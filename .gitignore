@@ -1,0 +1,47 @@
+# ROS / colcon generated files
+build/
+install/
+log/
+devel/
+.colcon/
+
+# Python cache and test output
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Local editor / OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Runtime data, bags, point clouds, and model artifacts
+*.bag
+*.db3
+*.mcap
+*.pcd
+*.ply
+*.onnx
+*.engine
+*.pt
+*.pth
+
+# Local raw map/session exports outside ROS packages
+/working_*/
+
+# Third-party reference workspace kept locally, not part of this project
+dddmr_navigation/
+
+# Documents that may be copyrighted or private
+*.pdf
+
+# Local environment/secrets
+.env
+.env.*
+*.pem
+*.key

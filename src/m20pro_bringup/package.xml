@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>m20pro_bringup</name>
+  <version>0.1.0</version>
+  <description>Launch and configuration files for the M20 Pro ROS 2 navigation stack.</description>
+  <maintainer email="user@example.com">M20Pro Developer</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>m20pro_navigation</exec_depend>
+  <exec_depend>m20pro_description</exec_depend>
+  <exec_depend>nav2_bringup</exec_depend>
+  <exec_depend>nav2_map_server</exec_depend>
+  <exec_depend>nav2_lifecycle_manager</exec_depend>
+  <exec_depend>nav2_util</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
