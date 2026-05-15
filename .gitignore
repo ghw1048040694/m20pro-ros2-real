@@ -46,3 +46,6 @@ dddmr_navigation/
 .env.*
 *.pem
 *.key
+
+# Local Codex/ChatGPT recap notes
+codex.md
