@@ -10,7 +10,7 @@ Panels:
 Visualization Manager:
   Class: ""
   Displays:
-    - Alpha: 0.7
+    - Alpha: 0.45
       Class: rviz_default_plugins/Map
       Color Scheme: map
       Enabled: true
@@ -22,7 +22,7 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /map
     
-    - Alpha: 0.7
+    - Alpha: 0.35
       Class: rviz_default_plugins/Map
       Color Scheme: costmap
       Enabled: true
@@ -209,12 +209,20 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /initialpose
     - Class: rviz_default_plugins/SetGoal
+      Name: Goal
       Topic:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /goal_pose
+    - Class: rviz_default_plugins/PublishPoint
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /clicked_point
   Value: true
   Views:
     Current:

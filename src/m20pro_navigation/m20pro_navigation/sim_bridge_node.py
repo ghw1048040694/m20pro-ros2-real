@@ -4,6 +4,7 @@ from typing import Optional
 import rclpy
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, TransformStamped, Twist
 from nav_msgs.msg import Odometry
+from rclpy.duration import Duration
 from rclpy.node import Node
 from std_msgs.msg import Bool, String
 from tf2_ros import TransformBroadcaster
@@ -27,6 +28,7 @@ class M20SimBridge(Node):
         self.declare_parameter("odom_frame", "odom")
         self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("publish_tf", True)
+        self.declare_parameter("tf_future_offset_s", 0.1)
 
         self.x = float(self.get_parameter("initial_x").value)
         self.y = float(self.get_parameter("initial_y").value)
@@ -106,14 +108,21 @@ class M20SimBridge(Node):
         self.status_pub.publish(status)
 
         if bool(self.get_parameter("publish_tf").value):
+            tf_stamp = (
+                stamp
+                + Duration(
+                    seconds=max(0.0, float(self.get_parameter("tf_future_offset_s").value))
+                )
+            ).to_msg()
+
             map_to_odom = TransformStamped()
-            map_to_odom.header.stamp = pose.header.stamp
+            map_to_odom.header.stamp = tf_stamp
             map_to_odom.header.frame_id = map_frame
             map_to_odom.child_frame_id = odom_frame
             map_to_odom.transform.rotation.w = 1.0
 
             transform = TransformStamped()
-            transform.header.stamp = pose.header.stamp
+            transform.header.stamp = tf_stamp
             transform.header.frame_id = odom_frame
             transform.child_frame_id = base_frame
             transform.transform.translation.x = self.x

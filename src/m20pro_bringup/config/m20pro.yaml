@@ -15,8 +15,24 @@ m20pro_tcp_bridge:
     odom_frame: "odom"
     base_frame: "base_link"
     publish_tf: true
+    # Used by the sim_bridge executable, which is intentionally named
+    # m20pro_tcp_bridge in sim launch so the topic names match real launch.
+    initial_x: -5.0 #原0.0
+    initial_y: 0.0
+    initial_yaw: 0.0
+    update_rate_hz: 50.0
+    tf_future_offset_s: 0.1
     enable_native_goal_bridge: false
     enable_axis_command: true
+    enable_gait_command: true
+    gait_command_topic: "/m20pro/gait_command"
+    gait_flat_param: 1
+    gait_stair_param: 14
+    enable_initialpose_relocalization: true
+    enable_initialpose_3d_relocalization: true
+    initialpose_topic: "/initialpose"
+    initialpose_3d_topic: "/m20pro/initialpose_3d"
+    relocalization_response_timeout_s: 2.0
     send_heartbeat: false
 
 m20pro_grid_planner:
@@ -57,17 +73,6 @@ m20pro_path_follower:
     scan_obstacle_max_age: 0.5
     scan_sample_step: 2
 
-m20pro_sim_bridge:
-  ros__parameters:
-    initial_x: 0.0
-    initial_y: 0.0
-    initial_yaw: 0.0
-    update_rate_hz: 50.0
-    map_frame: "map"
-    odom_frame: "odom"
-    base_frame: "base_link"
-    publish_tf: true
-
 m20pro_dynamic_obstacle_simulator:
   ros__parameters:
     frame_id: "map"
@@ -88,52 +93,54 @@ m20pro_dynamic_obstacle_simulator:
 
 m20pro_dual_lidar_simulator:
   ros__parameters:
-    map_topic: "/map"
     robot_pose_topic: "/m20pro_tcp_bridge/map_pose"
     dynamic_obstacle_topic: "/dynamic_obstacles"
-    
-    # 前雷达配置
-    front_lidar_topic: "/LIDAR/FRONT/POINTS"
-    front_lidar_offset_x: 0.3   # 根据实际安装位置调整
-    front_lidar_offset_y: 0.0
-    front_lidar_yaw: 0.0
-    
-    # 后雷达配置
-    rear_lidar_topic: "/LIDAR/REAR/POINTS"
-    rear_lidar_offset_x: -0.3
-    rear_lidar_offset_y: 0.0
-    rear_lidar_yaw: 3.14159265  
+    current_floor_topic: "/m20pro/current_floor"
+    default_floor: "F20"
 
-    # 导航主链路点云，与真机手册中的 /cloud_nav 对齐
+    # The simulator now uses the real factory PCD map for local perception.
+    # Keep this PCD and the active PGM/YAML from the same map package when
+    # running metric comparisons.
+    pcd_map_path: "package://m20pro_bringup/maps/Original_map/full_cloud.pcd"
+    pcd_voxel_size: 0.08
+    pcd_index_cell_size: 1.0
+    floor_z_ranges:
+      - "F19:-1.0:1.5:0.0"
+      - "F20:-1.0:1.5:0.0"
+      - "F21:-1.0:1.5:0.0"
+    default_z_min: -1.0
+    default_z_max: 1.5
+    default_z_offset: 0.0
+    use_occupancy_filter: true
+    map_topic: "/map"
+    occupancy_filter_threshold: 65
+    occupancy_filter_keep_unknown: false
+    occupancy_filter_padding_m: 0.0
+
+    front_lidar_topic: "/LIDAR/FRONT/POINTS"
+    rear_lidar_topic: "/LIDAR/REAR/POINTS"
     cloud_nav_topic: "/cloud_nav"
+    grid_map_3d_topic: "/grid_map_3d"
     publish_debug_lidars: false
-    
-    # 雷达参数：导航仿真使用较低点数，避免 Python raycast 和 RViz 堆积卡顿
-    num_horizontal_rays: 360
-    num_vertical_layers: 1
-    horizontal_stride: 1
-    vertical_stride: 1
-    vertical_fov_deg: 0.0
+    publish_grid_map_3d: true
+
     min_range: 0.2
     max_range: 10.0
-    ray_step: 0.05
-    
+    local_z_min: -0.35
+    local_z_max: 1.20
+    max_points_per_cloud: 6000
     publish_rate_hz: 10.0
     frame_id: "base_link"
-    
-    # 噪声模型
+
     enable_range_noise: true
-    range_noise_sigma_base: 0.02
-    range_noise_sigma_per_meter: 0.01
-    range_bias_factor: 0.015
-    
-    # 漏检模型
+    range_noise_sigma_base: 0.01
+    range_noise_sigma_per_meter: 0.004
+    range_bias_factor: 0.0
     enable_dropout: true
-    dropout_distance_scale: 20.0
-    
-    # 其他
-    obstacle_threshold: 65
+    dropout_distance_scale: 30.0
+
     dynamic_obstacle_radius: 0.2
+    dynamic_obstacle_point_count: 48
 
 m20pro_pointcloud_fusion:
   ros__parameters:

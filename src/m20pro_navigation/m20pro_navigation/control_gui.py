@@ -248,6 +248,7 @@ def create_gui(sock):
         ("关节阻尼/软急停", 2),
         ("开机阻尼", 3),
         ("趴下", 4),
+        ("标准运动模式", 6),
     ]
     # 转换为选择框的显示文本列表
     motion_display = [opt[0] for opt in motion_options]
@@ -295,9 +296,9 @@ def create_gui(sock):
     for i, lab in enumerate(labs):
         ttk.Label(in_frm, text=lab, width=12, anchor='e').grid(row=i, column=0, sticky='e', pady=2)
         ent = ttk.Entry(in_frm, width=18)
-        # 预设默认值（新版 gait 码）
+        # 预设默认值（按《山猫M20系列软件开发手册V0.0.9.pdf》1.4.4）
         if i == 4: ent.insert(0, "0")        # 目标点类型：过渡点=0
-        elif i == 5: ent.insert(0, "0x3002") # 步态：平地(敏捷运动模式)=0x3002
+        elif i == 5: ent.insert(0, "12")     # 步态：平地(敏捷运动模式)=12
         elif i == 6: ent.insert(0, "0")      # 速度：正常=0
         elif i == 7: ent.insert(0, "0")      # 运动方式：前进行走=0
         elif i == 8: ent.insert(0, "0")      # 避障模式：开启=0

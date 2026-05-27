@@ -35,10 +35,10 @@ source install/setup.bash
 
 ## 运行
 
-项目里已经内置了一张地图，路径是：
+项目里当前内置的默认地图是新录制的 F20，F19/F21 暂时复用同一份 PGM 作为跨楼层仿真占位：
 
 ```bash
-src/m20pro_bringup/maps/working_1-20260429-162852/occ_grid.yaml
+src/m20pro_bringup/maps/F20/occ_grid.yaml
 ```
 
 直接启动即可：
@@ -84,8 +84,26 @@ ros2 topic pub --once /goal_pose geometry_msgs/msg/PoseStamped \
 - `/m20pro_tcp_bridge/map_pose`: 103 返回的地图坐标系位姿。
 - `/m20pro_tcp_bridge/localization_ok`: 定位是否正常。
 - `/m20pro_tcp_bridge/obstacle_active`: 是否处于避障/停障状态。
+- `/m20pro_tcp_bridge/relocalization_result`: RViz `/initialpose` 转发给厂商定位初始化接口后的结果。
+- `/m20pro_tcp_bridge/gait_result`: `/m20pro/gait_command` 转发为厂商步态切换接口后的结果。
 - `/scan`: 前后雷达融合后的 2D 激光数据，供 Nav2 costmap 使用。
 - `/cmd_vel`: Nav2 输出，最终由 `tcp_bridge` 归一化为厂商轴指令。
+
+真机重定位：
+
+真机 launch 默认会订阅 `/initialpose`。在 RViz 中使用 `2D Pose Estimate`，`tcp_bridge` 会按照厂商手册的定位初始化接口向 103 发送 `Type=2101, Command=1`，字段为 `PosX`、`PosY`、`PosZ`、`Yaw`。这用于把 106/厂商定位重置到你在地图上指定的位姿。
+
+```bash
+ros2 topic echo /m20pro_tcp_bridge/relocalization_result
+```
+
+如果只想观察导航链路、不希望 104 改动真机定位，可以关闭：
+
+```bash
+ros2 launch m20pro_bringup m20pro_real.launch.py \
+  enable_axis_command:=false \
+  enable_initialpose_relocalization:=false
+```
 
 ## 上位机仿真
 
@@ -115,9 +133,9 @@ ros2 topic pub --once /goal_pose geometry_msgs/msg/PoseStamped \
 "{header: {frame_id: map}, pose: {position: {x: 2.0, y: 1.0, z: 0.0}, orientation: {w: 1.0}}}"
 ```
 
-需要重置仿真起点时，向 `/initialpose` 发布一个 `PoseStamped` 即可。
+需要重置仿真起点时，在 RViz 使用 `2D Pose Estimate`，或向 `/initialpose` 发布一个 `PoseWithCovarianceStamped` 即可。真机中同一个话题会触发厂商定位初始化；仿真中只是重置 `sim_bridge` 的虚拟位姿。
 
-项目里也带了一个轻量级的动态障碍仿真器，会发布往返移动的圆柱障碍物，并在 RViz 里显示为 `/dynamic_obstacle_markers`。仿真雷达会把地图障碍和动态障碍一起 raycast 成 `/cloud_nav`，再由 fusion 生成 `/scan` 给 Nav2 costmap 使用。
+项目里也带了一个轻量级的动态障碍仿真器，会发布往返移动的圆柱障碍物，并在 RViz 里显示为 `/dynamic_obstacle_markers`。仿真感知默认从 `F20/full_cloud.pcd` 按机器人当前位置裁剪局部点云，再叠加动态障碍并发布为 `/cloud_nav`，随后由 fusion 生成 `/scan` 给 Nav2 costmap 使用。
 
 为了贴近《开发手册》的接口，仿真里的导航主点云是：
 
@@ -259,6 +277,7 @@ m20pro_ros_snapshot_<host>_<time>.tar.gz
 ## 部署注意
 
 - 手册建议轴指令 20Hz，本工程默认按 20Hz 向 103 发送 `Type=2, Command=21`。
+- 楼梯/平地步态按手册 `Type=2, Command=23` 执行；`/m20pro/gait_command` 中的 `flat` 会转成 `GaitParam=1`，`stair_up`/`stair_down` 会转成 `GaitParam=14`。
 - 厂商导航任务在导航模式下执行，轴指令在常规模式下执行。使用本工程的 104 路径跟随时，请确保机器人处于可接受轴指令的常规/运动状态。
 - 默认没有开启心跳主动上报，避免主动报文和请求响应共用 TCP 连接时串包。需要时可在 `m20pro_bringup/config/m20pro.yaml` 中把 `send_heartbeat` 改为 `true`。
 - M20 Pro 上是 Foxy，上位机是 Humble 时，跨主机 DDS 通信要统一 `ROS_DOMAIN_ID`，并确认两侧网络可互通。若 DDS 不稳定，优先在 104 上运行本工程，只从 106 复制地图文件。

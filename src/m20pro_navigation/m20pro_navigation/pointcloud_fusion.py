@@ -35,6 +35,7 @@ class PointCloudFusion(Node):
         self.declare_parameter("use_latest_tf", True)
         self.declare_parameter("transform_timeout_s", 0.05)
         self.declare_parameter("max_source_age_s", 0.25)
+        self.declare_parameter("no_return_as_inf", True)
         
         # === 初始化成员变量 ===
         self.cloud_ranges: Optional[np.ndarray] = None
@@ -65,9 +66,10 @@ class PointCloudFusion(Node):
         
         # 初始化距离数组（填充最大值表示无检测）
         max_range = float(self.get_parameter("max_range").value)
-        self.cloud_ranges = np.full(self.num_readings, max_range, dtype=np.float32)
-        self.front_ranges = np.full(self.num_readings, max_range, dtype=np.float32)
-        self.rear_ranges = np.full(self.num_readings, max_range, dtype=np.float32)
+        empty_range = self._empty_range_value()
+        self.cloud_ranges = np.full(self.num_readings, empty_range, dtype=np.float32)
+        self.front_ranges = np.full(self.num_readings, empty_range, dtype=np.float32)
+        self.rear_ranges = np.full(self.num_readings, empty_range, dtype=np.float32)
         
         cloud_qos = qos_profile_sensor_data
         scan_qos = QoSProfile(depth=1)
@@ -154,9 +156,7 @@ class PointCloudFusion(Node):
         self.rear_received = True
     
     def _pointcloud_to_ranges(self, cloud_msg: PointCloud2) -> Optional[np.ndarray]:
-        ranges = np.full(self.num_readings, 
-                        float(self.get_parameter("max_range").value),
-                        dtype=np.float32)
+        ranges = np.full(self.num_readings, self._empty_range_value(), dtype=np.float32)
         
         height_min = float(self.get_parameter("height_min").value)
         height_max = float(self.get_parameter("height_max").value)
@@ -267,6 +267,11 @@ class PointCloudFusion(Node):
 
     def _target_frame(self) -> str:
         return self._clean_frame(str(self.get_parameter("frame_id").value)) or "base_link"
+
+    def _empty_range_value(self) -> float:
+        if bool(self.get_parameter("no_return_as_inf").value):
+            return float("inf")
+        return float(self.get_parameter("max_range").value)
 
     @staticmethod
     def _clean_frame(frame_id: str) -> str:

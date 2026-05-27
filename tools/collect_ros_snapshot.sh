@@ -67,6 +67,7 @@ run system/network "ip addr; echo; ip route"
 run system/processes "ps -eo pid,ppid,stat,pcpu,pmem,cmd --sort=cmd"
 run system/robot_processes "ps -eo pid,ppid,stat,pcpu,pmem,cmd | grep -Ei 'ros|slam|map|nav|local|dr|deep|lidar|camera|dds|robot' | grep -v grep || true"
 run system/systemd_robot "systemctl --type=service --state=running 2>/dev/null | grep -Ei 'ros|slam|map|nav|local|dr|deep|lidar|camera|robot' || true"
+run system/multicast_relay "systemctl status multicast-relay --no-pager 2>/dev/null || true; echo; pgrep -af 'multicast[-_]relay' || true; echo; ip maddr show || true"
 
 if ! command -v ros2 >/dev/null 2>&1; then
   echo "ros2 command not found. Source the robot ROS environment before running this script." > "$OUT/ros/ROS2_NOT_FOUND.txt"
@@ -95,6 +96,10 @@ fi
 for topic in \
   /cloud_nav \
   /LIDAR/POINTS \
+  /IMU_YESENSE \
+  /DEPTH_IMAGE \
+  /STEER \
+  /REAL_STEER \
   /LIDAR/FRONT/POINTS \
   /LIDAR/REAR/POINTS \
   /scan \

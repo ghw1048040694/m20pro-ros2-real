@@ -21,6 +21,7 @@ __pycache__/
 .DS_Store
 
 # Runtime data, bags, point clouds, and model artifacts
+bags/
 *.bag
 *.db3
 *.mcap
@@ -34,6 +35,8 @@ __pycache__/
 
 # Local raw map/session exports outside ROS packages
 /working_*/
+**/.blocks/
+**/.sessions/
 
 # Third-party reference workspace kept locally, not part of this project
 dddmr_navigation/
@@ -47,5 +50,5 @@ dddmr_navigation/
 *.pem
 *.key
 
-# Local Codex/ChatGPT recap notes
-codex.md
+# Local M20 Pro project memory notes
+m20pro.md

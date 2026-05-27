@@ -8,7 +8,7 @@ from nav_msgs.msg import OccupancyGrid, Path
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 
-from .geometry import yaw_to_quaternion
+from .geometry import quaternion_to_yaw, yaw_to_quaternion
 
 GridCell = Tuple[int, int]
 
@@ -235,7 +235,7 @@ class GridPlanner(Node):
                 nx, ny = self._cell_to_world(sampled[idx + 1])
                 yaw = math.atan2(ny - y, nx - x)
             else:
-                yaw = 2.0 * math.atan2(goal.pose.orientation.z, goal.pose.orientation.w)
+                yaw = quaternion_to_yaw(goal.pose.orientation)
             pose.pose.orientation = yaw_to_quaternion(yaw)
             path.poses.append(pose)
         return path

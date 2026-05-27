@@ -1,14 +1,13 @@
-import math
 from typing import Optional
 
 import rclpy
-from geometry_msgs.msg import PoseStamped, TransformStamped, Twist
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, TransformStamped, Twist
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from std_msgs.msg import Bool, String
 from tf2_ros import TransformBroadcaster
 
-from .geometry import yaw_to_quaternion
+from .geometry import quaternion_to_yaw, yaw_to_quaternion
 from .tcp_protocol import M20TcpClient, patrol_items
 
 
@@ -32,6 +31,15 @@ class M20TcpBridge(Node):
         self.declare_parameter("publish_tf", True)
         self.declare_parameter("enable_native_goal_bridge", False)
         self.declare_parameter("enable_axis_command", True)
+        self.declare_parameter("enable_gait_command", True)
+        self.declare_parameter("gait_command_topic", "/m20pro/gait_command")
+        self.declare_parameter("gait_flat_param", 1)
+        self.declare_parameter("gait_stair_param", 14)
+        self.declare_parameter("enable_initialpose_relocalization", True)
+        self.declare_parameter("enable_initialpose_3d_relocalization", True)
+        self.declare_parameter("initialpose_topic", "/initialpose")
+        self.declare_parameter("initialpose_3d_topic", "/m20pro/initialpose_3d")
+        self.declare_parameter("relocalization_response_timeout_s", 2.0)
         self.declare_parameter("send_heartbeat", False)
 
         self.client = M20TcpClient(
@@ -50,10 +58,33 @@ class M20TcpBridge(Node):
         self.obs_pub = self.create_publisher(Bool, "~/obstacle_active", 10)
         self.status_pub = self.create_publisher(String, "~/navigation_status", 10)
         self.raw_pub = self.create_publisher(String, "~/raw_status_json", 10)
+        self.relocalization_pub = self.create_publisher(String, "~/relocalization_result", 10)
+        self.gait_result_pub = self.create_publisher(String, "~/gait_result", 10)
 
         self.create_subscription(Twist, "/cmd_vel", self._on_cmd_vel, 10)
+        if bool(self.get_parameter("enable_gait_command").value):
+            self.create_subscription(
+                String,
+                str(self.get_parameter("gait_command_topic").value),
+                self._on_gait_command,
+                10,
+            )
         if bool(self.get_parameter("enable_native_goal_bridge").value):
             self.create_subscription(PoseStamped, "/goal_pose", self._on_goal_pose, 10)
+        if bool(self.get_parameter("enable_initialpose_relocalization").value):
+            self.create_subscription(
+                PoseWithCovarianceStamped,
+                str(self.get_parameter("initialpose_topic").value),
+                self._on_initial_pose,
+                10,
+            )
+        if bool(self.get_parameter("enable_initialpose_3d_relocalization").value):
+            self.create_subscription(
+                PoseStamped,
+                str(self.get_parameter("initialpose_3d_topic").value),
+                self._on_initial_pose_3d,
+                10,
+            )
 
         poll_period = 1.0 / max(0.5, float(self.get_parameter("poll_rate_hz").value))
         cmd_period = 1.0 / max(1.0, float(self.get_parameter("cmd_vel_rate_hz").value))
@@ -89,6 +120,91 @@ class M20TcpBridge(Node):
     def _on_cmd_vel(self, msg: Twist) -> None:
         self.latest_cmd = msg
         self.last_cmd_time = self.get_clock().now()
+
+    def _on_gait_command(self, msg: String) -> None:
+        gait_param = self._resolve_gait_param(msg.data)
+        if gait_param is None:
+            text = "failed: unknown gait command '%s'" % msg.data
+            self.get_logger().warning(text)
+            self._publish_gait_result(text)
+            return
+        if not self._ensure_connected():
+            self._publish_gait_result("failed: tcp connection unavailable")
+            return
+
+        try:
+            self.client.request(2, 23, {"GaitParam": gait_param}, wait_response=False)
+        except OSError as exc:
+            text = "failed: %s" % exc
+            self.get_logger().warning("gait command failed: %s" % exc)
+            self._publish_gait_result(text)
+            return
+
+        text = "sent: label=%s GaitParam=%d" % (msg.data.strip(), gait_param)
+        self.get_logger().info("vendor gait command sent: %s" % text)
+        self._publish_gait_result(text)
+
+    def _publish_gait_result(self, text: str) -> None:
+        msg = String()
+        msg.data = text
+        self.gait_result_pub.publish(msg)
+
+    def _on_initial_pose(self, msg: PoseWithCovarianceStamped) -> None:
+        """Forward RViz 2D Pose Estimate to the vendor localization reset API."""
+        self._send_relocalization_pose(msg.header.frame_id, msg.pose.pose)
+
+    def _on_initial_pose_3d(self, msg: PoseStamped) -> None:
+        """Forward a z-aware initial pose to the vendor localization reset API."""
+        self._send_relocalization_pose(msg.header.frame_id, msg.pose)
+
+    def _send_relocalization_pose(self, frame_id: str, pose: object) -> None:
+        if not self._ensure_connected():
+            self._publish_relocalization_result("failed: tcp connection unavailable")
+            return
+
+        map_frame = str(self.get_parameter("map_frame").value)
+        if frame_id and frame_id != map_frame:
+            self.get_logger().warning(
+                "initial pose frame is '%s', expected '%s'; sending raw coordinates anyway"
+                % (frame_id, map_frame)
+            )
+
+        yaw = quaternion_to_yaw(pose.orientation)
+        items = {
+            "PosX": float(pose.position.x),
+            "PosY": float(pose.position.y),
+            "PosZ": float(pose.position.z),
+            "Yaw": float(yaw),
+        }
+        timeout_s = max(0.1, float(self.get_parameter("relocalization_response_timeout_s").value))
+        try:
+            response = self.client.request(2101, 1, items, response_timeout=timeout_s)
+            result = patrol_items(response)
+            error_code = int(result.get("ErrorCode", -1))
+        except Exception as exc:
+            text = "failed: %s" % exc
+            self.get_logger().warning("vendor relocalization request failed: %s" % exc)
+            self._publish_relocalization_result(text)
+            return
+
+        if error_code == 0:
+            text = "success: x=%.3f y=%.3f z=%.3f yaw=%.3f" % (
+                items["PosX"], items["PosY"], items["PosZ"], items["Yaw"]
+            )
+            self.get_logger().info("vendor relocalization reset accepted: %s" % text)
+            self._publish_map_pose()
+            self._publish_navigation_status()
+        else:
+            text = "failed: ErrorCode=0x%04X x=%.3f y=%.3f yaw=%.3f" % (
+                error_code & 0xFFFF, items["PosX"], items["PosY"], items["Yaw"]
+            )
+            self.get_logger().warning("vendor relocalization reset rejected: %s" % text)
+        self._publish_relocalization_result(text)
+
+    def _publish_relocalization_result(self, text: str) -> None:
+        msg = String()
+        msg.data = text
+        self.relocalization_pub.publish(msg)
 
     def _send_axis_command(self) -> None:
         if not self._ensure_connected():
@@ -205,7 +321,7 @@ class M20TcpBridge(Node):
     def _on_goal_pose(self, goal: PoseStamped) -> None:
         if not self._ensure_connected():
             return
-        yaw = 2.0 * math.atan2(goal.pose.orientation.z, goal.pose.orientation.w)
+        yaw = quaternion_to_yaw(goal.pose.orientation)
         items = {
             "Value": 1,
             "MapID": 0,
@@ -231,6 +347,35 @@ class M20TcpBridge(Node):
         if scale <= 0.0:
             return 0.0
         return max(-1.0, min(1.0, float(value) / scale))
+
+    def _resolve_gait_param(self, command: str) -> Optional[int]:
+        text = command.strip()
+        if not text:
+            return None
+        normalized = text.lower().replace("-", "_").replace(" ", "_")
+        if normalized.startswith("gaitparam="):
+            normalized = normalized.split("=", 1)[1].strip()
+        try:
+            return int(normalized, 0)
+        except ValueError:
+            pass
+
+        flat = int(self.get_parameter("gait_flat_param").value)
+        stair = int(self.get_parameter("gait_stair_param").value)
+        mapping = {
+            "flat": flat,
+            "base": flat,
+            "basic": flat,
+            "normal": flat,
+            "stand": flat,
+            "stair": stair,
+            "stairs": stair,
+            "stair_up": stair,
+            "stair_down": stair,
+            "upstairs": stair,
+            "downstairs": stair,
+        }
+        return mapping.get(normalized)
 
 
 def main(args: Optional[list] = None) -> None:

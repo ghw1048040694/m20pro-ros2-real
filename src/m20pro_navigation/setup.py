@@ -25,13 +25,12 @@ setup(
             "control_gui = m20pro_navigation.control_gui:main",
             "zero_joint_state_publisher = m20pro_navigation.zero_joint_state_publisher:main",
             "map_editor = m20pro_navigation.map_editor:main",
+            "floor_manager = m20pro_navigation.floor_manager:main",
+            "initialpose_3d_adapter = m20pro_navigation.initialpose_3d_adapter:main",
             "dynamic_obstacle_simulator = m20pro_navigation.dynamic_obstacle_simulator:main",
-            #"lidar_simulator = m20pro_navigation.lidar_simulator:main",
             "dual_lidar_simulator = m20pro_navigation.dual_lidar_simulator:main",
             "pointcloud_fusion = m20pro_navigation.pointcloud_fusion:main",
-            
-            
-
+            "sim_health_monitor = m20pro_navigation.sim_health_monitor:main",
         ],
     },
 )

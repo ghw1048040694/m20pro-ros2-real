@@ -5,15 +5,76 @@
 # yaw is in radians.
 
 mission:
-  name: "single_floor_demo"
+  name: "multi_floor_sim_demo"
   frame_id: "map"
   default_inspect_duration_s: 4.0
   default_goal_timeout_s: 90.0
   default_retry_count: 1
+  # X30-style multi-floor semantics, kept on top of the M20Pro interfaces.
+  # The floor manager treats every stair route as:
+  # entry -> source-floor shared platform -> switch map -> target-floor shared platform -> post_exit.
+  multi_floor_model: "shared_stair_platform"
+  stair_transition_defaults:
+    point_type: "transition"
+    terrain: "stairs"
+    nav_mode: "straight"
+    direction_mode: "forward"
+    speed: "low"
+    obstacle_policy: "stop_only"
+    entry_margin_m: 0.8
 
 floors:
-  F1:
-    map_yaml: ""
+  F19:
+    level: 19
+    map_yaml: "package://m20pro_bringup/maps/F19/occ_grid.yaml"
+    initial_pose:
+      x: 0.0
+      y: 0.0
+      z: 0.0
+      yaw: 0.0
+    stairs:
+      stair_A_up_to_F20:
+        direction: "up"
+        target_floor: "F20"
+        transition:
+          model: "shared_platform"
+          point_type: "transition"
+          terrain: "stairs"
+          nav_mode: "straight"
+          direction_mode: "forward"
+          speed: "low"
+          obstacle_policy: "stop_only"
+          entry_margin_m: 0.8
+        entry:
+          x: 8.803242683410645
+          y: 15.900266647338867
+          z: 0.0
+          yaw: -1.5707968199457707
+        # Source-floor shared platform. Right side of the stair line: go up here.
+        source_platform:
+          x: 8.69885540008545
+          y: 10.093945503234863
+          z: 0.0
+          yaw: -0.01639160720318821
+        # Target-floor shared platform. After switching up, come out on the left/down side.
+        target_platform:
+          x: 10.25889778137207
+          y: 10.056803703308105
+          z: 0.0
+          yaw: -0.0019394554046166198
+        # Still in stair gait after map switch; move here before switching flat.
+        post_exit:
+          x: 8.803242683410645
+          y: 15.900266647338867
+          z: 0.0
+          yaw: 1.5707958336440224
+      stair_A_from_F20:
+        source_floor: "F20"
+        exit:
+          x: 8.69885540008545
+          y: 10.093945503234863
+          z: 0.0
+          yaw: 3.125201046386605
     waypoints:
       - id: "start_check"
         label: "Start Check"
@@ -50,3 +111,173 @@ floors:
         target_classes: []
         required_events: []
         notes: "Example return/finish pose."
+
+  F20:
+    level: 20
+    map_yaml: "package://m20pro_bringup/maps/F20/occ_grid.yaml"
+    initial_pose:
+      x: 0.0
+      y: 0.0
+      z: 0.0
+      yaw: 0.0
+    stairs:
+      stair_A_down_to_F19:
+        direction: "down"
+        target_floor: "F19"
+        transition:
+          model: "shared_platform"
+          point_type: "transition"
+          terrain: "stairs"
+          nav_mode: "straight"
+          direction_mode: "forward"
+          speed: "low"
+          obstacle_policy: "stop_only"
+          entry_margin_m: 0.8
+        entry:
+          x: 8.803242683410645
+          y: 15.900266647338867
+          z: 0.0
+          yaw: 1.5707958336440224
+        # Source-floor shared platform. Left side of the stair line: go down here.
+        source_platform:
+          x: 10.25889778137207
+          y: 10.056803703308105
+          z: 0.0
+          yaw: 3.1396531981851767
+        # Target-floor shared platform. After switching down, come out on the right/up side.
+        target_platform:
+          x: 8.69885540008545
+          y: 10.093945503234863
+          z: 0.0
+          yaw: 3.125201046386605
+        # Still in stair gait after map switch; move here before switching flat.
+        post_exit:
+          x: 8.803242683410645
+          y: 15.900266647338867
+          z: 0.0
+          yaw: 1.5707958336440224
+      stair_A_up_to_F21:
+        direction: "up"
+        target_floor: "F21"
+        transition:
+          model: "shared_platform"
+          point_type: "transition"
+          terrain: "stairs"
+          nav_mode: "straight"
+          direction_mode: "forward"
+          speed: "low"
+          obstacle_policy: "stop_only"
+          entry_margin_m: 0.8
+        entry:
+          x: 8.803242683410645
+          y: 15.900266647338867
+          z: 0.0
+          yaw: -1.5707968199457707
+        # Source-floor shared platform. Right side of the stair line: go up here.
+        source_platform:
+          x: 8.69885540008545
+          y: 10.093945503234863
+          z: 0.0
+          yaw: -0.01639160720318821
+        # Target-floor shared platform. After switching up, come out on the left/down side.
+        target_platform:
+          x: 10.25889778137207
+          y: 10.056803703308105
+          z: 0.0
+          yaw: -0.0019394554046166198
+        # Still in stair gait after map switch; move here before switching flat.
+        post_exit:
+          x: 8.803242683410645
+          y: 15.900266647338867
+          z: 0.0
+          yaw: 1.5707958336440224
+      stair_A_from_F19:
+        source_floor: "F19"
+        exit:
+          x: 10.25889778137207
+          y: 10.056803703308105
+          z: 0.0
+          yaw: -0.0019394554046166198
+      stair_A_from_F21:
+        source_floor: "F21"
+        exit:
+          x: 8.69885540008545
+          y: 10.093945503234863
+          z: 0.0
+          yaw: 3.125201046386605
+    waypoints:
+      - id: "f20_demo_check"
+        label: "F20 Demo Check"
+        pose:
+          x: 2.0
+          y: 0.0
+          yaw: 0.0
+        inspect_duration_s: 4.0
+        camera: "front_wide"
+        target_classes: ["person", "smoke"]
+        required_events: []
+        notes: "Placeholder F20 point for simulation map switching."
+
+  F21:
+    level: 21
+    map_yaml: "package://m20pro_bringup/maps/F21/occ_grid.yaml"
+    initial_pose:
+      x: 0.0
+      y: 0.0
+      z: 0.0
+      yaw: 0.0
+    stairs:
+      stair_A_down_to_F20:
+        direction: "down"
+        target_floor: "F20"
+        transition:
+          model: "shared_platform"
+          point_type: "transition"
+          terrain: "stairs"
+          nav_mode: "straight"
+          direction_mode: "forward"
+          speed: "low"
+          obstacle_policy: "stop_only"
+          entry_margin_m: 0.8
+        entry:
+          x: 8.803242683410645
+          y: 15.900266647338867
+          z: 0.0
+          yaw: 1.5707958336440224
+        # Source-floor shared platform. Left side of the stair line: go down here.
+        source_platform:
+          x: 10.25889778137207
+          y: 10.056803703308105
+          z: 0.0
+          yaw: 3.1396531981851767
+        # Target-floor shared platform. After switching down, come out on the right/up side.
+        target_platform:
+          x: 8.69885540008545
+          y: 10.093945503234863
+          z: 0.0
+          yaw: 3.125201046386605
+        # Still in stair gait after map switch; move here before switching flat.
+        post_exit:
+          x: 8.803242683410645
+          y: 15.900266647338867
+          z: 0.0
+          yaw: 1.5707958336440224
+      stair_A_from_F20:
+        source_floor: "F20"
+        exit:
+          x: 10.25889778137207
+          y: 10.056803703308105
+          z: 0.0
+          yaw: -0.0019394554046166198
+    waypoints:
+      - id: "f21_demo_check"
+        label: "F21 Demo Check"
+        pose:
+          x: 2.0
+          y: 0.0
+          yaw: 0.0
+        inspect_duration_s: 4.0
+        camera: "front_wide"
+        target_classes: ["person", "smoke"]
+        required_events: []
+        notes: "Placeholder F21 point for simulation map switching."

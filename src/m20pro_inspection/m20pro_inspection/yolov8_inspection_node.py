@@ -387,7 +387,7 @@ class M20ProYolov8Inspection(Node):
             for matrix in self._prediction_matrices(output):
                 if matrix.shape[1] == 6:
                     self._collect_nms_rows(matrix, meta, image_shape, boxes, scores, class_ids)
-                elif matrix.shape[1] > 6:
+                elif matrix.shape[1] >= 5:
                     self._collect_yolov8_rows(matrix, meta, image_shape, boxes, scores, class_ids)
 
         if not boxes:

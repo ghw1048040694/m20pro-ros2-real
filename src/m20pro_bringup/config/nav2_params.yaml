@@ -158,8 +158,8 @@ local_costmap:
         plugin: "nav2_costmap_2d::InflationLayer"
         # Keep a safety buffer, but do not turn every narrow passage into a
         # high-cost wall. Higher scaling makes inflated cost decay faster.
-        cost_scaling_factor: 7.0 #原6.0
-        inflation_radius: 0.35 #原0.40
+        cost_scaling_factor: 10.0 #原7.0
+        inflation_radius: 0.28 #原0.35
       
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
@@ -176,6 +176,8 @@ local_costmap:
           obstacle_max_range: 3.0
           raytrace_max_range: 3.5
           observation_persistence: 0.3
+
+      always_send_full_costmap: true
 
 global_costmap:
   global_costmap:
@@ -215,8 +217,10 @@ global_costmap:
       
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 6.0
-        inflation_radius: 0.40
+        cost_scaling_factor: 8.0
+        inflation_radius: 0.30
+
+      always_send_full_costmap: true
 
 map_server:
   ros__parameters:

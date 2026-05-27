@@ -60,9 +60,16 @@ def write_occ_yaml(yaml_path: str, metadata: MapMetadata, image_name: str) -> No
 
 
 def resolve_image_path(yaml_path: str, image_value: str) -> str:
+    image_value = image_value.strip().strip("\"'")
+    yaml_dir = os.path.dirname(yaml_path)
     if os.path.isabs(image_value):
+        if os.path.exists(image_value):
+            return image_value
+        local_image = os.path.join(yaml_dir, os.path.basename(image_value))
+        if os.path.exists(local_image):
+            return local_image
         return image_value
-    return os.path.normpath(os.path.join(os.path.dirname(yaml_path), image_value))
+    return os.path.normpath(os.path.join(yaml_dir, image_value))
 
 
 def read_pgm(path: str) -> Tuple[int, int, int, List[List[int]]]:
@@ -317,7 +324,7 @@ class MapEditorApp:
         self.status.set(message)
 
 
-def default_yaml_path() -> str:
+def default_maps_dir() -> str:
     try:
         bringup_share = get_package_share_directory("m20pro_bringup")
     except PackageNotFoundError:
@@ -325,33 +332,34 @@ def default_yaml_path() -> str:
         src_dir = os.path.dirname(package_dir)
         bringup_share = os.path.join(src_dir, "m20pro_bringup")
 
-    candidates = [
-        os.path.join(
-            bringup_share,
-            "maps",
-            "working_1-20260429-162852_edited",
-            "occ_grid.yaml",
-        ),
-        os.path.join(
-            bringup_share,
-            "maps",
-            "working_1-20260429-162852",
-            "occ_grid.yaml",
-        ),
-    ]
-    for yaml_path in candidates:
-        if os.path.exists(yaml_path):
-            return yaml_path
-    return candidates[0]
+    maps_dir = os.path.join(bringup_share, "maps")
+    return maps_dir if os.path.isdir(maps_dir) else os.getcwd()
+
+
+def choose_yaml_path() -> str:
+    return filedialog.askopenfilename(
+        title="Select occ_grid.yaml",
+        filetypes=[("Occupancy YAML", "*.yaml"), ("Occupancy YAML", "*.yml")],
+        initialdir=default_maps_dir(),
+    )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Edit M20 Pro occupancy grid maps")
-    parser.add_argument("yaml", nargs="?", default=default_yaml_path(), help="Path to occ_grid.yaml")
+    parser.add_argument("yaml", nargs="?", default="", help="Path to occ_grid.yaml")
     args = parser.parse_args()
 
     root = tk.Tk()
-    app = MapEditorApp(root, args.yaml)
+    yaml_path = args.yaml.strip()
+    if not yaml_path:
+        root.withdraw()
+        yaml_path = choose_yaml_path()
+        if not yaml_path:
+            root.destroy()
+            return
+        root.deiconify()
+
+    app = MapEditorApp(root, yaml_path)
     root.minsize(1000, 720)
     root.mainloop()
 
