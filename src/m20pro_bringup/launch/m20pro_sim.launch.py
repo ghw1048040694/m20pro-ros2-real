@@ -28,6 +28,8 @@ def generate_launch_description():
     enable_floor_manager = LaunchConfiguration("enable_floor_manager")
     enable_dynamic_obstacles = LaunchConfiguration("enable_dynamic_obstacles")
     enable_health_monitor = LaunchConfiguration("enable_health_monitor")
+    enable_web_dashboard = LaunchConfiguration("enable_web_dashboard")
+    web_dashboard_port = LaunchConfiguration("web_dashboard_port")
     initial_floor = LaunchConfiguration("initial_floor")
     use_rviz = LaunchConfiguration("rviz")
     rviz_config = LaunchConfiguration("rviz_config")
@@ -42,8 +44,10 @@ def generate_launch_description():
         DeclareLaunchArgument("floor_config", default_value=default_floor_config),
         DeclareLaunchArgument("map", default_value=default_map),
         DeclareLaunchArgument("enable_floor_manager", default_value="true"),
-        DeclareLaunchArgument("enable_dynamic_obstacles", default_value="false"),
+        DeclareLaunchArgument("enable_dynamic_obstacles", default_value="true"),
         DeclareLaunchArgument("enable_health_monitor", default_value="true"),
+        DeclareLaunchArgument("enable_web_dashboard", default_value="true"),
+        DeclareLaunchArgument("web_dashboard_port", default_value="8080"),
         DeclareLaunchArgument("initial_floor", default_value="F20"),
         DeclareLaunchArgument("rviz", default_value="true"),
         DeclareLaunchArgument("rviz_config", default_value=default_rviz),
@@ -151,6 +155,14 @@ def generate_launch_description():
             output="screen",
             parameters=[{"require_dynamic_obstacles": enable_dynamic_obstacles}],
             condition=IfCondition(enable_health_monitor),
+        ),
+        Node(
+            package="m20pro_cloud_bridge",
+            executable="web_dashboard",
+            name="m20pro_web_dashboard",
+            output="screen",
+            parameters=[{"port": web_dashboard_port}],
+            condition=IfCondition(enable_web_dashboard),
         ),
         TimerAction(
             period=rviz_delay_s,

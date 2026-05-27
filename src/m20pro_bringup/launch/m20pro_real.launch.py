@@ -33,6 +33,8 @@ def generate_launch_description():
     load_initial_floor = LaunchConfiguration("load_initial_floor")
     enable_initialpose_3d_adapter = LaunchConfiguration("enable_initialpose_3d_adapter")
     initialpose_3d_z = LaunchConfiguration("initialpose_3d_z")
+    enable_web_dashboard = LaunchConfiguration("enable_web_dashboard")
+    web_dashboard_port = LaunchConfiguration("web_dashboard_port")
     use_rviz = LaunchConfiguration("rviz")
     rviz_config = LaunchConfiguration("rviz_config")
     enable_axis_command = LaunchConfiguration("enable_axis_command")
@@ -53,6 +55,8 @@ def generate_launch_description():
         DeclareLaunchArgument("load_initial_floor", default_value="false"),
         DeclareLaunchArgument("enable_initialpose_3d_adapter", default_value="false"),
         DeclareLaunchArgument("initialpose_3d_z", default_value="0.0"),
+        DeclareLaunchArgument("enable_web_dashboard", default_value="true"),
+        DeclareLaunchArgument("web_dashboard_port", default_value="8080"),
         DeclareLaunchArgument("rviz", default_value="true"),
         DeclareLaunchArgument("rviz_config", default_value=default_rviz),
         DeclareLaunchArgument(
@@ -187,6 +191,14 @@ def generate_launch_description():
                 "use_sim_time": "False",
                 "use_composition": "False",
             }.items(),
+        ),
+        Node(
+            package="m20pro_cloud_bridge",
+            executable="web_dashboard",
+            name="m20pro_web_dashboard",
+            output="screen",
+            parameters=[{"port": web_dashboard_port}],
+            condition=IfCondition(enable_web_dashboard),
         ),
         Node(
             package="rviz2",
