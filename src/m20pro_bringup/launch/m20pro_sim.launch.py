@@ -17,6 +17,7 @@ def generate_launch_description():
     default_params = os.path.join(bringup_share, "config", "m20pro.yaml")
     default_nav2_params = os.path.join(bringup_share, "config", "nav2_params.yaml")
     default_floor_config = os.path.join(bringup_share, "config", "inspection_waypoints.yaml")
+    default_map_manifest = os.path.join(bringup_share, "config", "map_manifest.yaml")
     default_urdf = os.path.join(desc_share, "urdf", "M20.urdf")
     default_map = os.path.join(bringup_share, "maps", "F20", "occ_grid.yaml")
     default_rviz = os.path.join(bringup_share, "rviz", "m20pro_sim.rviz")
@@ -24,12 +25,23 @@ def generate_launch_description():
     params_file = LaunchConfiguration("params_file")
     nav2_params_file = LaunchConfiguration("nav2_params_file")
     floor_config = LaunchConfiguration("floor_config")
+    map_manifest = LaunchConfiguration("map_manifest")
     map_yaml = LaunchConfiguration("map")
     enable_floor_manager = LaunchConfiguration("enable_floor_manager")
+    enable_floor_goal_bridge = LaunchConfiguration("enable_floor_goal_bridge")
     enable_dynamic_obstacles = LaunchConfiguration("enable_dynamic_obstacles")
-    enable_health_monitor = LaunchConfiguration("enable_health_monitor")
+    enable_system_check = LaunchConfiguration("enable_system_check")
+    enable_config_audit = LaunchConfiguration("enable_config_audit")
     enable_web_dashboard = LaunchConfiguration("enable_web_dashboard")
     web_dashboard_port = LaunchConfiguration("web_dashboard_port")
+    web_dashboard_data_dir = LaunchConfiguration("web_dashboard_data_dir")
+    web_dashboard_map_archive_dir = LaunchConfiguration("web_dashboard_map_archive_dir")
+    factory_host = LaunchConfiguration("factory_host")
+    factory_user = LaunchConfiguration("factory_user")
+    factory_active_map = LaunchConfiguration("factory_active_map")
+    factory_mapping_start_command = LaunchConfiguration("factory_mapping_start_command")
+    factory_mapping_finish_command = LaunchConfiguration("factory_mapping_finish_command")
+    factory_mapping_cancel_command = LaunchConfiguration("factory_mapping_cancel_command")
     initial_floor = LaunchConfiguration("initial_floor")
     use_rviz = LaunchConfiguration("rviz")
     rviz_config = LaunchConfiguration("rviz_config")
@@ -42,17 +54,61 @@ def generate_launch_description():
         DeclareLaunchArgument("params_file", default_value=default_params),
         DeclareLaunchArgument("nav2_params_file", default_value=default_nav2_params),
         DeclareLaunchArgument("floor_config", default_value=default_floor_config),
+        DeclareLaunchArgument("map_manifest", default_value=default_map_manifest),
         DeclareLaunchArgument("map", default_value=default_map),
         DeclareLaunchArgument("enable_floor_manager", default_value="true"),
+        DeclareLaunchArgument("enable_floor_goal_bridge", default_value="true"),
         DeclareLaunchArgument("enable_dynamic_obstacles", default_value="true"),
-        DeclareLaunchArgument("enable_health_monitor", default_value="true"),
+        DeclareLaunchArgument("enable_system_check", default_value="true"),
+        DeclareLaunchArgument("enable_config_audit", default_value="true"),
         DeclareLaunchArgument("enable_web_dashboard", default_value="true"),
         DeclareLaunchArgument("web_dashboard_port", default_value="8080"),
+        DeclareLaunchArgument("web_dashboard_data_dir", default_value="~/.m20pro_web"),
+        DeclareLaunchArgument("web_dashboard_map_archive_dir", default_value="~/m20pro_maps"),
+        DeclareLaunchArgument("factory_host", default_value="10.21.31.106"),
+        DeclareLaunchArgument("factory_user", default_value="user"),
+        DeclareLaunchArgument("factory_active_map", default_value="/var/opt/robot/data/maps/active"),
+        DeclareLaunchArgument(
+            "factory_mapping_start_command",
+            default_value=(
+                "ssh -o BatchMode=yes -o ConnectTimeout=8 {factory_user}@{factory_host} "
+                "\"nohup sudo -n drmap mapping -s -n {map_name} > "
+                "/tmp/m20pro_drmap_mapping_{session_id}.log 2>&1 &\""
+            ),
+        ),
+        DeclareLaunchArgument(
+            "factory_mapping_finish_command",
+            default_value=(
+                "ssh -o BatchMode=yes -o ConnectTimeout=8 {factory_user}@{factory_host} "
+                "\"sudo -n drmap stop_mapping\""
+            ),
+        ),
+        DeclareLaunchArgument(
+            "factory_mapping_cancel_command",
+            default_value=(
+                "ssh -o BatchMode=yes -o ConnectTimeout=8 {factory_user}@{factory_host} "
+                "\"sudo -n drmap stop_mapping\""
+            ),
+        ),
         DeclareLaunchArgument("initial_floor", default_value="F20"),
         DeclareLaunchArgument("rviz", default_value="true"),
         DeclareLaunchArgument("rviz_config", default_value=default_rviz),
         DeclareLaunchArgument("rviz_delay_s", default_value="5.0"),
 
+        Node(
+            package="m20pro_navigation",
+            executable="config_audit",
+            name="m20pro_config_audit",
+            output="screen",
+            parameters=[
+                {
+                    "map_manifest": map_manifest,
+                    "floor_config": floor_config,
+                    "fail_on_error": False,
+                }
+            ],
+            condition=IfCondition(enable_config_audit),
+        ),
         Node(
             package="m20pro_navigation",
             executable="zero_joint_state_publisher",
@@ -79,7 +135,7 @@ def generate_launch_description():
             executable="dual_lidar_simulator",
             name="m20pro_dual_lidar_simulator",
             output="screen",
-            parameters=[params_file],
+            parameters=[params_file, {"map_manifest": map_manifest}],
         ),
         Node(
             package="m20pro_navigation",
@@ -138,6 +194,20 @@ def generate_launch_description():
             ],
             condition=IfCondition(enable_floor_manager),
         ),
+        Node(
+            package="m20pro_navigation",
+            executable="floor_goal_bridge",
+            name="m20pro_floor_goal_bridge",
+            output="screen",
+            parameters=[
+                {
+                    "floor_config": floor_config,
+                    "default_floor": initial_floor,
+                    "enable_same_floor_goal_bridge": True,
+                }
+            ],
+            condition=IfCondition(enable_floor_goal_bridge),
+        ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(nav2_bringup_share, "launch", "navigation_launch.py")
@@ -150,18 +220,37 @@ def generate_launch_description():
         ),
         Node(
             package="m20pro_navigation",
-            executable="sim_health_monitor",
-            name="m20pro_sim_health_monitor",
+            executable="system_check",
+            name="m20pro_system_check",
             output="screen",
-            parameters=[{"require_dynamic_obstacles": enable_dynamic_obstacles}],
-            condition=IfCondition(enable_health_monitor),
+            parameters=[
+                {
+                    "mode": "sim",
+                    "cloud_topic": "/cloud_nav",
+                    "require_dynamic_obstacles": enable_dynamic_obstacles,
+                    "require_floor_manager": enable_floor_manager,
+                }
+            ],
+            condition=IfCondition(enable_system_check),
         ),
         Node(
             package="m20pro_cloud_bridge",
             executable="web_dashboard",
             name="m20pro_web_dashboard",
             output="screen",
-            parameters=[{"port": web_dashboard_port}],
+            parameters=[
+                {
+                    "port": web_dashboard_port,
+                    "data_dir": web_dashboard_data_dir,
+                    "map_archive_dir": web_dashboard_map_archive_dir,
+                    "factory_host": factory_host,
+                    "factory_user": factory_user,
+                    "factory_active_map": factory_active_map,
+                    "factory_mapping_start_command": factory_mapping_start_command,
+                    "factory_mapping_finish_command": factory_mapping_finish_command,
+                    "factory_mapping_cancel_command": factory_mapping_cancel_command,
+                }
+            ],
             condition=IfCondition(enable_web_dashboard),
         ),
         TimerAction(

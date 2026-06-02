@@ -12,9 +12,12 @@ from geometry_msgs.msg import PoseArray, PoseStamped
 from nav_msgs.msg import OccupancyGrid
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import PointCloud2, PointField
 from std_msgs.msg import String
+
+from .map_manifest import floor_z_ranges, load_manifest, resolve_path
 
 
 class DualLidarSimulator(Node):
@@ -42,6 +45,7 @@ class DualLidarSimulator(Node):
         self.declare_parameter("publish_grid_map_3d", True)
 
         self.declare_parameter("pcd_map_path", "")
+        self.declare_parameter("map_manifest", "")
         self.declare_parameter("pcd_voxel_size", 0.08)
         self.declare_parameter("pcd_index_cell_size", 1.0)
         self.declare_parameter("floor_z_ranges", ["F20:-1.0:1.5:0.0"])
@@ -74,6 +78,7 @@ class DualLidarSimulator(Node):
         self.pose_msg: Optional[PoseStamped] = None
         self.dynamic_obstacles: List[Tuple[float, float]] = []
         self.current_floor = str(self.get_parameter("default_floor").value).strip()
+        self._apply_map_manifest()
         self.floor_z_ranges = self._parse_floor_z_ranges(
             list(self.get_parameter("floor_z_ranges").value)
         )
@@ -150,6 +155,28 @@ class DualLidarSimulator(Node):
                 str(self.get_parameter("cloud_nav_topic").value),
             )
         )
+
+    def _apply_map_manifest(self) -> None:
+        manifest_path = str(self.get_parameter("map_manifest").value).strip()
+        if not manifest_path:
+            return
+        try:
+            manifest = load_manifest(manifest_path)
+        except Exception as exc:
+            self.get_logger().warning("ignored map_manifest: %s" % exc)
+            return
+
+        map_set = manifest.get("map_set") or {}
+        if not self.current_floor:
+            self.current_floor = str(map_set.get("default_floor") or "").strip()
+        global_pcd = str(map_set.get("global_pcd") or "").strip()
+        floor = (manifest.get("floors") or {}).get(self.current_floor) or {}
+        pcd_map = str(floor.get("pcd_map") or global_pcd).strip()
+        if pcd_map:
+            self.set_parameters([Parameter("pcd_map_path", value=resolve_path(pcd_map))])
+        ranges = floor_z_ranges(manifest)
+        if ranges:
+            self.set_parameters([Parameter("floor_z_ranges", value=ranges)])
 
     def _on_pose(self, msg: PoseStamped) -> None:
         self.pose_msg = msg

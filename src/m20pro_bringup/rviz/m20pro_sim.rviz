@@ -202,6 +202,7 @@ Visualization Manager:
     - Class: rviz_default_plugins/FocusCamera
     - Class: rviz_default_plugins/Measure
     - Class: rviz_default_plugins/SetInitialPose
+      Name: 2D Pose Estimate
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -209,13 +210,37 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /initialpose
     - Class: rviz_default_plugins/SetGoal
-      Name: Goal
+      Name: 当前楼层目标
       Topic:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /goal_pose
+        Value: /m20pro/rviz_goal_current
+    - Class: rviz_default_plugins/SetGoal
+      Name: 19楼目标
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /m20pro/rviz_goal_f19
+    - Class: rviz_default_plugins/SetGoal
+      Name: 20楼目标
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /m20pro/rviz_goal_f20
+    - Class: rviz_default_plugins/SetGoal
+      Name: 21楼目标
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /m20pro/rviz_goal_f21
     - Class: rviz_default_plugins/PublishPoint
       Topic:
         Depth: 5

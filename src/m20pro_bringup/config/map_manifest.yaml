@@ -1,0 +1,41 @@
+# M20Pro map asset manifest.
+#
+# Keep map assets here so navigation, simulation, and future deployment scripts
+# all refer to the same PGM/PCD products. Route and inspection semantics remain
+# in inspection_waypoints.yaml.
+
+map_set:
+  name: "F19_F20_F21_shared_stair"
+  description: "F20 recorded map reused for F19/F21 during current multi-floor validation."
+  default_floor: "F20"
+  frame_id: "map"
+  global_pcd: "package://m20pro_bringup/maps/Original_map/full_cloud.pcd"
+  source_note: "Current F19 and F21 maps reuse the edited F20 map products."
+
+floors:
+  F19:
+    level: 19
+    label: "19楼"
+    map_yaml: "package://m20pro_bringup/maps/F19/occ_grid.yaml"
+    pcd_map: "package://m20pro_bringup/maps/Original_map/full_cloud.pcd"
+    z_min: -1.0
+    z_max: 1.5
+    z_offset: 0.0
+
+  F20:
+    level: 20
+    label: "20楼"
+    map_yaml: "package://m20pro_bringup/maps/F20/occ_grid.yaml"
+    pcd_map: "package://m20pro_bringup/maps/Original_map/full_cloud.pcd"
+    z_min: -1.0
+    z_max: 1.5
+    z_offset: 0.0
+
+  F21:
+    level: 21
+    label: "21楼"
+    map_yaml: "package://m20pro_bringup/maps/F21/occ_grid.yaml"
+    pcd_map: "package://m20pro_bringup/maps/Original_map/full_cloud.pcd"
+    z_min: -1.0
+    z_max: 1.5
+    z_offset: 0.0

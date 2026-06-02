@@ -21,7 +21,7 @@
 
 - 103 AOS：默认 `10.21.31.103:30001`，提供官方本体监控 TCP 协议。工程通过它查询地图位姿、定位/避障状态，并下发轴指令、步态切换、重定位等命令。
 - 106 NOS：负责原厂建图、定位、导航、避障。地图通常位于 `/var/opt/robot/data/maps/active`，可复制 `occ_grid.yaml`、`occ_grid.pgm`、`full_cloud.pcd` 到 104 或本 workspace。
-- 104 GOS：运行本工程。真机推荐启动 `m20pro_real.launch.py`；仿真使用 `m20pro_sim.launch.py`。
+- 104 GOS：运行本工程。推荐统一入口 `m20pro.launch.py`，用 `mode:=sim` 或 `mode:=real` 区分仿真/真机。
 
 当前导航主链路：
 
@@ -36,8 +36,8 @@ floor_manager -> 地图切换、楼层重定位、步态切换、跨楼层目标
 
 | Package | 用途 | 常用入口 |
 | --- | --- | --- |
-| `m20pro_bringup` | launch、参数、地图、RViz 配置 | `m20pro_sim.launch.py`、`m20pro_real.launch.py`、`m20pro_web_dashboard.launch.py` |
-| `m20pro_navigation` | 真机 TCP 桥、仿真桥、点云融合、楼层管理、地图编辑、动态障碍物 | `tcp_bridge`、`sim_bridge`、`floor_manager`、`pointcloud_fusion`、`map_editor` |
+| `m20pro_bringup` | launch、参数、地图、RViz 配置 | `m20pro.launch.py`、`m20pro_sim.launch.py`、`m20pro_real.launch.py` |
+| `m20pro_navigation` | 真机 TCP 桥、仿真桥、点云融合、楼层管理、目标点桥、配置检查、动态障碍物 | `tcp_bridge`、`sim_bridge`、`floor_manager`、`floor_goal_bridge`、`system_check` |
 | `m20pro_description` | M20 Pro URDF 和 meshes | 由 bringup 自动加载 |
 | `m20pro_inspection` | YOLOv8/RKNN 巡检检测 | `m20pro_inspection.launch.py` |
 | `m20pro_cloud_bridge` | 本地网页看板/后续云端上报雏形 | `web_dashboard` |
@@ -62,21 +62,58 @@ colcon build --packages-select m20pro_navigation m20pro_bringup --symlink-instal
 source install/setup.bash
 ```
 
+## 104 真机移植状态
+
+当前项目已经完成一次向 M20 Pro 104 GOS 主机的实机移植验证，状态如下：
+
+- 连接方式：开发电脑通过 RJ45 直连 104，开发电脑网口配置为 `10.21.31.200/24`，104 地址为 `10.21.31.104`。
+- 104 环境：Ubuntu 20.04.6、ARM64、ROS 2 Foxy，具备 `colcon`、`rosdep`、`git` 和 Python 3.8。
+- 代码位置：已把当前 workspace 部署到 104 的 `/home/user/m20pro_ros2_ws_20260529_173921`。
+- 编译状态：`m20pro_description`、`m20pro_navigation`、`m20pro_cloud_bridge`、`m20pro_inspection`、`m20pro_bringup` 五个包已经在 104 上编译通过。
+- 依赖状态：104 原本缺少 Nav2 和 `sensor_msgs_py`，已通过离线 deb 包方式安装 Foxy/ARM64 版本。
+- 已验证 Nav2 包：`nav2_bringup`、`nav2_map_server`、`nav2_lifecycle_manager`、`nav2_controller`、`nav2_planner`、`nav2_navfn_planner`、`nav2_dwb_controller`、`nav2_msgs`、`sensor_msgs_py`。
+- 安全策略：104 上默认保持 `enable_axis_command:=false`，先观察地图、点云、TF、costmap 和 Nav2 状态，不直接驱动机器狗运动。
+
+104 上的安全启动命令：
+
+```bash
+cd ~/m20pro_ros2_ws_20260529_173921
+source /opt/ros/foxy/setup.bash
+source install/setup.bash
+ros2 launch m20pro_bringup m20pro.launch.py mode:=real \
+  rviz:=false \
+  enable_web_dashboard:=false \
+  enable_axis_command:=false \
+  cloud_topic:=/LIDAR/POINTS
+```
+
+本次移植后的烟雾测试结果：
+
+- Nav2 map server、lifecycle manager、controller、planner、recoveries、BT navigator、waypoint follower 可以启动；
+- `floor_manager`、`floor_goal_bridge`、`pointcloud_fusion`、`tcp_bridge` 可以进入 real 启动链路；
+- map server 可以加载当前 F20 的 `occ_grid.yaml/pgm`；
+- TCP bridge 可以连接 103 的官方控制协议端口；
+- 短时间测试中仍需要等待 104 侧实时 `/LIDAR/POINTS` 和转换后的 `/scan` 稳定出现。
+
+因此，当前真机侧已经不是“Nav2 缺包/工作区无法编译”的状态，而是进入“实时雷达点云、TF、costmap、低速实机闭环验证”的阶段。打开 `enable_axis_command:=true` 前，必须先确认 `/LIDAR/POINTS`、`/scan`、`/map`、`/local_costmap/costmap`、`/global_costmap/costmap` 和 Nav2 lifecycle 都稳定。
+
 ## 快速启动
 
 仿真：
 
 ```bash
 source install/setup.bash
-ros2 launch m20pro_bringup m20pro_sim.launch.py
+ros2 launch m20pro_bringup m20pro.launch.py mode:=sim
 ```
 
 真机：
 
 ```bash
 source install/setup.bash
-ros2 launch m20pro_bringup m20pro_real.launch.py
+ros2 launch m20pro_bringup m20pro.launch.py mode:=real cloud_topic:=/LIDAR/POINTS
 ```
+
+仍然可以直接用旧入口 `m20pro_sim.launch.py` 和 `m20pro_real.launch.py`，但日常建议记统一入口。
 
 本地网页看板会默认随 sim/real 启动，浏览器打开：
 
@@ -93,13 +130,22 @@ http://104的IP:8080
 换端口：
 
 ```bash
-ros2 launch m20pro_bringup m20pro_sim.launch.py web_dashboard_port:=18080
+ros2 launch m20pro_bringup m20pro.launch.py mode:=sim web_dashboard_port:=18080
 ```
+
+网页操作台会随 sim/real 默认启动。它现在不是单纯看板，而是一套现场流程入口：
+
+- 建图向导：记录项目、建筑、单层/多层模式、楼层编号；
+- 106 地图拉取：把 106 原厂 active map 复制归档到 104；
+- 地图选择：在网页中选择实时 `/map` 或归档地图；
+- 地图标点：在 PGM 地图上点击生成巡检点、楼梯切换点、充电点等；
+- 任务编排：用点位生成巡检任务，并向 `/m20pro/floor_goal` 下发楼层目标；
+- 实时看板：显示楼层、位姿、路径、动态障碍物、YOLO 检测和事件。
 
 关闭网页看板：
 
 ```bash
-ros2 launch m20pro_bringup m20pro_sim.launch.py enable_web_dashboard:=false
+ros2 launch m20pro_bringup m20pro.launch.py mode:=sim enable_web_dashboard:=false
 ```
 
 ## m20pro_bringup
@@ -109,6 +155,7 @@ ros2 launch m20pro_bringup m20pro_sim.launch.py enable_web_dashboard:=false
 主要文件：
 
 - `config/m20pro.yaml`：真机 TCP、仿真初始位姿、点云融合、动态障碍物、PCD 感知仿真等参数。
+- `config/map_manifest.yaml`：PGM/PCD 地图资产总表，用来收拢 F19/F20/F21 的地图、点云和高度范围。
 - `config/nav2_params.yaml`：Humble/上位机 Nav2 参数。
 - `config/nav2_params_foxy.yaml`：104/Foxy Nav2 参数。
 - `config/inspection_waypoints.yaml`：F19/F20/F21 楼层、楼梯路线、巡检点模板。
@@ -119,19 +166,20 @@ ros2 launch m20pro_bringup m20pro_sim.launch.py enable_web_dashboard:=false
 ### 仿真 launch
 
 ```bash
-ros2 launch m20pro_bringup m20pro_sim.launch.py
+ros2 launch m20pro_bringup m20pro.launch.py mode:=sim
 ```
 
 常用参数：
 
 ```bash
-ros2 launch m20pro_bringup m20pro_sim.launch.py \
+ros2 launch m20pro_bringup m20pro.launch.py mode:=sim \
   initial_floor:=F20 \
   map:=/path/to/occ_grid.yaml \
   rviz:=true \
   enable_dynamic_obstacles:=true \
   enable_web_dashboard:=true \
-  web_dashboard_port:=8080
+  web_dashboard_port:=8080 \
+  web_dashboard_map_archive_dir:=~/m20pro_maps
 ```
 
 当前要求：动态障碍物默认必须显示，`enable_dynamic_obstacles` 默认是 `true`。
@@ -139,18 +187,19 @@ ros2 launch m20pro_bringup m20pro_sim.launch.py \
 ### 真机 launch
 
 ```bash
-ros2 launch m20pro_bringup m20pro_real.launch.py
+ros2 launch m20pro_bringup m20pro.launch.py mode:=real
 ```
 
 常用参数：
 
 ```bash
-ros2 launch m20pro_bringup m20pro_real.launch.py \
+ros2 launch m20pro_bringup m20pro.launch.py mode:=real \
   cloud_topic:=/LIDAR/POINTS \
   initial_floor:=F20 \
   rviz:=true \
   enable_axis_command:=false \
-  enable_web_dashboard:=true
+  enable_web_dashboard:=true \
+  web_dashboard_map_archive_dir:=~/m20pro_maps
 ```
 
 说明：
@@ -159,6 +208,8 @@ ros2 launch m20pro_bringup m20pro_real.launch.py \
 - `enable_axis_command:=false` 用于只观察链路、不向真机下发轴指令。
 - `enable_initialpose_relocalization` 默认开启，RViz 的 `2D Pose Estimate` 会触发厂商重定位接口。
 - `enable_initialpose_3d_adapter:=true` 时，会把普通 `/initialpose` 补上当前楼层 z 值后转发到 `/m20pro/initialpose_3d`。
+- `config_audit` 会在启动时检查地图总表和楼层路线配置。
+- `system_check` 会持续检查地图、点云、`/scan`、代价地图、Nav2 和楼层管理是否正常。
 
 ### 独立网页看板
 
@@ -167,6 +218,29 @@ ros2 launch m20pro_bringup m20pro_real.launch.py \
 ```bash
 ros2 launch m20pro_bringup m20pro_web_dashboard.launch.py port:=8080
 ```
+
+常用参数：
+
+```bash
+ros2 launch m20pro_bringup m20pro_web_dashboard.launch.py \
+  port:=8080 \
+  data_dir:=~/.m20pro_web \
+  map_archive_dir:=~/m20pro_maps \
+  factory_host:=10.21.31.106 \
+  factory_user:=user \
+  factory_active_map:=/var/opt/robot/data/maps/active
+```
+
+说明：`factory_mapping_start_command`、`factory_mapping_finish_command`、`factory_mapping_cancel_command` 是 106 原厂建图命令钩子，可按现场需要覆盖。
+
+默认命令已按《山猫 M20 Pro 软件使用手册 V0.0.1》配置为：
+
+```bash
+sudo drmap mapping -s -n <地图名称>
+sudo drmap stop_mapping
+```
+
+网页节点会通过 SSH 在 106/NOS 上执行它们。要让按钮直接可用，需要 104 能免密 SSH 到 `user@10.21.31.106`，并且 106 上 `sudo drmap ...` 不需要交互输入密码。若现场暂时没配好，仍可在 106 上手动执行 `drmap`，再回到网页点击“从 106 拉到 104”。
 
 ## m20pro_navigation
 
@@ -287,18 +361,38 @@ ros2 topic echo /m20pro/gait_command
 
 RViz 里不能只靠普通 `2D Goal Pose` 表达“目标楼层”，因为普通目标没有楼层字段。当前提供了楼层专用 RViz 目标话题：
 
+- `/m20pro/rviz_goal_current`
 - `/m20pro/rviz_goal_f19`
 - `/m20pro/rviz_goal_f20`
 - `/m20pro/rviz_goal_f21`
 
-如果 RViz 工具栏配置成对应话题，就可以在 RViz 里点目标，并由 topic 名决定目标楼层。
+默认 RViz 配置已经放了这些目标工具：
+
+- `当前楼层目标`：发布到 `/m20pro/rviz_goal_current`，由目标点桥补成当前楼层目标；
+- `19楼目标`：发布到 `/m20pro/rviz_goal_f19`；
+- `20楼目标`：发布到 `/m20pro/rviz_goal_f20`；
+- `21楼目标`：发布到 `/m20pro/rviz_goal_f21`。
+
+使用 `19楼目标`、`20楼目标`、`21楼目标` 点目标时，`floor_manager` 会根据工具对应的话题补齐目标楼层，再自动执行跨楼层路线。当前这是基于标准 RViz `SetGoal` 工具实现的，不依赖云深处 X30 Pro 的 3D RViz 插件。
+
+命令行也可以用更短的字符串目标：
+
+```bash
+ros2 topic pub --once /m20pro/goal_command std_msgs/msg/String "{data: 'F21 2.0 0.0 0.0'}"
+```
+
+也可以直接发送巡检点 id，例如：
+
+```bash
+ros2 topic pub --once /m20pro/goal_command std_msgs/msg/String "{data: 'f21_demo_check'}"
+```
 
 ### initialpose_3d_adapter
 
 把 RViz 的 `/initialpose` 补上当前楼层 z 值，转发为 `/m20pro/initialpose_3d`。主要用于真机多楼层重定位实验：
 
 ```bash
-ros2 launch m20pro_bringup m20pro_real.launch.py enable_initialpose_3d_adapter:=true
+ros2 launch m20pro_bringup m20pro.launch.py mode:=real enable_initialpose_3d_adapter:=true
 ```
 
 ### map_editor
@@ -327,9 +421,26 @@ ros2 run m20pro_navigation control_gui
 
 用于查询状态、发送轴指令、单点导航、定位/避障状态测试。
 
-### sim_health_monitor
+### floor_goal_bridge
 
-仿真健康检查节点，随 sim 启动。用于检查 `/map`、`/cloud_nav`、`/scan`、costmap、robot model、Nav2 lifecycle、动态障碍物是否正常。
+目标点桥。它把 RViz 当前楼层目标、楼层专用目标和简单字符串命令统一转换为 `/m20pro/floor_goal`，避免用户手写很长的 `PoseStamped`。
+
+常用命令：
+
+```bash
+ros2 topic pub --once /m20pro/goal_command std_msgs/msg/String "{data: 'F21 2.0 0.0 0.0'}"
+ros2 topic pub --once /m20pro/goal_command std_msgs/msg/String "{data: 'f20_demo_check'}"
+```
+
+### system_check 和 config_audit
+
+`config_audit` 是启动前配置检查，检查 `map_manifest.yaml`、`inspection_waypoints.yaml` 和实际地图文件是否能对上。
+
+`system_check` 是运行时健康检查，随 sim/real 启动。用于检查 `/map`、点云、`/scan`、costmap、robot model、Nav2 lifecycle、楼层管理和动态障碍物是否正常。仿真启动正常时会看到类似：
+
+```text
+M20PRO SIM OK: required topics, nodes, maps and Nav2 are active
+```
 
 ## m20pro_description
 
@@ -403,7 +514,7 @@ ros2 topic echo /m20pro_yolov8_inspection/events
 
 ## m20pro_cloud_bridge
 
-`m20pro_cloud_bridge` 是最小版网页数据桥。当前先实现“本地端口可视化”，后续可以在同一个包中继续扩展成 HTTP/WebSocket/MQTT 上报到甲方服务器。
+`m20pro_cloud_bridge` 是 M20Pro 现场网页操作台和后续云端上报的基础包。它在 104 上启动一个轻量 HTTP 服务，安卓手柄浏览器、SSH 端口转发、本地电脑或甲方服务器反向代理访问的都是同一套页面。
 
 独立启动：
 
@@ -423,21 +534,22 @@ http://localhost:8080
 curl http://localhost:8080/healthz
 curl http://localhost:8080/api/state
 curl http://localhost:8080/api/map
+curl http://localhost:8080/api/maps
+curl http://localhost:8080/api/annotations
+curl http://localhost:8080/api/tasks
 ```
 
-页面当前显示：
+页面当前包含：
 
-- 当前楼层；
-- 楼梯状态；
-- 步态指令；
-- 机器人位姿；
-- PGM 黑白地图；
-- 全局路径；
-- 动态障碍物；
-- YOLO 检测和事件；
-- 关键话题最近更新时间。
+- `看板`：当前楼层、楼梯状态、步态、机器人位姿、PGM 地图、路径、动态障碍物、YOLO 检测/事件和话题状态；
+- `建图`：建立单层/多层建图任务，预留 106 原厂建图启动/保存命令钩子，从 106 active map 拉取地图到 104；
+- `地图`：管理 104 归档地图并选择当前显示地图；
+- `标点`：点击地图生成巡检点、步态切换点、楼层切换点、出楼梯点、充电点、过渡点；
+- `任务`：用标点生成任务，并按顺序向 `/m20pro/floor_goal` 发布楼层目标。
 
-当前不做视频推流，也没有对接甲方服务器。视频和云端协议建议作为下一阶段单独补充，避免把现场导航链路和外网链路绑死。
+持久化数据默认放在 `~/.m20pro_web`，归档地图默认放在 `~/m20pro_maps`。拉取 106 地图依赖 104 能通过 `scp` 访问 `user@10.21.31.106:/var/opt/robot/data/maps/active`。
+
+当前不直接修改 106 的 active map。前端拉到 104 的地图是工作副本，用于 104 Nav2、标点和任务编排；106 仍保留原厂建图/定位链路。
 
 ## 多楼层地图与目标点
 
@@ -465,7 +577,7 @@ ros2 topic pub --once /m20pro/floor_goal geometry_msgs/msg/PoseStamped \
 获取 RViz 中点选的 x/y/yaw：
 
 ```bash
-ros2 topic echo /goal_pose
+ros2 topic echo /m20pro/rviz_goal_current
 ```
 
 如果使用楼层专用 RViz 目标话题，则 echo 对应话题：
@@ -473,6 +585,15 @@ ros2 topic echo /goal_pose
 ```bash
 ros2 topic echo /m20pro/rviz_goal_f21
 ```
+
+项目默认 RViz 工具栏已经提供：
+
+- `当前楼层目标`
+- `19楼目标`
+- `20楼目标`
+- `21楼目标`
+
+其中 `19楼目标`、`20楼目标`、`21楼目标` 用于直接在 RViz 中下达跨楼层目标。
 
 ## 地图与点云放置
 
@@ -493,6 +614,18 @@ src/m20pro_bringup/maps/
     full_cloud.pcd
 ```
 
+地图资产总表在：
+
+```text
+src/m20pro_bringup/config/map_manifest.yaml
+```
+
+路线、楼梯点、巡检点仍在：
+
+```text
+src/m20pro_bringup/config/inspection_waypoints.yaml
+```
+
 真机运行主要依赖 PGM/YAML 做 Nav2 全局地图；实时点云用于局部 costmap。仿真中 PCD 用来生成局部点云，更贴近真机雷达输入，但当前没有做完整 3D 全局路径规划。
 
 从 106 复制地图示例：
@@ -504,7 +637,7 @@ scp -r user@10.21.31.106:/var/opt/robot/data/maps/active "$HOME/m20pro_active_ma
 指定地图启动：
 
 ```bash
-ros2 launch m20pro_bringup m20pro_real.launch.py \
+ros2 launch m20pro_bringup m20pro.launch.py mode:=real \
   map:=$HOME/m20pro_active_map/occ_grid.yaml
 ```
 

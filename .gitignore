@@ -40,6 +40,12 @@ bags/
 
 # Third-party reference workspace kept locally, not part of this project
 dddmr_navigation/
+/scripts/
+/x30_core_nav_slam/
+
+# Local map editor/export metadata
+**/.optimizers/
+/src/m20pro_bringup/maps/Original_map/occ_grid_id_map.toml
 
 # Documents that may be copyrighted or private
 *.pdf

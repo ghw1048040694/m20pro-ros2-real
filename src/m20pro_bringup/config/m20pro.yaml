@@ -23,7 +23,7 @@ m20pro_tcp_bridge:
     update_rate_hz: 50.0
     tf_future_offset_s: 0.1
     enable_native_goal_bridge: false
-    enable_axis_command: true
+    enable_axis_command: false
     enable_gait_command: true
     gait_command_topic: "/m20pro/gait_command"
     gait_flat_param: 1
