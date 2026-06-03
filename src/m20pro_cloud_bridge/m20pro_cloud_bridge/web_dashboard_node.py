@@ -17,12 +17,16 @@ import rclpy
 import yaml
 from geometry_msgs.msg import Pose, PoseStamped
 from nav_msgs.msg import OccupancyGrid, Path as RosPath
-from rclpy._rclpy_pybind11 import RCLError
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
 from visualization_msgs.msg import Marker, MarkerArray
+
+try:
+    from rclpy._rclpy_pybind11 import RCLError
+except ImportError:  # Foxy does not expose this internal exception module.
+    RCLError = Exception
 
 try:
     import cv2
@@ -1220,6 +1224,169 @@ class _ReusableThreadingHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
 
+class _CameraProxyWorker:
+    _opencv_env_lock = threading.Lock()
+
+    def __init__(self, node: "WebDashboardNode", camera_name: str, url: str) -> None:
+        self.node = node
+        self.camera_name = camera_name
+        self.url = url
+        self._condition = threading.Condition()
+        self._thread: Optional[threading.Thread] = None
+        self._stopped = False
+        self._latest_jpeg: Optional[bytes] = None
+        self._latest_stamp = 0.0
+        self._sequence = 0
+        self._last_error: Optional[str] = None
+        self._last_error_log_time = 0.0
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"m20pro_camera_proxy_{self.camera_name}",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        with self._condition:
+            self._stopped = True
+            self._condition.notify_all()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+
+    def wait_for_frame(
+        self,
+        last_sequence: int,
+        timeout_s: float,
+    ) -> Tuple[int, Optional[bytes], float, Optional[str]]:
+        deadline = time.monotonic() + max(0.1, timeout_s)
+        with self._condition:
+            while not self._stopped and self._sequence <= last_sequence:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    break
+                self._condition.wait(timeout=remaining)
+            return self._sequence, self._latest_jpeg, self._latest_stamp, self._last_error
+
+    def _run(self) -> None:
+        cap = None
+        reconnect_s = max(0.2, float(self.node.get_parameter("camera_proxy_reconnect_s").value))
+        while not self._is_stopped():
+            try:
+                if cv2 is None:
+                    self._set_error("python3-opencv is not installed")
+                    time.sleep(reconnect_s)
+                    continue
+                if cap is None or not cap.isOpened():
+                    cap = self._open_capture()
+                    if not cap.isOpened():
+                        self._set_error("failed to open RTSP stream")
+                        cap.release()
+                        cap = None
+                        time.sleep(reconnect_s)
+                        continue
+                    self._set_error(None)
+
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    self._set_error("failed to read RTSP frame")
+                    cap.release()
+                    cap = None
+                    time.sleep(reconnect_s)
+                    continue
+
+                if not self._should_publish_frame():
+                    continue
+                payload = self._encode_frame(frame)
+                if payload is not None:
+                    with self._condition:
+                        self._latest_jpeg = payload
+                        self._latest_stamp = time.time()
+                        self._sequence += 1
+                        self._last_error = None
+                        self._condition.notify_all()
+            except Exception as exc:
+                self._set_error(str(exc))
+                if cap is not None:
+                    cap.release()
+                    cap = None
+                time.sleep(reconnect_s)
+        if cap is not None:
+            cap.release()
+
+    def _open_capture(self):
+        if str(self.node.get_parameter("camera_proxy_transport").value).lower() == "tcp":
+            options = str(self.node.get_parameter("camera_proxy_ffmpeg_options").value)
+            with self._opencv_env_lock:
+                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = options
+                if hasattr(cv2, "CAP_FFMPEG"):
+                    cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
+                else:
+                    cap = cv2.VideoCapture(self.url)
+        else:
+            cap = cv2.VideoCapture(self.url)
+
+        self._set_capture_property(cap, "CAP_PROP_BUFFERSIZE", 1)
+        self._set_capture_property(
+            cap,
+            "CAP_PROP_OPEN_TIMEOUT_MSEC",
+            int(float(self.node.get_parameter("camera_proxy_open_timeout_s").value) * 1000.0),
+        )
+        self._set_capture_property(
+            cap,
+            "CAP_PROP_READ_TIMEOUT_MSEC",
+            int(float(self.node.get_parameter("camera_proxy_read_timeout_s").value) * 1000.0),
+        )
+        return cap
+
+    def _set_capture_property(self, cap: Any, name: str, value: float) -> None:
+        prop = getattr(cv2, name, None)
+        if prop is None:
+            return
+        try:
+            cap.set(prop, value)
+        except Exception:
+            pass
+
+    def _should_publish_frame(self) -> bool:
+        fps = max(1.0, float(self.node.get_parameter("camera_proxy_fps").value))
+        with self._condition:
+            last_stamp = self._latest_stamp
+        if last_stamp <= 0.0:
+            return True
+        return (time.time() - last_stamp) >= (1.0 / fps)
+
+    def _encode_frame(self, frame: Any) -> Optional[bytes]:
+        max_width = int(self.node.get_parameter("camera_proxy_max_width").value)
+        if max_width > 0 and hasattr(frame, "shape") and frame.shape[1] > max_width:
+            scale = max_width / float(frame.shape[1])
+            height = max(1, int(frame.shape[0] * scale))
+            frame = cv2.resize(frame, (max_width, height), interpolation=cv2.INTER_AREA)
+
+        quality = max(30, min(95, int(self.node.get_parameter("camera_proxy_jpeg_quality").value)))
+        ok, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+        if not ok:
+            return None
+        return encoded.tobytes()
+
+    def _set_error(self, error: Optional[str]) -> None:
+        with self._condition:
+            self._last_error = error
+            self._condition.notify_all()
+        if error:
+            now = time.monotonic()
+            if now - self._last_error_log_time >= 5.0:
+                self._last_error_log_time = now
+                self.node.get_logger().warning(f"{self.camera_name} camera proxy: {error}")
+
+    def _is_stopped(self) -> bool:
+        with self._condition:
+            return self._stopped
+
+
 class WebDashboardNode(Node):
     def __init__(self) -> None:
         super().__init__("m20pro_web_dashboard")
@@ -1243,6 +1410,7 @@ class WebDashboardNode(Node):
         self._sessions = self._load_json("mapping_sessions.json", [])
         self._settings = self._load_json("settings.json", {"selected_map_id": None, "active_task": None})
         self._mapping_processes: Dict[str, Dict[str, Any]] = {}
+        self._camera_workers: Dict[str, _CameraProxyWorker] = {}
 
         self.floor_goal_pub = self.create_publisher(
             PoseStamped,
@@ -1309,8 +1477,18 @@ class WebDashboardNode(Node):
         self.declare_parameter("enable_camera_proxy", True)
         self.declare_parameter("front_camera_url", "rtsp://10.21.31.103:8554/video1")
         self.declare_parameter("rear_camera_url", "rtsp://10.21.31.103:8554/video2")
-        self.declare_parameter("camera_proxy_fps", 8.0)
-        self.declare_parameter("camera_proxy_jpeg_quality", 78)
+        self.declare_parameter("camera_proxy_fps", 6.0)
+        self.declare_parameter("camera_proxy_jpeg_quality", 70)
+        self.declare_parameter("camera_proxy_max_width", 720)
+        self.declare_parameter("camera_proxy_transport", "tcp")
+        self.declare_parameter(
+            "camera_proxy_ffmpeg_options",
+            "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|max_delay;500000|stimeout;3000000",
+        )
+        self.declare_parameter("camera_proxy_open_timeout_s", 3.0)
+        self.declare_parameter("camera_proxy_read_timeout_s", 3.0)
+        self.declare_parameter("camera_proxy_reconnect_s", 0.5)
+        self.declare_parameter("camera_proxy_frame_timeout_s", 2.0)
         self.declare_parameter("max_path_points", 800)
         self.declare_parameter("max_events", 30)
 
@@ -2184,64 +2362,55 @@ class WebDashboardNode(Node):
             handler.send_error(HTTPStatus.SERVICE_UNAVAILABLE, "python3-opencv is not installed")
             return
 
-        if camera_name == "rear":
-            url = str(self.get_parameter("rear_camera_url").value)
-        else:
-            url = str(self.get_parameter("front_camera_url").value)
-
-        fps = max(1.0, float(self.get_parameter("camera_proxy_fps").value))
-        period = 1.0 / fps
-        quality = max(30, min(95, int(self.get_parameter("camera_proxy_jpeg_quality").value)))
+        worker = self._camera_worker(camera_name)
+        frame_timeout = max(0.5, float(self.get_parameter("camera_proxy_frame_timeout_s").value))
 
         handler.send_response(HTTPStatus.OK)
         handler.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
         handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Pragma", "no-cache")
         handler.send_header("Access-Control-Allow-Origin", "*")
         handler.end_headers()
 
-        cap = None
+        last_sequence = -1
         try:
             while True:
-                if cap is None or not cap.isOpened():
-                    cap = cv2.VideoCapture(url)
-                    if not cap.isOpened():
-                        time.sleep(1.0)
-                        continue
-
-                started = time.monotonic()
-                ok, frame = cap.read()
-                if not ok or frame is None:
-                    cap.release()
-                    cap = None
-                    time.sleep(0.2)
+                sequence, payload, stamp, error = worker.wait_for_frame(last_sequence, frame_timeout)
+                if payload is None or sequence == last_sequence:
+                    if error:
+                        self.get_logger().debug(f"{camera_name} camera waiting for frame: {error}")
                     continue
-
-                ok, encoded = cv2.imencode(
-                    ".jpg",
-                    frame,
-                    [int(cv2.IMWRITE_JPEG_QUALITY), quality],
-                )
-                if not ok:
-                    time.sleep(period)
-                    continue
-
-                payload = encoded.tobytes()
+                last_sequence = sequence
                 handler.wfile.write(b"--frame\r\n")
                 handler.wfile.write(b"Content-Type: image/jpeg\r\n")
+                handler.wfile.write(b"Cache-Control: no-store\r\n")
+                handler.wfile.write(f"X-M20Pro-Frame-Seq: {sequence}\r\n".encode("ascii"))
+                handler.wfile.write(f"X-M20Pro-Frame-Age-Ms: {max(0.0, (time.time() - stamp) * 1000.0):.1f}\r\n".encode("ascii"))
                 handler.wfile.write(f"Content-Length: {len(payload)}\r\n\r\n".encode("ascii"))
                 handler.wfile.write(payload)
                 handler.wfile.write(b"\r\n")
-
-                elapsed = time.monotonic() - started
-                if elapsed < period:
-                    time.sleep(period - elapsed)
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception as exc:
             self.get_logger().warning(f"{camera_name} camera MJPEG proxy stopped: {exc}")
-        finally:
-            if cap is not None:
-                cap.release()
+
+    def _camera_worker(self, camera_name: str) -> _CameraProxyWorker:
+        if camera_name == "rear":
+            url = str(self.get_parameter("rear_camera_url").value)
+        else:
+            camera_name = "front"
+            url = str(self.get_parameter("front_camera_url").value)
+
+        worker = self._camera_workers.get(camera_name)
+        if worker is not None and worker.url == url:
+            worker.start()
+            return worker
+        if worker is not None:
+            worker.stop()
+        worker = _CameraProxyWorker(self, camera_name, url)
+        self._camera_workers[camera_name] = worker
+        worker.start()
+        return worker
 
     @staticmethod
     def _error(message: str, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -2379,6 +2548,9 @@ class WebDashboardNode(Node):
         return server
 
     def destroy_node(self) -> bool:
+        for worker in list(getattr(self, "_camera_workers", {}).values()):
+            worker.stop()
+        self._camera_workers.clear()
         if hasattr(self, "_server"):
             self._server.shutdown()
             self._server.server_close()

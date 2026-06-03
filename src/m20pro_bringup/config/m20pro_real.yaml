@@ -13,11 +13,13 @@ m20pro_tcp_bridge:
     angular_z_sign: 1.0
     map_frame: "map"
     odom_frame: "odom"
-    base_frame: "base_link"
+    base_frame: "m20pro_base_link"
     vendor_position_scale: 0.001
     vendor_position_offset_x: 0.0
     vendor_position_offset_y: 0.0
     vendor_position_offset_z: 0.0
+    flatten_odom_z: true
+    odom_z: 0.0
     publish_tf: true
     # Used by the sim_bridge executable, which is intentionally named
     # m20pro_tcp_bridge in sim launch so the topic names match real launch.

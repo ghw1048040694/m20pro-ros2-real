@@ -33,7 +33,7 @@ def generate_launch_description():
     )
 
     default_params = os.path.join(bringup_share, "config", "m20pro.yaml")
-    default_nav2_params = os.path.join(bringup_share, "config", "nav2_params_foxy.yaml")
+    default_nav2_params = os.path.join(bringup_share, "config", "nav2_params_real.yaml")
     default_floor_config = os.path.join(bringup_share, "config", "inspection_waypoints.yaml")
     default_map_manifest = os.path.join(bringup_share, "config", "map_manifest.yaml")
     default_urdf = os.path.join(desc_share, "urdf", "M20.urdf")
@@ -74,6 +74,10 @@ def generate_launch_description():
     enable_camera_proxy = LaunchConfiguration("enable_camera_proxy")
     front_camera_url = LaunchConfiguration("front_camera_url")
     rear_camera_url = LaunchConfiguration("rear_camera_url")
+    camera_proxy_fps = LaunchConfiguration("camera_proxy_fps")
+    camera_proxy_jpeg_quality = LaunchConfiguration("camera_proxy_jpeg_quality")
+    camera_proxy_max_width = LaunchConfiguration("camera_proxy_max_width")
+    camera_proxy_transport = LaunchConfiguration("camera_proxy_transport")
     enable_inspection = LaunchConfiguration("enable_inspection")
     inspection_backend = LaunchConfiguration("inspection_backend")
     inspection_source_type = LaunchConfiguration("inspection_source_type")
@@ -96,7 +100,7 @@ def generate_launch_description():
         DeclareLaunchArgument("floor_config", default_value=default_floor_config),
         DeclareLaunchArgument("map_manifest", default_value=default_map_manifest),
         DeclareLaunchArgument("map", default_value=default_map),
-        DeclareLaunchArgument("cloud_topic", default_value="/cloud_nav"),
+        DeclareLaunchArgument("cloud_topic", default_value="/LIDAR/POINTS"),
         DeclareLaunchArgument("fusion", default_value="true"),
         DeclareLaunchArgument(
             "enable_nav2",
@@ -121,6 +125,10 @@ def generate_launch_description():
         DeclareLaunchArgument("enable_camera_proxy", default_value="true"),
         DeclareLaunchArgument("front_camera_url", default_value="rtsp://10.21.31.103:8554/video1"),
         DeclareLaunchArgument("rear_camera_url", default_value="rtsp://10.21.31.103:8554/video2"),
+        DeclareLaunchArgument("camera_proxy_fps", default_value="6.0"),
+        DeclareLaunchArgument("camera_proxy_jpeg_quality", default_value="70"),
+        DeclareLaunchArgument("camera_proxy_max_width", default_value="720"),
+        DeclareLaunchArgument("camera_proxy_transport", default_value="tcp"),
         DeclareLaunchArgument("enable_inspection", default_value="true"),
         DeclareLaunchArgument("inspection_backend", default_value="dry_run"),
         DeclareLaunchArgument("inspection_source_type", default_value="rtsp"),
@@ -201,6 +209,7 @@ def generate_launch_description():
                 params_file,
                 {
                     "publish_tf": True,
+                    "base_frame": "m20pro_base_link",
                     "enable_native_goal_bridge": False,
                     "enable_initialpose_relocalization": ParameterValue(
                         enable_initialpose_relocalization,
@@ -221,6 +230,7 @@ def generate_launch_description():
                 params_file,
                 {
                     "publish_tf": True,
+                    "base_frame": "m20pro_base_link",
                     "enable_native_goal_bridge": False,
                     "enable_axis_command": ParameterValue(enable_axis_command, value_type=bool),
                     "enable_initialpose_relocalization": False,
@@ -237,9 +247,29 @@ def generate_launch_description():
             name="m20pro_pointcloud_fusion",
             output="screen",
             parameters=[
-                params_file,
                 {
                     "input_cloud_topic": cloud_topic,
+                    "front_lidar_topic": "",
+                    "rear_lidar_topic": "",
+                    "output_scan_topic": "/scan",
+                    "frame_id": "m20pro_base_link",
+                    "min_angle": -3.14159,
+                    "max_angle": 3.14159,
+                    "angle_increment": 0.0174533,
+                    "min_range": 0.2,
+                    "max_range": 10.0,
+                    "height_min": -0.25,
+                    "height_max": 0.60,
+                    "robot_radius": 0.28,
+                    "publish_rate_hz": 10.0,
+                    "transform_cloud": False,
+                    "use_latest_tf": True,
+                    "transform_timeout_s": 0.05,
+                    "max_source_age_s": 0.25,
+                    "cloud_reliability": "reliable",
+                    "scan_reliability": "best_effort",
+                    "max_points_per_cloud": 12000,
+                    "min_cloud_interval_s": 0.05,
                 },
             ],
             condition=IfCondition(use_fusion if nav2_stack_available else "false"),
@@ -329,6 +359,7 @@ def generate_launch_description():
                         "params_file": nav2_params_file,
                         "use_sim_time": "False",
                         "use_composition": "False",
+                        "map_subscribe_transient_local": "True",
                     }.items(),
                     condition=IfCondition(enable_nav2),
                 )
@@ -367,6 +398,16 @@ def generate_launch_description():
                     "enable_camera_proxy": ParameterValue(enable_camera_proxy, value_type=bool),
                     "front_camera_url": front_camera_url,
                     "rear_camera_url": rear_camera_url,
+                    "camera_proxy_fps": ParameterValue(camera_proxy_fps, value_type=float),
+                    "camera_proxy_jpeg_quality": ParameterValue(
+                        camera_proxy_jpeg_quality,
+                        value_type=int,
+                    ),
+                    "camera_proxy_max_width": ParameterValue(
+                        camera_proxy_max_width,
+                        value_type=int,
+                    ),
+                    "camera_proxy_transport": camera_proxy_transport,
                 }
             ],
             condition=IfCondition(enable_web_dashboard),
@@ -388,6 +429,16 @@ def generate_launch_description():
                     "require_scan": nav2_stack_available,
                     "require_dynamic_obstacles": False,
                     "require_floor_manager": nav2_stack_available,
+                    "check_scan_content": nav2_stack_available,
+                    "check_local_costmap_content": nav2_stack_available,
+                    "check_tf_height": nav2_stack_available,
+                    "tf_global_frame": "odom",
+                    "tf_base_frame": "m20pro_base_link",
+                    "max_abs_base_z": 1.0,
+                    "min_scan_finite_bins": 20,
+                    "min_scan_close_bins": 1,
+                    "scan_close_range_m": 2.0,
+                    "min_local_costmap_marked_cells": 1,
                 }
             ],
             condition=IfCondition(enable_system_check),

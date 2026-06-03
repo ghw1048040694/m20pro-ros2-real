@@ -93,9 +93,11 @@ ros2 launch m20pro_bringup m20pro.launch.py mode:=real \
 - `floor_manager`、`floor_goal_bridge`、`pointcloud_fusion`、`tcp_bridge` 可以进入 real 启动链路；
 - map server 可以加载当前 F20 的 `occ_grid.yaml/pgm`；
 - TCP bridge 可以连接 103 的官方控制协议端口；
-- 短时间测试中仍需要等待 104 侧实时 `/LIDAR/POINTS` 和转换后的 `/scan` 稳定出现。
+- 106 侧 multicast-relay 启动顺序修复后，104 可以稳定看到 `/LIDAR/POINTS`；
+- `/LIDAR/POINTS` 已接入 `pointcloud_fusion` 并转换为 `/scan`，real 模式下 `/scan` 进入 Nav2 local costmap 后可以产生 lethal/inflated 障碍单元；
+- real 模式下保留原厂 `map_pose` 的 z 信息，同时把给 Nav2 使用的 `/odom` 和 `odom -> m20pro_base_link` TF 压平到 z=0，避免 2D costmap 被楼层高度干扰。
 
-因此，当前真机侧已经不是“Nav2 缺包/工作区无法编译”的状态，而是进入“实时雷达点云、TF、costmap、低速实机闭环验证”的阶段。打开 `enable_axis_command:=true` 前，必须先确认 `/LIDAR/POINTS`、`/scan`、`/map`、`/local_costmap/costmap`、`/global_costmap/costmap` 和 Nav2 lifecycle 都稳定。
+因此，当前真机侧已经不是“Nav2 缺包/工作区无法编译”的状态，而是进入“低速实机闭环验证”的阶段。打开 `enable_axis_command:=true` 前，必须先确认 `/LIDAR/POINTS`、`/scan`、`/map`、`/local_costmap/costmap`、`/global_costmap/costmap`、TF 高度和 Nav2 lifecycle 都稳定。
 
 ## 快速启动
 
@@ -109,8 +111,9 @@ ros2 launch m20pro_bringup m20pro.launch.py mode:=sim
 真机：
 
 ```bash
+source /opt/ros/foxy/setup.bash
 source install/setup.bash
-ros2 launch m20pro_bringup m20pro.launch.py mode:=real cloud_topic:=/LIDAR/POINTS
+ros2 launch m20pro_bringup m20pro.launch.py mode:=real
 ```
 
 仍然可以直接用旧入口 `m20pro_sim.launch.py` 和 `m20pro_real.launch.py`，但日常建议记统一入口。
@@ -204,12 +207,12 @@ ros2 launch m20pro_bringup m20pro.launch.py mode:=real \
 
 说明：
 
-- `cloud_topic` 默认是 `/cloud_nav`，如果 104 上已经能看到原始雷达点云，可改成 `/LIDAR/POINTS`。
+- real 模式下 `cloud_topic` 默认使用 `/LIDAR/POINTS`；sim 模式下仍由仿真点云链路提供 `/cloud_nav`。
 - `enable_axis_command:=false` 用于只观察链路、不向真机下发轴指令。
 - `enable_initialpose_relocalization` 默认开启，RViz 的 `2D Pose Estimate` 会触发厂商重定位接口。
 - `enable_initialpose_3d_adapter:=true` 时，会把普通 `/initialpose` 补上当前楼层 z 值后转发到 `/m20pro/initialpose_3d`。
 - `config_audit` 会在启动时检查地图总表和楼层路线配置。
-- `system_check` 会持续检查地图、点云、`/scan`、代价地图、Nav2 和楼层管理是否正常。
+- `system_check` 会持续检查地图、点云、`/scan`、代价地图、Nav2 和楼层管理是否正常；real 模式还会检查 `/scan` 内容、local costmap 标障结果和 TF 高度。
 
 ### 独立网页看板
 
@@ -436,7 +439,7 @@ ros2 topic pub --once /m20pro/goal_command std_msgs/msg/String "{data: 'f20_demo
 
 `config_audit` 是启动前配置检查，检查 `map_manifest.yaml`、`inspection_waypoints.yaml` 和实际地图文件是否能对上。
 
-`system_check` 是运行时健康检查，随 sim/real 启动。用于检查 `/map`、点云、`/scan`、costmap、robot model、Nav2 lifecycle、楼层管理和动态障碍物是否正常。仿真启动正常时会看到类似：
+`system_check` 是运行时健康检查，随 sim/real 启动。用于检查 `/map`、点云、`/scan`、costmap、robot model、Nav2 lifecycle、楼层管理和动态障碍物是否正常。real 模式额外检查 `/scan` 是否有有效束、近距离障碍出现时 local costmap 是否真的标障、`odom -> m20pro_base_link` 的 z 是否保持在合理范围内。仿真启动正常时会看到类似：
 
 ```text
 M20PRO SIM OK: required topics, nodes, maps and Nav2 are active

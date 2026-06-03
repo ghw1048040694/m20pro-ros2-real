@@ -5,7 +5,7 @@ from typing import Optional, Tuple
 import rclpy
 from rclpy.duration import Duration
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, qos_profile_sensor_data
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2, LaserScan
 import sensor_msgs_py.point_cloud2 as pc2
@@ -36,6 +36,11 @@ class PointCloudFusion(Node):
         self.declare_parameter("transform_timeout_s", 0.05)
         self.declare_parameter("max_source_age_s", 0.25)
         self.declare_parameter("no_return_as_inf", True)
+        self.declare_parameter("cloud_reliability", "reliable")
+        self.declare_parameter("scan_reliability", "best_effort")
+        self.declare_parameter("max_points_per_cloud", 12000)
+        self.declare_parameter("min_cloud_interval_s", 0.05)
+        self.declare_parameter("publish_on_cloud_update", False)
         
         # === 初始化成员变量 ===
         self.cloud_ranges: Optional[np.ndarray] = None
@@ -71,8 +76,20 @@ class PointCloudFusion(Node):
         self.front_ranges = np.full(self.num_readings, empty_range, dtype=np.float32)
         self.rear_ranges = np.full(self.num_readings, empty_range, dtype=np.float32)
         
-        cloud_qos = qos_profile_sensor_data
+        cloud_qos = QoSProfile(depth=10)
+        cloud_qos.history = HistoryPolicy.KEEP_LAST
+        cloud_qos.durability = DurabilityPolicy.VOLATILE
+        if str(self.get_parameter("cloud_reliability").value).lower() == "best_effort":
+            cloud_qos.reliability = ReliabilityPolicy.BEST_EFFORT
+        else:
+            cloud_qos.reliability = ReliabilityPolicy.RELIABLE
         scan_qos = QoSProfile(depth=1)
+        scan_qos.history = HistoryPolicy.KEEP_LAST
+        scan_qos.durability = DurabilityPolicy.VOLATILE
+        if str(self.get_parameter("scan_reliability").value).lower() == "reliable":
+            scan_qos.reliability = ReliabilityPolicy.RELIABLE
+        else:
+            scan_qos.reliability = ReliabilityPolicy.BEST_EFFORT
         self.input_cloud_topic = str(self.get_parameter("input_cloud_topic").value)
 
         # === 创建订阅者 ===
@@ -127,6 +144,8 @@ class PointCloudFusion(Node):
 
     def _on_cloud(self, msg: PointCloud2) -> None:
         """处理导航主链路点云。"""
+        if not self._should_process_cloud():
+            return
         ranges = self._pointcloud_to_ranges(msg)
         if ranges is None:
             return
@@ -134,6 +153,8 @@ class PointCloudFusion(Node):
         self.cloud_stamp = self._output_stamp_for_cloud(msg)
         self.cloud_update_time = self.get_clock().now()
         self.cloud_received = True
+        if bool(self.get_parameter("publish_on_cloud_update").value):
+            self._publish_scan()
     
     def _on_front_lidar(self, msg: PointCloud2) -> None:
         """处理前雷达点云"""
@@ -163,7 +184,12 @@ class PointCloudFusion(Node):
         min_range = float(self.get_parameter("min_range").value)
         max_range = float(self.get_parameter("max_range").value)
         
-        # 提取点云数据
+        xyz = self._extract_xyz_arrays(cloud_msg)
+        if xyz is not None:
+            return self._point_arrays_to_ranges(cloud_msg, xyz)
+
+        # Fallback for unusual PointCloud2 layouts. This path is slower and is
+        # mainly kept for compatibility with synthetic/test clouds.
         points = pc2.read_points(cloud_msg, field_names=("x", "y", "z"))
         robot_radius = float(self.get_parameter("robot_radius").value)
         transform = self._lookup_cloud_transform(cloud_msg)
@@ -201,6 +227,84 @@ class PointCloudFusion(Node):
                 if distance < ranges[idx]:
                     ranges[idx] = distance
         
+        return ranges
+
+    def _extract_xyz_arrays(self, cloud_msg: PointCloud2):
+        offsets = {}
+        for field in cloud_msg.fields:
+            if field.name in ("x", "y", "z"):
+                offsets[field.name] = field.offset
+        if set(offsets) != {"x", "y", "z"}:
+            return None
+        point_step = int(cloud_msg.point_step)
+        if point_step <= 0:
+            return None
+
+        endian = ">" if cloud_msg.is_bigendian else "<"
+        dtype = np.dtype(
+            {
+                "names": ["x", "y", "z"],
+                "formats": [endian + "f4", endian + "f4", endian + "f4"],
+                "offsets": [offsets["x"], offsets["y"], offsets["z"]],
+                "itemsize": point_step,
+            }
+        )
+        point_count = len(cloud_msg.data) // point_step
+        if point_count <= 0:
+            return None
+        cloud = np.frombuffer(cloud_msg.data, dtype=dtype, count=point_count)
+
+        max_points = int(self.get_parameter("max_points_per_cloud").value)
+        if max_points > 0 and point_count > max_points:
+            stride = max(1, point_count // max_points)
+            cloud = cloud[::stride]
+
+        x = cloud["x"].astype(np.float32, copy=False)
+        y = cloud["y"].astype(np.float32, copy=False)
+        z = cloud["z"].astype(np.float32, copy=False)
+        return x, y, z
+
+    def _point_arrays_to_ranges(self, cloud_msg: PointCloud2, xyz) -> Optional[np.ndarray]:
+        x, y, z = xyz
+        valid = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+        if not np.any(valid):
+            return np.full(self.num_readings, self._empty_range_value(), dtype=np.float32)
+
+        x = x[valid]
+        y = y[valid]
+        z = z[valid]
+
+        transform = self._lookup_cloud_transform(cloud_msg)
+        if transform is False:
+            return None
+        if transform is not None:
+            x, y, z = self._transform_arrays(x, y, z, transform)
+
+        height_min = float(self.get_parameter("height_min").value)
+        height_max = float(self.get_parameter("height_max").value)
+        min_range = float(self.get_parameter("min_range").value)
+        max_range = float(self.get_parameter("max_range").value)
+        robot_radius = float(self.get_parameter("robot_radius").value)
+
+        distance = np.hypot(x, y)
+        valid = (
+            (z >= height_min)
+            & (z <= height_max)
+            & (distance >= robot_radius)
+            & (distance >= min_range)
+            & (distance <= max_range)
+        )
+        if not np.any(valid):
+            return np.full(self.num_readings, self._empty_range_value(), dtype=np.float32)
+
+        distance = distance[valid].astype(np.float32, copy=False)
+        angle = np.arctan2(y[valid], x[valid])
+        idx = np.floor((angle - self.angle_min) / self.angle_increment).astype(np.int64)
+        valid_idx = (idx >= 0) & (idx < self.num_readings)
+
+        ranges = np.full(self.num_readings, self._empty_range_value(), dtype=np.float32)
+        if np.any(valid_idx):
+            np.minimum.at(ranges, idx[valid_idx], distance[valid_idx])
         return ranges
 
     def _lookup_cloud_transform(self, cloud_msg: PointCloud2):
@@ -254,6 +358,13 @@ class PointCloudFusion(Node):
         age = (self.get_clock().now() - update_time).nanoseconds * 1e-9
         return age <= max_age
 
+    def _should_process_cloud(self) -> bool:
+        min_interval = float(self.get_parameter("min_cloud_interval_s").value)
+        if min_interval <= 0.0 or self.cloud_update_time is None:
+            return True
+        age = (self.get_clock().now() - self.cloud_update_time).nanoseconds * 1e-9
+        return age >= min_interval
+
     def _warn_tf_throttled(self, message: str) -> None:
         now = self.get_clock().now()
         if self.last_tf_warning_time is None:
@@ -279,6 +390,38 @@ class PointCloudFusion(Node):
 
     @staticmethod
     def _transform_point(x: float, y: float, z: float, transform) -> Tuple[float, float, float]:
+        translation = transform.transform.translation
+        rotation = transform.transform.rotation
+        qx = rotation.x
+        qy = rotation.y
+        qz = rotation.z
+        qw = rotation.w
+        norm = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
+        if norm < 1e-9:
+            return x + translation.x, y + translation.y, z + translation.z
+        qx /= norm
+        qy /= norm
+        qz /= norm
+        qw /= norm
+
+        xx = qx * qx
+        yy = qy * qy
+        zz = qz * qz
+        xy = qx * qy
+        xz = qx * qz
+        yz = qy * qz
+        wx = qw * qx
+        wy = qw * qy
+        wz = qw * qz
+
+        tx = (1.0 - 2.0 * (yy + zz)) * x + 2.0 * (xy - wz) * y + 2.0 * (xz + wy) * z
+        ty = 2.0 * (xy + wz) * x + (1.0 - 2.0 * (xx + zz)) * y + 2.0 * (yz - wx) * z
+        tz = 2.0 * (xz - wy) * x + 2.0 * (yz + wx) * y + (1.0 - 2.0 * (xx + yy)) * z
+
+        return tx + translation.x, ty + translation.y, tz + translation.z
+
+    @staticmethod
+    def _transform_arrays(x: np.ndarray, y: np.ndarray, z: np.ndarray, transform):
         translation = transform.transform.translation
         rotation = transform.transform.rotation
         qx = rotation.x

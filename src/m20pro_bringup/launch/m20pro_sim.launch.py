@@ -216,6 +216,7 @@ def generate_launch_description():
                 "params_file": nav2_params_file,
                 "use_sim_time": "False",
                 "use_composition": "False",
+                "map_subscribe_transient_local": "True",
             }.items(),
         ),
         Node(

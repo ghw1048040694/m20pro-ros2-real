@@ -1,3 +1,4 @@
+import math
 from typing import Any, Dict, List, Optional, Set
 
 import rclpy
@@ -5,8 +6,10 @@ from lifecycle_msgs.srv import GetState
 from nav_msgs.msg import OccupancyGrid, Path
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.time import Time
 from sensor_msgs.msg import LaserScan, PointCloud2
 from std_msgs.msg import String
+from tf2_ros import Buffer, TransformListener
 from visualization_msgs.msg import MarkerArray
 
 
@@ -27,6 +30,16 @@ class SystemCheckNode(Node):
         self.declare_parameter("require_robot_model", True)
         self.declare_parameter("require_nodes", True)
         self.declare_parameter("require_floor_manager", True)
+        self.declare_parameter("check_scan_content", False)
+        self.declare_parameter("check_local_costmap_content", False)
+        self.declare_parameter("check_tf_height", False)
+        self.declare_parameter("tf_global_frame", "odom")
+        self.declare_parameter("tf_base_frame", "m20pro_base_link")
+        self.declare_parameter("max_abs_base_z", 1.0)
+        self.declare_parameter("min_scan_finite_bins", 20)
+        self.declare_parameter("min_scan_close_bins", 1)
+        self.declare_parameter("scan_close_range_m", 2.0)
+        self.declare_parameter("min_local_costmap_marked_cells", 1)
         self.declare_parameter("expected_nodes", [])
         self.declare_parameter(
             "lifecycle_nodes",
@@ -36,7 +49,6 @@ class SystemCheckNode(Node):
                 "/planner_server",
                 "/bt_navigator",
                 "/waypoint_follower",
-                "/velocity_smoother",
             ],
         )
 
@@ -45,6 +57,10 @@ class SystemCheckNode(Node):
         self.reported_ok = False
         self.seen_topics: Set[str] = set()
         self.lifecycle_states: Dict[str, str] = {}
+        self.scan_stats: Optional[Dict[str, Any]] = None
+        self.local_costmap_stats: Optional[Dict[str, int]] = None
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
 
         self._subscribe_required_topics()
         self.lifecycle_clients = {
@@ -72,17 +88,23 @@ class SystemCheckNode(Node):
         if self._bool("require_map"):
             self.create_subscription(OccupancyGrid, "/map", self._mark("/map"), latched_qos)
         if self._bool("require_scan"):
-            self.create_subscription(LaserScan, "/scan", self._mark("/scan"), 10)
+            scan_qos = QoSProfile(depth=10)
+            scan_qos.reliability = ReliabilityPolicy.BEST_EFFORT
+            scan_qos.durability = DurabilityPolicy.VOLATILE
+            self.create_subscription(LaserScan, "/scan", self._on_scan, scan_qos)
 
         cloud_topic = str(self.get_parameter("cloud_topic").value).strip()
         if cloud_topic:
-            self.create_subscription(PointCloud2, cloud_topic, self._mark(cloud_topic), 10)
+            cloud_qos = QoSProfile(depth=5)
+            cloud_qos.reliability = ReliabilityPolicy.BEST_EFFORT
+            cloud_qos.durability = DurabilityPolicy.VOLATILE
+            self.create_subscription(PointCloud2, cloud_topic, self._mark(cloud_topic), cloud_qos)
 
         if self._bool("require_costmaps"):
             self.create_subscription(
                 OccupancyGrid,
                 "/local_costmap/costmap",
-                self._mark("/local_costmap/costmap"),
+                self._on_local_costmap,
                 10,
             )
             self.create_subscription(
@@ -117,6 +139,41 @@ class SystemCheckNode(Node):
             self.seen_topics.add(topic_name)
 
         return callback
+
+    def _on_scan(self, msg: LaserScan) -> None:
+        self.seen_topics.add("/scan")
+        finite = [
+            value
+            for value in msg.ranges
+            if math.isfinite(value)
+            and value >= msg.range_min
+            and value <= msg.range_max
+        ]
+        close_range = float(self.get_parameter("scan_close_range_m").value)
+        self.scan_stats = {
+            "finite": len(finite),
+            "close": sum(1 for value in finite if value <= close_range),
+            "min": min(finite) if finite else None,
+            "frame_id": msg.header.frame_id,
+        }
+
+    def _on_local_costmap(self, msg: OccupancyGrid) -> None:
+        self.seen_topics.add("/local_costmap/costmap")
+        lethal = 0
+        inflated = 0
+        unknown = 0
+        for value in msg.data:
+            if value < 0:
+                unknown += 1
+            elif value >= 100:
+                lethal += 1
+            elif value > 0:
+                inflated += 1
+        self.local_costmap_stats = {
+            "lethal": lethal,
+            "inflated": inflated,
+            "unknown": unknown,
+        }
 
     def _required_topics(self) -> List[str]:
         topics = []
@@ -164,6 +221,10 @@ class SystemCheckNode(Node):
             problems.append("inactive_lifecycle=%s" % ",".join(inactive))
         if elapsed > grace_s and waiting_messages:
             problems.append("no_messages_yet=%s" % ",".join(waiting_messages))
+        if elapsed > grace_s:
+            content_problems = self._content_problems()
+            if content_problems:
+                problems.extend(content_problems)
 
         if problems:
             self.reported_ok = False
@@ -222,6 +283,66 @@ class SystemCheckNode(Node):
                 lambda done, lifecycle_name=node_name: self._on_state(done, lifecycle_name)
             )
         return inactive
+
+    def _content_problems(self) -> List[str]:
+        problems: List[str] = []
+        if self._bool("check_scan_content"):
+            if not self.scan_stats:
+                problems.append("scan_content=no_scan_stats")
+            else:
+                finite = int(self.scan_stats.get("finite", 0))
+                min_finite = int(self.get_parameter("min_scan_finite_bins").value)
+                if finite < min_finite:
+                    problems.append(
+                        "scan_content=finite:%d/%d,close:%d,min:%s,frame:%s"
+                        % (
+                            finite,
+                            min_finite,
+                            int(self.scan_stats.get("close", 0)),
+                            self.scan_stats.get("min"),
+                            self.scan_stats.get("frame_id"),
+                        )
+                    )
+
+        if self._bool("check_local_costmap_content"):
+            if not self.local_costmap_stats:
+                problems.append("local_costmap_content=no_costmap_stats")
+            else:
+                scan_close = int((self.scan_stats or {}).get("close", 0))
+                min_close = int(self.get_parameter("min_scan_close_bins").value)
+                marked = int(self.local_costmap_stats.get("lethal", 0)) + int(
+                    self.local_costmap_stats.get("inflated", 0)
+                )
+                min_marked = int(self.get_parameter("min_local_costmap_marked_cells").value)
+                if scan_close >= min_close and marked < min_marked:
+                    problems.append(
+                        "local_costmap_content=marked:%d/%d,lethal:%d,inflated:%d"
+                        % (
+                            marked,
+                            min_marked,
+                            int(self.local_costmap_stats.get("lethal", 0)),
+                            int(self.local_costmap_stats.get("inflated", 0)),
+                        )
+                    )
+
+        if self._bool("check_tf_height"):
+            transform_problem = self._tf_height_problem()
+            if transform_problem:
+                problems.append(transform_problem)
+        return problems
+
+    def _tf_height_problem(self) -> Optional[str]:
+        global_frame = str(self.get_parameter("tf_global_frame").value).strip() or "odom"
+        base_frame = str(self.get_parameter("tf_base_frame").value).strip() or "m20pro_base_link"
+        try:
+            transform = self.tf_buffer.lookup_transform(global_frame, base_frame, Time())
+        except Exception as exc:
+            return "tf_height=no_tf:%s->%s:%s" % (global_frame, base_frame, exc)
+        z = float(transform.transform.translation.z)
+        max_abs_z = float(self.get_parameter("max_abs_base_z").value)
+        if abs(z) > max_abs_z:
+            return "tf_height=z:%.3f,max_abs:%.3f" % (z, max_abs_z)
+        return None
 
     def _on_state(self, future, node_name: str) -> None:
         try:

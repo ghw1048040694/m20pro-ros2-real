@@ -21,6 +21,7 @@ def generate_launch_description():
     floor_config = LaunchConfiguration("floor_config")
     map_manifest = LaunchConfiguration("map_manifest")
     params_file = LaunchConfiguration("params_file")
+    real_params_file = LaunchConfiguration("real_params_file")
     nav2_params_file = LaunchConfiguration("nav2_params_file")
     real_nav2_params_file = LaunchConfiguration("real_nav2_params_file")
     cloud_topic = LaunchConfiguration("cloud_topic")
@@ -41,6 +42,10 @@ def generate_launch_description():
     enable_camera_proxy = LaunchConfiguration("enable_camera_proxy")
     front_camera_url = LaunchConfiguration("front_camera_url")
     rear_camera_url = LaunchConfiguration("rear_camera_url")
+    camera_proxy_fps = LaunchConfiguration("camera_proxy_fps")
+    camera_proxy_jpeg_quality = LaunchConfiguration("camera_proxy_jpeg_quality")
+    camera_proxy_max_width = LaunchConfiguration("camera_proxy_max_width")
+    camera_proxy_transport = LaunchConfiguration("camera_proxy_transport")
     enable_inspection = LaunchConfiguration("enable_inspection")
     inspection_backend = LaunchConfiguration("inspection_backend")
     inspection_source_type = LaunchConfiguration("inspection_source_type")
@@ -74,12 +79,16 @@ def generate_launch_description():
             default_value=os.path.join(bringup_share, "config", "m20pro.yaml"),
         ),
         DeclareLaunchArgument(
+            "real_params_file",
+            default_value=os.path.join(bringup_share, "config", "m20pro_real.yaml"),
+        ),
+        DeclareLaunchArgument(
             "nav2_params_file",
             default_value=os.path.join(bringup_share, "config", "nav2_params.yaml"),
         ),
         DeclareLaunchArgument(
             "real_nav2_params_file",
-            default_value=os.path.join(bringup_share, "config", "nav2_params_foxy.yaml"),
+            default_value=os.path.join(bringup_share, "config", "nav2_params_real.yaml"),
         ),
         DeclareLaunchArgument("cloud_topic", default_value="/LIDAR/POINTS"),
         DeclareLaunchArgument("enable_axis_command", default_value="false"),
@@ -96,6 +105,10 @@ def generate_launch_description():
         DeclareLaunchArgument("enable_camera_proxy", default_value="true"),
         DeclareLaunchArgument("front_camera_url", default_value="rtsp://10.21.31.103:8554/video1"),
         DeclareLaunchArgument("rear_camera_url", default_value="rtsp://10.21.31.103:8554/video2"),
+        DeclareLaunchArgument("camera_proxy_fps", default_value="6.0"),
+        DeclareLaunchArgument("camera_proxy_jpeg_quality", default_value="70"),
+        DeclareLaunchArgument("camera_proxy_max_width", default_value="720"),
+        DeclareLaunchArgument("camera_proxy_transport", default_value="tcp"),
         DeclareLaunchArgument("enable_inspection", default_value="true"),
         DeclareLaunchArgument("inspection_backend", default_value="dry_run"),
         DeclareLaunchArgument("inspection_source_type", default_value="rtsp"),
@@ -168,7 +181,7 @@ def generate_launch_description():
                 "map": map_yaml,
                 "floor_config": floor_config,
                 "map_manifest": map_manifest,
-                "params_file": params_file,
+                "params_file": real_params_file,
                 "nav2_params_file": real_nav2_params_file,
                 "cloud_topic": cloud_topic,
                 "enable_axis_command": enable_axis_command,
@@ -187,6 +200,10 @@ def generate_launch_description():
                 "enable_camera_proxy": enable_camera_proxy,
                 "front_camera_url": front_camera_url,
                 "rear_camera_url": rear_camera_url,
+                "camera_proxy_fps": camera_proxy_fps,
+                "camera_proxy_jpeg_quality": camera_proxy_jpeg_quality,
+                "camera_proxy_max_width": camera_proxy_max_width,
+                "camera_proxy_transport": camera_proxy_transport,
                 "enable_inspection": enable_inspection,
                 "inspection_backend": inspection_backend,
                 "inspection_source_type": inspection_source_type,

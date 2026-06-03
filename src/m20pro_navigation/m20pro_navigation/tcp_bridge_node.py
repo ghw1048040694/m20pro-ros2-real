@@ -28,6 +28,12 @@ class M20TcpBridge(Node):
         self.declare_parameter("map_frame", "map")
         self.declare_parameter("odom_frame", "odom")
         self.declare_parameter("base_frame", "base_link")
+        self.declare_parameter("vendor_position_scale", 0.001)
+        self.declare_parameter("vendor_position_offset_x", 0.0)
+        self.declare_parameter("vendor_position_offset_y", 0.0)
+        self.declare_parameter("vendor_position_offset_z", 0.0)
+        self.declare_parameter("flatten_odom_z", False)
+        self.declare_parameter("odom_z", 0.0)
         self.declare_parameter("publish_tf", True)
         self.declare_parameter("enable_native_goal_bridge", False)
         self.declare_parameter("enable_axis_command", True)
@@ -51,6 +57,8 @@ class M20TcpBridge(Node):
         self.last_cmd_time = self.get_clock().now()
         self.connected = False
         self.tf_broadcaster = TransformBroadcaster(self)
+        self.last_pose_warning_time = None
+        self.last_status_warning_time = None
 
         self.pose_pub = self.create_publisher(PoseStamped, "~/map_pose", 10)
         self.odom_pub = self.create_publisher(Odometry, "/odom", 10)
@@ -170,10 +178,15 @@ class M20TcpBridge(Node):
             )
 
         yaw = quaternion_to_yaw(pose.orientation)
+        vendor_x, vendor_y, vendor_z = self._ros_position_to_vendor(
+            float(pose.position.x),
+            float(pose.position.y),
+            float(pose.position.z),
+        )
         items = {
-            "PosX": float(pose.position.x),
-            "PosY": float(pose.position.y),
-            "PosZ": float(pose.position.z),
+            "PosX": vendor_x,
+            "PosY": vendor_y,
+            "PosZ": vendor_z,
             "Yaw": float(yaw),
         }
         timeout_s = max(0.1, float(self.get_parameter("relocalization_response_timeout_s").value))
@@ -189,7 +202,7 @@ class M20TcpBridge(Node):
 
         if error_code == 0:
             text = "success: x=%.3f y=%.3f z=%.3f yaw=%.3f" % (
-                items["PosX"], items["PosY"], items["PosZ"], items["Yaw"]
+                pose.position.x, pose.position.y, pose.position.z, items["Yaw"]
             )
             self.get_logger().info("vendor relocalization reset accepted: %s" % text)
             self._publish_map_pose()
@@ -246,7 +259,7 @@ class M20TcpBridge(Node):
         try:
             items = patrol_items(self.client.request(1007, 2, {}, response_timeout=1.0))
         except Exception as exc:
-            self.get_logger().debug("map pose query failed: %s" % exc)
+            self._warn_throttled("pose", "map pose query failed: %s" % exc, 5.0)
             return
         if not items:
             return
@@ -257,6 +270,7 @@ class M20TcpBridge(Node):
         x = float(items.get("PosX", 0.0))
         y = float(items.get("PosY", 0.0))
         z = float(items.get("PosZ", 0.0))
+        x, y, z = self._vendor_position_to_ros(x, y, z)
         yaw = float(items.get("Yaw", 0.0))
         quat = yaw_to_quaternion(yaw)
 
@@ -273,7 +287,11 @@ class M20TcpBridge(Node):
         odom.header.stamp = now
         odom.header.frame_id = odom_frame
         odom.child_frame_id = base_frame
-        odom.pose.pose = pose.pose
+        odom_z = self._odom_z(z)
+        odom.pose.pose.position.x = x
+        odom.pose.pose.position.y = y
+        odom.pose.pose.position.z = odom_z
+        odom.pose.pose.orientation = quat
         self.odom_pub.publish(odom)
 
         if bool(self.get_parameter("publish_tf").value):
@@ -289,7 +307,7 @@ class M20TcpBridge(Node):
             odom_to_base.child_frame_id = base_frame
             odom_to_base.transform.translation.x = x
             odom_to_base.transform.translation.y = y
-            odom_to_base.transform.translation.z = z
+            odom_to_base.transform.translation.z = odom_z
             odom_to_base.transform.rotation = quat
             self.tf_broadcaster.sendTransform([map_to_odom, odom_to_base])
 
@@ -301,7 +319,7 @@ class M20TcpBridge(Node):
         try:
             items = patrol_items(self.client.request(2002, 1, {}, response_timeout=1.0))
         except Exception as exc:
-            self.get_logger().debug("navigation status query failed: %s" % exc)
+            self._warn_throttled("status", "navigation status query failed: %s" % exc, 5.0)
             return
         if not items:
             return
@@ -317,6 +335,37 @@ class M20TcpBridge(Node):
         raw = String()
         raw.data = str(items)
         self.raw_pub.publish(raw)
+
+    def _vendor_position_to_ros(self, x: float, y: float, z: float):
+        scale = float(self.get_parameter("vendor_position_scale").value)
+        return (
+            x * scale + float(self.get_parameter("vendor_position_offset_x").value),
+            y * scale + float(self.get_parameter("vendor_position_offset_y").value),
+            z * scale + float(self.get_parameter("vendor_position_offset_z").value),
+        )
+
+    def _odom_z(self, z: float) -> float:
+        if bool(self.get_parameter("flatten_odom_z").value):
+            return float(self.get_parameter("odom_z").value)
+        return z
+
+    def _warn_throttled(self, key: str, message: str, period_s: float) -> None:
+        attr = "last_%s_warning_time" % key
+        now = self.get_clock().now()
+        last = getattr(self, attr, None)
+        if last is None or (now - last).nanoseconds * 1e-9 >= period_s:
+            setattr(self, attr, now)
+            self.get_logger().warning(message)
+
+    def _ros_position_to_vendor(self, x: float, y: float, z: float):
+        scale = float(self.get_parameter("vendor_position_scale").value)
+        if abs(scale) < 1e-12:
+            scale = 1.0
+        return (
+            (x - float(self.get_parameter("vendor_position_offset_x").value)) / scale,
+            (y - float(self.get_parameter("vendor_position_offset_y").value)) / scale,
+            (z - float(self.get_parameter("vendor_position_offset_z").value)) / scale,
+        )
 
     def _on_goal_pose(self, goal: PoseStamped) -> None:
         if not self._ensure_connected():
