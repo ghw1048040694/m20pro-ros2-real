@@ -30,12 +30,15 @@ class SystemCheckNode(Node):
         self.declare_parameter("require_robot_model", True)
         self.declare_parameter("require_nodes", True)
         self.declare_parameter("require_floor_manager", True)
+        self.declare_parameter("require_cloud_topic", True)
+        self.declare_parameter("require_topic_messages", True)
         self.declare_parameter("check_scan_content", False)
         self.declare_parameter("check_local_costmap_content", False)
         self.declare_parameter("check_tf_height", False)
         self.declare_parameter("tf_global_frame", "odom")
         self.declare_parameter("tf_base_frame", "m20pro_base_link")
         self.declare_parameter("max_abs_base_z", 1.0)
+        self.declare_parameter("cloud_reliability", "best_effort")
         self.declare_parameter("min_scan_finite_bins", 20)
         self.declare_parameter("min_scan_close_bins", 1)
         self.declare_parameter("scan_close_range_m", 2.0)
@@ -59,8 +62,11 @@ class SystemCheckNode(Node):
         self.lifecycle_states: Dict[str, str] = {}
         self.scan_stats: Optional[Dict[str, Any]] = None
         self.local_costmap_stats: Optional[Dict[str, int]] = None
-        self.tf_buffer = Buffer()
-        self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.tf_buffer = None
+        self.tf_listener = None
+        if self._bool("check_tf_height"):
+            self.tf_buffer = Buffer()
+            self.tf_listener = TransformListener(self.tf_buffer, self)
 
         self._subscribe_required_topics()
         self.lifecycle_clients = {
@@ -74,51 +80,60 @@ class SystemCheckNode(Node):
         self.get_logger().info("system check started mode=%s" % self.mode)
 
     def _subscribe_required_topics(self) -> None:
+        require_messages = self._bool("require_topic_messages")
+        need_scan_stats = self._bool("check_scan_content") or self._bool("check_local_costmap_content")
+        need_local_costmap_stats = self._bool("check_local_costmap_content")
+
         latched_qos = QoSProfile(depth=1)
         latched_qos.reliability = ReliabilityPolicy.RELIABLE
         latched_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
 
-        if self._bool("require_robot_model"):
+        if require_messages and self._bool("require_robot_model"):
             self.create_subscription(
                 String,
                 "/robot_description",
                 self._mark("/robot_description"),
                 latched_qos,
             )
-        if self._bool("require_map"):
+        if require_messages and self._bool("require_map"):
             self.create_subscription(OccupancyGrid, "/map", self._mark("/map"), latched_qos)
-        if self._bool("require_scan"):
+        if self._bool("require_scan") and (require_messages or need_scan_stats):
             scan_qos = QoSProfile(depth=10)
             scan_qos.reliability = ReliabilityPolicy.BEST_EFFORT
             scan_qos.durability = DurabilityPolicy.VOLATILE
             self.create_subscription(LaserScan, "/scan", self._on_scan, scan_qos)
 
         cloud_topic = str(self.get_parameter("cloud_topic").value).strip()
-        if cloud_topic:
+        if require_messages and cloud_topic and self._bool("require_cloud_topic"):
             cloud_qos = QoSProfile(depth=5)
-            cloud_qos.reliability = ReliabilityPolicy.BEST_EFFORT
+            if str(self.get_parameter("cloud_reliability").value).lower() == "reliable":
+                cloud_qos.reliability = ReliabilityPolicy.RELIABLE
+            else:
+                cloud_qos.reliability = ReliabilityPolicy.BEST_EFFORT
             cloud_qos.durability = DurabilityPolicy.VOLATILE
             self.create_subscription(PointCloud2, cloud_topic, self._mark(cloud_topic), cloud_qos)
 
         if self._bool("require_costmaps"):
-            self.create_subscription(
-                OccupancyGrid,
-                "/local_costmap/costmap",
-                self._on_local_costmap,
-                10,
-            )
-            self.create_subscription(
-                OccupancyGrid,
-                "/global_costmap/costmap",
-                self._mark("/global_costmap/costmap"),
-                10,
-            )
+            if require_messages or need_local_costmap_stats:
+                self.create_subscription(
+                    OccupancyGrid,
+                    "/local_costmap/costmap",
+                    self._on_local_costmap,
+                    10,
+                )
+            if require_messages:
+                self.create_subscription(
+                    OccupancyGrid,
+                    "/global_costmap/costmap",
+                    self._mark("/global_costmap/costmap"),
+                    10,
+                )
 
-        if self._bool("require_floor_manager"):
+        if require_messages and self._bool("require_floor_manager"):
             self.create_subscription(String, "/m20pro/current_floor", self._mark("/m20pro/current_floor"), 10)
             self.create_subscription(String, "/m20pro/stair_status", self._mark("/m20pro/stair_status"), 10)
 
-        if self._bool("require_dynamic_obstacles"):
+        if require_messages and self._bool("require_dynamic_obstacles"):
             self.create_subscription(
                 MarkerArray,
                 "/dynamic_obstacle_markers",
@@ -126,7 +141,8 @@ class SystemCheckNode(Node):
                 10,
             )
 
-        self.create_subscription(Path, "/plan", self._mark_optional("/plan"), 10)
+        if require_messages:
+            self.create_subscription(Path, "/plan", self._mark_optional("/plan"), 10)
 
     def _mark(self, topic_name: str):
         def callback(_msg) -> None:
@@ -142,6 +158,8 @@ class SystemCheckNode(Node):
 
     def _on_scan(self, msg: LaserScan) -> None:
         self.seen_topics.add("/scan")
+        if not self._bool("check_scan_content") and not self._bool("check_local_costmap_content"):
+            return
         finite = [
             value
             for value in msg.ranges
@@ -159,6 +177,8 @@ class SystemCheckNode(Node):
 
     def _on_local_costmap(self, msg: OccupancyGrid) -> None:
         self.seen_topics.add("/local_costmap/costmap")
+        if not self._bool("check_local_costmap_content"):
+            return
         lethal = 0
         inflated = 0
         unknown = 0
@@ -182,7 +202,7 @@ class SystemCheckNode(Node):
         if self._bool("require_map"):
             topics.append("/map")
         cloud_topic = str(self.get_parameter("cloud_topic").value).strip()
-        if cloud_topic:
+        if cloud_topic and self._bool("require_cloud_topic"):
             topics.append(cloud_topic)
         if self._bool("require_scan"):
             topics.append("/scan")
@@ -219,7 +239,7 @@ class SystemCheckNode(Node):
             problems.append("missing_topics=%s" % ",".join(missing_topics))
         if inactive:
             problems.append("inactive_lifecycle=%s" % ",".join(inactive))
-        if elapsed > grace_s and waiting_messages:
+        if elapsed > grace_s and waiting_messages and self._bool("require_topic_messages"):
             problems.append("no_messages_yet=%s" % ",".join(waiting_messages))
         if elapsed > grace_s:
             content_problems = self._content_problems()
@@ -334,6 +354,8 @@ class SystemCheckNode(Node):
     def _tf_height_problem(self) -> Optional[str]:
         global_frame = str(self.get_parameter("tf_global_frame").value).strip() or "odom"
         base_frame = str(self.get_parameter("tf_base_frame").value).strip() or "m20pro_base_link"
+        if self.tf_buffer is None:
+            return "tf_height=no_tf_listener"
         try:
             transform = self.tf_buffer.lookup_transform(global_frame, base_frame, Time())
         except Exception as exc:

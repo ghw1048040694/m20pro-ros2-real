@@ -15,7 +15,7 @@ def generate_launch_description():
     nav2_bringup_share = get_package_share_directory("nav2_bringup")
 
     default_params = os.path.join(bringup_share, "config", "m20pro.yaml")
-    default_nav2_params = os.path.join(bringup_share, "config", "nav2_params.yaml")
+    default_nav2_params = os.path.join(bringup_share, "config", "nav2_params_sim.yaml")
     default_floor_config = os.path.join(bringup_share, "config", "inspection_waypoints.yaml")
     default_map_manifest = os.path.join(bringup_share, "config", "map_manifest.yaml")
     default_urdf = os.path.join(desc_share, "urdf", "M20.urdf")
@@ -124,18 +124,36 @@ def generate_launch_description():
             parameters=[{"robot_description": robot_description}],
         ),
         Node(
+            package="tf2_ros",
+            executable="static_transform_publisher",
+            name="m20pro_nav_base_to_urdf_base",
+            output="screen",
+            arguments=[
+                "0", "0", "0",
+                "0", "0", "0",
+                "m20pro_base_link",
+                "base_link",
+            ],
+        ),
+        Node(
             package="m20pro_navigation",
             executable="sim_bridge",
             name="m20pro_tcp_bridge",
             output="screen",
-            parameters=[params_file],
+            parameters=[params_file, {"base_frame": "m20pro_base_link"}],
         ),
         Node(
             package="m20pro_navigation",
             executable="dual_lidar_simulator",
             name="m20pro_dual_lidar_simulator",
             output="screen",
-            parameters=[params_file, {"map_manifest": map_manifest}],
+            parameters=[
+                params_file,
+                {
+                    "map_manifest": map_manifest,
+                    "frame_id": "m20pro_base_link",
+                },
+            ],
         ),
         Node(
             package="m20pro_navigation",
@@ -149,9 +167,18 @@ def generate_launch_description():
                     # remnants. Filter them more aggressively in sim so the
                     # local costmap does not turn narrow corridors into a blue
                     # inflated sheet.
+                    "input_cloud_topic": "/cloud_nav",
+                    "output_scan_topic": "/scan",
+                    "frame_id": "m20pro_base_link",
+                    "publish_rate_hz": 10.0,
                     "height_min": 0.05,
                     "height_max": 0.85,
                     "robot_radius": 0.45,
+                    "cloud_reliability": "reliable",
+                    "scan_reliability": "best_effort",
+                    "max_points_per_cloud": 12000,
+                    "min_cloud_interval_s": 0.05,
+                    "publish_on_cloud_update": False,
                 },
             ],
         ),
@@ -230,6 +257,16 @@ def generate_launch_description():
                     "cloud_topic": "/cloud_nav",
                     "require_dynamic_obstacles": enable_dynamic_obstacles,
                     "require_floor_manager": enable_floor_manager,
+                    "check_scan_content": True,
+                    "check_local_costmap_content": True,
+                    "check_tf_height": True,
+                    "tf_global_frame": "odom",
+                    "tf_base_frame": "m20pro_base_link",
+                    "max_abs_base_z": 0.5,
+                    "min_scan_finite_bins": 20,
+                    "min_scan_close_bins": 1,
+                    "scan_close_range_m": 2.0,
+                    "min_local_costmap_marked_cells": 1,
                 }
             ],
             condition=IfCondition(enable_system_check),

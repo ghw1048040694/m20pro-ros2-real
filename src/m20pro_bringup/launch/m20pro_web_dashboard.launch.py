@@ -2,6 +2,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -15,6 +16,13 @@ def generate_launch_description():
     factory_mapping_start_command = LaunchConfiguration("factory_mapping_start_command")
     factory_mapping_finish_command = LaunchConfiguration("factory_mapping_finish_command")
     factory_mapping_cancel_command = LaunchConfiguration("factory_mapping_cancel_command")
+    enable_camera_proxy = LaunchConfiguration("enable_camera_proxy")
+    front_camera_url = LaunchConfiguration("front_camera_url")
+    rear_camera_url = LaunchConfiguration("rear_camera_url")
+    camera_proxy_fps = LaunchConfiguration("camera_proxy_fps")
+    camera_proxy_jpeg_quality = LaunchConfiguration("camera_proxy_jpeg_quality")
+    camera_proxy_max_width = LaunchConfiguration("camera_proxy_max_width")
+    camera_proxy_transport = LaunchConfiguration("camera_proxy_transport")
 
     return LaunchDescription([
         DeclareLaunchArgument("host", default_value="0.0.0.0"),
@@ -52,6 +60,13 @@ def generate_launch_description():
             ),
             description="Shell command template for cancelling drmap mapping on 106.",
         ),
+        DeclareLaunchArgument("enable_camera_proxy", default_value="false"),
+        DeclareLaunchArgument("front_camera_url", default_value="rtsp://10.21.31.103:8554/video1"),
+        DeclareLaunchArgument("rear_camera_url", default_value="rtsp://10.21.31.103:8554/video2"),
+        DeclareLaunchArgument("camera_proxy_fps", default_value="3.0"),
+        DeclareLaunchArgument("camera_proxy_jpeg_quality", default_value="55"),
+        DeclareLaunchArgument("camera_proxy_max_width", default_value="480"),
+        DeclareLaunchArgument("camera_proxy_transport", default_value="tcp"),
         Node(
             package="m20pro_cloud_bridge",
             executable="web_dashboard",
@@ -69,6 +84,19 @@ def generate_launch_description():
                     "factory_mapping_start_command": factory_mapping_start_command,
                     "factory_mapping_finish_command": factory_mapping_finish_command,
                     "factory_mapping_cancel_command": factory_mapping_cancel_command,
+                    "enable_camera_proxy": ParameterValue(enable_camera_proxy, value_type=bool),
+                    "front_camera_url": front_camera_url,
+                    "rear_camera_url": rear_camera_url,
+                    "camera_proxy_fps": ParameterValue(camera_proxy_fps, value_type=float),
+                    "camera_proxy_jpeg_quality": ParameterValue(
+                        camera_proxy_jpeg_quality,
+                        value_type=int,
+                    ),
+                    "camera_proxy_max_width": ParameterValue(
+                        camera_proxy_max_width,
+                        value_type=int,
+                    ),
+                    "camera_proxy_transport": camera_proxy_transport,
                 }
             ],
         ),

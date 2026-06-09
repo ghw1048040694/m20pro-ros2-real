@@ -7,4 +7,12 @@ install(DIRECTORY config launch maps rviz behavior_trees
   DESTINATION share/${PROJECT_NAME}
 )
 
+install(PROGRAMS
+  scripts/m20pro_real_nav.sh
+  scripts/m20pro_real_full.sh
+  scripts/m20pro_real_web.sh
+  scripts/m20pro_record_real.sh
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 ament_package()

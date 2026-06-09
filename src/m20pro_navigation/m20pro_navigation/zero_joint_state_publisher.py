@@ -15,6 +15,11 @@ class ZeroJointStatePublisher(Node):
         robot_description = str(self.get_parameter("robot_description").value)
         self.joint_names = self._extract_joint_names(robot_description)
         self.publisher = self.create_publisher(JointState, "/joint_states", 10)
+        self.message = JointState()
+        self.message.name = list(self.joint_names)
+        self.message.position = [0.0] * len(self.joint_names)
+        self.message.velocity = [0.0] * len(self.joint_names)
+        self.message.effort = [0.0] * len(self.joint_names)
 
         rate = max(1.0, float(self.get_parameter("publish_rate_hz").value))
         self.create_timer(1.0 / rate, self._publish_joint_states)
@@ -23,13 +28,8 @@ class ZeroJointStatePublisher(Node):
         )
 
     def _publish_joint_states(self) -> None:
-        msg = JointState()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.name = list(self.joint_names)
-        msg.position = [0.0] * len(self.joint_names)
-        msg.velocity = [0.0] * len(self.joint_names)
-        msg.effort = [0.0] * len(self.joint_names)
-        self.publisher.publish(msg)
+        self.message.header.stamp = self.get_clock().now().to_msg()
+        self.publisher.publish(self.message)
 
     @staticmethod
     def _extract_joint_names(robot_description: str) -> List[str]:

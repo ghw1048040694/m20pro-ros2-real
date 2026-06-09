@@ -40,7 +40,6 @@ bags/
 
 # Third-party reference workspace kept locally, not part of this project
 dddmr_navigation/
-/scripts/
 /x30_core_nav_slam/
 
 # Local map editor/export metadata

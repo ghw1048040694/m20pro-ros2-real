@@ -41,6 +41,30 @@ class PointCloudFusion(Node):
         self.declare_parameter("max_points_per_cloud", 12000)
         self.declare_parameter("min_cloud_interval_s", 0.05)
         self.declare_parameter("publish_on_cloud_update", False)
+
+        self.input_cloud_topic = str(self.get_parameter("input_cloud_topic").value)
+        self.front_lidar_topic = str(self.get_parameter("front_lidar_topic").value)
+        self.rear_lidar_topic = str(self.get_parameter("rear_lidar_topic").value)
+        self.output_scan_topic = str(self.get_parameter("output_scan_topic").value)
+        self.target_frame = self._clean_frame(str(self.get_parameter("frame_id").value)) or "base_link"
+        self.min_range = float(self.get_parameter("min_range").value)
+        self.max_range = float(self.get_parameter("max_range").value)
+        self.height_min = float(self.get_parameter("height_min").value)
+        self.height_max = float(self.get_parameter("height_max").value)
+        self.robot_radius = float(self.get_parameter("robot_radius").value)
+        self.transform_cloud = bool(self.get_parameter("transform_cloud").value)
+        self.use_latest_tf = bool(self.get_parameter("use_latest_tf").value)
+        self.transform_timeout = Duration(
+            seconds=max(0.0, float(self.get_parameter("transform_timeout_s").value))
+        )
+        self.max_source_age_s = float(self.get_parameter("max_source_age_s").value)
+        self.max_points_per_cloud = int(self.get_parameter("max_points_per_cloud").value)
+        self.min_cloud_interval_s = float(self.get_parameter("min_cloud_interval_s").value)
+        self.publish_on_cloud_update = bool(self.get_parameter("publish_on_cloud_update").value)
+        if bool(self.get_parameter("no_return_as_inf").value):
+            self.empty_range_value = float("inf")
+        else:
+            self.empty_range_value = self.max_range
         
         # === 初始化成员变量 ===
         self.cloud_ranges: Optional[np.ndarray] = None
@@ -56,8 +80,11 @@ class PointCloudFusion(Node):
         self.front_update_time = None
         self.rear_update_time = None
         self.last_tf_warning_time = None
-        self.tf_buffer = Buffer()
-        self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.tf_buffer = None
+        self.tf_listener = None
+        if self.transform_cloud:
+            self.tf_buffer = Buffer()
+            self.tf_listener = TransformListener(self.tf_buffer, self)
         
         # 计算角度数组
         min_angle = float(self.get_parameter("min_angle").value)
@@ -70,11 +97,14 @@ class PointCloudFusion(Node):
         self.angle_max = self.angle_min + (self.num_readings - 1) * self.angle_increment
         
         # 初始化距离数组（填充最大值表示无检测）
-        max_range = float(self.get_parameter("max_range").value)
-        empty_range = self._empty_range_value()
-        self.cloud_ranges = np.full(self.num_readings, empty_range, dtype=np.float32)
-        self.front_ranges = np.full(self.num_readings, empty_range, dtype=np.float32)
-        self.rear_ranges = np.full(self.num_readings, empty_range, dtype=np.float32)
+        self.empty_ranges_template = np.full(
+            self.num_readings,
+            self.empty_range_value,
+            dtype=np.float32,
+        )
+        self.cloud_ranges = self.empty_ranges_template.copy()
+        self.front_ranges = self.empty_ranges_template.copy()
+        self.rear_ranges = self.empty_ranges_template.copy()
         
         cloud_qos = QoSProfile(depth=10)
         cloud_qos.history = HistoryPolicy.KEEP_LAST
@@ -90,8 +120,6 @@ class PointCloudFusion(Node):
             scan_qos.reliability = ReliabilityPolicy.RELIABLE
         else:
             scan_qos.reliability = ReliabilityPolicy.BEST_EFFORT
-        self.input_cloud_topic = str(self.get_parameter("input_cloud_topic").value)
-
         # === 创建订阅者 ===
         if self.input_cloud_topic:
             self.create_subscription(
@@ -103,14 +131,14 @@ class PointCloudFusion(Node):
         else:
             self.create_subscription(
                 PointCloud2,
-                str(self.get_parameter("front_lidar_topic").value),
+                self.front_lidar_topic,
                 self._on_front_lidar,
                 cloud_qos
             )
 
             self.create_subscription(
                 PointCloud2,
-                str(self.get_parameter("rear_lidar_topic").value),
+                self.rear_lidar_topic,
                 self._on_rear_lidar,
                 cloud_qos
             )
@@ -118,7 +146,7 @@ class PointCloudFusion(Node):
         # === 创建发布者 ===
         self.scan_pub = self.create_publisher(
             LaserScan,
-            str(self.get_parameter("output_scan_topic").value),
+            self.output_scan_topic,
             scan_qos
         )
         
@@ -131,13 +159,13 @@ class PointCloudFusion(Node):
             source_desc = self.input_cloud_topic
         else:
             source_desc = "%s + %s" % (
-                str(self.get_parameter("front_lidar_topic").value),
-                str(self.get_parameter("rear_lidar_topic").value),
+                self.front_lidar_topic,
+                self.rear_lidar_topic,
             )
         self.get_logger().info(
             "PointCloud fusion ready: %s -> %s in %s" % (
                 source_desc,
-                str(self.get_parameter("output_scan_topic").value),
+                self.output_scan_topic,
                 self._target_frame(),
             )
         )
@@ -153,7 +181,7 @@ class PointCloudFusion(Node):
         self.cloud_stamp = self._output_stamp_for_cloud(msg)
         self.cloud_update_time = self.get_clock().now()
         self.cloud_received = True
-        if bool(self.get_parameter("publish_on_cloud_update").value):
+        if self.publish_on_cloud_update:
             self._publish_scan()
     
     def _on_front_lidar(self, msg: PointCloud2) -> None:
@@ -177,21 +205,14 @@ class PointCloudFusion(Node):
         self.rear_received = True
     
     def _pointcloud_to_ranges(self, cloud_msg: PointCloud2) -> Optional[np.ndarray]:
-        ranges = np.full(self.num_readings, self._empty_range_value(), dtype=np.float32)
-        
-        height_min = float(self.get_parameter("height_min").value)
-        height_max = float(self.get_parameter("height_max").value)
-        min_range = float(self.get_parameter("min_range").value)
-        max_range = float(self.get_parameter("max_range").value)
-        
         xyz = self._extract_xyz_arrays(cloud_msg)
         if xyz is not None:
             return self._point_arrays_to_ranges(cloud_msg, xyz)
 
         # Fallback for unusual PointCloud2 layouts. This path is slower and is
         # mainly kept for compatibility with synthetic/test clouds.
+        ranges = self.empty_ranges_template.copy()
         points = pc2.read_points(cloud_msg, field_names=("x", "y", "z"))
-        robot_radius = float(self.get_parameter("robot_radius").value)
         transform = self._lookup_cloud_transform(cloud_msg)
         if transform is False:
             return None
@@ -201,17 +222,17 @@ class PointCloudFusion(Node):
                 x, y, z = self._transform_point(x, y, z, transform)
 
             # 过滤高度
-            if z < height_min or z > height_max:
+            if z < self.height_min or z > self.height_max:
                 continue
             
             # 计算距离和角度
             distance = math.sqrt(x * x + y * y)
             
             # 过滤机器人本体附近的点
-            if distance < robot_radius:
+            if distance < self.robot_radius:
                 continue
             
-            if distance < min_range or distance > max_range:
+            if distance < self.min_range or distance > self.max_range:
                 continue
             
             angle = math.atan2(y, x)
@@ -254,9 +275,8 @@ class PointCloudFusion(Node):
             return None
         cloud = np.frombuffer(cloud_msg.data, dtype=dtype, count=point_count)
 
-        max_points = int(self.get_parameter("max_points_per_cloud").value)
-        if max_points > 0 and point_count > max_points:
-            stride = max(1, point_count // max_points)
+        if self.max_points_per_cloud > 0 and point_count > self.max_points_per_cloud:
+            stride = max(1, point_count // self.max_points_per_cloud)
             cloud = cloud[::stride]
 
         x = cloud["x"].astype(np.float32, copy=False)
@@ -268,7 +288,7 @@ class PointCloudFusion(Node):
         x, y, z = xyz
         valid = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
         if not np.any(valid):
-            return np.full(self.num_readings, self._empty_range_value(), dtype=np.float32)
+            return self.empty_ranges_template.copy()
 
         x = x[valid]
         y = y[valid]
@@ -280,53 +300,48 @@ class PointCloudFusion(Node):
         if transform is not None:
             x, y, z = self._transform_arrays(x, y, z, transform)
 
-        height_min = float(self.get_parameter("height_min").value)
-        height_max = float(self.get_parameter("height_max").value)
-        min_range = float(self.get_parameter("min_range").value)
-        max_range = float(self.get_parameter("max_range").value)
-        robot_radius = float(self.get_parameter("robot_radius").value)
-
-        distance = np.hypot(x, y)
+        distance_sq = x * x + y * y
+        min_keep_range = max(self.robot_radius, self.min_range)
         valid = (
-            (z >= height_min)
-            & (z <= height_max)
-            & (distance >= robot_radius)
-            & (distance >= min_range)
-            & (distance <= max_range)
+            (z >= self.height_min)
+            & (z <= self.height_max)
+            & (distance_sq >= min_keep_range * min_keep_range)
+            & (distance_sq <= self.max_range * self.max_range)
         )
         if not np.any(valid):
-            return np.full(self.num_readings, self._empty_range_value(), dtype=np.float32)
+            return self.empty_ranges_template.copy()
 
-        distance = distance[valid].astype(np.float32, copy=False)
+        distance = np.sqrt(distance_sq[valid]).astype(np.float32, copy=False)
         angle = np.arctan2(y[valid], x[valid])
         idx = np.floor((angle - self.angle_min) / self.angle_increment).astype(np.int64)
         valid_idx = (idx >= 0) & (idx < self.num_readings)
 
-        ranges = np.full(self.num_readings, self._empty_range_value(), dtype=np.float32)
+        ranges = self.empty_ranges_template.copy()
         if np.any(valid_idx):
             np.minimum.at(ranges, idx[valid_idx], distance[valid_idx])
         return ranges
 
     def _lookup_cloud_transform(self, cloud_msg: PointCloud2):
         """Return None when no transform is needed, False when TF is unavailable."""
-        if not bool(self.get_parameter("transform_cloud").value):
+        if not self.transform_cloud:
             return None
         source_frame = self._clean_frame(cloud_msg.header.frame_id)
         target_frame = self._target_frame()
         if not source_frame or source_frame == target_frame:
             return None
 
-        timeout = Duration(seconds=max(0.0, float(self.get_parameter("transform_timeout_s").value)))
-        if bool(self.get_parameter("use_latest_tf").value):
+        if self.use_latest_tf:
             lookup_time = Time()
         else:
             lookup_time = Time.from_msg(cloud_msg.header.stamp)
         try:
+            if self.tf_buffer is None:
+                return False
             return self.tf_buffer.lookup_transform(
                 target_frame,
                 source_frame,
                 lookup_time,
-                timeout=timeout,
+                timeout=self.transform_timeout,
             )
         except Exception as exc:
             self._warn_tf_throttled(
@@ -339,31 +354,29 @@ class PointCloudFusion(Node):
             return False
 
     def _output_stamp_for_cloud(self, cloud_msg: PointCloud2):
-        if not bool(self.get_parameter("transform_cloud").value):
+        if not self.transform_cloud:
             return cloud_msg.header.stamp
         source_frame = self._clean_frame(cloud_msg.header.frame_id)
         target_frame = self._target_frame()
         if not source_frame or source_frame == target_frame:
             return cloud_msg.header.stamp
-        if bool(self.get_parameter("use_latest_tf").value):
+        if self.use_latest_tf:
             return self.get_clock().now().to_msg()
         return cloud_msg.header.stamp
 
     def _source_is_fresh(self, update_time) -> bool:
         if update_time is None:
             return False
-        max_age = float(self.get_parameter("max_source_age_s").value)
-        if max_age <= 0.0:
+        if self.max_source_age_s <= 0.0:
             return True
         age = (self.get_clock().now() - update_time).nanoseconds * 1e-9
-        return age <= max_age
+        return age <= self.max_source_age_s
 
     def _should_process_cloud(self) -> bool:
-        min_interval = float(self.get_parameter("min_cloud_interval_s").value)
-        if min_interval <= 0.0 or self.cloud_update_time is None:
+        if self.min_cloud_interval_s <= 0.0 or self.cloud_update_time is None:
             return True
         age = (self.get_clock().now() - self.cloud_update_time).nanoseconds * 1e-9
-        return age >= min_interval
+        return age >= self.min_cloud_interval_s
 
     def _warn_tf_throttled(self, message: str) -> None:
         now = self.get_clock().now()
@@ -377,12 +390,10 @@ class PointCloudFusion(Node):
             self.get_logger().warning(message)
 
     def _target_frame(self) -> str:
-        return self._clean_frame(str(self.get_parameter("frame_id").value)) or "base_link"
+        return self.target_frame
 
     def _empty_range_value(self) -> float:
-        if bool(self.get_parameter("no_return_as_inf").value):
-            return float("inf")
-        return float(self.get_parameter("max_range").value)
+        return self.empty_range_value
 
     @staticmethod
     def _clean_frame(frame_id: str) -> str:
@@ -481,14 +492,14 @@ class PointCloudFusion(Node):
         # 创建 LaserScan 消息
         scan_msg = LaserScan()
         scan_msg.header.stamp = stamp or self.get_clock().now().to_msg()
-        scan_msg.header.frame_id = str(self.get_parameter("frame_id").value)
+        scan_msg.header.frame_id = self.target_frame
         scan_msg.angle_min = self.angle_min
         scan_msg.angle_max = self.angle_max
         scan_msg.angle_increment = self.angle_increment
         scan_msg.time_increment = self.scan_period / max(self.num_readings, 1)
         scan_msg.scan_time = self.scan_period
-        scan_msg.range_min = float(self.get_parameter("min_range").value)
-        scan_msg.range_max = float(self.get_parameter("max_range").value)
+        scan_msg.range_min = self.min_range
+        scan_msg.range_max = self.max_range
         scan_msg.ranges = fused_ranges.tolist()
         scan_msg.intensities = []
         

@@ -28,7 +28,7 @@ class M20SimBridge(Node):
         self.declare_parameter("odom_frame", "odom")
         self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("publish_tf", True)
-        self.declare_parameter("tf_future_offset_s", 0.1)
+        self.declare_parameter("tf_future_offset_s", 0.0)
 
         self.x = float(self.get_parameter("initial_x").value)
         self.y = float(self.get_parameter("initial_y").value)

@@ -15,7 +15,7 @@ from urllib.parse import parse_qs, urlparse
 
 import rclpy
 import yaml
-from geometry_msgs.msg import Pose, PoseStamped
+from geometry_msgs.msg import Pose, PoseStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Path as RosPath
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -168,6 +168,10 @@ INDEX_HTML = r"""<!doctype html>
       background: #ffffff;
       color: var(--text);
       cursor: pointer;
+    }
+    button:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
     }
     button:hover { border-color: #9fb3c8; }
     button.primary {
@@ -630,6 +634,9 @@ INDEX_HTML = r"""<!doctype html>
           <div class="section">
             <h2>当前执行</h2>
             <div id="activeTask" class="mono">无任务</div>
+            <div class="actions">
+              <button class="danger" id="stopTaskBtn" disabled>停止当前任务</button>
+            </div>
           </div>
         </section>
       </div>
@@ -679,6 +686,9 @@ INDEX_HTML = r"""<!doctype html>
     }
     function setLog(id, payload) {
       $(id).textContent = typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
+    }
+    function currentAnnotationMapId() {
+      return state.selectedMapId || "live_map";
     }
     async function fetchJson(url) {
       const res = await fetch(url, { cache: "no-store" });
@@ -738,13 +748,15 @@ INDEX_HTML = r"""<!doctype html>
       const drawH = map.height * scale;
       return { scale, ox: (rect.width - drawW) / 2, oy: (rect.height - drawH) / 2, rect };
     }
-    function worldToCanvas(x, y) {
+    function worldToCanvasWithView(x, y, view) {
       const map = state.map;
-      const view = getView();
       if (!map) return null;
       const mx = (x - map.origin.x) / map.resolution;
       const my = map.height - (y - map.origin.y) / map.resolution;
       return { x: view.ox + mx * view.scale, y: view.oy + my * view.scale };
+    }
+    function worldToCanvas(x, y) {
+      return worldToCanvasWithView(x, y, getView());
     }
     function canvasToWorld(clientX, clientY) {
       const map = state.map;
@@ -798,11 +810,12 @@ INDEX_HTML = r"""<!doctype html>
     }
     function drawObstacles(items) {
       if (!items || items.length === 0 || !state.map) return;
+      const view = getView();
       ctx.save();
       for (const item of items) {
-        const p = worldToCanvas(item.x, item.y);
+        const p = worldToCanvasWithView(item.x, item.y, view);
         if (!p) continue;
-        const radius = Math.max(5, Math.min(22, (item.scale_x || 0.4) / state.map.resolution * getView().scale * 0.5));
+        const radius = Math.max(5, Math.min(22, (item.scale_x || 0.4) / state.map.resolution * view.scale * 0.5));
         ctx.fillStyle = "rgba(185, 28, 28, 0.82)";
         ctx.strokeStyle = "#ffffff";
         ctx.lineWidth = 2;
@@ -865,10 +878,12 @@ INDEX_HTML = r"""<!doctype html>
       if (!map.available) return;
       state.map = map;
       state.mapImage = buildMapImage(map);
+      state.selectedMapId = null;
       state.liveMapVersion = map.version;
       $("mapTitle").textContent = `实时地图版本 ${map.version}`;
       $("mapMeta").textContent = `${map.width} x ${map.height}, ${map.resolution.toFixed(3)} m/格`;
       $("mapMode").textContent = "实时 /map";
+      await loadAnnotations();
     }
     async function loadFileMap(mapId) {
       if (!mapId) {
@@ -905,6 +920,7 @@ INDEX_HTML = r"""<!doctype html>
       $("detections").textContent = det ? JSON.stringify(det, null, 2) : "等待数据";
       $("events").textContent = s.events && s.events.length ? JSON.stringify(s.events.slice(-5), null, 2) : "等待数据";
       $("activeTask").textContent = s.active_task ? JSON.stringify(s.active_task, null, 2) : "无任务";
+      $("stopTaskBtn").disabled = !(s.active_task && s.active_task.status === "running");
       const table = $("topics");
       table.innerHTML = "";
       for (const [name, info] of Object.entries(s.topics || {})) {
@@ -956,7 +972,7 @@ INDEX_HTML = r"""<!doctype html>
       }
     }
     async function loadAnnotations() {
-      const mapId = state.selectedMapId || "";
+      const mapId = currentAnnotationMapId();
       const payload = await fetchJson(`/api/annotations${mapId ? `?map_id=${encodeURIComponent(mapId)}` : ""}`);
       state.annotations = payload.annotations || [];
       renderAnnotations();
@@ -1015,12 +1031,15 @@ INDEX_HTML = r"""<!doctype html>
         return;
       }
       for (const task of state.tasks) {
+        const active = payload.active_task && payload.active_task.status === "running";
+        const isRunning = task.status === "running";
+        const canStart = !active && !isRunning;
         const el = document.createElement("div");
         el.className = "item";
         el.innerHTML = `
           <div class="item-head"><span>${task.name || task.id}</span><span class="tag">${task.status || "ready"}</span></div>
           <div class="item-meta">${(task.annotation_ids || []).length} 个点 / ${task.created_at || ""}</div>
-          <div class="actions"><button class="primary" data-start-task="${task.id}">开始执行</button></div>
+          <div class="actions"><button class="primary" data-start-task="${task.id}" ${canStart ? "" : "disabled"}>${isRunning ? "执行中" : (active ? "先停止当前任务" : "开始执行")}</button></div>
         `;
         box.appendChild(el);
       }
@@ -1028,6 +1047,7 @@ INDEX_HTML = r"""<!doctype html>
         btn.addEventListener("click", async () => {
           const payload = await api("POST", "/api/tasks/start", {task_id: btn.dataset.startTask});
           setLog("activeTask", payload.active_task || payload);
+          await loadTasks();
         });
       }
     }
@@ -1046,7 +1066,7 @@ INDEX_HTML = r"""<!doctype html>
         label.textContent = "等待服务";
         console.warn(err);
       } finally {
-        setTimeout(mainLoop, 1000);
+        setTimeout(mainLoop, 1500);
       }
     }
     for (const btn of document.querySelectorAll("button.tab")) {
@@ -1117,17 +1137,22 @@ INDEX_HTML = r"""<!doctype html>
     $("reloadMapsBtn").addEventListener("click", loadMaps);
     $("saveMarkBtn").addEventListener("click", async () => {
       try {
+        if (!state.map) throw {message: "还没有地图，等地图加载后再保存点位"};
         const [xText, yText] = $("markXY").value.split(",");
+        const x = Number(xText);
+        const y = Number(yText);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) throw {message: "点位坐标无效，请先点击地图取点"};
+        const yaw = Number($("markYaw").value);
         const payload = await api("POST", "/api/annotations", {
-          map_id: state.selectedMapId,
+          map_id: currentAnnotationMapId(),
           type: $("markType").value,
           floor: $("markFloor").value.trim(),
           label: $("markLabel").value.trim(),
           pose: {
-            x: Number(xText),
-            y: Number(yText),
+            x,
+            y,
             z: 0,
-            yaw: Number($("markYaw").value)
+            yaw: Number.isFinite(yaw) ? yaw : 0
           }
         });
         await loadAnnotations();
@@ -1148,13 +1173,20 @@ INDEX_HTML = r"""<!doctype html>
         const ids = Array.from($("taskPointList").querySelectorAll("input:checked")).map(item => item.value);
         await api("POST", "/api/tasks", {
           name: $("taskName").value.trim(),
-          map_id: state.selectedMapId,
+          map_id: currentAnnotationMapId(),
           annotation_ids: ids
         });
         await loadTasks();
       } catch (err) { setLog("activeTask", err); }
     });
     $("reloadTasksBtn").addEventListener("click", loadTasks);
+    $("stopTaskBtn").addEventListener("click", async () => {
+      try {
+        const payload = await api("POST", "/api/tasks/stop", {});
+        setLog("activeTask", payload.active_task || "无任务");
+        await loadTasks();
+      } catch (err) { setLog("activeTask", err); }
+    });
     window.addEventListener("resize", resizeCanvas);
     resizeCanvas();
     loadMaps().then(loadAnnotations).then(loadTasks).catch(console.warn);
@@ -1409,12 +1441,23 @@ class WebDashboardNode(Node):
         self._tasks = self._load_json("tasks.json", [])
         self._sessions = self._load_json("mapping_sessions.json", [])
         self._settings = self._load_json("settings.json", {"selected_map_id": None, "active_task": None})
+        self._normalize_runtime_state_on_startup()
         self._mapping_processes: Dict[str, Dict[str, Any]] = {}
         self._camera_workers: Dict[str, _CameraProxyWorker] = {}
 
         self.floor_goal_pub = self.create_publisher(
             PoseStamped,
             str(self.get_parameter("floor_goal_topic").value),
+            10,
+        )
+        self.stop_task_pub = self.create_publisher(
+            String,
+            str(self.get_parameter("stop_task_topic").value),
+            10,
+        )
+        self.cmd_vel_pub = self.create_publisher(
+            Twist,
+            str(self.get_parameter("cmd_vel_topic").value),
             10,
         )
 
@@ -1463,6 +1506,8 @@ class WebDashboardNode(Node):
         self.declare_parameter("map_import_timeout_s", 180.0)
         self.declare_parameter("goal_reached_tolerance_m", 0.6)
         self.declare_parameter("floor_goal_topic", "/m20pro/floor_goal")
+        self.declare_parameter("stop_task_topic", "/m20pro/stop_task")
+        self.declare_parameter("cmd_vel_topic", "/cmd_vel")
         self.declare_parameter("current_floor_topic", "/m20pro/current_floor")
         self.declare_parameter("stair_status_topic", "/m20pro/stair_status")
         self.declare_parameter("gait_command_topic", "/m20pro/gait_command")
@@ -1474,12 +1519,12 @@ class WebDashboardNode(Node):
         self.declare_parameter("events_topic", "/m20pro_yolov8_inspection/events")
         self.declare_parameter("annotated_image_topic", "/m20pro_yolov8_inspection/annotated_image")
         self.declare_parameter("subscribe_annotated_image", False)
-        self.declare_parameter("enable_camera_proxy", True)
+        self.declare_parameter("enable_camera_proxy", False)
         self.declare_parameter("front_camera_url", "rtsp://10.21.31.103:8554/video1")
         self.declare_parameter("rear_camera_url", "rtsp://10.21.31.103:8554/video2")
-        self.declare_parameter("camera_proxy_fps", 6.0)
-        self.declare_parameter("camera_proxy_jpeg_quality", 70)
-        self.declare_parameter("camera_proxy_max_width", 720)
+        self.declare_parameter("camera_proxy_fps", 3.0)
+        self.declare_parameter("camera_proxy_jpeg_quality", 55)
+        self.declare_parameter("camera_proxy_max_width", 480)
         self.declare_parameter("camera_proxy_transport", "tcp")
         self.declare_parameter(
             "camera_proxy_ffmpeg_options",
@@ -1515,6 +1560,26 @@ class WebDashboardNode(Node):
         with tmp.open("w", encoding="utf-8") as file:
             json.dump(value, file, ensure_ascii=False, indent=2)
         os.replace(tmp, path)
+
+    def _normalize_runtime_state_on_startup(self) -> None:
+        active = self._settings.get("active_task") or {}
+        changed = False
+        if active:
+            task_id = active.get("task_id")
+            task = self._find_by_id(self._tasks, task_id)
+            if active.get("status") == "running" and task is not None:
+                task["status"] = "stopped"
+                task["updated_at"] = _now_text()
+            self._settings["active_task"] = None
+            changed = True
+        for task in self._tasks:
+            if task.get("status") == "running":
+                task["status"] = "stopped"
+                task["updated_at"] = _now_text()
+                changed = True
+        if changed:
+            self._save_json("settings.json", self._settings)
+            self._save_json("tasks.json", self._tasks)
 
     def _append_event(self, text: str, parsed: Optional[Dict[str, Any]] = None) -> None:
         max_events = int(self.get_parameter("max_events").value)
@@ -1734,6 +1799,9 @@ class WebDashboardNode(Node):
     def _select_map(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         map_id = str(payload.get("map_id") or "").strip() or None
         with self._data_lock:
+            active = self._settings.get("active_task") or {}
+            if active.get("status") == "running":
+                return self._error("任务执行中不能切换地图，请先停止当前任务")
             if map_id and not self._find_by_id(self._maps, map_id):
                 return self._error("地图不存在")
             self._settings["selected_map_id"] = map_id
@@ -1975,11 +2043,17 @@ class WebDashboardNode(Node):
         if not floor:
             return self._error("点位楼层不能为空")
         map_id = str(payload.get("map_id") or "").strip() or None
+        if map_id == "live_map":
+            map_id = "live_map"
         with self._data_lock:
-            if map_id and not self._find_by_id(self._maps, map_id):
+            if map_id and map_id != "live_map" and not self._find_by_id(self._maps, map_id):
                 return self._error("地图不存在")
             if not map_id:
                 map_id = self._settings.get("selected_map_id")
+            if not map_id and self._state.get("map"):
+                map_id = "live_map"
+            if not map_id:
+                return self._error("没有可用地图，请等待实时 /map 或先选择归档地图")
         item = {
             "id": _new_id("point"),
             "map_id": map_id,
@@ -2001,12 +2075,28 @@ class WebDashboardNode(Node):
         if not annotation_id:
             return self._error("缺少点位 id")
         with self._data_lock:
+            active = self._settings.get("active_task") or {}
+            if active.get("status") == "running" and annotation_id in (active.get("annotation_ids") or []):
+                return self._error("点位正在当前任务中执行，请先停止任务再删除")
             before = len(self._annotations)
             self._annotations = [item for item in self._annotations if item.get("id") != annotation_id]
             if len(self._annotations) == before:
                 return self._error("点位不存在")
+            affected_tasks = []
+            for task in self._tasks:
+                ids = list(task.get("annotation_ids") or [])
+                if annotation_id not in ids:
+                    continue
+                task["annotation_ids"] = [item for item in ids if item != annotation_id]
+                task["updated_at"] = _now_text()
+                if not task["annotation_ids"]:
+                    task["status"] = "invalid"
+                elif task.get("status") in ("ready", "stopped", "completed"):
+                    task["status"] = "ready"
+                affected_tasks.append(task.get("id"))
             self._save_json("annotations.json", self._annotations)
-        return {"ok": True, "deleted": annotation_id}
+            self._save_json("tasks.json", self._tasks)
+        return {"ok": True, "deleted": annotation_id, "affected_tasks": affected_tasks}
 
     def _tasks_payload(self) -> Dict[str, Any]:
         with self._data_lock:
@@ -2037,14 +2127,34 @@ class WebDashboardNode(Node):
     def _start_task(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         task_id = str(payload.get("task_id") or "").strip()
         with self._data_lock:
+            current_active = self._settings.get("active_task") or {}
+            if current_active.get("status") == "running":
+                return self._error("已有任务正在执行，请先停止当前任务")
             task = self._find_by_id(self._tasks, task_id)
             if task is None:
                 return self._error("任务不存在")
+            if task.get("status") == "invalid":
+                return self._error("任务点位已失效，请重新生成任务")
             if not task.get("annotation_ids"):
                 return self._error("任务没有点位")
+            known = {item["id"]: item for item in self._annotations}
+            missing = [item for item in task.get("annotation_ids") or [] if item not in known]
+            if missing:
+                task["status"] = "invalid"
+                task["updated_at"] = _now_text()
+                self._save_json("tasks.json", self._tasks)
+                return self._error("任务中存在已删除的点位，请重新生成任务", {"missing": missing})
+            selected_map_id = self._settings.get("selected_map_id") or "live_map"
+            task_map_id = str(task.get("map_id") or "").strip() or selected_map_id
+            if task_map_id != selected_map_id:
+                return self._error(
+                    "当前地图与任务地图不一致，请先切换到任务对应地图",
+                    {"task_map_id": task_map_id, "selected_map_id": selected_map_id},
+                )
             active = {
                 "task_id": task["id"],
                 "task_name": task.get("name"),
+                "map_id": task_map_id,
                 "status": "running",
                 "index": 0,
                 "annotation_ids": list(task.get("annotation_ids") or []),
@@ -2059,6 +2169,24 @@ class WebDashboardNode(Node):
         self._append_event("启动前端任务", {"task_id": task_id})
         with self._data_lock:
             return {"ok": True, "active_task": self._settings.get("active_task")}
+
+    def _stop_task(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        reason = str(payload.get("reason") or "web_stop").strip() or "web_stop"
+        stopped_task_id = None
+        with self._data_lock:
+            active = dict(self._settings.get("active_task") or {})
+            stopped_task_id = active.get("task_id")
+            if stopped_task_id:
+                self._mark_task_status(stopped_task_id, "stopped")
+            self._settings["active_task"] = None
+            self._save_json("settings.json", self._settings)
+            self._save_json("tasks.json", self._tasks)
+        msg = String()
+        msg.data = reason
+        self.stop_task_pub.publish(msg)
+        self.cmd_vel_pub.publish(Twist())
+        self._append_event("停止前端任务", {"task_id": stopped_task_id, "reason": reason})
+        return {"ok": True, "active_task": None, "stopped_task_id": stopped_task_id}
 
     def _tick_active_task(self) -> None:
         with self._data_lock:
@@ -2094,7 +2222,7 @@ class WebDashboardNode(Node):
                     completed_task_id = active.get("task_id")
                 else:
                     active["last_goal_annotation_id"] = None
-                self._settings["active_task"] = active
+                self._settings["active_task"] = None if completed_task_id else active
                 self._save_json("settings.json", self._settings)
                 self._save_json("tasks.json", self._tasks)
             if completed_task_id:
@@ -2355,7 +2483,7 @@ class WebDashboardNode(Node):
         return width, height, max_value, pixels
 
     def _serve_mjpeg(self, camera_name: str, handler: BaseHTTPRequestHandler) -> None:
-        if not bool(self.get_parameter("enable_camera_proxy").value):
+        if not self._as_bool(self.get_parameter("enable_camera_proxy").value):
             handler.send_error(HTTPStatus.SERVICE_UNAVAILABLE, "camera proxy disabled")
             return
         if cv2 is None:
@@ -2411,6 +2539,14 @@ class WebDashboardNode(Node):
         self._camera_workers[camera_name] = worker
         worker.start()
         return worker
+
+    @staticmethod
+    def _as_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        return str(value).strip().lower() in ("1", "true", "yes", "on")
 
     @staticmethod
     def _error(message: str, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -2482,6 +2618,8 @@ class WebDashboardNode(Node):
                     self._send_api(node._create_task(payload))
                 elif parsed.path == "/api/tasks/start":
                     self._send_api(node._start_task(payload))
+                elif parsed.path == "/api/tasks/stop":
+                    self._send_api(node._stop_task(payload))
                 else:
                     self.send_error(HTTPStatus.NOT_FOUND)
 

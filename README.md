@@ -68,7 +68,7 @@ source install/setup.bash
 
 - 连接方式：开发电脑通过 RJ45 直连 104，开发电脑网口配置为 `10.21.31.200/24`，104 地址为 `10.21.31.104`。
 - 104 环境：Ubuntu 20.04.6、ARM64、ROS 2 Foxy，具备 `colcon`、`rosdep`、`git` 和 Python 3.8。
-- 代码位置：已把当前 workspace 部署到 104 的 `/home/user/m20pro_ros2_ws_20260529_173921`。
+- 代码位置：已把当前 workspace 部署到 104，并规范为固定入口 `/home/user/m20pro_ros2_ws`。历史日期目录保留为实际目录，`/home/user/m20pro_ros2_ws` 是指向它的软链接。
 - 编译状态：`m20pro_description`、`m20pro_navigation`、`m20pro_cloud_bridge`、`m20pro_inspection`、`m20pro_bringup` 五个包已经在 104 上编译通过。
 - 依赖状态：104 原本缺少 Nav2 和 `sensor_msgs_py`，已通过离线 deb 包方式安装 Foxy/ARM64 版本。
 - 已验证 Nav2 包：`nav2_bringup`、`nav2_map_server`、`nav2_lifecycle_manager`、`nav2_controller`、`nav2_planner`、`nav2_navfn_planner`、`nav2_dwb_controller`、`nav2_msgs`、`sensor_msgs_py`。
@@ -77,7 +77,7 @@ source install/setup.bash
 104 上的安全启动命令：
 
 ```bash
-cd ~/m20pro_ros2_ws_20260529_173921
+cd ~/m20pro_ros2_ws
 source /opt/ros/foxy/setup.bash
 source install/setup.bash
 ros2 launch m20pro_bringup m20pro.launch.py mode:=real \
@@ -118,7 +118,7 @@ ros2 launch m20pro_bringup m20pro.launch.py mode:=real
 
 仍然可以直接用旧入口 `m20pro_sim.launch.py` 和 `m20pro_real.launch.py`，但日常建议记统一入口。
 
-本地网页看板会默认随 sim/real 启动，浏览器打开：
+本地网页看板在 sim 模式默认启动；real 模式按参数或脚本启动。浏览器打开：
 
 ```text
 http://localhost:8080
@@ -136,7 +136,8 @@ http://104的IP:8080
 ros2 launch m20pro_bringup m20pro.launch.py mode:=sim web_dashboard_port:=18080
 ```
 
-网页操作台会随 sim/real 默认启动。它现在不是单纯看板，而是一套现场流程入口：
+网页操作台在 sim 中默认启动；real 中默认不随完整系统启动，现场需要时用
+`enable_web_dashboard:=true` 或根目录脚本单独启动。它现在不是单纯看板，而是一套现场流程入口：
 
 - 建图向导：记录项目、建筑、单层/多层模式、楼层编号；
 - 106 地图拉取：把 106 原厂 active map 复制归档到 104；
@@ -144,6 +145,62 @@ ros2 launch m20pro_bringup m20pro.launch.py mode:=sim web_dashboard_port:=18080
 - 地图标点：在 PGM 地图上点击生成巡检点、楼梯切换点、充电点等；
 - 任务编排：用点位生成巡检任务，并向 `/m20pro/floor_goal` 下发楼层目标；
 - 实时看板：显示楼层、位姿、路径、动态障碍物、YOLO 检测和事件。
+
+## 现场常用脚本
+
+给现场人员直接执行的脚本统一放在仓库根目录 `scripts/`，不要和
+`src/m20pro_bringup/scripts/` 混用。根目录 `scripts/` 是人工入口；
+`src/m20pro_bringup/scripts/` 只保留 ROS 包内部脚本。
+
+104 上固定进入环境：
+
+```bash
+ssh user@10.21.31.104
+source /opt/robot/scripts/setup_ros2.sh
+su
+cd /home/user/m20pro_ros2_ws
+source install/setup.bash
+```
+
+常用脚本：
+
+```bash
+./scripts/104_start_web.sh                 # 单独启动网页前端
+./scripts/104_stop_web.sh                  # 停止网页前端
+./scripts/104_start_real_shadow.sh          # 启动 real，不放开运动控制
+./scripts/104_start_real_move.sh            # 启动 real，放开运动控制
+./scripts/104_stop_real.sh                  # 停止 real
+./scripts/104_record_bag.sh 180 m20_test    # 录包
+./scripts/104_check_lidar.sh                # 检查 /LIDAR/POINTS
+./scripts/104_status.sh                     # 查看前端/real/8080 状态
+```
+
+上位机拉回 104 bags：
+
+```bash
+./scripts/local_pull_bags.sh
+```
+
+注意：`104_start_real_move.sh` 会放开运动控制，只能在现场有人看护并准备手柄急停时使用。这些脚本不重启原厂 multicast 服务。
+
+## 真机测试任务顺序
+
+桌面版现场脚本在：
+
+```text
+/home/fabu/桌面/脚本.docx
+```
+
+当前建议按以下顺序推进：
+
+1. 原厂常规模式录包。
+2. 原厂导航模式录包和重定位。
+3. 我们的 real 影子导航测试，不放开运动控制。
+4. 同楼层短距离运动测试，目标距离先控制在 1 到 2 米。
+5. 长距离 + 避障实测，先做 5 到 10 米，再逐步加长。
+6. 跨楼层实测。
+
+任务 5 和任务 6 都必须录包。出现原地转圈、明显偏航、贴障碍物、路径穿墙、地图和当前位置明显不匹配时，立即停止当前任务或使用手柄急停。
 
 关闭网页看板：
 
@@ -159,8 +216,9 @@ ros2 launch m20pro_bringup m20pro.launch.py mode:=sim enable_web_dashboard:=fals
 
 - `config/m20pro.yaml`：真机 TCP、仿真初始位姿、点云融合、动态障碍物、PCD 感知仿真等参数。
 - `config/map_manifest.yaml`：PGM/PCD 地图资产总表，用来收拢 F19/F20/F21 的地图、点云和高度范围。
-- `config/nav2_params.yaml`：Humble/上位机 Nav2 参数。
-- `config/nav2_params_foxy.yaml`：104/Foxy Nav2 参数。
+- `config/nav2_params_sim.yaml`：Humble/上位机仿真 Nav2 参数，导航 base frame 隔离为 `m20pro_base_link`，避免被机器狗网络里的外部 `/tf` 污染。
+- `config/nav2_params.yaml`：旧版通用 Nav2 参数，保留作参考。
+- `config/nav2_params_real.yaml`：104/Foxy 真机 Nav2 参数。
 - `config/inspection_waypoints.yaml`：F19/F20/F21 楼层、楼梯路线、巡检点模板。
 - `maps/F19`、`maps/F20`、`maps/F21`：当前多楼层 PGM 地图。
 - `maps/Original_map/full_cloud.pcd`：仿真局部点云来源。
@@ -186,6 +244,8 @@ ros2 launch m20pro_bringup m20pro.launch.py mode:=sim \
 ```
 
 当前要求：动态障碍物默认必须显示，`enable_dynamic_obstacles` 默认是 `true`。
+
+sim 模式会复用 real 验证后的点云链路假设：PCD 感知仿真发布 `/cloud_nav`，`pointcloud_fusion` 以 best-effort `/scan` 喂给 Nav2，导航 base frame 使用 `m20pro_base_link` 隔离外部 `/tf`，`system_check` 会检查 `/scan` 是否有有效束、近距离障碍出现时 local costmap 是否真的标障、`odom -> m20pro_base_link` 的 z 是否保持在合理范围内。这样可以提前暴露“话题存在但避障没吃进去”的问题。
 
 ### 真机 launch
 
@@ -439,7 +499,7 @@ ros2 topic pub --once /m20pro/goal_command std_msgs/msg/String "{data: 'f20_demo
 
 `config_audit` 是启动前配置检查，检查 `map_manifest.yaml`、`inspection_waypoints.yaml` 和实际地图文件是否能对上。
 
-`system_check` 是运行时健康检查，随 sim/real 启动。用于检查 `/map`、点云、`/scan`、costmap、robot model、Nav2 lifecycle、楼层管理和动态障碍物是否正常。real 模式额外检查 `/scan` 是否有有效束、近距离障碍出现时 local costmap 是否真的标障、`odom -> m20pro_base_link` 的 z 是否保持在合理范围内。仿真启动正常时会看到类似：
+`system_check` 是运行时健康检查，随 sim/real 启动。用于检查 `/map`、点云、`/scan`、costmap、robot model、Nav2 lifecycle、楼层管理和动态障碍物是否正常。sim/real 都会额外检查 `/scan` 是否有有效束、近距离障碍出现时 local costmap 是否真的标障、base TF 的 z 是否保持在合理范围内。仿真启动正常时会看到类似：
 
 ```text
 M20PRO SIM OK: required topics, nodes, maps and Nav2 are active
@@ -531,6 +591,16 @@ ros2 launch m20pro_bringup m20pro_web_dashboard.launch.py port:=8080
 http://localhost:8080
 ```
 
+现场访问方式：
+
+```text
+http://10.21.31.104:8080
+```
+
+现阶段前端建议跑在 104 上。笔记本、安卓手柄或调试电脑先连接机器狗 WiFi/机器狗内网，再打开上面的地址。这样不需要甲方服务器，也不依赖公网。
+
+后期接入工业路由器后，104 仍然运行同一套前端。工业路由器负责让机器狗上网，再通过 VPN、内网穿透或甲方服务器反向代理访问 `104:8080`。不建议直接把 `8080` 裸露到公网。
+
 接口：
 
 ```bash
@@ -550,6 +620,17 @@ curl http://localhost:8080/api/tasks
 - `标点`：点击地图生成巡检点、步态切换点、楼层切换点、出楼梯点、充电点、过渡点；
 - `任务`：用标点生成任务，并按顺序向 `/m20pro/floor_goal` 发布楼层目标。
 
+任务执行防呆：
+
+- 执行中会显示“停止当前任务”按钮；
+- 停止会清空网页 active task，发布 `/m20pro/stop_task`，并发送一次零 `/cmd_vel`；
+- `floor_manager` 收到停止请求后会取消当前 Nav2 goal，并清理跨楼层任务状态；
+- 有任务执行时，网页/API 会拒绝启动另一个任务；
+- 有任务执行时，网页/API 会拒绝切换地图；
+- 删除点位时，如果点位正在当前任务中，会拒绝删除；
+- 启动任务前会检查点位是否还存在、任务地图是否和当前地图一致；
+- web 节点重启后不会自动恢复旧的 running 任务，避免重启后误继续发目标。
+
 持久化数据默认放在 `~/.m20pro_web`，归档地图默认放在 `~/m20pro_maps`。拉取 106 地图依赖 104 能通过 `scp` 访问 `user@10.21.31.106:/var/opt/robot/data/maps/active`。
 
 当前不直接修改 106 的 active map。前端拉到 104 的地图是工作副本，用于 104 Nav2、标点和任务编排；106 仍保留原厂建图/定位链路。
@@ -561,6 +642,17 @@ curl http://localhost:8080/api/tasks
 - `F19`
 - `F20`
 - `F21`
+
+网页前端当前不是三维多楼层同时显示，而是一次显示一张单层地图。跨楼层现场操作方式：
+
+1. 在地图下拉框选择当前楼层地图，例如 `F20`。
+2. 在当前楼层保存楼梯入口或巡检点，点位楼层填写 `F20`。
+3. 在地图下拉框选择目标楼层地图，例如 `F21`。
+4. 在目标楼层保存楼梯出口后方安全点或目标巡检点，点位楼层填写 `F21`。
+5. 在任务页勾选跨楼层相关点位并生成任务。
+6. 点击开始执行后，前端把目标发布到 `/m20pro/floor_goal`，`floor_manager` 根据目标楼层决定是否进入跨楼层流程。
+
+如果当前地图和任务地图不一致，前端会拒绝开始任务；如果任务正在执行，前端会拒绝切换地图。
 
 对应配置在 `inspection_waypoints.yaml`。每层地图只表达本层和上下半层楼梯区域：
 

@@ -2,13 +2,13 @@ import math
 import os
 from functools import partial
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import rclpy
 import yaml
 from action_msgs.msg import GoalStatus
 from ament_index_python.packages import get_package_share_directory
-from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
 from nav2_msgs.action import NavigateToPose
 from nav2_msgs.srv import ClearEntireCostmap, LoadMap
 from rclpy.action import ActionClient
@@ -29,6 +29,7 @@ class FloorManager(Node):
         self.declare_parameter("switch_floor_topic", "/m20pro/switch_floor")
         self.declare_parameter("stair_command_topic", "/m20pro/use_stairs")
         self.declare_parameter("floor_goal_topic", "/m20pro/floor_goal")
+        self.declare_parameter("stop_task_topic", "/m20pro/stop_task")
         self.declare_parameter("enable_rviz_floor_goal_topics", True)
         self.declare_parameter(
             "rviz_floor_goal_topics",
@@ -44,6 +45,7 @@ class FloorManager(Node):
         self.declare_parameter("robot_pose_topic", "/m20pro_tcp_bridge/map_pose")
         self.declare_parameter("initialpose_topic", "/initialpose")
         self.declare_parameter("navigate_to_pose_action", "/navigate_to_pose")
+        self.declare_parameter("cmd_vel_topic", "/cmd_vel")
         self.declare_parameter("map_server_load_map_service", "/map_server/load_map")
         self.declare_parameter(
             "clear_costmap_services",
@@ -81,6 +83,11 @@ class FloorManager(Node):
         self.pending_post_switch_goal_floor: Optional[str] = None
         self.pending_post_exit_pose: Optional[Dict[str, Any]] = None
         self.active_floor_mission = False
+        self.active_nav_goal_handle: Optional[Any] = None
+        self.active_nav_goal_label = ""
+        self.nav_goal_sequence = 0
+        self.stop_nav_goal_sequence = 0
+        self.cancelled_nav_goal_handle_ids: Set[int] = set()
         self.stair_timer = None
         self.post_exit_goal_timer = None
         self.post_switch_goal_timer = None
@@ -125,6 +132,11 @@ class FloorManager(Node):
             str(self.get_parameter("gait_command_topic").value),
             10,
         )
+        self.cmd_vel_pub = self.create_publisher(
+            Twist,
+            str(self.get_parameter("cmd_vel_topic").value),
+            10,
+        )
         self.create_subscription(
             String,
             str(self.get_parameter("switch_floor_topic").value),
@@ -135,6 +147,12 @@ class FloorManager(Node):
             String,
             str(self.get_parameter("stair_command_topic").value),
             self._on_stair_command,
+            10,
+        )
+        self.create_subscription(
+            String,
+            str(self.get_parameter("stop_task_topic").value),
+            self._on_stop_task,
             10,
         )
         self.create_subscription(
@@ -310,6 +328,13 @@ class FloorManager(Node):
             self.get_logger().warning("ignored empty stair command")
             return
         self.use_stairs(command)
+
+    def _on_stop_task(self, msg: String) -> None:
+        reason = msg.data.strip() or "stop_task"
+        self.get_logger().warning("received stop task request: %s" % reason)
+        self._publish_stair_status("stopped reason=%s" % reason)
+        self._clear_floor_mission_if_needed("floor_goal")
+        self._cancel_active_nav_goal(reason)
 
     def _on_floor_goal(self, msg: PoseStamped) -> None:
         if self.active_floor_mission:
@@ -542,10 +567,12 @@ class FloorManager(Node):
             "sending Nav2 goal label=%s x=%.2f y=%.2f"
             % (label, pose.pose.position.x, pose.pose.position.y)
         )
+        self.nav_goal_sequence += 1
+        goal_sequence = self.nav_goal_sequence
         future = self.navigate_to_pose_client.send_goal_async(goal)
-        future.add_done_callback(lambda done: self._on_nav_goal_response(done, label))
+        future.add_done_callback(lambda done: self._on_nav_goal_response(done, label, goal_sequence))
 
-    def _on_nav_goal_response(self, future: Any, label: str) -> None:
+    def _on_nav_goal_response(self, future: Any, label: str, goal_sequence: int) -> None:
         try:
             goal_handle = future.result()
         except Exception as exc:
@@ -558,20 +585,46 @@ class FloorManager(Node):
             self._publish_stair_status("error reason=nav_goal_rejected label=%s" % label)
             self._clear_floor_mission_if_needed(label)
             return
+        if goal_sequence <= self.stop_nav_goal_sequence:
+            self.get_logger().warning("cancelling stale Nav2 goal after stop request: %s" % label)
+            self.cancelled_nav_goal_handle_ids.add(id(goal_handle))
+            result_future = goal_handle.get_result_async()
+            result_future.add_done_callback(lambda done: self._on_nav_result(done, label, goal_handle))
+            try:
+                cancel_future = goal_handle.cancel_goal_async()
+                cancel_future.add_done_callback(
+                    lambda done: self._on_cancel_done(done, label, "stale_goal_after_stop")
+                )
+            except Exception as exc:
+                self.get_logger().error("failed to cancel stale Nav2 goal %s: %s" % (label, exc))
+                self._publish_stair_status("error reason=nav_cancel_failed label=%s" % label)
+            self._publish_zero_cmd()
+            return
+        self.active_nav_goal_handle = goal_handle
+        self.active_nav_goal_label = label
         self._publish_stair_status("nav_goal_accepted label=%s" % label)
         result_future = goal_handle.get_result_async()
-        result_future.add_done_callback(lambda done: self._on_nav_result(done, label))
+        result_future.add_done_callback(lambda done: self._on_nav_result(done, label, goal_handle))
 
-    def _on_nav_result(self, future: Any, label: str) -> None:
+    def _on_nav_result(self, future: Any, label: str, goal_handle: Any) -> None:
         try:
             result = future.result()
         except Exception as exc:
             self.get_logger().error("Nav2 result failed for %s: %s" % (label, exc))
+            self._clear_active_nav_goal(goal_handle)
             self._publish_stair_status("error reason=nav_result_failed label=%s" % label)
             self._clear_floor_mission_if_needed(label)
             return
 
         status = int(getattr(result, "status", GoalStatus.STATUS_UNKNOWN))
+        was_cancel_requested = id(goal_handle) in self.cancelled_nav_goal_handle_ids
+        self.cancelled_nav_goal_handle_ids.discard(id(goal_handle))
+        self._clear_active_nav_goal(goal_handle)
+        if status == GoalStatus.STATUS_CANCELED and was_cancel_requested:
+            self.get_logger().warning("Nav2 goal %s finished as cancelled" % label)
+            self._publish_stair_status("nav_goal_cancelled_result label=%s" % label)
+            self._clear_floor_mission_if_needed(label)
+            return
         if status != GoalStatus.STATUS_SUCCEEDED:
             self.get_logger().warning("Nav2 goal %s finished with status %d" % (label, status))
             self._publish_stair_status(
@@ -597,6 +650,46 @@ class FloorManager(Node):
         elif label == "floor_goal":
             self.active_floor_mission = False
             self.pending_post_switch_goal_floor = None
+
+    def _cancel_active_nav_goal(self, reason: str) -> None:
+        self.stop_nav_goal_sequence = self.nav_goal_sequence
+        goal_handle = self.active_nav_goal_handle
+        label = self.active_nav_goal_label
+        self.active_nav_goal_handle = None
+        self.active_nav_goal_label = ""
+        self._publish_zero_cmd()
+        if goal_handle is None:
+            self.get_logger().info("no active Nav2 goal to cancel for stop request")
+            return
+        self.cancelled_nav_goal_handle_ids.add(id(goal_handle))
+        try:
+            future = goal_handle.cancel_goal_async()
+            future.add_done_callback(lambda done: self._on_cancel_done(done, label, reason))
+        except Exception as exc:
+            self.get_logger().error("failed to cancel Nav2 goal %s: %s" % (label, exc))
+            self._publish_stair_status("error reason=nav_cancel_failed label=%s" % label)
+
+    def _on_cancel_done(self, future: Any, label: str, reason: str) -> None:
+        try:
+            result = future.result()
+            count = len(getattr(result, "goals_canceling", []) or [])
+        except Exception as exc:
+            self.get_logger().error("Nav2 cancel result failed for %s: %s" % (label, exc))
+            self._publish_stair_status("error reason=nav_cancel_result_failed label=%s" % label)
+            return
+        self._publish_zero_cmd()
+        self.get_logger().warning(
+            "cancelled Nav2 goal label=%s count=%d reason=%s" % (label, count, reason)
+        )
+        self._publish_stair_status("nav_goal_cancelled label=%s reason=%s count=%d" % (label, reason, count))
+
+    def _clear_active_nav_goal(self, goal_handle: Any) -> None:
+        if self.active_nav_goal_handle is goal_handle:
+            self.active_nav_goal_handle = None
+            self.active_nav_goal_label = ""
+
+    def _publish_zero_cmd(self) -> None:
+        self.cmd_vel_pub.publish(Twist())
 
     def _is_floor_mission_label(self, label: str) -> bool:
         return label in ("stair_entry", "stair_traverse", "stair_exit", "floor_goal")
