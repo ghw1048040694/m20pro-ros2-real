@@ -5141,3 +5141,23 @@ source install/setup.bash
 ```
 
   - then open `http://10.21.31.104:8080` from a laptop/handheld connected to the robot network.
+
+## 2026-06-10 Field script Word simplified for remaining real tests
+
+- Desktop test script was rewritten:
+
+```text
+/home/fabu/桌面/脚本.docx
+```
+
+- Removed old task set from the Word script:
+  - factory normal-mode bag recording;
+  - factory navigation-mode bag recording/relocalization;
+  - our real shadow-mode validation.
+- New script keeps only the remaining real navigation work:
+  - task 1: start real move system and record bag;
+  - task 2: same-floor real navigation continuous test, combining short-distance verification, long-distance navigation, and obstacle avoidance;
+  - task 3: cross-floor real navigation.
+- Verified the regenerated docx text:
+  - old titles `原厂常规模式录包`, `原厂导航模式录包`, and `我们的 real 影子导航测试` are no longer present;
+  - new tasks are numbered 1/2/3 as above.
