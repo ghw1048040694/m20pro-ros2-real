@@ -5291,3 +5291,27 @@ axis command enabled
   - fast web-side localization check first;
   - 106 relocalization only as an exception path;
   - same-floor short/long/obstacle tests do not require relocalization between tasks when pose remains aligned.
+
+## 2026-06-11 Web relocalization added
+
+- User asked whether startup/relocalization can be done directly from the web dashboard instead of opening RViz on 106.
+- Implemented a new `定位` tab in the web dashboard:
+  - drag an arrow on the map at the robot's real position;
+  - arrow direction is the robot's current heading;
+  - click `执行重定位`.
+- Web backend now publishes `geometry_msgs/msg/PoseWithCovarianceStamped` on `/initialpose`.
+- Existing `m20pro_tcp_bridge` already subscribes to `/initialpose` and forwards it to the M20 Pro vendor localization reset API:
+  - Type `2101`;
+  - Command `1`;
+  - fields `PosX`, `PosY`, `PosZ`, `Yaw`.
+- The web dashboard also subscribes to `/m20pro_tcp_bridge/relocalization_result`, so the `定位` tab can show whether the vendor reset was accepted.
+- Safety behavior:
+  - web relocalization is rejected while a web task is running;
+  - stop the task first, then relocalize.
+- Launch files now expose and pass:
+  - `initialpose_topic`;
+  - `relocalization_result_topic`.
+- `/home/fabu/桌面/脚本.docx` was regenerated:
+  - fast web pose check first;
+  - web relocalization as the normal correction path;
+  - 106 RViz `2D Pose Estimate` only as fallback if web relocalization or the web frontend is unavailable.

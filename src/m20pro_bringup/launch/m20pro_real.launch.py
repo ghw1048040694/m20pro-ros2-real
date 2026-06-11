@@ -65,6 +65,8 @@ def generate_launch_description():
     web_dashboard_port = LaunchConfiguration("web_dashboard_port")
     web_dashboard_data_dir = LaunchConfiguration("web_dashboard_data_dir")
     web_dashboard_map_archive_dir = LaunchConfiguration("web_dashboard_map_archive_dir")
+    initialpose_topic = LaunchConfiguration("initialpose_topic")
+    relocalization_result_topic = LaunchConfiguration("relocalization_result_topic")
     factory_host = LaunchConfiguration("factory_host")
     factory_user = LaunchConfiguration("factory_user")
     factory_active_map = LaunchConfiguration("factory_active_map")
@@ -119,6 +121,11 @@ def generate_launch_description():
         DeclareLaunchArgument("web_dashboard_port", default_value="8080"),
         DeclareLaunchArgument("web_dashboard_data_dir", default_value="~/.m20pro_web"),
         DeclareLaunchArgument("web_dashboard_map_archive_dir", default_value="~/m20pro_maps"),
+        DeclareLaunchArgument("initialpose_topic", default_value="/initialpose"),
+        DeclareLaunchArgument(
+            "relocalization_result_topic",
+            default_value="/m20pro_tcp_bridge/relocalization_result",
+        ),
         DeclareLaunchArgument("factory_host", default_value="10.21.31.106"),
         DeclareLaunchArgument("factory_user", default_value="user"),
         DeclareLaunchArgument("factory_active_map", default_value="/var/opt/robot/data/maps/active"),
@@ -407,6 +414,8 @@ def generate_launch_description():
                     "data_dir": web_dashboard_data_dir,
                     "map_archive_dir": web_dashboard_map_archive_dir,
                     "map_manifest": map_manifest,
+                    "initialpose_topic": initialpose_topic,
+                    "relocalization_result_topic": relocalization_result_topic,
                     "factory_host": factory_host,
                     "factory_user": factory_user,
                     "factory_active_map": factory_active_map,

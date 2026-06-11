@@ -29,6 +29,8 @@ def generate_launch_description():
     camera_proxy_jpeg_quality = LaunchConfiguration("camera_proxy_jpeg_quality")
     camera_proxy_max_width = LaunchConfiguration("camera_proxy_max_width")
     camera_proxy_transport = LaunchConfiguration("camera_proxy_transport")
+    initialpose_topic = LaunchConfiguration("initialpose_topic")
+    relocalization_result_topic = LaunchConfiguration("relocalization_result_topic")
 
     return LaunchDescription([
         DeclareLaunchArgument("host", default_value="0.0.0.0"),
@@ -77,6 +79,11 @@ def generate_launch_description():
         DeclareLaunchArgument("camera_proxy_jpeg_quality", default_value="55"),
         DeclareLaunchArgument("camera_proxy_max_width", default_value="480"),
         DeclareLaunchArgument("camera_proxy_transport", default_value="tcp"),
+        DeclareLaunchArgument("initialpose_topic", default_value="/initialpose"),
+        DeclareLaunchArgument(
+            "relocalization_result_topic",
+            default_value="/m20pro_tcp_bridge/relocalization_result",
+        ),
         Node(
             package="m20pro_cloud_bridge",
             executable="web_dashboard",
@@ -108,6 +115,8 @@ def generate_launch_description():
                         value_type=int,
                     ),
                     "camera_proxy_transport": camera_proxy_transport,
+                    "initialpose_topic": initialpose_topic,
+                    "relocalization_result_topic": relocalization_result_topic,
                 }
             ],
         ),

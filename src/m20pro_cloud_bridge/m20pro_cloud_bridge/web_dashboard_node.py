@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, urlparse
 import rclpy
 import yaml
 from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
-from geometry_msgs.msg import Pose, PoseStamped, Twist
+from geometry_msgs.msg import Pose, PoseStamped, PoseWithCovarianceStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Path as RosPath
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -214,7 +214,7 @@ INDEX_HTML = r"""<!doctype html>
     }
     .tabs {
       display: grid;
-      grid-template-columns: repeat(5, minmax(0, 1fr));
+      grid-template-columns: repeat(6, minmax(0, 1fr));
       gap: 4px;
       padding: 8px;
       border-bottom: 1px solid var(--line);
@@ -501,6 +501,7 @@ INDEX_HTML = r"""<!doctype html>
     <aside class="side">
       <nav class="tabs">
         <button class="tab active" data-tab="live">看板</button>
+        <button class="tab" data-tab="localize">定位</button>
         <button class="tab" data-tab="mapping">建图</button>
         <button class="tab" data-tab="maps">地图</button>
         <button class="tab" data-tab="marks">标点</button>
@@ -555,6 +556,29 @@ INDEX_HTML = r"""<!doctype html>
           <div class="section">
             <h2>话题状态</h2>
             <table id="topics"></table>
+          </div>
+        </section>
+
+        <section id="tab-localize" class="panel">
+          <div class="section">
+            <h2>网页重定位</h2>
+            <div class="row">
+              <label>坐标 X/Y</label>
+              <input id="locXY" placeholder="拖拽地图自动填入" />
+            </div>
+            <div class="row">
+              <label>朝向角(rad)</label>
+              <input id="locYaw" value="0.0" />
+            </div>
+            <div class="row">
+              <label>楼层</label>
+              <input id="locFloor" value="F20" />
+            </div>
+            <div class="actions">
+              <button class="primary" id="sendInitialPoseBtn">执行重定位</button>
+              <button id="useRobotPoseForLocBtn">使用当前机器人位姿</button>
+            </div>
+            <div id="localizeLog" class="mono" style="margin-top:8px;">先在地图上拖箭头，箭头方向就是机器狗当前朝向。</div>
           </div>
         </section>
 
@@ -779,7 +803,9 @@ INDEX_HTML = r"""<!doctype html>
       tasks: [],
       sessionId: null,
       markDraft: null,
-      markPointer: null
+      localizeDraft: null,
+      markPointer: null,
+      lastRelocalizationStamp: null
     };
     const manualPointTypeNames = {
       transition: "过渡点",
@@ -942,6 +968,9 @@ INDEX_HTML = r"""<!doctype html>
     function currentMarkYaw() {
       return normalizeYaw($("markYaw").value);
     }
+    function currentLocalizeYaw() {
+      return normalizeYaw($("locYaw").value);
+    }
     function setMarkDraft(pose, message) {
       state.markDraft = {
         x: Number(pose.x),
@@ -952,6 +981,21 @@ INDEX_HTML = r"""<!doctype html>
       $("markYaw").value = state.markDraft.yaw.toFixed(4);
       $("cursor").textContent = message || `x ${state.markDraft.x.toFixed(3)} / y ${state.markDraft.y.toFixed(3)} / 朝向 ${state.markDraft.yaw.toFixed(3)} rad`;
       draw();
+    }
+    function setLocalizeDraft(pose, message) {
+      state.localizeDraft = {
+        x: Number(pose.x),
+        y: Number(pose.y),
+        yaw: normalizeYaw(pose.yaw)
+      };
+      $("locXY").value = `${state.localizeDraft.x.toFixed(3)}, ${state.localizeDraft.y.toFixed(3)}`;
+      $("locYaw").value = state.localizeDraft.yaw.toFixed(4);
+      $("cursor").textContent = message || `定位 x ${state.localizeDraft.x.toFixed(3)} / y ${state.localizeDraft.y.toFixed(3)} / 朝向 ${state.localizeDraft.yaw.toFixed(3)} rad`;
+      draw();
+    }
+    function activeTabName() {
+      const active = document.querySelector("button.tab.active");
+      return active ? active.dataset.tab : "";
     }
     function drawArrow(pose, options = {}) {
       if (!Number.isFinite(Number(pose.x)) || !Number.isFinite(Number(pose.y))) return;
@@ -1039,6 +1083,16 @@ INDEX_HTML = r"""<!doctype html>
         label: "待保存"
       });
     }
+    function drawLocalizeDraft() {
+      if (!state.localizeDraft) return;
+      drawArrow(state.localizeDraft, {
+        color: "#dc2626",
+        stroke: "#fef2f2",
+        lineWidth: 2.5,
+        size: 1.0,
+        label: "定位"
+      });
+    }
     function draw() {
       const rect = canvas.getBoundingClientRect();
       ctx.clearRect(0, 0, rect.width, rect.height);
@@ -1062,6 +1116,7 @@ INDEX_HTML = r"""<!doctype html>
       }
       drawAnnotations();
       drawMarkDraft();
+      drawLocalizeDraft();
       if (latest && latest.pose) drawArrow(latest.pose);
     }
     async function refreshLiveMap(version) {
@@ -1111,6 +1166,13 @@ INDEX_HTML = r"""<!doctype html>
       const det = s.detections && (s.detections.parsed || s.detections.raw);
       $("detections").textContent = det ? JSON.stringify(det, null, 2) : "等待数据";
       $("events").textContent = s.events && s.events.length ? JSON.stringify(s.events.slice(-5), null, 2) : "等待数据";
+      if (s.relocalization_result && s.relocalization_result.last_update !== state.lastRelocalizationStamp) {
+        state.lastRelocalizationStamp = s.relocalization_result.last_update;
+        setLog("localizeLog", {
+          重定位结果: s.relocalization_result.raw,
+          更新时间: s.node_time_text
+        });
+      }
       $("activeTask").textContent = s.active_task ? JSON.stringify(s.active_task, null, 2) : "无任务";
       $("stopTaskBtn").disabled = !(s.active_task && s.active_task.status === "running");
       const table = $("topics");
@@ -1279,12 +1341,19 @@ INDEX_HTML = r"""<!doctype html>
       const p = canvasToWorld(evt.clientX, evt.clientY);
       if (!p) return;
       evt.preventDefault();
-      state.markPointer = {id: evt.pointerId, start: p, moved: false};
+      state.markPointer = {id: evt.pointerId, start: p, moved: false, mode: activeTabName() === "localize" ? "localize" : "mark"};
       canvas.setPointerCapture(evt.pointerId);
-      setMarkDraft(
-        {x: p.x, y: p.y, yaw: currentMarkYaw()},
-        `x ${p.x.toFixed(3)} / y ${p.y.toFixed(3)} / 拖动设置朝向`
-      );
+      if (state.markPointer.mode === "localize") {
+        setLocalizeDraft(
+          {x: p.x, y: p.y, yaw: currentLocalizeYaw()},
+          `定位 x ${p.x.toFixed(3)} / y ${p.y.toFixed(3)} / 拖动设置朝向`
+        );
+      } else {
+        setMarkDraft(
+          {x: p.x, y: p.y, yaw: currentMarkYaw()},
+          `x ${p.x.toFixed(3)} / y ${p.y.toFixed(3)} / 拖动设置朝向`
+        );
+      }
     });
     canvas.addEventListener("pointermove", (evt) => {
       const p = canvasToWorld(evt.clientX, evt.clientY);
@@ -1296,21 +1365,31 @@ INDEX_HTML = r"""<!doctype html>
       evt.preventDefault();
       const start = state.markPointer.start;
       const distance = Math.hypot(p.x - start.x, p.y - start.y);
-      const yaw = distance > 0.03 ? Math.atan2(p.y - start.y, p.x - start.x) : currentMarkYaw();
-      state.markPointer.moved = state.markPointer.moved || distance > 0.03;
-      setMarkDraft(
-        {x: start.x, y: start.y, yaw},
-        `x ${start.x.toFixed(3)} / y ${start.y.toFixed(3)} / 朝向 ${normalizeYaw(yaw).toFixed(3)} rad`
+      const yaw = distance > 0.03 ? Math.atan2(p.y - start.y, p.x - start.x) : (
+        state.markPointer.mode === "localize" ? currentLocalizeYaw() : currentMarkYaw()
       );
+      state.markPointer.moved = state.markPointer.moved || distance > 0.03;
+      if (state.markPointer.mode === "localize") {
+        setLocalizeDraft(
+          {x: start.x, y: start.y, yaw},
+          `定位 x ${start.x.toFixed(3)} / y ${start.y.toFixed(3)} / 朝向 ${normalizeYaw(yaw).toFixed(3)} rad`
+        );
+      } else {
+        setMarkDraft(
+          {x: start.x, y: start.y, yaw},
+          `x ${start.x.toFixed(3)} / y ${start.y.toFixed(3)} / 朝向 ${normalizeYaw(yaw).toFixed(3)} rad`
+        );
+      }
     });
     function finishMarkPointer(evt) {
       if (!state.markPointer || state.markPointer.id !== evt.pointerId) return;
       evt.preventDefault();
       if (canvas.hasPointerCapture(evt.pointerId)) canvas.releasePointerCapture(evt.pointerId);
-      const pose = state.markDraft;
+      const mode = state.markPointer.mode;
+      const pose = mode === "localize" ? state.localizeDraft : state.markDraft;
       state.markPointer = null;
       if (pose) {
-        $("cursor").textContent = `待保存 x ${pose.x.toFixed(3)} / y ${pose.y.toFixed(3)} / 朝向 ${pose.yaw.toFixed(3)} rad`;
+        $("cursor").textContent = `${mode === "localize" ? "待重定位" : "待保存"} x ${pose.x.toFixed(3)} / y ${pose.y.toFixed(3)} / 朝向 ${pose.yaw.toFixed(3)} rad`;
       }
     }
     canvas.addEventListener("pointerup", finishMarkPointer);
@@ -1328,6 +1407,44 @@ INDEX_HTML = r"""<!doctype html>
       if (!Number.isFinite(x) || !Number.isFinite(y)) return;
       state.markDraft = {x, y, yaw: currentMarkYaw()};
       draw();
+    });
+    $("locYaw").addEventListener("input", () => {
+      const pose = state.localizeDraft;
+      if (!pose) return;
+      state.localizeDraft = {x: pose.x, y: pose.y, yaw: currentLocalizeYaw()};
+      draw();
+    });
+    $("locXY").addEventListener("input", () => {
+      const [xText, yText] = $("locXY").value.split(",");
+      const x = Number(xText);
+      const y = Number(yText);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+      state.localizeDraft = {x, y, yaw: currentLocalizeYaw()};
+      draw();
+    });
+    $("sendInitialPoseBtn").addEventListener("click", async () => {
+      try {
+        const [xText, yText] = $("locXY").value.split(",");
+        const x = Number(xText);
+        const y = Number(yText);
+        const yaw = Number($("locYaw").value);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) throw {message: "定位坐标无效，请先在地图上拖箭头"};
+        const payload = await api("POST", "/api/localization/initialpose", {
+          x,
+          y,
+          z: 0,
+          yaw: Number.isFinite(yaw) ? yaw : 0,
+          floor: $("locFloor").value.trim()
+        });
+        setLog("localizeLog", payload);
+        $("cursor").textContent = `已发送重定位 x ${x.toFixed(3)} / y ${y.toFixed(3)} / 朝向 ${normalizeYaw(yaw).toFixed(3)} rad`;
+      } catch (err) { setLog("localizeLog", err); }
+    });
+    $("useRobotPoseForLocBtn").addEventListener("click", () => {
+      const pose = state.latest && state.latest.pose;
+      if (!pose) return;
+      setLocalizeDraft({x: pose.x, y: pose.y, yaw: pose.yaw}, "已取当前机器人位姿");
+      if (state.latest.floor) $("locFloor").value = state.latest.floor;
     });
     $("checkMappingEnvBtn").addEventListener("click", async () => {
       try { setLog("mappingLog", await api("POST", "/api/mapping/check_environment", {})); }
@@ -1738,6 +1855,11 @@ class WebDashboardNode(Node):
             str(self.get_parameter("active_waypoint_topic").value),
             10,
         )
+        self.initialpose_pub = self.create_publisher(
+            PoseWithCovarianceStamped,
+            str(self.get_parameter("initialpose_topic").value),
+            10,
+        )
 
         self._state: Dict[str, Any] = {
             "floor": None,
@@ -1749,6 +1871,7 @@ class WebDashboardNode(Node):
             "map_version": 0,
             "dynamic_obstacles": [],
             "detections": None,
+            "relocalization_result": None,
             "events": [],
             "topics": {},
         }
@@ -1791,6 +1914,11 @@ class WebDashboardNode(Node):
         self.declare_parameter("stop_task_topic", "/m20pro/stop_task")
         self.declare_parameter("active_waypoint_topic", "/m20pro/active_waypoint")
         self.declare_parameter("cmd_vel_topic", "/cmd_vel")
+        self.declare_parameter("initialpose_topic", "/initialpose")
+        self.declare_parameter("initialpose_covariance_xy", 0.25)
+        self.declare_parameter("initialpose_covariance_yaw", 0.0685)
+        self.declare_parameter("initialpose_publish_repeats", 5)
+        self.declare_parameter("initialpose_publish_interval_s", 0.1)
         self.declare_parameter("current_floor_topic", "/m20pro/current_floor")
         self.declare_parameter("stair_status_topic", "/m20pro/stair_status")
         self.declare_parameter("gait_command_topic", "/m20pro/gait_command")
@@ -1798,6 +1926,7 @@ class WebDashboardNode(Node):
         self.declare_parameter("plan_topic", "/plan")
         self.declare_parameter("map_topic", "/map")
         self.declare_parameter("dynamic_obstacle_topic", "/dynamic_obstacle_markers")
+        self.declare_parameter("relocalization_result_topic", "/m20pro_tcp_bridge/relocalization_result")
         self.declare_parameter("detections_topic", "/m20pro_yolov8_inspection/detections")
         self.declare_parameter("events_topic", "/m20pro_yolov8_inspection/events")
         self.declare_parameter("annotated_image_topic", "/m20pro_yolov8_inspection/annotated_image")
@@ -1975,6 +2104,12 @@ class WebDashboardNode(Node):
         self.create_subscription(RosPath, self._topic("plan_topic"), self._on_path, 5)
         self.create_subscription(OccupancyGrid, self._topic("map_topic"), self._on_map, map_qos)
         self.create_subscription(MarkerArray, self._topic("dynamic_obstacle_topic"), self._on_markers, 10)
+        self.create_subscription(
+            String,
+            self._topic("relocalization_result_topic"),
+            self._on_relocalization_result,
+            10,
+        )
         self.create_subscription(String, self._topic("detections_topic"), self._on_detections, 10)
         self.create_subscription(String, self._topic("events_topic"), self._on_event, 10)
 
@@ -2083,6 +2218,15 @@ class WebDashboardNode(Node):
                 "parsed": _parse_json_text(msg.data),
             }
             self._mark_topic("detections")
+
+    def _on_relocalization_result(self, msg: String) -> None:
+        with self._lock:
+            self._state["relocalization_result"] = {
+                "last_update": time.time(),
+                "raw": msg.data,
+                "parsed": _parse_json_text(msg.data),
+            }
+            self._mark_topic("relocalization_result")
 
     def _on_event(self, msg: String) -> None:
         max_events = int(self.get_parameter("max_events").value)
@@ -2693,6 +2837,54 @@ class WebDashboardNode(Node):
         self._append_event("停止前端任务", {"task_id": stopped_task_id, "reason": reason})
         return {"ok": True, "active_task": None, "stopped_task_id": stopped_task_id}
 
+    def _publish_initialpose(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        with self._data_lock:
+            active = self._settings.get("active_task") or {}
+            if active.get("status") == "running":
+                return self._error("任务执行中不能重定位，请先停止当前任务")
+        try:
+            x = float(payload.get("x"))
+            y = float(payload.get("y"))
+            z = float(payload.get("z", 0.0))
+            yaw = float(payload.get("yaw", 0.0))
+        except (TypeError, ValueError):
+            return self._error("重定位坐标无效，请先在地图上拖箭头")
+        frame_id = str(payload.get("frame_id") or "map").strip() or "map"
+        floor = str(payload.get("floor") or "").strip()
+        msg = PoseWithCovarianceStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = frame_id
+        msg.pose.pose.position.x = x
+        msg.pose.pose.position.y = y
+        msg.pose.pose.position.z = z
+        msg.pose.pose.orientation.x = 0.0
+        msg.pose.pose.orientation.y = 0.0
+        msg.pose.pose.orientation.z = math.sin(yaw * 0.5)
+        msg.pose.pose.orientation.w = math.cos(yaw * 0.5)
+        xy_cov = max(0.0, float(self.get_parameter("initialpose_covariance_xy").value))
+        yaw_cov = max(0.0, float(self.get_parameter("initialpose_covariance_yaw").value))
+        msg.pose.covariance[0] = xy_cov
+        msg.pose.covariance[7] = xy_cov
+        msg.pose.covariance[35] = yaw_cov
+        repeats = max(1, int(self.get_parameter("initialpose_publish_repeats").value))
+        interval_s = max(0.0, float(self.get_parameter("initialpose_publish_interval_s").value))
+        for _ in range(repeats):
+            msg.header.stamp = self.get_clock().now().to_msg()
+            self.initialpose_pub.publish(msg)
+            if interval_s > 0.0:
+                time.sleep(interval_s)
+        result = {
+            "ok": True,
+            "message": "已发布网页重定位请求。请等待几秒后确认点云、地图和网页位姿是否对齐。",
+            "topic": str(self.get_parameter("initialpose_topic").value),
+            "publish_repeats": repeats,
+            "frame_id": frame_id,
+            "floor": floor,
+            "pose": {"x": x, "y": y, "z": z, "yaw": yaw},
+        }
+        self._append_event("网页发布重定位", result)
+        return result
+
     def _tick_active_task(self) -> None:
         with self._data_lock:
             active = dict(self._settings.get("active_task") or {})
@@ -3248,6 +3440,8 @@ class WebDashboardNode(Node):
                     self._send_api(node._start_task(payload))
                 elif parsed.path == "/api/tasks/stop":
                     self._send_api(node._stop_task(payload))
+                elif parsed.path == "/api/localization/initialpose":
+                    self._send_api(node._publish_initialpose(payload))
                 else:
                     self.send_error(HTTPStatus.NOT_FOUND)
 
