@@ -68,14 +68,14 @@ source install/setup.bash
 现场人员直接使用仓库根目录 `scripts/`，不要和 `src/m20pro_bringup/scripts/` 混用。
 
 ```bash
-./scripts/104_start_web.sh                 # 启动网页前端
-./scripts/104_stop_web.sh                  # 停止网页前端
 ./scripts/104_start_real_shadow.sh         # 启动 real，不放开运动控制
 ./scripts/104_start_real_move.sh           # 启动 real，放开运动控制
 ./scripts/104_stop_real.sh                 # 停止 real
 ./scripts/104_record_bag.sh 180 m20_test   # 录包
 ./scripts/104_check_lidar.sh               # 检查 /LIDAR/POINTS
 ./scripts/104_status.sh                    # 查看服务状态
+./scripts/104_start_web.sh                 # 仅开发预览网页，不用于真机测试
+./scripts/104_stop_web.sh                  # 停止单独预览网页
 ```
 
 在上位机拉回 104 录包：
@@ -84,7 +84,9 @@ source install/setup.bash
 ./scripts/local_pull_bags.sh
 ```
 
-`104_start_real_move.sh` 会放开运动控制，只能在现场有人看护、手柄急停可用时执行。
+现场真机测试只走全量 real 启动：`104_start_real_shadow.sh` 或 `104_start_real_move.sh`。全量 real 会同时拉起 tcp_bridge、Nav2、点云融合和网页前端。
+
+`104_start_real_move.sh` 会放开运动控制，只能在现场有人看护、手柄急停可用时执行。`104_start_web.sh` 只用于开发预览网页界面，不会拉起 tcp_bridge/Nav2/点云融合，不能作为重定位、标点、下发任务的现场流程。
 
 ## 启动方式
 
@@ -94,33 +96,27 @@ source install/setup.bash
 ros2 launch m20pro_bringup m20pro.launch.py mode:=sim
 ```
 
-真机影子模式，不下发运动控制：
+真机测试推荐用脚本启动。开一个 104 终端，按固定环境顺序进入后执行：
 
 ```bash
-ros2 launch m20pro_bringup m20pro.launch.py mode:=real \
-  cloud_topic:=/LIDAR/POINTS \
-  initial_floor:=F20 \
-  rviz:=true \
-  enable_axis_command:=false \
-  enable_web_dashboard:=true
+./scripts/104_start_real_shadow.sh
 ```
 
-真机运动模式：
+影子模式用于看定位、地图、点云、路径和网页任务逻辑，不放开运动控制。
+
+确认现场安全、手柄急停可用后，运动模式执行：
 
 ```bash
-ros2 launch m20pro_bringup m20pro.launch.py mode:=real \
-  cloud_topic:=/LIDAR/POINTS \
-  initial_floor:=F20 \
-  rviz:=true \
-  enable_axis_command:=true \
-  enable_web_dashboard:=true
+./scripts/104_start_real_move.sh
 ```
 
-单独启动网页：
+开发预览网页：
 
 ```bash
 ros2 launch m20pro_bringup m20pro_web_dashboard.launch.py port:=8080
 ```
+
+这只适合改前端样式或检查页面是否能打开。真机重定位、标点、下发任务必须在全量 real 启动后操作。
 
 浏览器访问：
 
@@ -132,7 +128,7 @@ http://10.21.31.104:8080
 
 ## 网页操作流程
 
-网页前端跑在 104 上。笔记本、手柄或调试电脑连接机器狗 WiFi/机器狗内网后访问 `http://10.21.31.104:8080`。
+真机测试时，网页前端是全量 real 系统的一部分，跑在 104 上。笔记本、手柄或调试电脑连接机器狗 WiFi/机器狗内网后访问 `http://10.21.31.104:8080`。
 
 基本流程：
 
@@ -150,6 +146,15 @@ http://10.21.31.104:8080
 当前项目内置地图入口有 `F19`、`F20`、`F21`。其中 `F19` 和 `F21` 目前仍复用编辑后的 `F20` 地图产品，真实交付前应替换为各楼层实测建图结果。
 
 网页重定位通过 `/initialpose` 发布当前位置和朝向，`m20pro_tcp_bridge` 会转成 M20 Pro 原厂 `2101/1` 初始化定位请求。执行任务时不能重定位；需要先停止当前任务，再到 `定位` 页拖箭头并点击 `执行重定位`。
+
+如果网页箭头方向看起来不对，不要直接改 180 度偏置。先检查：
+
+1. 网页看板里的 `定位状态` 是否正常。
+2. `/m20pro_tcp_bridge/map_pose` 的 yaw 是否和实际朝向一致。
+3. `/ODOM` 是否有 `inf/nan` 或明显漂移。
+4. 当前加载地图是否就是机器狗所在环境。
+
+只有定位源头正确、地图正确、仅网页绘制方向不一致时，才调整前端显示逻辑。默认 `robot_pose_display_yaw_offset_rad=0.0`，不做猜测性旋转。
 
 ## 巡检点字段
 
@@ -199,16 +204,13 @@ NavMode=1    自主导航
 
 ## 真机测试顺序
 
-建议按这个顺序推进，不要跳步：
+当前现场测试顺序：
 
-1. 原厂常规模式录包。
-2. 原厂导航模式录包和重定位。
-3. 本工程 real 影子导航测试，不放开运动控制。
-4. 同楼层短距离运动测试，目标先控制在 1 到 2 米。
-5. 长距离 + 避障测试，先 5 到 10 米，再逐步加长。
-6. 跨楼层测试。
+1. 本工程 real 影子测试：全量启动，不放开运动控制，确认点云、定位、地图、路径、网页状态。
+2. 同楼层真导航：短距离、长距离和避障连续测试，使用 `104_start_real_move.sh`。
+3. 跨楼层真导航：确认各楼层真实地图、楼梯点和原厂步态后再测。
 
-任务 5 和任务 6 必须录包。出现原地转圈、明显偏航、贴障碍物、路径穿墙、地图和当前位置明显不匹配时，立即停止网页任务或使用手柄急停。
+任务 2 和任务 3 必须录包。出现原地转圈、明显偏航、贴障碍物、路径穿墙、地图和当前位置明显不匹配时，立即点击网页停止任务或使用手柄急停。
 
 ## 关键文件
 

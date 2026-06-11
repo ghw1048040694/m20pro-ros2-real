@@ -122,7 +122,7 @@ def generate_launch_description():
         DeclareLaunchArgument("web_dashboard_port", default_value="8080"),
         DeclareLaunchArgument("web_dashboard_data_dir", default_value="~/.m20pro_web"),
         DeclareLaunchArgument("web_dashboard_map_archive_dir", default_value="~/m20pro_maps"),
-        DeclareLaunchArgument("robot_pose_display_yaw_offset_rad", default_value="3.141592653589793"),
+        DeclareLaunchArgument("robot_pose_display_yaw_offset_rad", default_value="0.0"),
         DeclareLaunchArgument("initialpose_topic", default_value="/initialpose"),
         DeclareLaunchArgument(
             "relocalization_result_topic",

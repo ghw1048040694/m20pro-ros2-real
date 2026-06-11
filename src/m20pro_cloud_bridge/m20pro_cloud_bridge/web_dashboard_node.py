@@ -21,7 +21,7 @@ from nav_msgs.msg import OccupancyGrid, Path as RosPath
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
 from visualization_msgs.msg import Marker, MarkerArray
 
 try:
@@ -284,6 +284,9 @@ INDEX_HTML = r"""<!doctype html>
       min-height: 62px;
       background: #fbfcfe;
     }
+    .tile.wide {
+      grid-column: 1 / -1;
+    }
     .label {
       color: var(--muted);
       font-size: 12px;
@@ -522,9 +525,17 @@ INDEX_HTML = r"""<!doctype html>
               <div class="label">步态指令</div>
               <div id="gait" class="value">-</div>
             </div>
-            <div class="tile">
+            <div class="tile wide">
               <div class="label">机器人位姿</div>
               <div id="pose" class="value">-</div>
+            </div>
+            <div class="tile">
+              <div class="label">定位状态</div>
+              <div id="localization" class="value">-</div>
+            </div>
+            <div class="tile">
+              <div class="label">原厂导航</div>
+              <div id="factoryNav" class="value">-</div>
             </div>
           </div>
           <div class="section">
@@ -1164,13 +1175,23 @@ INDEX_HTML = r"""<!doctype html>
       $("gait").textContent = text(s.gait_command);
       if (s.pose) {
         const yawDeg = Number.isFinite(Number(s.pose.display_yaw_deg)) ? s.pose.display_yaw_deg : s.pose.yaw_deg;
-        $("pose").textContent = `x ${fmtNumber(s.pose.x)} / y ${fmtNumber(s.pose.y)} / 朝向 ${fmtNumber(yawDeg, 0)}°`;
+        const rawYaw = fmtNumber(s.pose.yaw_deg, 0);
+        const shownYaw = fmtNumber(yawDeg, 0);
+        const offsetDeg = Number(s.pose.display_yaw_offset_deg || 0);
+        const offsetText = Math.abs(offsetDeg) > 0.01 ? ` / 显示偏置 ${fmtNumber(offsetDeg, 0)}°` : "";
+        $("pose").textContent = `x ${fmtNumber(s.pose.x)} / y ${fmtNumber(s.pose.y)} / 朝向 ${shownYaw}° / 原始 ${rawYaw}°${offsetText}`;
       }
       else $("pose").textContent = "-";
+      if (s.localization_ok === true) $("localization").textContent = "正常";
+      else if (s.localization_ok === false) $("localization").textContent = "异常/未定位";
+      else $("localization").textContent = "-";
+      $("factoryNav").textContent = text(s.navigation_status);
       $("nav").textContent = JSON.stringify({
         路径点数: s.path ? s.path.points.length : 0,
         动态障碍物: s.dynamic_obstacles ? s.dynamic_obstacles.length : 0,
         当前任务: s.active_task || null,
+        定位状态: s.localization_ok,
+        原厂导航: s.navigation_status || null,
         更新时间: s.node_time_text
       }, null, 2);
       const det = s.detections && (s.detections.parsed || s.detections.raw);
@@ -1890,6 +1911,8 @@ class WebDashboardNode(Node):
             "floor": None,
             "stair_status": None,
             "gait_command": None,
+            "localization_ok": None,
+            "navigation_status": None,
             "pose": None,
             "path": {"version": 0, "points": []},
             "map": None,
@@ -1944,10 +1967,12 @@ class WebDashboardNode(Node):
         self.declare_parameter("initialpose_covariance_yaw", 0.0685)
         self.declare_parameter("initialpose_publish_repeats", 5)
         self.declare_parameter("initialpose_publish_interval_s", 0.1)
-        self.declare_parameter("robot_pose_display_yaw_offset_rad", math.pi)
+        self.declare_parameter("robot_pose_display_yaw_offset_rad", 0.0)
         self.declare_parameter("current_floor_topic", "/m20pro/current_floor")
         self.declare_parameter("stair_status_topic", "/m20pro/stair_status")
         self.declare_parameter("gait_command_topic", "/m20pro/gait_command")
+        self.declare_parameter("localization_ok_topic", "/m20pro_tcp_bridge/localization_ok")
+        self.declare_parameter("navigation_status_topic", "/m20pro_tcp_bridge/navigation_status")
         self.declare_parameter("pose_topic", "/m20pro_tcp_bridge/map_pose")
         self.declare_parameter("plan_topic", "/plan")
         self.declare_parameter("map_topic", "/map")
@@ -2126,6 +2151,8 @@ class WebDashboardNode(Node):
         self.create_subscription(String, self._topic("current_floor_topic"), self._on_current_floor, 10)
         self.create_subscription(String, self._topic("stair_status_topic"), self._on_stair_status, 10)
         self.create_subscription(String, self._topic("gait_command_topic"), self._on_gait_command, 10)
+        self.create_subscription(Bool, self._topic("localization_ok_topic"), self._on_localization_ok, 10)
+        self.create_subscription(String, self._topic("navigation_status_topic"), self._on_navigation_status, 10)
         self.create_subscription(PoseStamped, self._topic("pose_topic"), self._on_pose, 20)
         self.create_subscription(RosPath, self._topic("plan_topic"), self._on_path, 5)
         self.create_subscription(OccupancyGrid, self._topic("map_topic"), self._on_map, map_qos)
@@ -2163,14 +2190,27 @@ class WebDashboardNode(Node):
             self._state["gait_command"] = msg.data
             self._mark_topic("gait_command")
 
+    def _on_localization_ok(self, msg: Bool) -> None:
+        with self._lock:
+            self._state["localization_ok"] = bool(msg.data)
+            self._mark_topic("localization_ok")
+
+    def _on_navigation_status(self, msg: String) -> None:
+        with self._lock:
+            self._state["navigation_status"] = msg.data
+            self._mark_topic("navigation_status")
+
     def _on_pose(self, msg: PoseStamped) -> None:
         with self._lock:
             pose = _pose_to_dict(msg.pose)
             if not _is_finite_pose_dict(pose):
                 self._mark_topic("pose_invalid")
                 return
-            display_offset = float(self.get_parameter("robot_pose_display_yaw_offset_rad").value)
-            if math.isfinite(display_offset) and abs(display_offset) > 1e-12:
+            raw_display_offset = float(self.get_parameter("robot_pose_display_yaw_offset_rad").value)
+            display_offset = raw_display_offset if math.isfinite(raw_display_offset) else 0.0
+            pose["display_yaw_offset_rad"] = display_offset
+            pose["display_yaw_offset_deg"] = math.degrees(display_offset)
+            if abs(display_offset) > 1e-12:
                 display_yaw = _wrap_angle(pose["yaw"] + display_offset)
                 pose["display_yaw"] = display_yaw
                 pose["display_yaw_deg"] = math.degrees(display_yaw)

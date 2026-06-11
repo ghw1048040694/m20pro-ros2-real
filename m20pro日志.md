@@ -5335,8 +5335,9 @@ axis command enabled
     - `执行重定位`.
 - Web heading display:
   - added `robot_pose_display_yaw_offset_rad`;
-  - real/web default is `pi`, only for the blue robot arrow and dashboard heading display;
-  - saved waypoint yaw, task yaw, and web relocalization yaw are not modified by this display offset.
+  - earlier temporary handling set the real/web default to `pi` for the blue robot arrow and dashboard heading display;
+  - this was later withdrawn in the next section because heading mismatch must be diagnosed from localization/map/source yaw/frontend drawing instead of guessed by a 180-degree display offset;
+  - saved waypoint yaw, task yaw, and web relocalization yaw were not modified by this display offset.
 - 106 RViz `ODOM` error / invalid localization finding:
   - during failure, 104 `/ODOM` contained invalid values such as `x=.inf`, `y=-.inf`;
   - direct 103 TCP `1007/2` map pose query returned truncated JSON while localization was lost;
@@ -5360,3 +5361,23 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - Important field note:
   - if 106 RViz or 104 web shows ODOM/pose errors, first check whether localization is valid (`Location=0`) and whether 103 `1007/2` returns a full valid pose;
   - do not treat an `inf` ODOM state as a normal Nav2 problem.
+
+## 2026-06-11 Web heading correction and full-stack test policy
+
+- User correctly pointed out that the web robot arrow looking reversed should not be fixed by blindly rotating the display by 180 degrees.
+- Correction applied:
+  - reverted the default `robot_pose_display_yaw_offset_rad` from `pi` to `0.0`;
+  - the parameter remains available only as an explicit debug override;
+  - saved waypoint yaw, task yaw, and web relocalization yaw continue to use the raw map-frame yaw.
+- Added web dashboard diagnostics:
+  - `定位状态` from `/m20pro_tcp_bridge/localization_ok`;
+  - `原厂导航` from `/m20pro_tcp_bridge/navigation_status`;
+  - robot pose display now shows both displayed heading and raw heading, plus display offset only when a nonzero offset is explicitly configured.
+- Field diagnosis rule:
+  - if heading looks wrong, first compare web pose, `/m20pro_tcp_bridge/map_pose`, `/ODOM`, active map, and real robot orientation;
+  - only change frontend drawing if localization and source yaw are correct and only the canvas display is wrong.
+- Field startup policy tightened:
+  - real tests must use one full-stack startup path on 104;
+  - use `scripts/104_start_real_shadow.sh` for no-motion checks;
+  - use `scripts/104_start_real_move.sh` only when motion control is allowed;
+  - standalone `104_start_web.sh` / `m20pro_real_web.sh` are now documented as development preview only and are not valid for relocalization, marking, or task dispatch tests because they do not start tcp_bridge/Nav2/pointcloud fusion.

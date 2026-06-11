@@ -38,7 +38,7 @@ def generate_launch_description():
         DeclareLaunchArgument("port", default_value="8080"),
         DeclareLaunchArgument("data_dir", default_value="~/.m20pro_web"),
         DeclareLaunchArgument("map_archive_dir", default_value="~/m20pro_maps"),
-        DeclareLaunchArgument("robot_pose_display_yaw_offset_rad", default_value="3.141592653589793"),
+        DeclareLaunchArgument("robot_pose_display_yaw_offset_rad", default_value="0.0"),
         DeclareLaunchArgument(
             "map_manifest",
             default_value=os.path.join(bringup_share, "config", "map_manifest.yaml"),
