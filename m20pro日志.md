@@ -5204,3 +5204,53 @@ waypoint.result_file_prefix
   - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py src/m20pro_navigation/m20pro_navigation/config_audit_node.py`;
   - YAML safe-load and task waypoint semantic assertion for `inspection_waypoints.yaml`;
   - `colcon build --packages-select m20pro_cloud_bridge m20pro_navigation m20pro_bringup --symlink-install`.
+
+## 2026-06-11 Real short-distance test no-motion diagnosis
+
+- User reported: after setting points in the web dashboard and clicking start task during a short-distance real test, the robot did not move.
+- 104 was full at first:
+  - `/home/user` on `overlayroot` was `100%` used;
+  - new bag `/home/user/bags/m20_real_nav_20260611_153008` was about `6.5G`;
+  - old shadow bag `/home/user/bags/m20_shadow_20260609_144525` was about `3.2G`;
+  - `/home/user/m20_deploy.zip` was about `2.2G`.
+- Cleanup performed on 104:
+  - deleted `/home/user/m20_deploy.zip`;
+  - deleted old `/home/user/bags/m20_shadow_20260609_144525`;
+  - kept today's `/home/user/bags/m20_real_nav_20260611_153008`;
+  - free space recovered to about `5.2G`, `72%` used.
+- Web task state after launch shutdown was stale:
+  - `settings.json` still had `active_task.status=running`;
+  - `tasks.json` still marked the task as `running`;
+  - cleared `active_task` and marked that task `stopped`, without changing maps, points, DDS, or factory services.
+- Bag and root ROS logs show the web frontend did send the task:
+  - `/m20pro/floor_goal`: 2 messages;
+  - `/m20pro/active_waypoint`: 2 messages;
+  - `/plan`: 13 messages;
+  - `/cmd_vel`: 244 messages.
+- Concrete values from the bag:
+  - target floor/pose: `F20`, `x=3.935`, `y=0.210`, `yaw=0.0`;
+  - initial `/cmd_vel` was approximately `linear.x=0.55`, `angular.z=-0.041`.
+- Root launch log proves the key cause:
+
+```text
+m20pro_tcp_bridge: M20 TCP bridge ready; target 103 host is 10.21.31.103:30001; shadow mode; axis command disabled
+```
+
+- Therefore this run was not actually sending `/cmd_vel` to the 103 body controller. Nav2 planned and generated velocity commands, but `tcp_bridge` was in shadow mode, so the robot would not move.
+- Nav2 also reported controller progress failures:
+  - `Failed to make progress`;
+  - `Nav2 goal floor_goal finished with status 6`;
+  - this is expected if the controller command is not being applied to the robot.
+- The real launch was stopped by `Ctrl+C` around `2026-06-11 15:32:32`, so no real/web/Nav2 process was left running afterward.
+- `scripts/104_status.sh` was enhanced and synced to 104:
+  - prints 104 disk usage;
+  - prints active web task if the web server is running;
+  - prints the latest tcp bridge motion mode from logs;
+  - run it after `su` to read `/root/.ros/log` and confirm whether the latest launch says `axis command enabled` or `shadow mode; axis command disabled`.
+- Next real move test must confirm the root log contains:
+
+```text
+axis command enabled
+```
+
+- If it still says `shadow mode; axis command disabled`, stop and do not expect the robot to move.
