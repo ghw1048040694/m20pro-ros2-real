@@ -5265,3 +5265,17 @@ axis command enabled
 - A plain click still updates `x/y` and keeps the current yaw value.
 - Saved annotations are now drawn as small arrows instead of only circles, so waypoint heading can be checked visually before starting a task.
 - Manual `x/y` and `yaw` inputs remain available for precise values copied from bags/RViz.
+
+## 2026-06-11 Field script updated with 106 localization step
+
+- `/home/fabu/桌面/脚本.docx` was regenerated as a small plain Word document.
+- Added a mandatory pre-test 106/NOS localization check before 104 real navigation:
+  - SSH to 106;
+  - `su`;
+  - `source /opt/ros/foxy/setup.bash`;
+  - `export XAUTHORITY=/home/user/.Xauthority`;
+  - `rviz2`;
+  - open `/opt/robot/share/localization/conf/localization.rviz`;
+  - use RViz `2D Pose Estimate` to align live pointcloud with the active map if needed.
+- The script now explicitly says not to start real navigation if 106 localization, active map, or 104 web robot pose is not aligned.
+- Updated web marking instructions in the script to use drag-arrow marking for `x/y/yaw`, matching the new web dashboard behavior.
