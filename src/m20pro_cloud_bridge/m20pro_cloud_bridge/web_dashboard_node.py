@@ -29,10 +29,26 @@ try:
 except ImportError:  # Foxy does not expose this internal exception module.
     RCLError = Exception
 
-try:
-    import cv2
-except ImportError:  # pragma: no cover - runtime dependency on the robot/operator PC
-    cv2 = None
+cv2 = None
+_CV2_IMPORT_ERROR: Optional[str] = None
+_CV2_IMPORT_ATTEMPTED = False
+_CV2_IMPORT_LOCK = threading.Lock()
+
+
+def get_cv2() -> Any:
+    global cv2, _CV2_IMPORT_ATTEMPTED, _CV2_IMPORT_ERROR
+    with _CV2_IMPORT_LOCK:
+        if not _CV2_IMPORT_ATTEMPTED:
+            _CV2_IMPORT_ATTEMPTED = True
+            try:
+                import cv2 as imported_cv2
+
+                cv2 = imported_cv2
+                _CV2_IMPORT_ERROR = None
+            except Exception as exc:  # pragma: no cover - runtime dependency
+                cv2 = None
+                _CV2_IMPORT_ERROR = str(exc) or exc.__class__.__name__
+        return cv2
 
 
 MANUAL_POINT_TYPES: Dict[str, Dict[str, Any]] = {
@@ -175,6 +191,8 @@ INDEX_HTML = r"""<!doctype html>
       width: 100%;
       height: 100%;
       image-rendering: pixelated;
+      touch-action: none;
+      cursor: crosshair;
     }
     .crosshair {
       position: absolute;
@@ -477,7 +495,7 @@ INDEX_HTML = r"""<!doctype html>
       </div>
       <div class="canvas-box">
         <canvas id="mapCanvas"></canvas>
-        <div id="cursor" class="crosshair">点击地图可取点</div>
+        <div id="cursor" class="crosshair">拖拽地图取点和朝向</div>
       </div>
     </section>
     <aside class="side">
@@ -662,7 +680,7 @@ INDEX_HTML = r"""<!doctype html>
             </div>
             <div class="row">
               <label>坐标 X/Y</label>
-              <input id="markXY" placeholder="点击地图自动填入" />
+              <input id="markXY" placeholder="拖拽地图自动填入" />
             </div>
             <div class="row">
               <label>朝向角(rad)</label>
@@ -760,7 +778,8 @@ INDEX_HTML = r"""<!doctype html>
       annotations: [],
       tasks: [],
       sessionId: null,
-      clickPose: null
+      markDraft: null,
+      markPointer: null
     };
     const manualPointTypeNames = {
       transition: "过渡点",
@@ -913,24 +932,56 @@ INDEX_HTML = r"""<!doctype html>
         y: map.origin.y + (map.height - my) * map.resolution
       };
     }
-    function drawArrow(pose) {
+    function normalizeYaw(yaw) {
+      let value = Number(yaw);
+      if (!Number.isFinite(value)) return 0;
+      while (value > Math.PI) value -= Math.PI * 2;
+      while (value <= -Math.PI) value += Math.PI * 2;
+      return value;
+    }
+    function currentMarkYaw() {
+      return normalizeYaw($("markYaw").value);
+    }
+    function setMarkDraft(pose, message) {
+      state.markDraft = {
+        x: Number(pose.x),
+        y: Number(pose.y),
+        yaw: normalizeYaw(pose.yaw)
+      };
+      $("markXY").value = `${state.markDraft.x.toFixed(3)}, ${state.markDraft.y.toFixed(3)}`;
+      $("markYaw").value = state.markDraft.yaw.toFixed(4);
+      $("cursor").textContent = message || `x ${state.markDraft.x.toFixed(3)} / y ${state.markDraft.y.toFixed(3)} / 朝向 ${state.markDraft.yaw.toFixed(3)} rad`;
+      draw();
+    }
+    function drawArrow(pose, options = {}) {
+      if (!Number.isFinite(Number(pose.x)) || !Number.isFinite(Number(pose.y))) return;
       const p = worldToCanvas(pose.x, pose.y);
       if (!p) return;
+      const color = options.color || "#0f6bff";
+      const size = options.size || 1.0;
+      const label = options.label || "";
       ctx.save();
       ctx.translate(p.x, p.y);
-      ctx.rotate(-pose.yaw);
-      ctx.fillStyle = "#0f6bff";
-      ctx.strokeStyle = "#ffffff";
-      ctx.lineWidth = 2;
+      ctx.rotate(-(Number(pose.yaw) || 0));
+      ctx.fillStyle = color;
+      ctx.strokeStyle = options.stroke || "#ffffff";
+      ctx.lineWidth = options.lineWidth || 2;
       ctx.beginPath();
-      ctx.moveTo(15, 0);
-      ctx.lineTo(-10, -8);
-      ctx.lineTo(-6, 0);
-      ctx.lineTo(-10, 8);
+      ctx.moveTo(15 * size, 0);
+      ctx.lineTo(-10 * size, -8 * size);
+      ctx.lineTo(-6 * size, 0);
+      ctx.lineTo(-10 * size, 8 * size);
       ctx.closePath();
       ctx.fill();
       ctx.stroke();
       ctx.restore();
+      if (label) {
+        ctx.save();
+        ctx.font = "12px system-ui, sans-serif";
+        ctx.fillStyle = "#17212b";
+        ctx.fillText(label, p.x + 11, p.y - 9);
+        ctx.restore();
+      }
     }
     function drawPath(path) {
       if (!path || !path.points || path.points.length < 2) return;
@@ -968,25 +1019,25 @@ INDEX_HTML = r"""<!doctype html>
     }
     function drawAnnotations() {
       if (!state.annotations || !state.map) return;
-      ctx.save();
-      ctx.font = "12px system-ui, sans-serif";
       for (const item of state.annotations) {
         const pose = item.pose || {};
-        const p = worldToCanvas(Number(pose.x), Number(pose.y));
-        if (!p) continue;
         const color = typeColors[item.type] || "#0f6bff";
-        ctx.fillStyle = color;
-        ctx.strokeStyle = "#ffffff";
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, 7, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.stroke();
-        ctx.fillStyle = "#17212b";
         const label = item.label || typeNames[item.type] || "point";
-        ctx.fillText(label, p.x + 10, p.y - 8);
+        drawArrow(
+          {x: Number(pose.x), y: Number(pose.y), yaw: Number(pose.yaw) || 0},
+          {color, size: 0.72, label}
+        );
       }
-      ctx.restore();
+    }
+    function drawMarkDraft() {
+      if (!state.markDraft) return;
+      drawArrow(state.markDraft, {
+        color: "#16a34a",
+        stroke: "#f8fafc",
+        lineWidth: 2.5,
+        size: 0.92,
+        label: "待保存"
+      });
     }
     function draw() {
       const rect = canvas.getBoundingClientRect();
@@ -1010,6 +1061,7 @@ INDEX_HTML = r"""<!doctype html>
         drawObstacles(latest.dynamic_obstacles);
       }
       drawAnnotations();
+      drawMarkDraft();
       if (latest && latest.pose) drawArrow(latest.pose);
     }
     async function refreshLiveMap(version) {
@@ -1223,12 +1275,59 @@ INDEX_HTML = r"""<!doctype html>
         $(`tab-${btn.dataset.tab}`).classList.add("active");
       });
     }
-    canvas.addEventListener("click", (evt) => {
+    canvas.addEventListener("pointerdown", (evt) => {
       const p = canvasToWorld(evt.clientX, evt.clientY);
       if (!p) return;
-      state.clickPose = p;
-      $("markXY").value = `${p.x.toFixed(3)}, ${p.y.toFixed(3)}`;
-      $("cursor").textContent = `x ${p.x.toFixed(3)} / y ${p.y.toFixed(3)}`;
+      evt.preventDefault();
+      state.markPointer = {id: evt.pointerId, start: p, moved: false};
+      canvas.setPointerCapture(evt.pointerId);
+      setMarkDraft(
+        {x: p.x, y: p.y, yaw: currentMarkYaw()},
+        `x ${p.x.toFixed(3)} / y ${p.y.toFixed(3)} / 拖动设置朝向`
+      );
+    });
+    canvas.addEventListener("pointermove", (evt) => {
+      const p = canvasToWorld(evt.clientX, evt.clientY);
+      if (!p) return;
+      if (!state.markPointer || state.markPointer.id !== evt.pointerId) {
+        $("cursor").textContent = `x ${p.x.toFixed(3)} / y ${p.y.toFixed(3)}`;
+        return;
+      }
+      evt.preventDefault();
+      const start = state.markPointer.start;
+      const distance = Math.hypot(p.x - start.x, p.y - start.y);
+      const yaw = distance > 0.03 ? Math.atan2(p.y - start.y, p.x - start.x) : currentMarkYaw();
+      state.markPointer.moved = state.markPointer.moved || distance > 0.03;
+      setMarkDraft(
+        {x: start.x, y: start.y, yaw},
+        `x ${start.x.toFixed(3)} / y ${start.y.toFixed(3)} / 朝向 ${normalizeYaw(yaw).toFixed(3)} rad`
+      );
+    });
+    function finishMarkPointer(evt) {
+      if (!state.markPointer || state.markPointer.id !== evt.pointerId) return;
+      evt.preventDefault();
+      if (canvas.hasPointerCapture(evt.pointerId)) canvas.releasePointerCapture(evt.pointerId);
+      const pose = state.markDraft;
+      state.markPointer = null;
+      if (pose) {
+        $("cursor").textContent = `待保存 x ${pose.x.toFixed(3)} / y ${pose.y.toFixed(3)} / 朝向 ${pose.yaw.toFixed(3)} rad`;
+      }
+    }
+    canvas.addEventListener("pointerup", finishMarkPointer);
+    canvas.addEventListener("pointercancel", finishMarkPointer);
+    $("markYaw").addEventListener("input", () => {
+      const pose = state.markDraft;
+      if (!pose) return;
+      state.markDraft = {x: pose.x, y: pose.y, yaw: currentMarkYaw()};
+      draw();
+    });
+    $("markXY").addEventListener("input", () => {
+      const [xText, yText] = $("markXY").value.split(",");
+      const x = Number(xText);
+      const y = Number(yText);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+      state.markDraft = {x, y, yaw: currentMarkYaw()};
+      draw();
     });
     $("checkMappingEnvBtn").addEventListener("click", async () => {
       try { setLog("mappingLog", await api("POST", "/api/mapping/check_environment", {})); }
@@ -1320,6 +1419,7 @@ INDEX_HTML = r"""<!doctype html>
           }
         });
         await loadAnnotations();
+        state.markDraft = null;
         draw();
         $("markLabel").value = "";
         $("markResultPrefix").value = "";
@@ -1331,6 +1431,8 @@ INDEX_HTML = r"""<!doctype html>
       if (!pose) return;
       $("markXY").value = `${pose.x.toFixed(3)}, ${pose.y.toFixed(3)}`;
       $("markYaw").value = String(pose.yaw.toFixed(4));
+      state.markDraft = {x: pose.x, y: pose.y, yaw: normalizeYaw(pose.yaw)};
+      draw();
       if (state.latest.floor) $("markFloor").value = state.latest.floor;
     });
     $("createTaskBtn").addEventListener("click", async () => {
@@ -1474,12 +1576,14 @@ class _CameraProxyWorker:
         reconnect_s = max(0.2, float(self.node.get_parameter("camera_proxy_reconnect_s").value))
         while not self._is_stopped():
             try:
-                if cv2 is None:
-                    self._set_error("python3-opencv is not installed")
+                cv2_module = get_cv2()
+                if cv2_module is None:
+                    detail = _CV2_IMPORT_ERROR or "python3-opencv is not installed"
+                    self._set_error(f"OpenCV unavailable: {detail}")
                     time.sleep(reconnect_s)
                     continue
                 if cap is None or not cap.isOpened():
-                    cap = self._open_capture()
+                    cap = self._open_capture(cv2_module)
                     if not cap.isOpened():
                         self._set_error("failed to open RTSP stream")
                         cap.release()
@@ -1498,7 +1602,7 @@ class _CameraProxyWorker:
 
                 if not self._should_publish_frame():
                     continue
-                payload = self._encode_frame(frame)
+                payload = self._encode_frame(cv2_module, frame)
                 if payload is not None:
                     with self._condition:
                         self._latest_jpeg = payload
@@ -1515,33 +1619,35 @@ class _CameraProxyWorker:
         if cap is not None:
             cap.release()
 
-    def _open_capture(self):
+    def _open_capture(self, cv2_module: Any) -> Any:
         if str(self.node.get_parameter("camera_proxy_transport").value).lower() == "tcp":
             options = str(self.node.get_parameter("camera_proxy_ffmpeg_options").value)
             with self._opencv_env_lock:
                 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = options
-                if hasattr(cv2, "CAP_FFMPEG"):
-                    cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
+                if hasattr(cv2_module, "CAP_FFMPEG"):
+                    cap = cv2_module.VideoCapture(self.url, cv2_module.CAP_FFMPEG)
                 else:
-                    cap = cv2.VideoCapture(self.url)
+                    cap = cv2_module.VideoCapture(self.url)
         else:
-            cap = cv2.VideoCapture(self.url)
+            cap = cv2_module.VideoCapture(self.url)
 
-        self._set_capture_property(cap, "CAP_PROP_BUFFERSIZE", 1)
+        self._set_capture_property(cv2_module, cap, "CAP_PROP_BUFFERSIZE", 1)
         self._set_capture_property(
+            cv2_module,
             cap,
             "CAP_PROP_OPEN_TIMEOUT_MSEC",
             int(float(self.node.get_parameter("camera_proxy_open_timeout_s").value) * 1000.0),
         )
         self._set_capture_property(
+            cv2_module,
             cap,
             "CAP_PROP_READ_TIMEOUT_MSEC",
             int(float(self.node.get_parameter("camera_proxy_read_timeout_s").value) * 1000.0),
         )
         return cap
 
-    def _set_capture_property(self, cap: Any, name: str, value: float) -> None:
-        prop = getattr(cv2, name, None)
+    def _set_capture_property(self, cv2_module: Any, cap: Any, name: str, value: float) -> None:
+        prop = getattr(cv2_module, name, None)
         if prop is None:
             return
         try:
@@ -1557,15 +1663,15 @@ class _CameraProxyWorker:
             return True
         return (time.time() - last_stamp) >= (1.0 / fps)
 
-    def _encode_frame(self, frame: Any) -> Optional[bytes]:
+    def _encode_frame(self, cv2_module: Any, frame: Any) -> Optional[bytes]:
         max_width = int(self.node.get_parameter("camera_proxy_max_width").value)
         if max_width > 0 and hasattr(frame, "shape") and frame.shape[1] > max_width:
             scale = max_width / float(frame.shape[1])
             height = max(1, int(frame.shape[0] * scale))
-            frame = cv2.resize(frame, (max_width, height), interpolation=cv2.INTER_AREA)
+            frame = cv2_module.resize(frame, (max_width, height), interpolation=cv2_module.INTER_AREA)
 
         quality = max(30, min(95, int(self.node.get_parameter("camera_proxy_jpeg_quality").value)))
-        ok, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+        ok, encoded = cv2_module.imencode(".jpg", frame, [int(cv2_module.IMWRITE_JPEG_QUALITY), quality])
         if not ok:
             return None
         return encoded.tobytes()
@@ -3007,8 +3113,9 @@ class WebDashboardNode(Node):
         if not self._as_bool(self.get_parameter("enable_camera_proxy").value):
             handler.send_error(HTTPStatus.SERVICE_UNAVAILABLE, "camera proxy disabled")
             return
-        if cv2 is None:
-            handler.send_error(HTTPStatus.SERVICE_UNAVAILABLE, "python3-opencv is not installed")
+        if get_cv2() is None:
+            detail = _CV2_IMPORT_ERROR or "python3-opencv is not installed"
+            handler.send_error(HTTPStatus.SERVICE_UNAVAILABLE, f"OpenCV unavailable: {detail}")
             return
 
         worker = self._camera_worker(camera_name)

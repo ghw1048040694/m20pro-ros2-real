@@ -5254,3 +5254,14 @@ axis command enabled
 ```
 
 - If it still says `shadow mode; axis command disabled`, stop and do not expect the robot to move.
+
+## 2026-06-11 Web waypoint yaw marking improved
+
+- User pointed out that manually entering waypoint yaw in the web dashboard is awkward during field marking.
+- Web map marking now works closer to RViz `2D Goal Pose`:
+  - press on the map to choose waypoint `x/y`;
+  - drag toward the direction the robot should face at that waypoint;
+  - release to fill `x/y/yaw` automatically.
+- A plain click still updates `x/y` and keeps the current yaw value.
+- Saved annotations are now drawn as small arrows instead of only circles, so waypoint heading can be checked visually before starting a task.
+- Manual `x/y` and `yaw` inputs remain available for precise values copied from bags/RViz.
