@@ -5279,3 +5279,15 @@ axis command enabled
   - use RViz `2D Pose Estimate` to align live pointcloud with the active map if needed.
 - The script now explicitly says not to start real navigation if 106 localization, active map, or 104 web robot pose is not aligned.
 - Updated web marking instructions in the script to use drag-arrow marking for `x/y/yaw`, matching the new web dashboard behavior.
+
+## 2026-06-11 Field script localization policy simplified
+
+- User pointed out that going to 106 for relocalization before every web task is too cumbersome.
+- Correct field policy:
+  - at the start of a test session, first check localization from the 104 web dashboard;
+  - if the robot pose, map, pointcloud/scan, and costmap look aligned, do not open 106 RViz;
+  - only go to 106 RViz and use `2D Pose Estimate` when localization is visibly wrong, the active map changed, the robot was moved manually, the robot restarted and pose is wrong, cross-floor pose is wrong, or the robot appears outside the map/costmap.
+- `/home/fabu/桌面/脚本.docx` was regenerated with this lighter policy:
+  - fast web-side localization check first;
+  - 106 relocalization only as an exception path;
+  - same-floor short/long/obstacle tests do not require relocalization between tasks when pose remains aligned.
