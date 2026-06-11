@@ -5174,3 +5174,32 @@ source install/setup.bash
   - `/home/user/bags/m20_shadow_20260609_144525`.
 - 104 free space after cleanup:
   - `/home/user` on `overlayroot`: `6.5G` available, `65%` used.
+
+## 2026-06-11 Patrol point naming and payload check
+
+- Meeting decision: patrol points must carry a human-readable name so inspection results can say which area/room they came from.
+- Web point marking now saves explicit inspection semantics:
+  - `label`: point name shown to operators and reports;
+  - `area`: site area such as east zone, core tube, sample section;
+  - `room`: room or inspected component/location;
+  - `result_file_prefix`: result filename prefix for Onrol lidar, YOLO, and later report files.
+- If the operator leaves `result_file_prefix` empty, the web backend generates one from `floor_area_room_label`.
+- `/m20pro/active_waypoint` now publishes those fields inside `waypoint`, so the Onrol lidar detection process should name result files from:
+
+```text
+waypoint.result_file_prefix
+```
+
+- `inspection_waypoints.yaml` example task points were updated with Chinese labels plus `area`, `room`, and `result_file_prefix`.
+- `config_audit_node` now warns if a task waypoint has no label/name, area/region, or room/place.
+- Payload/负重 check:
+  - this repository has no runtime payload/负重 compensation setting;
+  - URDF has static link masses only, not a real-robot load setting;
+  - 104 currently exposes `/EXT_LOAD/POWER` and `/EXT_LOAD/CUR` services with type `drdds/srv/StdSrvInt32`;
+  - the M20 developer manual has `MotionStatus.Payload`, but marks it as an invalid parameter;
+  - the manual also has `LoadPower`, which belongs to device enable/power status and should be treated as external load power, not robot weight compensation.
+- Do not call `/EXT_LOAD/*` casually during navigation tests; it likely affects external load power rather than navigation payload tuning.
+- Validation:
+  - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py src/m20pro_navigation/m20pro_navigation/config_audit_node.py`;
+  - YAML safe-load and task waypoint semantic assertion for `inspection_waypoints.yaml`;
+  - `colcon build --packages-select m20pro_cloud_bridge m20pro_navigation m20pro_bringup --symlink-install`.

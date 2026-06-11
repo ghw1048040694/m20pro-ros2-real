@@ -92,7 +92,10 @@ floors:
           yaw: 3.125201046386605
     waypoints:
       - id: "start_check"
-        label: "Start Check"
+        label: "19层起点检查"
+        area: "示例区域"
+        room: "起点"
+        result_file_prefix: "F19_示例区域_起点_19层起点检查"
         point_type: "task"
         dwell_s: 3.0
         pose:
@@ -113,7 +116,10 @@ floors:
         notes: "Replace with a real safe start-area inspection pose."
 
       - id: "corridor_check"
-        label: "Corridor Check"
+        label: "19层走廊检查"
+        area: "示例区域"
+        room: "走廊"
+        result_file_prefix: "F19_示例区域_走廊_19层走廊检查"
         point_type: "task"
         dwell_s: 5.0
         pose:
@@ -134,7 +140,7 @@ floors:
         notes: "Example point. Tune pose and class names for your model."
 
       - id: "return_check"
-        label: "Return Check"
+        label: "19层返回点"
         point_type: "transition"
         dwell_s: 0.0
         pose:
@@ -249,7 +255,10 @@ floors:
           yaw: 3.125201046386605
     waypoints:
       - id: "f20_demo_check"
-        label: "F20 Demo Check"
+        label: "20层示例房间检查"
+        area: "示例区域"
+        room: "示例房间"
+        result_file_prefix: "F20_示例区域_示例房间_20层示例房间检查"
         point_type: "task"
         dwell_s: 4.0
         pose:
@@ -322,7 +331,10 @@ floors:
           yaw: -0.0019394554046166198
     waypoints:
       - id: "f21_demo_check"
-        label: "F21 Demo Check"
+        label: "21层示例房间检查"
+        area: "示例区域"
+        room: "示例房间"
+        result_file_prefix: "F21_示例区域_示例房间_21层示例房间检查"
         point_type: "task"
         dwell_s: 4.0
         pose:

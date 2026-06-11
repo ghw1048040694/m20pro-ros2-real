@@ -154,6 +154,9 @@ http://10.21.31.104:8080
 
 | 字段 | 含义 |
 | --- | --- |
+| `label` | 点位名称，给现场人员和巡检报告使用 |
+| `area` / `room` | 区域、房间或构件部位 |
+| `result_file_prefix` | 昂锐雷达、YOLO 等检测结果落盘时使用的文件名前缀 |
 | `pose.x/y/z/yaw` | 地图坐标和到点朝向，yaw 单位 rad |
 | `manual_point_type` | 手册点位类型：`transition`、`task`、`charge` |
 | `dwell_s` | 到点后停留秒数 |
@@ -187,7 +190,7 @@ NavMode=1    自主导航
 /m20pro/stop_task
 ```
 
-`/m20pro/active_waypoint` 是 JSON，便于录包后复盘当前点位类型、yaw、停留时间和原厂导航字段。
+`/m20pro/active_waypoint` 是 JSON，包含当前点位名称、区域、房间/部位、结果文件名前缀、点位类型、yaw、停留时间和原厂导航字段。昂锐雷达检测节点应优先使用这里的 `waypoint.result_file_prefix` 命名结果文件。
 
 ## 真机测试顺序
 

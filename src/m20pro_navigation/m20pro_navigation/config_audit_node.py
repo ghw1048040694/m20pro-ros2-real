@@ -135,6 +135,22 @@ class ConfigAuditNode(Node):
             for key in ("x", "y", "yaw"):
                 if key not in pose:
                     warnings.append("floor %s waypoint %s missing pose.%s" % (floor_id, waypoint_id, key))
+            if not str(waypoint.get("label") or waypoint.get("name") or "").strip():
+                warnings.append(
+                    "floor %s waypoint %s has no label/name for inspection reports"
+                    % (floor_id, waypoint_id)
+                )
+            if str(waypoint.get("point_type") or waypoint.get("manual_point_type") or "").strip() == "task":
+                if not str(waypoint.get("area") or waypoint.get("region") or "").strip():
+                    warnings.append(
+                        "floor %s task waypoint %s has no area/region"
+                        % (floor_id, waypoint_id)
+                    )
+                if not str(waypoint.get("room") or waypoint.get("place") or "").strip():
+                    warnings.append(
+                        "floor %s task waypoint %s has no room/place"
+                        % (floor_id, waypoint_id)
+                    )
             point_type = str(waypoint.get("point_type") or waypoint.get("manual_point_type") or "").strip()
             if point_type not in ("transition", "task", "charge"):
                 warnings.append(

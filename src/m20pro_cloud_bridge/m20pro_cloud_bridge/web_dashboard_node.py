@@ -646,7 +646,19 @@ INDEX_HTML = r"""<!doctype html>
             </div>
             <div class="row">
               <label>名称</label>
-              <input id="markLabel" placeholder="例如 F20 楼梯上行切换点" />
+              <input id="markLabel" placeholder="例如 20层东区2008房间" />
+            </div>
+            <div class="row">
+              <label>区域</label>
+              <input id="markArea" placeholder="例如 东区、核心筒、样板段" />
+            </div>
+            <div class="row">
+              <label>房间/部位</label>
+              <input id="markRoom" placeholder="例如 2008房间、西侧走廊" />
+            </div>
+            <div class="row">
+              <label>结果前缀</label>
+              <input id="markResultPrefix" placeholder="留空自动生成昂锐雷达结果文件名前缀" />
             </div>
             <div class="row">
               <label>坐标 X/Y</label>
@@ -1118,6 +1130,7 @@ INDEX_HTML = r"""<!doctype html>
       }
       for (const item of state.annotations) {
         const pose = item.pose || {};
+        const place = [item.area, item.room, item.result_file_prefix ? `结果:${item.result_file_prefix}` : ""].filter(Boolean).join(" / ");
         const el = document.createElement("div");
         el.className = "item";
         el.innerHTML = `
@@ -1126,6 +1139,7 @@ INDEX_HTML = r"""<!doctype html>
             <span class="tag">${typeNames[item.type] || item.type}</span>
           </div>
           <div class="item-meta">${item.floor || "-"} / ${manualPointTypeNames[item.manual_point_type] || item.manual_point_type || "-"} / x ${fmtNumber(Number(pose.x))}, y ${fmtNumber(Number(pose.y))}, 朝向 ${fmtNumber(Number(pose.yaw), 2)} / 停留 ${fmtNumber(Number(item.dwell_s || 0), 1)}s</div>
+          ${place ? `<div class="item-meta">${place}</div>` : ""}
           <div class="actions"><button class="danger" data-delete-mark="${item.id}">删除</button></div>
         `;
         box.appendChild(el);
@@ -1148,7 +1162,8 @@ INDEX_HTML = r"""<!doctype html>
       for (const item of state.annotations) {
         const line = document.createElement("label");
         line.className = "checkline";
-        line.innerHTML = `<input type="checkbox" value="${item.id}" checked><span>${item.floor || "-"} / ${item.label || item.id} / ${manualPointTypeNames[item.manual_point_type] || item.manual_point_type || typeNames[item.type] || item.type} / 朝向 ${fmtNumber(Number((item.pose || {}).yaw), 2)} / 停留 ${fmtNumber(Number(item.dwell_s || 0), 1)}s</span>`;
+        const place = [item.area, item.room].filter(Boolean).join(" / ");
+        line.innerHTML = `<input type="checkbox" value="${item.id}" checked><span>${item.floor || "-"} / ${item.label || item.id}${place ? ` / ${place}` : ""} / ${manualPointTypeNames[item.manual_point_type] || item.manual_point_type || typeNames[item.type] || item.type} / 朝向 ${fmtNumber(Number((item.pose || {}).yaw), 2)} / 停留 ${fmtNumber(Number(item.dwell_s || 0), 1)}s</span>`;
         box.appendChild(line);
       }
     }
@@ -1285,6 +1300,9 @@ INDEX_HTML = r"""<!doctype html>
           type: $("markType").value,
           floor: $("markFloor").value.trim(),
           label: $("markLabel").value.trim(),
+          area: $("markArea").value.trim(),
+          room: $("markRoom").value.trim(),
+          result_file_prefix: $("markResultPrefix").value.trim(),
           pose: {
             x,
             y,
@@ -1304,6 +1322,7 @@ INDEX_HTML = r"""<!doctype html>
         await loadAnnotations();
         draw();
         $("markLabel").value = "";
+        $("markResultPrefix").value = "";
         $("cursor").textContent = `已保存 ${payload.annotation.label || payload.annotation.id}`;
       } catch (err) { $("cursor").textContent = err.message || JSON.stringify(err); }
     });
@@ -2287,6 +2306,10 @@ class WebDashboardNode(Node):
         floor = str(payload.get("floor") or "").strip()
         if not floor:
             return self._error("点位楼层不能为空")
+        point_type = str(payload.get("type") or "patrol").strip()
+        label = str(payload.get("label") or "").strip()
+        if not label:
+            label = f"{floor}_{point_type}_{len(self._annotations) + 1}"
         map_id = str(payload.get("map_id") or "").strip() or None
         if map_id == "live_map":
             map_id = "live_map"
@@ -2302,9 +2325,12 @@ class WebDashboardNode(Node):
         item = {
             "id": _new_id("point"),
             "map_id": map_id,
-            "type": str(payload.get("type") or "patrol").strip(),
+            "type": point_type,
             "floor": floor,
-            "label": str(payload.get("label") or "").strip(),
+            "label": label,
+            "area": str(payload.get("area") or payload.get("region") or "").strip(),
+            "room": str(payload.get("room") or payload.get("place") or "").strip(),
+            "result_file_prefix": str(payload.get("result_file_prefix") or "").strip(),
             "pose": {"x": x, "y": y, "z": z, "yaw": yaw},
             "dwell_s": self._resolve_dwell_s(payload),
             "manual_point_type": self._manual_point_type_from_payload(payload),
@@ -2315,8 +2341,6 @@ class WebDashboardNode(Node):
             "created_at": _now_text(),
         }
         self._normalize_annotation_semantics(item)
-        if not item["label"]:
-            item["label"] = f"{floor}_{item['type']}_{len(self._annotations) + 1}"
         with self._data_lock:
             self._annotations.append(item)
             self._save_json("annotations.json", self._annotations)
@@ -2404,10 +2428,26 @@ class WebDashboardNode(Node):
             item["dwell_s"] = float(MANUAL_POINT_TYPES[manual_type]["default_dwell_s"])
         item["inspect_duration_s"] = item["dwell_s"]
 
+        item["label"] = str(item.get("label") or item.get("name") or item.get("id") or "").strip()
+        item["area"] = str(item.get("area") or item.get("region") or "").strip()
+        item["room"] = str(item.get("room") or item.get("place") or item.get("location") or "").strip()
+        result_prefix = str(item.get("result_file_prefix") or "").strip()
+        item["result_file_prefix"] = result_prefix or self._annotation_result_prefix(item)
+
         if "camera" not in item:
             item["camera"] = ""
         item["target_classes"] = self._string_list(item.get("target_classes"))
         return item
+
+    def _annotation_result_prefix(self, item: Dict[str, Any]) -> str:
+        parts = [
+            str(item.get("floor") or "").strip(),
+            str(item.get("area") or "").strip(),
+            str(item.get("room") or "").strip(),
+            str(item.get("label") or item.get("id") or "").strip(),
+        ]
+        raw = "_".join(part for part in parts if part)
+        return _sanitize_name(raw, str(item.get("id") or "inspection_result"))
 
     @staticmethod
     def _string_list(value: Any) -> List[str]:
@@ -2709,6 +2749,9 @@ class WebDashboardNode(Node):
         return {
             "id": annotation.get("id"),
             "label": annotation.get("label"),
+            "area": annotation.get("area"),
+            "room": annotation.get("room"),
+            "result_file_prefix": annotation.get("result_file_prefix"),
             "floor": annotation.get("floor"),
             "type": annotation.get("type"),
             "manual_point_type": annotation.get("manual_point_type"),
