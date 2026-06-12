@@ -5381,3 +5381,18 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
   - use `scripts/104_start_real_shadow.sh` for no-motion checks;
   - use `scripts/104_start_real_move.sh` only when motion control is allowed;
   - standalone `104_start_web.sh` / `m20pro_real_web.sh` are now documented as development preview only and are not valid for relocalization, marking, or task dispatch tests because they do not start tcp_bridge/Nav2/pointcloud fusion.
+
+## 2026-06-12 Full-stack preflight script
+
+- User clarified that the old Task 1 should not be a manual procedure for every customer-side startup.
+- Added `scripts/104_preflight_check.sh`:
+  - must be run on 104 after the known-good `source -> su -> source install` sequence;
+  - does not restart original services, does not start/stop real, and does not change DDS/multicast settings;
+  - checks full real startup nodes, topics, lidar data, scan data, finite map pose, finite ODOM, `/m20pro_tcp_bridge/localization_ok`, vendor navigation status, Nav2 lifecycle active states, web `/healthz`, and web `/api/state`;
+  - default mode is `move`, so it also confirms motion command mode before field tasks;
+  - `shadow` can be passed for no-motion diagnostics.
+- Field policy:
+  - start `scripts/104_start_real_move.sh`;
+  - open another 104 terminal and run `scripts/104_preflight_check.sh move`;
+  - if it prints `M20PRO PREFLIGHT OK`, proceed to web relocalization/marking/task dispatch;
+  - if it prints `M20PRO PREFLIGHT FAIL`, do not start a task and fix the listed items first.

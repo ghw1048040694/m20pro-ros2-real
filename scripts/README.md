@@ -22,6 +22,7 @@ source install/setup.bash
 ```bash
 ./scripts/104_start_real_shadow.sh
 ./scripts/104_start_real_move.sh
+./scripts/104_preflight_check.sh move
 ./scripts/104_stop_real.sh
 ./scripts/104_record_bag.sh 180 m20_test
 ./scripts/104_check_lidar.sh
@@ -39,6 +40,7 @@ source install/setup.bash
 说明：
 - 真机现场测试只用 `104_start_real_shadow.sh` 或 `104_start_real_move.sh` 全量启动。
 - 全量 real 会同时拉起 tcp_bridge、Nav2、点云融合和网页前端；笔记本/手柄访问 `http://10.21.31.104:8080`。
+- `104_preflight_check.sh move` 是作业前自检；看到 `M20PRO PREFLIGHT OK` 后再在网页里执行任务。
 - `104_start_web.sh` 只用于开发预览网页界面，不会拉起 tcp_bridge/Nav2/点云融合，不能作为重定位、标点、下发任务的现场流程。
 - `127.0.0.1:8080` 只适合在运行前端的那台机器本机自测。
 - `shadow` 不放开运动控制。

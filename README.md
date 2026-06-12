@@ -70,6 +70,7 @@ source install/setup.bash
 ```bash
 ./scripts/104_start_real_shadow.sh         # 启动 real，不放开运动控制
 ./scripts/104_start_real_move.sh           # 启动 real，放开运动控制
+./scripts/104_preflight_check.sh move      # 作业前自检，OK 后再开始任务
 ./scripts/104_stop_real.sh                 # 停止 real
 ./scripts/104_record_bag.sh 180 m20_test   # 录包
 ./scripts/104_check_lidar.sh               # 检查 /LIDAR/POINTS
@@ -86,7 +87,7 @@ source install/setup.bash
 
 现场真机测试只走全量 real 启动：`104_start_real_shadow.sh` 或 `104_start_real_move.sh`。全量 real 会同时拉起 tcp_bridge、Nav2、点云融合和网页前端。
 
-`104_start_real_move.sh` 会放开运动控制，只能在现场有人看护、手柄急停可用时执行。`104_start_web.sh` 只用于开发预览网页界面，不会拉起 tcp_bridge/Nav2/点云融合，不能作为重定位、标点、下发任务的现场流程。
+`104_start_real_move.sh` 会放开运动控制，只能在现场有人看护、手柄急停可用时执行。启动后先跑 `104_preflight_check.sh move`，看到 `M20PRO PREFLIGHT OK` 再打开网页执行作业任务。`104_start_web.sh` 只用于开发预览网页界面，不会拉起 tcp_bridge/Nav2/点云融合，不能作为重定位、标点、下发任务的现场流程。
 
 ## 启动方式
 
@@ -109,6 +110,19 @@ ros2 launch m20pro_bringup m20pro.launch.py mode:=sim
 ```bash
 ./scripts/104_start_real_move.sh
 ```
+
+另开一个 104 终端执行作业前自检：
+
+```bash
+ssh user@10.21.31.104
+source /opt/robot/scripts/setup_ros2.sh
+su
+cd /home/user/m20pro_ros2_ws
+source install/setup.bash
+./scripts/104_preflight_check.sh move
+```
+
+看到 `M20PRO PREFLIGHT OK` 后，浏览器访问 `http://10.21.31.104:8080`，直接做网页重定位、标点、任务下发。自检失败时不要开始任务，按脚本列出的失败项处理。
 
 开发预览网页：
 
@@ -207,7 +221,7 @@ NavMode=1    自主导航
 当前现场测试顺序：
 
 1. 本工程 real 影子测试：全量启动，不放开运动控制，确认点云、定位、地图、路径、网页状态。
-2. 同楼层真导航：短距离、长距离和避障连续测试，使用 `104_start_real_move.sh`。
+2. 同楼层真导航：使用 `104_start_real_move.sh` 全量启动，`104_preflight_check.sh move` 返回 OK 后再做短距离、长距离和避障连续测试。
 3. 跨楼层真导航：确认各楼层真实地图、楼梯点和原厂步态后再测。
 
 任务 2 和任务 3 必须录包。出现原地转圈、明显偏航、贴障碍物、路径穿墙、地图和当前位置明显不匹配时，立即点击网页停止任务或使用手柄急停。
