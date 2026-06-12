@@ -28,6 +28,30 @@ Naming note: this file replaced the previous local-only `codex.md`. Going forwar
   - README check commands were updated to avoid `--once`.
 - Do not change or restart factory multicast/FastDDS services during the field run unless explicitly doing recovery diagnostics.
 
+## 2026-06-12 web dashboard usability pass
+
+- Stopped the standalone web preview before editing.
+- Improved the web task panel:
+  - tasks can now be renamed through `/api/tasks/update`;
+  - tasks can now be deleted through `DELETE /api/tasks?id=...`;
+  - a running task cannot be deleted until it is stopped;
+  - deleting a task does not delete map annotations.
+- Added robot battery display:
+  - subscribes to factory `/BATTERY_DATA` when `drdds/msg/BatteryData` is available;
+  - parses two battery packs, percentage, voltage, current, remaining capacity, cycles, and average temperature;
+  - standalone/local environments without `drdds` still start, with battery display disabled.
+- Improved map viewport behavior:
+  - desktop layout now fits the map panel within the browser viewport;
+  - the map canvas recalculates size after live map or fixed map loads;
+  - mobile/narrow layouts still scroll normally.
+- Verified on 104:
+  - `m20pro_cloud_bridge` builds successfully;
+  - standalone web preview starts on `0.0.0.0:8080`;
+  - `/healthz` returns OK;
+  - page HTML contains the new battery/task controls;
+  - `/api/state` reports live battery data from two packs;
+  - stopped the preview afterward and confirmed no web/real process remained.
+
 ## 2026-06-04 desktop field script regenerated
 
 - User asked to delete the previous M20Pro Word documents from the desktop and regenerate a clean script document named `脚本.word`.

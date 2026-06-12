@@ -25,6 +25,11 @@ from std_msgs.msg import Bool, String
 from visualization_msgs.msg import Marker, MarkerArray
 
 try:
+    from drdds.msg import BatteryData
+except ImportError:  # Only available on the robot's factory ROS environment.
+    BatteryData = None
+
+try:
     from rclpy._rclpy_pybind11 import RCLError
 except ImportError:  # Foxy does not expose this internal exception module.
     RCLError = Exception
@@ -125,6 +130,7 @@ INDEX_HTML = r"""<!doctype html>
       background: var(--bg);
       color: var(--text);
       font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      overflow: hidden;
     }
     header {
       min-height: 58px;
@@ -152,13 +158,15 @@ INDEX_HTML = r"""<!doctype html>
       grid-template-columns: minmax(520px, 1fr) 420px;
       gap: 12px;
       padding: 12px;
-      min-height: calc(100vh - 58px);
+      height: calc(100vh - 58px);
+      min-height: 0;
     }
     .map-wrap, .side {
       background: var(--panel);
       border: 1px solid var(--line);
       border-radius: 8px;
       min-width: 0;
+      min-height: 0;
     }
     .map-wrap {
       display: flex;
@@ -183,7 +191,7 @@ INDEX_HTML = r"""<!doctype html>
     .canvas-box {
       position: relative;
       flex: 1;
-      min-height: 590px;
+      min-height: 0;
       background: #cfd5dc;
     }
     canvas {
@@ -470,8 +478,10 @@ INDEX_HTML = r"""<!doctype html>
       width: 76px;
     }
     @media (max-width: 1080px) {
-      main { grid-template-columns: 1fr; }
-      .canvas-box { min-height: 460px; }
+      body { overflow: auto; }
+      main { grid-template-columns: 1fr; height: auto; min-height: calc(100vh - 58px); }
+      .canvas-box { min-height: min(62vh, 560px); }
+      .side { min-height: 520px; }
     }
     @media (max-width: 560px) {
       header { align-items: flex-start; flex-direction: column; }
@@ -536,6 +546,10 @@ INDEX_HTML = r"""<!doctype html>
             <div class="tile">
               <div class="label">原厂导航</div>
               <div id="factoryNav" class="value">-</div>
+            </div>
+            <div class="tile">
+              <div class="label">机器狗电量</div>
+              <div id="battery" class="value">-</div>
             </div>
           </div>
           <div class="section">
@@ -1149,6 +1163,7 @@ INDEX_HTML = r"""<!doctype html>
       $("mapMeta").textContent = `${map.width} x ${map.height}, ${map.resolution.toFixed(3)} m/格`;
       $("mapMode").textContent = "实时 /map";
       await loadAnnotations();
+      resizeCanvas();
     }
     async function loadFileMap(mapId) {
       if (!mapId) {
@@ -1166,7 +1181,7 @@ INDEX_HTML = r"""<!doctype html>
       $("mapMeta").textContent = `${map.floor || "-"} / ${map.width} x ${map.height}, ${map.resolution.toFixed(3)} m/格`;
       $("mapMode").textContent = map.source === "project_builtin" ? "项目内置地图" : "固定地图";
       await loadAnnotations();
-      draw();
+      resizeCanvas();
     }
     function updateState(s) {
       state.latest = s;
@@ -1186,10 +1201,18 @@ INDEX_HTML = r"""<!doctype html>
       else if (s.localization_ok === false) $("localization").textContent = "异常/未定位";
       else $("localization").textContent = "-";
       $("factoryNav").textContent = text(s.navigation_status);
+      if (s.battery && s.battery.primary) {
+        const pack = s.battery.primary;
+        const tempText = Number.isFinite(Number(pack.temperature_c)) ? ` / ${fmtNumber(Number(pack.temperature_c), 1)}℃` : "";
+        $("battery").textContent = `${text(pack.level)}% / ${fmtNumber(Number(pack.voltage_v), 1)}V / ${fmtNumber(Number(pack.current_a), 1)}A${tempText}`;
+      } else {
+        $("battery").textContent = "-";
+      }
       $("nav").textContent = JSON.stringify({
         路径点数: s.path ? s.path.points.length : 0,
         动态障碍物: s.dynamic_obstacles ? s.dynamic_obstacles.length : 0,
         当前任务: s.active_task || null,
+        电量: s.battery && s.battery.primary ? s.battery.primary : null,
         定位状态: s.localization_ok,
         原厂导航: s.navigation_status || null,
         更新时间: s.node_time_text
@@ -1325,12 +1348,17 @@ INDEX_HTML = r"""<!doctype html>
         const active = payload.active_task && payload.active_task.status === "running";
         const isRunning = task.status === "running";
         const canStart = !active && !isRunning;
+        const canDelete = !isRunning && !(payload.active_task && payload.active_task.task_id === task.id);
         const el = document.createElement("div");
         el.className = "item";
         el.innerHTML = `
           <div class="item-head"><span>${task.name || task.id}</span><span class="tag">${task.status || "ready"}</span></div>
-          <div class="item-meta">${(task.annotation_ids || []).length} 个点 / ${task.created_at || ""}</div>
-          <div class="actions"><button class="primary" data-start-task="${task.id}" ${canStart ? "" : "disabled"}>${isRunning ? "执行中" : (active ? "先停止当前任务" : "开始执行")}</button></div>
+          <div class="item-meta">${(task.annotation_ids || []).length} 个点 / ${task.created_at || ""}${task.updated_at ? ` / 更新 ${task.updated_at}` : ""}</div>
+          <div class="actions">
+            <button class="primary" data-start-task="${task.id}" ${canStart ? "" : "disabled"}>${isRunning ? "执行中" : (active ? "先停止当前任务" : "开始执行")}</button>
+            <button data-rename-task="${task.id}">改名</button>
+            <button class="danger" data-delete-task="${task.id}" ${canDelete ? "" : "disabled"}>删除</button>
+          </div>
         `;
         box.appendChild(el);
       }
@@ -1339,6 +1367,31 @@ INDEX_HTML = r"""<!doctype html>
           const payload = await api("POST", "/api/tasks/start", {task_id: btn.dataset.startTask});
           setLog("activeTask", payload.active_task || payload);
           await loadTasks();
+        });
+      }
+      for (const btn of box.querySelectorAll("[data-rename-task]")) {
+        btn.addEventListener("click", async () => {
+          const task = state.tasks.find(item => item.id === btn.dataset.renameTask);
+          if (!task) return;
+          const name = window.prompt("请输入新的任务名称", task.name || "");
+          if (name === null) return;
+          const trimmed = name.trim();
+          if (!trimmed) return;
+          try {
+            await api("POST", "/api/tasks/update", {task_id: task.id, name: trimmed});
+            await loadTasks();
+          } catch (err) { setLog("activeTask", err); }
+        });
+      }
+      for (const btn of box.querySelectorAll("[data-delete-task]")) {
+        btn.addEventListener("click", async () => {
+          const task = state.tasks.find(item => item.id === btn.dataset.deleteTask);
+          if (!task) return;
+          if (!window.confirm(`确认删除任务“${task.name || task.id}”？点位不会被删除。`)) return;
+          try {
+            await api("DELETE", `/api/tasks?id=${encodeURIComponent(task.id)}`);
+            await loadTasks();
+          } catch (err) { setLog("activeTask", err); }
         });
       }
     }
@@ -1913,6 +1966,7 @@ class WebDashboardNode(Node):
             "gait_command": None,
             "localization_ok": None,
             "navigation_status": None,
+            "battery": None,
             "pose": None,
             "path": {"version": 0, "points": []},
             "map": None,
@@ -1973,6 +2027,7 @@ class WebDashboardNode(Node):
         self.declare_parameter("gait_command_topic", "/m20pro/gait_command")
         self.declare_parameter("localization_ok_topic", "/m20pro_tcp_bridge/localization_ok")
         self.declare_parameter("navigation_status_topic", "/m20pro_tcp_bridge/navigation_status")
+        self.declare_parameter("battery_topic", "/BATTERY_DATA")
         self.declare_parameter("pose_topic", "/m20pro_tcp_bridge/map_pose")
         self.declare_parameter("plan_topic", "/plan")
         self.declare_parameter("map_topic", "/map")
@@ -2153,6 +2208,10 @@ class WebDashboardNode(Node):
         self.create_subscription(String, self._topic("gait_command_topic"), self._on_gait_command, 10)
         self.create_subscription(Bool, self._topic("localization_ok_topic"), self._on_localization_ok, 10)
         self.create_subscription(String, self._topic("navigation_status_topic"), self._on_navigation_status, 10)
+        if BatteryData is not None:
+            self.create_subscription(BatteryData, self._topic("battery_topic"), self._on_battery, 10)
+        else:
+            self.get_logger().warning("drdds.msg.BatteryData is unavailable; battery display is disabled")
         self.create_subscription(PoseStamped, self._topic("pose_topic"), self._on_pose, 20)
         self.create_subscription(RosPath, self._topic("plan_topic"), self._on_path, 5)
         self.create_subscription(OccupancyGrid, self._topic("map_topic"), self._on_map, map_qos)
@@ -2199,6 +2258,63 @@ class WebDashboardNode(Node):
         with self._lock:
             self._state["navigation_status"] = msg.data
             self._mark_topic("navigation_status")
+
+    def _on_battery(self, msg: Any) -> None:
+        batteries = []
+        for index, item in enumerate(getattr(msg, "data", []) or []):
+            temperatures = [
+                float(value)
+                for value in (getattr(item, "battery_temperature", []) or [])
+                if math.isfinite(float(value))
+            ]
+            avg_temp = sum(temperatures) / len(temperatures) if temperatures else None
+            serial_raw = getattr(item, "battery_serialnum", "")
+            if isinstance(serial_raw, (bytes, bytearray)):
+                serial = serial_raw.decode("utf-8", errors="ignore").strip("\x00").strip()
+            elif isinstance(serial_raw, str):
+                serial = serial_raw.strip("\x00").strip()
+            else:
+                try:
+                    serial_values = list(serial_raw)
+                except TypeError:
+                    serial_values = None
+                if serial_values is None:
+                    serial = str(serial_raw).strip("\x00").strip()
+                else:
+                    chars = []
+                    for value in serial_values:
+                        try:
+                            ivalue = int(value)
+                        except (TypeError, ValueError):
+                            continue
+                        if ivalue == 0:
+                            continue
+                        chars.append(chr(ivalue))
+                    serial = "".join(chars).strip()
+            batteries.append(
+                {
+                    "index": index,
+                    "level": int(getattr(item, "battery_level", 0)),
+                    "voltage_v": float(getattr(item, "voltage", 0)) * 0.01,
+                    "current_a": float(getattr(item, "current", 0)) * 0.01,
+                    "remaining_mah": float(getattr(item, "remaining_capacity", 0)) * 10.0,
+                    "nominal_mah": float(getattr(item, "nominal_capacity", 0)) * 10.0,
+                    "cycles": int(getattr(item, "cycles", 0)),
+                    "temperature_c": avg_temp,
+                    "mos_state": int(getattr(item, "mos_state", 0)),
+                    "protected_state": int(getattr(item, "protected_state", 0)),
+                    "serial": serial,
+                }
+            )
+        battery = {
+            "last_update": time.time(),
+            "count": len(batteries),
+            "packs": batteries,
+            "primary": batteries[0] if batteries else None,
+        }
+        with self._lock:
+            self._state["battery"] = battery
+            self._mark_topic("battery")
 
     def _on_pose(self, msg: PoseStamped) -> None:
         with self._lock:
@@ -2813,6 +2929,48 @@ class WebDashboardNode(Node):
     def _tasks_payload(self) -> Dict[str, Any]:
         with self._data_lock:
             return {"ok": True, "tasks": list(self._tasks), "active_task": self._settings.get("active_task")}
+
+    def _update_task(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        task_id = str(payload.get("task_id") or payload.get("id") or "").strip()
+        name = str(payload.get("name") or "").strip()
+        if not task_id:
+            return self._error("缺少任务 id")
+        if not name:
+            return self._error("任务名称不能为空")
+        with self._data_lock:
+            task = self._find_by_id(self._tasks, task_id)
+            if task is None:
+                return self._error("任务不存在")
+            task["name"] = name
+            task["updated_at"] = _now_text()
+            active = self._settings.get("active_task") or {}
+            if active.get("task_id") == task_id:
+                active["task_name"] = name
+                self._settings["active_task"] = active
+                self._save_json("settings.json", self._settings)
+            self._save_json("tasks.json", self._tasks)
+            updated = dict(task)
+        self._append_event("修改任务名称", {"task_id": task_id, "name": name})
+        return {"ok": True, "task": updated}
+
+    def _delete_task(self, task_id: str) -> Dict[str, Any]:
+        task_id = str(task_id or "").strip()
+        if not task_id:
+            return self._error("缺少任务 id")
+        with self._data_lock:
+            active = self._settings.get("active_task") or {}
+            if active.get("status") == "running" and active.get("task_id") == task_id:
+                return self._error("任务正在执行，请先停止当前任务再删除")
+            before = len(self._tasks)
+            self._tasks = [item for item in self._tasks if item.get("id") != task_id]
+            if len(self._tasks) == before:
+                return self._error("任务不存在")
+            if active.get("task_id") == task_id:
+                self._settings["active_task"] = None
+                self._save_json("settings.json", self._settings)
+            self._save_json("tasks.json", self._tasks)
+        self._append_event("删除任务", {"task_id": task_id})
+        return {"ok": True, "deleted": task_id}
 
     def _create_task(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         annotation_ids = payload.get("annotation_ids") or []
@@ -3510,6 +3668,8 @@ class WebDashboardNode(Node):
                     self._send_api(node._create_annotation(payload))
                 elif parsed.path == "/api/tasks":
                     self._send_api(node._create_task(payload))
+                elif parsed.path == "/api/tasks/update":
+                    self._send_api(node._update_task(payload))
                 elif parsed.path == "/api/tasks/start":
                     self._send_api(node._start_task(payload))
                 elif parsed.path == "/api/tasks/stop":
@@ -3525,6 +3685,9 @@ class WebDashboardNode(Node):
                 if parsed.path == "/api/annotations":
                     annotation_id = (query.get("id") or [""])[0]
                     self._send_api(node._delete_annotation(annotation_id))
+                elif parsed.path == "/api/tasks":
+                    task_id = (query.get("id") or [""])[0]
+                    self._send_api(node._delete_task(task_id))
                 else:
                     self.send_error(HTTPStatus.NOT_FOUND)
 
