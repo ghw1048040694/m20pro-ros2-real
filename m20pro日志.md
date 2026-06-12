@@ -1,10 +1,32 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-06-04 18:03 CST
+Last updated: 2026-06-12 10:52 CST
 
 This file is maintained by Codex as the local M20 Pro project memory for future ChatGPT review. It records the current architecture, important decisions, recent changes, verification status, and next steps.
 
 Naming note: this file replaced the previous local-only `codex.md`. Going forward, maintain `m20pro.md`.
+
+## 2026-06-12 pre-departure field check
+
+- Local repo was clean before the check and latest commit was present on both GitHub and GitLab.
+- Desktop `/home/fabu/桌面/脚本.docx` was verified readable, uses Songti fonts, and contains only:
+  - `任务一：同楼层真导航`
+  - `任务二：跨楼层真导航`
+- 104 workspace structure was checked:
+  - packages are only under `/home/user/m20pro_ros2_ws/src`;
+  - no stray `package.xml` exists at workspace root or `src` root;
+  - `colcon list --base-paths src` sees the expected five packages.
+- 104 field scripts were verified synchronized with local checksums.
+- No M20Pro real/web/Nav2 process was left running before departure.
+- Disk note:
+  - 104 has about 5.2 GB free on `/home/user`;
+  - `/home/user/bags/m20_real_nav_20260611_153008` still occupies about 6.5 GB;
+  - it was not deleted because no local backup was found during the check.
+- Fixed a field-critical compatibility issue:
+  - 104 ROS 2 Foxy does not accept `ros2 topic echo --once`;
+  - `scripts/104_preflight_check.sh` now reads one message through `ros2 topic echo ... --no-arr` and exits after the first message separator;
+  - README check commands were updated to avoid `--once`.
+- Do not change or restart factory multicast/FastDDS services during the field run unless explicitly doing recovery diagnostics.
 
 ## 2026-06-04 desktop field script regenerated
 

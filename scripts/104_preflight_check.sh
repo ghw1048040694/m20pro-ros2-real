@@ -77,7 +77,15 @@ node_exists() {
 }
 
 topic_once() {
-  timeout "$1" ros2 topic echo "$2" --once --no-arr >/tmp/m20pro_preflight_topic.out 2>/tmp/m20pro_preflight_topic.err
+  local timeout_s="$1"
+  local topic="$2"
+  : >/tmp/m20pro_preflight_topic.out
+  : >/tmp/m20pro_preflight_topic.err
+  timeout "${timeout_s}" bash -c '
+    ros2 topic echo "$1" --no-arr 2>"$2" \
+      | awk "{ print; if (\$0 == \"---\") exit 0 }" >"$3"
+  ' _ "${topic}" /tmp/m20pro_preflight_topic.err /tmp/m20pro_preflight_topic.out || true
+  [[ -s /tmp/m20pro_preflight_topic.out ]]
 }
 
 contains_nonfinite() {

@@ -266,7 +266,7 @@ Nav2：
 ros2 lifecycle get /controller_server
 ros2 lifecycle get /planner_server
 ros2 lifecycle get /bt_navigator
-ros2 topic echo --once /local_costmap/costmap --no-arr
+timeout 8 ros2 topic echo /local_costmap/costmap --no-arr
 ```
 
 位姿和 TF：
