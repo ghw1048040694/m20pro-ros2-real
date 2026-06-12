@@ -831,7 +831,7 @@ INDEX_HTML = r"""<!doctype html>
               <button id="refreshPreflightBtn">刷新结果</button>
             </div>
             <div class="small" style="margin-top:8px;">
-              自检只读取当前系统状态，不重启原厂服务，不修改 multicast/FastDDS。看到“自检通过”后再开始任务。
+              自检只读取当前系统状态，不重启原厂服务，不修改 multicast/FastDDS。开始任务时系统也会自动自检。
             </div>
           </div>
           <div class="section">
@@ -849,7 +849,7 @@ INDEX_HTML = r"""<!doctype html>
             <h2>作业前状态</h2>
             <div id="taskPreflightSummary" class="preflight-summary">尚未自检</div>
             <div class="actions">
-              <button id="taskRunPreflightBtn">先做自检</button>
+              <button id="taskRunPreflightBtn">手动自检</button>
             </div>
           </div>
           <div class="section">
@@ -950,8 +950,8 @@ INDEX_HTML = r"""<!doctype html>
     function preflightStatusText(result) {
       if (!result) return "尚未自检";
       const ageText = result.age_sec === null || result.age_sec === undefined ? "" : ` / ${fmtAge(result.age_sec)}前`;
-      if (result.ok) return `自检通过${ageText}`;
-      return `自检未通过${ageText}`;
+      if (result.ok) return `最近一次自检通过${ageText}`;
+      return `最近一次自检未通过${ageText}`;
     }
     function renderPreflight(result) {
       state.preflight = result || null;
@@ -1475,10 +1475,9 @@ INDEX_HTML = r"""<!doctype html>
       for (const task of state.tasks) {
         const active = payload.active_task && payload.active_task.status === "running";
         const isRunning = task.status === "running";
-        const preflightOk = Boolean(payload.preflight_ok);
-        const canStart = preflightOk && !active && !isRunning;
+        const canStart = !active && !isRunning;
         const canDelete = !isRunning && !(payload.active_task && payload.active_task.task_id === task.id);
-        const startLabel = isRunning ? "执行中" : (!preflightOk ? "先做自检" : (active ? "先停止当前任务" : "开始执行"));
+        const startLabel = isRunning ? "执行中" : (active ? "先停止当前任务" : "开始执行");
         const el = document.createElement("div");
         el.className = "item";
         el.innerHTML = `
@@ -1494,9 +1493,19 @@ INDEX_HTML = r"""<!doctype html>
       }
       for (const btn of box.querySelectorAll("[data-start-task]")) {
         btn.addEventListener("click", async () => {
-          const payload = await api("POST", "/api/tasks/start", {task_id: btn.dataset.startTask});
-          setLog("activeTask", payload.active_task || payload);
-          await loadTasks();
+          btn.disabled = true;
+          btn.textContent = "自检中...";
+          try {
+            const payload = await api("POST", "/api/tasks/start", {task_id: btn.dataset.startTask});
+            if (payload.preflight) renderPreflight(payload.preflight);
+            setLog("activeTask", payload.active_task || payload);
+            await loadTasks();
+          } catch (err) {
+            if (err.preflight) renderPreflight(err.preflight);
+            setLog("activeTask", err);
+          } finally {
+            await loadTasks();
+          }
         });
       }
       for (const btn of box.querySelectorAll("[data-rename-task]")) {
@@ -2208,7 +2217,6 @@ class WebDashboardNode(Node):
         self.declare_parameter("camera_proxy_frame_timeout_s", 2.0)
         self.declare_parameter("max_path_points", 800)
         self.declare_parameter("max_events", 30)
-        self.declare_parameter("preflight_valid_s", 120.0)
         self.declare_parameter("preflight_topic_timeout_s", 5.0)
         self.declare_parameter("preflight_min_battery_level", 20)
 
@@ -2749,9 +2757,7 @@ class WebDashboardNode(Node):
         timestamp = payload.get("timestamp")
         if timestamp is not None:
             payload["age_sec"] = max(0.0, time.time() - float(timestamp))
-            valid_s = max(1.0, float(self.get_parameter("preflight_valid_s").value))
-            payload["valid"] = bool(payload.get("ok")) and payload["age_sec"] <= valid_s
-            payload["valid_s"] = valid_s
+            payload["valid"] = bool(payload.get("ok"))
         return payload
 
     def _preflight_is_valid(self) -> bool:
@@ -2966,7 +2972,6 @@ class WebDashboardNode(Node):
             "timestamp": now,
             "time_text": _now_text(),
             "age_sec": 0.0,
-            "valid_s": max(1.0, float(self.get_parameter("preflight_valid_s").value)),
             "items": items,
             "failures": len(failures),
             "warnings": len(warnings),
@@ -3478,7 +3483,7 @@ class WebDashboardNode(Node):
             "tasks": tasks,
             "active_task": active_task,
             "preflight": preflight,
-            "preflight_ok": bool(preflight and preflight.get("valid")),
+            "last_preflight_ok": bool(preflight and preflight.get("ok")),
         }
 
     def _update_task(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -3552,8 +3557,10 @@ class WebDashboardNode(Node):
 
     def _start_task(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         task_id = str(payload.get("task_id") or "").strip()
-        if not self._preflight_is_valid():
-            return self._error("作业前自检未通过或已过期，请先在前端执行自检")
+        preflight_response = self._run_preflight({"mode": "move", "reason": "task_start"})
+        preflight = preflight_response.get("preflight") or {}
+        if not preflight.get("ok"):
+            return self._error("自动自检未通过，任务未启动", {"preflight": preflight})
         with self._data_lock:
             current_active = self._settings.get("active_task") or {}
             if current_active.get("status") == "running":
@@ -3602,7 +3609,11 @@ class WebDashboardNode(Node):
         self._dispatch_active_goal(force=True)
         self._append_event("启动前端任务", {"task_id": task_id})
         with self._data_lock:
-            return {"ok": True, "active_task": self._settings.get("active_task")}
+            return {
+                "ok": True,
+                "active_task": self._settings.get("active_task"),
+                "preflight": preflight,
+            }
 
     def _stop_task(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         reason = str(payload.get("reason") or "web_stop").strip() or "web_stop"

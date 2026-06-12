@@ -63,9 +63,10 @@ Naming note: this file replaced the previous local-only `codex.md`. Going forwar
   - `GET /api/preflight` returns the latest result;
   - `POST /api/preflight/run` runs the checks and always returns HTTP 200 with full details, even when the preflight itself fails.
 - Added task safety gate:
-  - `/api/tasks` now reports `preflight_ok`;
-  - task start buttons are disabled unless the latest preflight is valid;
-  - `/api/tasks/start` also rejects direct API calls when preflight failed or expired.
+  - `/api/tasks` now reports `last_preflight_ok` for display only;
+  - task start buttons remain usable after a previous preflight ages out;
+  - `/api/tasks/start` automatically runs a fresh move-mode preflight before dispatching the first goal;
+  - if the automatic preflight fails, the task is not started and the full failed checklist is returned.
 - Checks currently include:
   - core nodes;
   - key topics;
@@ -86,8 +87,25 @@ Naming note: this file replaced the previous local-only `codex.md`. Going forwar
   - `/api/preflight` returns null before first run;
   - `/api/preflight/run` returns a full failed checklist in preview mode, as expected because full real is not running;
   - battery is still read correctly;
-  - `/api/tasks/start` is rejected while preflight is failed;
+  - `/api/tasks/start` runs automatic preflight and is rejected with the failed checklist while full real is not running;
   - preview was stopped and no web/real process remained.
+
+## 2026-06-12 preflight policy adjustment
+
+- Removed the strict “latest preflight must be within 120 seconds” task gate.
+- Rationale:
+  - the robot is expected to support remote autonomous operation;
+  - requiring a human to click task start within a short time window is too strict and does not match unattended execution.
+- Current behavior:
+  - manual preflight remains available for operators to inspect system health;
+  - starting a web task automatically runs a fresh preflight;
+  - task dispatch proceeds only if that fresh preflight passes;
+  - failed automatic preflight returns the complete checklist to the web UI and API caller.
+- Verified on 104 standalone web preview:
+  - task buttons are not disabled merely because the previous preflight is old or failed;
+  - `POST /api/tasks/start` runs automatic preflight;
+  - in preview mode, automatic preflight fails as expected and task dispatch is blocked;
+  - no web/real process remained after the preview was stopped.
 
 ## 2026-06-04 desktop field script regenerated
 
