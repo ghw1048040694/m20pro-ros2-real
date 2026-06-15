@@ -42,6 +42,7 @@ COMMON_ARGS=(
   mode:=real
   rviz:=false
   enable_web_dashboard:=true
+  enable_initialpose_relocalization:=false
   web_dashboard_data_dir:=/home/user/.m20pro_web
   web_dashboard_map_archive_dir:=/home/user/m20pro_maps
   enable_camera_proxy:=true
@@ -51,15 +52,41 @@ COMMON_ARGS=(
   cloud_topic:=/LIDAR/POINTS
 )
 
+BASE_REAL_PARAMS="${WS_DIR}/install/m20pro_bringup/share/m20pro_bringup/config/m20pro_real.yaml"
+make_runtime_params() {
+  local axis_enabled="$1"
+  local output
+  output="$(mktemp "/tmp/m20pro_real_params_${MODE}.XXXXXX.yaml")"
+  python3 - "${BASE_REAL_PARAMS}" "${output}" "${axis_enabled}" <<'PY'
+import sys
+import yaml
+
+src, dst, axis_text = sys.argv[1:4]
+with open(src, "r", encoding="utf-8") as file:
+    data = yaml.safe_load(file) or {}
+
+bridge = data.setdefault("m20pro_tcp_bridge", {}).setdefault("ros__parameters", {})
+bridge["enable_axis_command"] = axis_text.lower() in ("1", "true", "yes", "on")
+
+with open(dst, "w", encoding="utf-8") as file:
+    yaml.safe_dump(data, file, allow_unicode=True, sort_keys=False)
+PY
+  echo "${output}"
+}
+
 case "${MODE}" in
   shadow|safe)
+    RUNTIME_PARAMS="$(make_runtime_params false)"
     exec ros2 launch m20pro_bringup m20pro.launch.py \
       "${COMMON_ARGS[@]}" \
+      real_params_file:="${RUNTIME_PARAMS}" \
       enable_axis_command:=false
     ;;
   move)
+    RUNTIME_PARAMS="$(make_runtime_params true)"
     exec ros2 launch m20pro_bringup m20pro.launch.py \
       "${COMMON_ARGS[@]}" \
+      real_params_file:="${RUNTIME_PARAMS}" \
       enable_axis_command:=true
     ;;
   *)

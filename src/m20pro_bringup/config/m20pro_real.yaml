@@ -5,6 +5,7 @@ m20pro_tcp_bridge:
     poll_rate_hz: 5.0
     cmd_vel_rate_hz: 20.0
     cmd_vel_timeout_s: 0.5
+    send_idle_zero_commands: false
     max_linear_x: 0.8 #原0.8
     max_linear_y: 0.5 #原0.5
     max_angular_z: 1.1
@@ -18,6 +19,7 @@ m20pro_tcp_bridge:
     vendor_position_offset_x: 0.0
     vendor_position_offset_y: 0.0
     vendor_position_offset_z: 0.0
+    max_abs_map_position_m: 10000.0
     flatten_odom_z: true
     odom_z: 0.0
     publish_tf: true

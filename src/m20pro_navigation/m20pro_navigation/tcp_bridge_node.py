@@ -20,6 +20,7 @@ class M20TcpBridge(Node):
         self.declare_parameter("poll_rate_hz", 5.0)
         self.declare_parameter("cmd_vel_rate_hz", 20.0)
         self.declare_parameter("cmd_vel_timeout_s", 0.5)
+        self.declare_parameter("send_idle_zero_commands", False)
         self.declare_parameter("max_linear_x", 0.8)
         self.declare_parameter("max_linear_y", 0.5)
         self.declare_parameter("max_angular_z", 1.0)
@@ -33,6 +34,7 @@ class M20TcpBridge(Node):
         self.declare_parameter("vendor_position_offset_x", 0.0)
         self.declare_parameter("vendor_position_offset_y", 0.0)
         self.declare_parameter("vendor_position_offset_z", 0.0)
+        self.declare_parameter("max_abs_map_position_m", 10000.0)
         self.declare_parameter("flatten_odom_z", False)
         self.declare_parameter("odom_z", 0.0)
         self.declare_parameter("publish_tf", True)
@@ -55,7 +57,9 @@ class M20TcpBridge(Node):
             timeout=2.0,
         )
         self.latest_cmd = Twist()
-        self.last_cmd_time = self.get_clock().now()
+        self.last_cmd_time = None
+        self.axis_command_active = False
+        self.idle_zero_sent = False
         self.connected = False
         self.tf_broadcaster = TransformBroadcaster(self)
         self.last_pose_warning_time = None
@@ -104,9 +108,14 @@ class M20TcpBridge(Node):
             command_mode = "axis command enabled"
         else:
             command_mode = "shadow mode; axis command disabled"
+        idle_mode = (
+            "idle zero enabled"
+            if bool(self.get_parameter("send_idle_zero_commands").value)
+            else "idle zero disabled"
+        )
         self.get_logger().info(
-            "M20 TCP bridge ready; target 103 host is %s:%s; %s"
-            % (self.client.ip, self.client.port, command_mode)
+            "M20 TCP bridge ready; target 103 host is %s:%s; %s; %s"
+            % (self.client.ip, self.client.port, command_mode, idle_mode)
         )
 
     def destroy_node(self):
@@ -130,6 +139,7 @@ class M20TcpBridge(Node):
     def _on_cmd_vel(self, msg: Twist) -> None:
         self.latest_cmd = msg
         self.last_cmd_time = self.get_clock().now()
+        self.idle_zero_sent = False
 
     def _on_gait_command(self, msg: String) -> None:
         gait_param = self._resolve_gait_param(msg.data)
@@ -180,11 +190,11 @@ class M20TcpBridge(Node):
             )
 
         yaw = quaternion_to_yaw(pose.orientation)
-        vendor_x, vendor_y, vendor_z = self._ros_position_to_vendor(
-            float(pose.position.x),
-            float(pose.position.y),
-            float(pose.position.z),
-        )
+        # The M20 Pro developer manual defines 2101/1 PosX/PosY/PosZ in map-frame
+        # meters. Do not apply the 1007 pose scale used by some firmware builds.
+        vendor_x = float(pose.position.x)
+        vendor_y = float(pose.position.y)
+        vendor_z = float(pose.position.z)
         items = {
             "PosX": vendor_x,
             "PosY": vendor_y,
@@ -210,8 +220,14 @@ class M20TcpBridge(Node):
             self._publish_map_pose()
             self._publish_navigation_status()
         else:
-            text = "failed: ErrorCode=0x%04X x=%.3f y=%.3f yaw=%.3f" % (
-                error_code & 0xFFFF, items["PosX"], items["PosY"], items["Yaw"]
+            meaning = "初始化定位失败" if error_code == 1 else "原厂返回错误"
+            text = "failed: ErrorCode=0x%04X %s x=%.3f y=%.3f z=%.3f yaw=%.3f" % (
+                error_code & 0xFFFF,
+                meaning,
+                items["PosX"],
+                items["PosY"],
+                items["PosZ"],
+                items["Yaw"],
             )
             self.get_logger().warning("vendor relocalization reset rejected: %s" % text)
         self._publish_relocalization_result(text)
@@ -222,14 +238,28 @@ class M20TcpBridge(Node):
         self.relocalization_pub.publish(msg)
 
     def _send_axis_command(self) -> None:
+        timeout_s = max(0.0, float(self.get_parameter("cmd_vel_timeout_s").value))
+        send_idle_zero = bool(self.get_parameter("send_idle_zero_commands").value)
+        if self.last_cmd_time is None:
+            if not send_idle_zero:
+                return
+            cmd = Twist()
+        else:
+            age_s = (self.get_clock().now() - self.last_cmd_time).nanoseconds * 1e-9
+            if age_s <= timeout_s:
+                cmd = self.latest_cmd
+            elif send_idle_zero:
+                cmd = Twist()
+            else:
+                if self.idle_zero_sent or not self.axis_command_active:
+                    return
+                cmd = Twist()
+
         if not self._ensure_connected():
             return
         max_x = float(self.get_parameter("max_linear_x").value)
         max_y = float(self.get_parameter("max_linear_y").value)
         max_yaw = float(self.get_parameter("max_angular_z").value)
-        timeout_s = max(0.0, float(self.get_parameter("cmd_vel_timeout_s").value))
-        age_s = (self.get_clock().now() - self.last_cmd_time).nanoseconds * 1e-9
-        cmd = self.latest_cmd if age_s <= timeout_s else Twist()
         linear_x_sign = float(self.get_parameter("linear_x_sign").value)
         linear_y_sign = float(self.get_parameter("linear_y_sign").value)
         angular_z_sign = float(self.get_parameter("angular_z_sign").value)
@@ -245,6 +275,22 @@ class M20TcpBridge(Node):
             self.client.request(2, 21, items, wait_response=False)
         except OSError as exc:
             self.get_logger().warning("axis command failed: %s" % exc)
+            return
+
+        nonzero = (
+            abs(items["X"]) > 1e-6
+            or abs(items["Y"]) > 1e-6
+            or abs(items["Yaw"]) > 1e-6
+        )
+        if nonzero:
+            self.axis_command_active = True
+            self.idle_zero_sent = False
+        else:
+            self.axis_command_active = False
+            if self.last_cmd_time is not None:
+                age_s = (self.get_clock().now() - self.last_cmd_time).nanoseconds * 1e-9
+                if age_s > timeout_s and not send_idle_zero:
+                    self.idle_zero_sent = True
 
     def _poll_robot(self) -> None:
         if not self._ensure_connected():
@@ -276,11 +322,21 @@ class M20TcpBridge(Node):
         z = float(items.get("PosZ", 0.0))
         x, y, z = self._vendor_position_to_ros(x, y, z)
         yaw = float(items.get("Yaw", 0.0))
-        if not all(math.isfinite(value) for value in (x, y, z, yaw)):
+        location_ok = int(items.get("Location", 1)) == 0
+        max_abs_position = max(1.0, float(self.get_parameter("max_abs_map_position_m").value))
+        pose_values_finite = all(math.isfinite(value) for value in (x, y, z, yaw))
+        pose_values_plausible = (
+            pose_values_finite
+            and abs(x) <= max_abs_position
+            and abs(y) <= max_abs_position
+            and abs(z) <= max_abs_position
+        )
+        if not location_ok or not pose_values_plausible:
             self._warn_throttled(
                 "invalid_pose",
-                "ignored invalid vendor pose: PosX=%s PosY=%s PosZ=%s Yaw=%s"
+                "ignored invalid or unlocalized vendor pose: Location=%s PosX=%s PosY=%s PosZ=%s Yaw=%s"
                 % (
+                    items.get("Location"),
                     items.get("PosX"),
                     items.get("PosY"),
                     items.get("PosZ"),
@@ -331,7 +387,7 @@ class M20TcpBridge(Node):
             odom_to_base.transform.rotation = quat
             self.tf_broadcaster.sendTransform([map_to_odom, odom_to_base])
 
-        self._publish_localization_ok(int(items.get("Location", 1)) == 0)
+        self._publish_localization_ok(location_ok)
 
     def _publish_localization_ok(self, ok: bool) -> None:
         localization_ok = Bool()

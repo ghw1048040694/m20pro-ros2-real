@@ -1,10 +1,265 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-06-12 10:52 CST
+Last updated: 2026-06-15 18:14 CST
 
 This file is maintained by Codex as the local M20 Pro project memory for future ChatGPT review. It records the current architecture, important decisions, recent changes, verification status, and next steps.
 
 Naming note: this file replaced the previous local-only `codex.md`. Going forward, maintain `m20pro.md`.
+
+## 2026-06-15 second M20Pro configured as test robot
+
+- User asked to make the second M20Pro a test robot that can update after GitLab changes.
+- Second 104 initial state:
+  - `/home/user/m20pro_ros2_ws` did not exist;
+  - no Git repo was present;
+  - 104 had no default route;
+  - after temporary routing through 103, `git.fabu.ai` resolved to `192.168.3.100` but both 103 and 104 could not reach SSH/HTTPS ports on that address from the current `YiFangDa` network.
+- Important limitation:
+  - direct `git pull` from 104 is not currently possible on this network;
+  - this is a network reachability issue to company GitLab, not a ROS workspace issue.
+- Added scripts:
+  - `scripts/local_deploy_to_test_robot.sh`;
+  - `scripts/104_update_from_gitlab.sh`.
+- Current usable update path:
+  - pull/update code on the upper computer;
+  - run `./scripts/local_deploy_to_test_robot.sh`;
+  - the script rsyncs the current workspace to `user@10.21.31.104:/home/user/m20pro_ros2_ws`, excluding `.git`, `build`, `install`, `log`, and bag/database files;
+  - then it builds the full workspace on 104 with `colcon build --symlink-install`.
+- Future direct-GitLab path:
+  - once 104 can reach `git.fabu.ai`, run `/home/user/m20pro_ros2_ws/scripts/104_update_from_gitlab.sh` on 104 after `su`;
+  - the script will clone/fetch/reset to `gitlab/main` and build the full workspace.
+- GitLab deploy key prepared on the second 104:
+  - private key path: `/home/user/.ssh/id_ed25519_m20pro_test_gitlab`;
+  - public key path: `/home/user/.ssh/id_ed25519_m20pro_test_gitlab.pub`;
+  - SSH config entry for `git.fabu.ai` uses this key and `StrictHostKeyChecking accept-new`;
+  - public key should be added to the GitLab project as a deploy key or to the developer account as an SSH key before using direct pull.
+- User later added the key to GitLab, but direct validation from the robot still failed because the network path was unavailable:
+  - 104 resolved `git.fabu.ai` to `192.168.3.100`;
+  - 104 timed out on ports 22 and 443;
+  - 103 also timed out to `192.168.3.100` on ports 22 and 443;
+  - the upper computer could reach GitLab port 22, so the current practical path remains upper-computer pull plus `local_deploy_to_test_robot.sh` until the robot network can reach company GitLab.
+- Mirror-source clarification:
+  - mirror sources can help with public internet GitHub/Gitee access, but cannot make the robot reach the company intranet GitLab address `192.168.3.100`;
+  - second 104 can reach public `github.com` and `gitee.com` on ports 22 and 443 through the current 103/p2p0 route;
+  - anonymous HTTPS access to the existing GitHub repo prompted for credentials, so the repo is not public-readable from the robot;
+  - added `scripts/104_update_from_mirror.sh`, defaulting to `git@github.com:ghw1048040694/m20pro-ros2-navigation.git`;
+  - to use GitHub/Gitee as a robot-side mirror, add the second 104 public key to that mirror repo and run `104_update_from_mirror.sh` on 104.
+- User wants the second robot to stay outside for testing without staying connected to the upper computer:
+  - this is compatible with a private GitHub/Gitee mirror;
+  - the repository does not need to be public;
+  - add the second 104 public key as a read-only deploy key to the private mirror repo;
+  - 104 SSH config now includes `github.com` and `gitee.com`, both using `/home/user/.ssh/id_ed25519_m20pro_test_gitlab`;
+  - 104 verified SSH network reachability to both `github.com:22` and `gitee.com:22`.
+- Deploy key verification:
+  - user added the second 104 public key to the GitHub private repo;
+  - from second 104 user account, `ssh -T git@github.com` authenticated as `ghw1048040694/m20pro-ros2-navigation`;
+  - `git ls-remote git@github.com:ghw1048040694/m20pro-ros2-navigation.git HEAD` succeeded and returned `803200e88a182fb425aaca8fa0defd451193eee1`;
+  - running the mirror update as root initially failed because root did not use `/home/user/.ssh/id_ed25519_m20pro_test_gitlab`, so `104_update_from_gitlab.sh` was updated to explicitly use that key when present;
+  - the first robot-side clone from GitHub succeeded, proving the private mirror read path works;
+  - the current GitHub HEAD does not yet include the new `104_update_from_mirror.sh` script, so the local repo changes must be committed and pushed to GitHub before the robot can use the final one-command mirror update without manually copied scripts.
+- Verification on the second 104:
+  - deployed the current workspace to `/home/user/m20pro_ros2_ws`;
+  - full build succeeded for all five packages:
+    - `m20pro_bringup`;
+    - `m20pro_cloud_bridge`;
+    - `m20pro_navigation`;
+    - `m20pro_description`;
+    - `m20pro_inspection`;
+  - `ros2 pkg prefix` resolved all five packages from `/home/user/m20pro_ros2_ws/install`.
+- Installed 104 autostart service on the second test robot:
+  - ran `./scripts/104_enable_autostart.sh move`;
+  - `m20pro-real.service` is enabled;
+  - current service state was left `inactive`;
+  - next boot will start the full real stack and web dashboard, but it will not automatically execute any task.
+- A temporary NAT route through 103 was tested:
+  - 103 had `p2p0` connected to `YiFangDa`;
+  - enabled in-memory forwarding/NAT from `10.21.31.0/24` to `p2p0`;
+  - this allowed DNS resolution, but company GitLab remained unreachable because `git.fabu.ai` resolved to `192.168.3.100` and that address was not reachable from the current network.
+  - NAT was not made persistent.
+
+## 2026-06-15 second M20Pro factory DDS and WiFi setup
+
+- User connected a second M20Pro. Initial symptom:
+  - 104 could list `/LIDAR/POINTS` and see DDS publishers, but `ros2 topic echo /LIDAR/POINTS` had no samples;
+  - 106 also listed `/LIDAR/POINTS`, but its ROS 2 side initially had `Publisher count: 0` and no echo/hz samples.
+- Root cause was consistent with the first robot's earlier factory-side DDS/multicast fix not being applied to this second robot:
+  - 106 had `boardresources 1.3.11`;
+  - 106 `/opt/robot/fastdds.xml` only whitelisted `127.0.0.1` and `10.21.33.106`;
+  - `10.21.31.106` was missing;
+  - `multicast-relay.service` was disabled and inactive;
+  - `multicast-relay.service` had no `Wants=` line.
+- Applied the official package from the desktop:
+  - local file: `/home/fabu/桌面/boardresources.v1.3.13+fcae53.arm64(1).deb`;
+  - copied to 106 as `/tmp/boardresources.deb`;
+  - installed with `dpkg -i /tmp/boardresources.deb`;
+  - 106 `boardresources` upgraded from `1.3.11` to `1.3.13`.
+- The package did not automatically add the `10.21.31.106` FastDDS interface or enable multicast relay, so applied the same practical fix used on the first robot:
+  - backed up `/opt/robot/fastdds.xml`;
+  - added `<address>10.21.31.106</address>` to the interface whitelist;
+  - backed up `/lib/systemd/system/multicast-relay.service`;
+  - added `Wants=network-online.target`;
+  - ran `systemctl daemon-reload`;
+  - enabled and restarted `multicast-relay.service`.
+- Verification:
+  - 106 `multicast-relay.service` became enabled and active;
+  - 106 `/LIDAR/POINTS` publisher count recovered to 2;
+  - 104 successfully echoed live `/LIDAR/POINTS` frames with `frame_id: lidar_link` and about 55k to 81k points per frame.
+- Applied official WiFi script from desktop:
+  - local file: `/home/fabu/桌面/Wifi_link(1)(2).sh`;
+  - copied to 103 as `/tmp/wifi_link.sh`;
+  - ran as root with `WIFI_IFACE=p2p0 bash /tmp/wifi_link.sh`;
+  - selected `YiFangDa` with password provided by the user;
+  - 103 `p2p0` connected to `YiFangDa` and received `192.168.105.42`;
+  - 103 default route became `default via 192.168.107.254 dev p2p0`;
+  - 103 `wlan0` remained connected to `myap24G`, preserving the robot hotspot;
+  - `ping www.baidu.com` from 103 succeeded;
+  - `ping 10.21.31.104` from 103 also succeeded.
+
+## 2026-06-15 field script doc update
+
+- Rewrote desktop `/home/fabu/桌面/脚本.docx` as a plain field-operation Word document.
+- Current script keeps only three main tasks:
+  - same-floor real navigation test;
+  - cross-floor real navigation test;
+  - mapping flow test.
+- Each task now starts from web/opening/self-check/map selection/relocalization and ends with stop/reset/result recording, so tasks can be run consecutively without rebooting the robot when the system is healthy.
+- Added the latest web map controls to the script:
+  - `+` zoom in;
+  - `-` zoom out;
+  - `平移`;
+  - `适配`;
+  - `居中机器人`.
+- The script explicitly says to zoom in before dragging relocalization and waypoint arrows; zoom/pan only changes display and does not change map coordinates.
+- Verified `/home/fabu/桌面/脚本.docx` with `unzip -t` and LibreOffice headless text conversion.
+
+## 2026-06-15 web map zoom and pan
+
+- User issue:
+  - the web map could not zoom, so fine relocalization arrows and inspection waypoint placement were not accurate enough.
+- Web dashboard change:
+  - added map zoom controls: `-`, `+`, `适配`, `居中机器人`;
+  - added `平移` mode for touchscreen/handheld use, where dragging moves the map instead of marking a point;
+  - mouse wheel or touchpad scroll now zooms around the cursor;
+  - right button, middle button, Shift-drag, or Alt-drag can temporarily pan the map without switching modes.
+- Coordinate behavior:
+  - zoom and pan are display-only;
+  - `canvasToWorld()` still converts screen position back to true map-frame x/y through the same view transform;
+  - saved waypoints and web relocalization still publish the original map coordinates, not scaled screen coordinates.
+- Verification:
+  - local `py_compile` passed for `web_dashboard_node.py`;
+  - extracted dashboard JavaScript passed `node --check`;
+  - `git diff --check` passed for the dashboard file.
+
+## 2026-06-15 web task stop and start safety
+
+- Field issue:
+  - after starting a web task, the robot rotated in place several circles;
+  - the web `停止当前任务` button was grey and could not be clicked.
+- Diagnosis:
+  - spinning is consistent with starting a Nav2 task while localization/map alignment is not confirmed, or while the robot pose/goal yaw relation is wrong;
+  - the stop button was tied to `active_task.status == running`, so if the web task state became empty/error while Nav2 was still active, the button could become unavailable at exactly the wrong time.
+- Code changes:
+  - web `停止当前任务` is now always clickable and sends `/api/tasks/stop` with `reason=web_manual_stop`;
+  - backend stop now clears active task state and always sends a navigation reset even when no active task is recorded;
+  - backend reset publishes `/m20pro/stop_task` repeatedly, publishes multiple zero `/cmd_vel` samples, clears costmaps, and publishes idle waypoint status;
+  - `floor_manager` now publishes several zero velocity samples when cancelling a Nav2 goal, reducing residual command risk;
+  - starting a web task now requires confirmed localization, fresh map pose, robot pose inside the current live map, first waypoint inside the task map, and for same-floor fixed-map tasks, matching live-map metadata between the web-selected map and Nav2 `/map`;
+  - cross-floor tasks are not blocked only because the first waypoint floor differs from the current floor.
+- Verification:
+  - local `py_compile` passed for `web_dashboard_node.py` and `floor_manager.py`;
+  - extracted dashboard JavaScript passed `node --check`;
+  - `git diff --check` passed for the touched files.
+- Next field use:
+  - after updating/restarting the 104 full real system, if the robot rotates or acts wrong, first click web `停止当前任务`;
+  - if web is unreachable or stop does not take effect immediately, use the handheld/manual emergency stop as the fallback;
+  - before starting a task, make sure web localization is normal and the displayed map is the same environment as the robot.
+
+## 2026-06-12 preflight split: base check vs navigation readiness
+
+- User tested at the field and reported that web self-check kept failing; after returning to the desk, diagnosis showed two different states were being mixed together.
+- Clarification from the user:
+  - that field test happened before the base-check/navigation-readiness split;
+  - therefore the old failure does not prove that web relocalization is still ineffective after the latest changes.
+- Current desk/off-map factory state:
+  - `/LIDAR/POINTS` is healthy on 104, with about 41k to 42k points per frame;
+  - factory TCP `2002/1` returns valid navigation status such as `Location=1, ObsState=0`;
+  - factory TCP `1007/2` can return truncated JSON when the robot is unlocalized, stopping at `{"Location":1,"PosX":`;
+  - factory `/ODOM` can contain invalid values such as `.inf` or extremely large coordinates while unlocalized.
+- Important conclusion:
+  - web self-check is read-only and does not lock handheld control;
+  - before relocalization, pose/ODOM/scan/costmap/Nav2 checks are navigation-readiness checks, not boot/basic-health checks;
+  - treating those items as hard preflight failures made the normal desk/off-map state look like a system failure.
+- Code change:
+  - web preflight now reports `ok` for base health only: core nodes, base topics, raw lidar, factory navigation status, map, battery, and motion mode;
+  - `/scan`, `/ODOM`, `/m20pro_tcp_bridge/map_pose`, localization, local/global costmaps, and Nav2 lifecycle are now grouped as `navigation` warnings until relocalization is confirmed;
+  - UI button text changed to `开机基础自检`;
+  - summary now distinguishes `基础自检通过，导航待重定位后确认` from full navigation readiness;
+  - terminal `scripts/104_preflight_check.sh` uses the same policy.
+- Verified on 104:
+  - synced repo and rebuilt `m20pro_cloud_bridge` and `m20pro_bringup`;
+  - short-started `m20pro-real.service`;
+  - `/api/preflight/run` returned `ok=true`, `navigation_ready=false`, raw lidar OK, battery about 50%, and expected navigation warnings because the robot was back at the desk/off-map;
+  - stopped `m20pro-real.service` afterward;
+  - confirmed no real/web processes and no 8080 listener remained.
+- Field use:
+  - after boot/autostart, click web `开机基础自检`;
+  - if it says `基础自检通过，导航待重定位后确认`, drive/bring the robot to the mapped test area, perform web relocalization, then confirm navigation items turn healthy before starting an inspection task.
+
+## 2026-06-15 web relocalization failure root cause pass
+
+- User reported that web relocalization has never succeeded.
+- Screenshot result:
+  - `/LIDAR/POINTS` raw pointcloud is healthy;
+  - `/scan` may be missing before valid localization/TF;
+  - web relocalization returned `failed: Expecting value: line 1 column 1 (char 0)`;
+  - verification showed `vendor_request: fail`.
+- 104/103 direct TCP findings:
+  - `2002/1` returns valid JSON with `Location=1, ObsState=0` while unlocalized;
+  - `1007/2` can return malformed/truncated JSON while unlocalized, stopping at `{"Location":1,"PosX":`;
+  - `2101/1` returns valid JSON with `ErrorCode=1`, meaning factory initialization failed/rejected;
+  - sending both scaled coordinates such as `PosX=1184.0` and meter coordinates such as `PosX=1.184` still returned `ErrorCode=1` in the current unlocalized state.
+- Manual/document check:
+  - the developer manual defines `2101/1` `PosX/PosY/PosZ` in map-frame meters;
+  - `tcp_bridge` was corrected so relocalization requests no longer apply the 1007 pose scale before sending `2101/1`.
+- 106 factory localization check:
+  - `localization.service` is running `/opt/robot/share/localization/bin/localization_ddsnode`;
+  - it loads `/var/opt/robot/data/maps/active/occ_grid.yaml`;
+  - `localization.rviz` publishes `2D Pose Estimate` to `/initialpose`;
+  - `drddsctl list` on 106 shows factory-side subscribers on `rt/initialpose`.
+- Direction change:
+  - field web relocalization should primarily reproduce the 106 RViz `/initialpose` path;
+  - 103 TCP `2101/1` is kept as a diagnostic path, but should not be the only success criterion.
+- Code changes:
+  - `m20pro_real_full.sh` now passes `enable_initialpose_relocalization:=false` by default so `tcp_bridge` does not intercept `/initialpose` and turn it into 103 TCP `2101/1`;
+  - web relocalization verification now accepts success when localization is true, map pose is fresh, and the map pose is close to the requested initial pose;
+  - verification still reports `tcp_2101` separately if a TCP result exists;
+  - `tcp_protocol.py` now wraps malformed factory JSON with a readable `M20ProtocolError` containing response length and a short raw payload.
+- Verification:
+  - local `py_compile` passed for `tcp_protocol.py`, `tcp_bridge_node.py`, `web_dashboard_node.py`, `m20pro_real.launch.py`, and `m20pro.launch.py`;
+  - extracted dashboard JavaScript passed `node --check`.
+- Important limitation:
+  - this change has not yet been validated by restarting/deploying the running 104 full system during the field session;
+  - next field test should restart the full real service from the updated code, go to the mapped test area, drag the red scan overlay to match the map, click `执行重定位`, and check whether `factory_pose_accepted=true`.
+
+## 2026-06-12 web relocalization verification feedback
+
+- User noted that 106 RViz `2D Pose Estimate` can be rough and still converge because the factory localization uses the click as an initial guess and then aligns live pointcloud to the 106 active map.
+- Current web relocalization chain remains factory-based:
+  - web map drag -> `/api/localization/initialpose`;
+  - web dashboard publishes `/initialpose`;
+  - `m20pro_tcp_bridge` forwards it to the factory TCP API as `Type=2101`, `Command=1`, with `PosX/PosY/PosZ/Yaw`;
+  - factory localization should then converge if the map, frame, pose guess, and active map are correct.
+- Added verification feedback after web relocalization:
+  - new parameter `relocalization_verify_timeout_s`, default `8.0`;
+  - after publishing `/initialpose`, the web backend waits for `/m20pro_tcp_bridge/relocalization_result`;
+  - it also checks whether localization, `/m20pro_tcp_bridge/map_pose`, `/scan`, local costmap, and global costmap become fresh/healthy;
+  - the API response now includes `verification.request_accepted`, `verification.navigation_ready`, `verification.result`, and per-item `checks`.
+- Frontend behavior:
+  - clicking `执行重定位` now shows `已发送重定位请求，正在等待原厂回执和导航链路恢复...`;
+  - it then displays the full verification JSON instead of only saying the request was published;
+  - live topic updates are temporarily prevented from overwriting the API verification result.
+- Synced to 104 and rebuilt `m20pro_cloud_bridge` and `m20pro_bringup`.
+- No real/web processes were left running after the update.
 
 ## 2026-06-12 pre-departure field check
 
@@ -62,11 +317,10 @@ Naming note: this file replaced the previous local-only `codex.md`. Going forwar
 - Added API:
   - `GET /api/preflight` returns the latest result;
   - `POST /api/preflight/run` runs the checks and always returns HTTP 200 with full details, even when the preflight itself fails.
-- Added task safety gate:
-  - `/api/tasks` now reports `last_preflight_ok` for display only;
-  - task start buttons remain usable after a previous preflight ages out;
-  - `/api/tasks/start` automatically runs a fresh move-mode preflight before dispatching the first goal;
-  - if the automatic preflight fails, the task is not started and the full failed checklist is returned.
+- Added web-side status display:
+  - `/api/tasks` reports `last_preflight_ok` for display only;
+  - task start buttons do not depend on a preflight validity window;
+  - `/api/tasks/start` starts the selected task directly and does not run preflight automatically.
 - Checks currently include:
   - core nodes;
   - key topics;
@@ -87,7 +341,7 @@ Naming note: this file replaced the previous local-only `codex.md`. Going forwar
   - `/api/preflight` returns null before first run;
   - `/api/preflight/run` returns a full failed checklist in preview mode, as expected because full real is not running;
   - battery is still read correctly;
-  - `/api/tasks/start` runs automatic preflight and is rejected with the failed checklist while full real is not running;
+  - `/api/tasks/start` was later corrected to stop running preflight automatically;
   - preview was stopped and no web/real process remained.
 
 ## 2026-06-12 preflight policy adjustment
@@ -97,15 +351,41 @@ Naming note: this file replaced the previous local-only `codex.md`. Going forwar
   - the robot is expected to support remote autonomous operation;
   - requiring a human to click task start within a short time window is too strict and does not match unattended execution.
 - Current behavior:
-  - manual preflight remains available for operators to inspect system health;
-  - starting a web task automatically runs a fresh preflight;
-  - task dispatch proceeds only if that fresh preflight passes;
-  - failed automatic preflight returns the complete checklist to the web UI and API caller.
+  - web preflight is a manual operator check;
+  - the operator clicks “开始自检” once and uses the result to decide whether to continue;
+  - starting a web task does not automatically run another preflight;
+  - failed manual preflight still returns the complete checklist to the web UI and API caller.
 - Verified on 104 standalone web preview:
   - task buttons are not disabled merely because the previous preflight is old or failed;
-  - `POST /api/tasks/start` runs automatic preflight;
-  - in preview mode, automatic preflight fails as expected and task dispatch is blocked;
+  - `POST /api/tasks/start` no longer calls `/api/preflight/run`;
+  - in preview mode, `/api/preflight/run` still reports failures as expected because full real is not running;
   - no web/real process remained after the preview was stopped.
+
+## 2026-06-12 real autostart service
+
+- Added a controlled systemd autostart path for 104:
+  - `systemd/m20pro-real.service`;
+  - `systemd/m20pro-real.default`;
+  - `scripts/104_autostart_entrypoint.sh`;
+  - `scripts/104_enable_autostart.sh`;
+  - `scripts/104_disable_autostart.sh`;
+  - `scripts/104_autostart_status.sh`.
+- Intended behavior:
+  - boot starts the full real stack and web dashboard on 104;
+  - no inspection task starts automatically;
+  - operator opens `http://10.21.31.104:8080`, runs one manual web preflight, then relocalizes, maps/selects map, marks points, and starts the task manually.
+- Default mode is `move`, because the final field workflow needs the web task button to be able to move the robot. This only enables the motion-control chain; it does not dispatch a goal by itself.
+- The service only starts this project stack and does not modify or restart factory multicast/FastDDS services.
+- During validation, the first service start reached the web dashboard but `tcp_bridge` still logged `shadow mode; axis command disabled`.
+  - Root cause: `m20pro_real.yaml` contains node-specific `m20pro_tcp_bridge.enable_axis_command: false`, which overrode the launch-level `enable_axis_command:=true` on Foxy.
+  - Fix: `src/m20pro_bringup/scripts/m20pro_real_full.sh` now generates a runtime params file under `/tmp` and explicitly sets `m20pro_tcp_bridge.enable_axis_command` to `true` for `move`, `false` for `shadow`.
+  - Rebuilt `m20pro_bringup` on 104.
+- Verified after the fix:
+  - `m20pro-real.service` starts successfully;
+  - `http://127.0.0.1:8080/healthz` returns `{"ok":true}`;
+  - runtime params show `enable_axis_command: true`;
+  - `tcp_bridge` log shows `axis command enabled`;
+  - service is enabled for next boot but was stopped after validation, leaving no real/web processes running.
 
 ## 2026-06-04 desktop field script regenerated
 
@@ -5497,3 +5777,95 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
   - open another 104 terminal and run `scripts/104_preflight_check.sh move`;
   - if it prints `M20PRO PREFLIGHT OK`, proceed to web relocalization/marking/task dispatch;
   - if it prints `M20PRO PREFLIGHT FAIL`, do not start a task and fix the listed items first.
+
+## 2026-06-12 idle axis command fix
+
+- User reported that while still at the desk area, the robot could only move briefly from the handheld controller and then stopped.
+- Finding:
+  - web preflight is read-only and does not send commands; it was not the direct cause;
+  - `m20pro-real.service` had started the full real `move` stack;
+  - `tcp_bridge` in move mode was sending axis commands at 20 Hz even when no ROS `/cmd_vel` was active;
+  - after `/cmd_vel` timeout it repeatedly sent zero velocity, which can override handheld control.
+- Fix:
+  - added `send_idle_zero_commands` parameter to `tcp_bridge`, default `false`;
+  - `tcp_bridge` now sends axis commands only after receiving `/cmd_vel`;
+  - after command timeout it sends at most one zero command to stop robot-side ROS navigation, then stops sending idle zero commands;
+  - added `send_idle_zero_commands: false` to `m20pro.yaml` and `m20pro_real.yaml`.
+- Synced to 104 and rebuilt `m20pro_navigation` and `m20pro_bringup`.
+- Verification on 104:
+  - `m20pro-real.service` starts;
+  - web health returns `{"ok":true}`;
+  - tcp bridge log shows `axis command enabled; idle zero disabled`;
+  - service was stopped after validation and no real/web processes remained.
+- Operational note:
+  - failing self-check at the desk is expected if the robot is not on the loaded test-site map; `/scan`, global costmap, and localization can fail there;
+  - this should not block handheld driving after the idle-zero fix.
+
+## 2026-06-12 consecutive real task reliability pass
+
+- User concern:
+  - after finishing the short-distance task and then running the next real task, frontend/Nav2 state may get stuck and force a robot reboot.
+- Web dashboard task-session changes:
+  - task start now first resets the previous navigation session by publishing `/m20pro/stop_task`, sending several zero `/cmd_vel` samples, clearing local/global costmaps, and publishing an idle active-waypoint state;
+  - task stop and task completion run the same cleanup path;
+  - waypoint reached now cancels the old Nav2 goal and sends zero velocity before dwell/advance, reducing old-goal carryover between points;
+  - current waypoint goal is resent at a low rate if it appears to have been dropped or ignored;
+  - task list now treats only `active_task.status=running` as the real running state, and stale historical task `running` status is auto-normalized to `stopped`;
+  - added a web button `复位导航状态` for field recovery without rebooting the robot.
+- Floor manager robustness:
+  - a new same-floor goal can replace an active same-floor `floor_goal` instead of being rejected by stale `floor_mission_active`;
+  - stair/cross-floor missions are still protected and are not automatically interrupted by replacement goals;
+  - stale Nav2 goal request/result callbacks after stop/replacement are ignored, so an old cancel/reject/result cannot clear the new active mission.
+- Verification:
+  - local `py_compile` passed for `web_dashboard_node.py`, `floor_manager.py`, and `tcp_bridge_node.py`;
+  - extracted frontend JavaScript passed `node --check`;
+  - synced to 104 and rebuilt `m20pro_cloud_bridge`, `m20pro_navigation`, and `m20pro_bringup`;
+  - 104 post-build `py_compile` passed;
+  - `m20pro-real.service` remained inactive after verification.
+- Field use:
+  - if task 1 finishes and task 2 looks stuck, first click webpage `复位导航状态`, then refresh task list and start the next task;
+  - this recovery path does not restart original multicast/FastDDS services and does not change factory fallback behavior.
+
+## 2026-06-15 web relocalization scan overlay
+
+- Field issue:
+  - user can navigate from the web map, but web relocalization is still harder to use than the original 106 RViz workflow;
+  - in RViz, after dragging `2D Pose Estimate`, live scan/pointcloud feedback appears immediately, so it is easy to see whether the estimate matches the map.
+- Web dashboard change:
+  - added `显示实时激光轮廓` in the `定位` tab;
+  - backend subscribes to `/scan`, downsamples finite laser ranges, and sends lightweight 2D points to the browser;
+  - frontend overlays the scan on the map:
+    - red means the scan is projected using the unsent relocalization draft pose;
+    - blue means the scan is projected using the current robot pose.
+- Field use:
+  - open the web `定位` tab;
+  - drag an arrow on the map and rotate it;
+  - adjust until the red laser outline aligns with wall/map structure;
+  - then click `执行重定位`.
+- Implementation note:
+  - this uses the fused 2D `/scan`, not raw `/LIDAR/POINTS`, to keep the web page responsive;
+  - web dashboard now subscribes to `/scan` with Best Effort QoS to match the project `pointcloud_fusion` publisher.
+
+## 2026-06-15 waypoint landing mismatch audit
+
+- User concern:
+  - the robot may not be stopping at the same physical point that was selected on the web map.
+- Checks performed against the currently running 104 web service:
+  - current saved waypoints are `F20_patrol_1` at `(4.572, -0.227)` and `F20_patrol_2` at `(12.347, 0.272)`;
+  - current robot map pose was near `(0.005, 0.000)`, so `F20_patrol_1` is about `4.57m` from the robot and `F20_patrol_2` about `12.35m`;
+  - the live `/map` and built-in `builtin_F20` map have the same width, height, origin, resolution, and occupancy hash, so there is no evidence of map scale or origin mismatch;
+  - both saved waypoints are in free cells and not on occupied/unknown map cells;
+  - frontend `canvasToWorld()` and `worldToCanvas()` use the standard occupancy-grid conversion with y-axis flip for display only;
+  - saved annotation pose is published unchanged as `/m20pro/floor_goal`;
+  - `floor_manager` passes the same x/y/yaw to Nav2 `NavigateToPose` without offset, scale, or rotation.
+- Likely causes still open:
+  - localization error or drift after relocalization;
+  - operator comparing the selected map point with the robot body/front instead of the base-center reference point;
+  - web task layer marking waypoint reached too early.
+- Change:
+  - reduced web task `goal_reached_tolerance_m` default from `0.6m` to `0.3m`, closer to Nav2's `0.25m` xy goal tolerance;
+  - this should reduce early task completion/cancel before the robot has reached the selected point.
+- Next field validation:
+  - record a short bag while running one waypoint;
+  - compare selected waypoint pose, `/m20pro_tcp_bridge/map_pose` final pose, and video/frame reference;
+  - if final pose is close in `/map` but looks wrong physically, the issue is relocalization/map alignment; if final pose is far in `/map`, inspect Nav2/controller behavior.

@@ -84,7 +84,13 @@ class M20TcpClient:
                 raise M20ProtocolError("bad protocol sync header")
             length = struct.unpack("<H", header[4:6])[0]
             body = self._read_exact(length)
-            return json.loads(body.decode("utf-8"))
+            try:
+                return json.loads(body.decode("utf-8"))
+            except json.JSONDecodeError as exc:
+                raw = body[:160].decode("utf-8", errors="replace")
+                raise M20ProtocolError(
+                    "invalid JSON response length=%d raw=%r error=%s" % (length, raw, exc)
+                ) from exc
         finally:
             if response_timeout is not None:
                 self._sock.settimeout(old_timeout)

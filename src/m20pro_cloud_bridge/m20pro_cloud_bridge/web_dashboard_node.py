@@ -30,6 +30,11 @@ except ImportError:  # pragma: no cover - ROS lifecycle package should exist on 
     GetState = None
 
 try:
+    from nav2_msgs.srv import ClearEntireCostmap
+except ImportError:  # pragma: no cover - Nav2 package should exist on robot.
+    ClearEntireCostmap = None
+
+try:
     from drdds.msg import BatteryData
 except ImportError:  # Only available on the robot's factory ROS environment.
     BatteryData = None
@@ -193,6 +198,35 @@ INDEX_HTML = r"""<!doctype html>
       color: var(--text);
       font-weight: 650;
     }
+    .map-toolbar-left {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .map-tools {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    .map-tools button {
+      min-height: 30px;
+      padding: 5px 9px;
+      font-size: 12px;
+    }
+    .zoom-readout {
+      min-width: 48px;
+      text-align: center;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    button.active-tool {
+      border-color: var(--accent);
+      background: #eaf2ff;
+      color: var(--accent);
+    }
     .canvas-box {
       position: relative;
       flex: 1;
@@ -206,6 +240,9 @@ INDEX_HTML = r"""<!doctype html>
       image-rendering: pixelated;
       touch-action: none;
       cursor: crosshair;
+    }
+    canvas.panning {
+      cursor: grabbing;
     }
     .crosshair {
       position: absolute;
@@ -468,6 +505,10 @@ INDEX_HTML = r"""<!doctype html>
       border-color: #86efac;
       background: #f0fdf4;
     }
+    .preflight-summary.warn {
+      border-color: #fcd34d;
+      background: #fffbeb;
+    }
     .preflight-summary.fail {
       border-color: #fecaca;
       background: #fef2f2;
@@ -540,8 +581,16 @@ INDEX_HTML = r"""<!doctype html>
   <main>
     <section class="map-wrap">
       <div class="map-toolbar">
-        <span><strong id="mapTitle">等待地图</strong> <span id="mapMeta">-</span></span>
-        <span id="mapMode" class="pill">实时 /map</span>
+        <span class="map-toolbar-left"><strong id="mapTitle">等待地图</strong> <span id="mapMeta">-</span></span>
+        <span class="map-tools">
+          <button id="zoomOutBtn" title="缩小地图">-</button>
+          <span id="zoomReadout" class="zoom-readout">100%</span>
+          <button id="zoomInBtn" title="放大地图">+</button>
+          <button id="panModeBtn" title="开启后拖动地图，不会标点">平移</button>
+          <button id="fitMapBtn" title="恢复整图适配">适配</button>
+          <button id="centerRobotBtn" title="把机器人位置移动到视图中心">居中机器人</button>
+          <span id="mapMode" class="pill">实时 /map</span>
+        </span>
       </div>
       <div class="canvas-box">
         <canvas id="mapCanvas"></canvas>
@@ -641,7 +690,12 @@ INDEX_HTML = r"""<!doctype html>
               <button class="primary" id="sendInitialPoseBtn">执行重定位</button>
               <button id="useRobotPoseForLocBtn">使用当前机器人位姿</button>
             </div>
-            <div id="localizeLog" class="mono" style="margin-top:8px;">先在地图上拖箭头，箭头方向就是机器狗当前朝向。</div>
+            <label class="checkline">
+              <input id="scanOverlayToggle" type="checkbox" checked />
+              <span>显示实时激光轮廓</span>
+            </label>
+            <div class="small" id="scanOverlayStatus">等待 /scan 数据</div>
+            <div id="localizeLog" class="mono" style="margin-top:8px;">先在地图上拖箭头，红色激光轮廓贴合地图后再执行重定位。</div>
           </div>
         </section>
 
@@ -827,11 +881,11 @@ INDEX_HTML = r"""<!doctype html>
             <h2>作业前自检</h2>
             <div id="preflightSummary" class="preflight-summary">尚未自检</div>
             <div class="actions">
-              <button class="primary" id="runPreflightBtn">开始自检</button>
+              <button class="primary" id="runPreflightBtn">开机基础自检</button>
               <button id="refreshPreflightBtn">刷新结果</button>
             </div>
             <div class="small" style="margin-top:8px;">
-              自检只读取当前系统状态，不重启原厂服务，不修改 multicast/FastDDS。开始任务时系统也会自动自检。
+              基础自检只确认全量系统、网页、原始点云、电量和原厂状态链路；定位和代价地图需要到测试场地重定位后再看，不会阻止手柄原厂遥控。
             </div>
           </div>
           <div class="section">
@@ -849,7 +903,7 @@ INDEX_HTML = r"""<!doctype html>
             <h2>作业前状态</h2>
             <div id="taskPreflightSummary" class="preflight-summary">尚未自检</div>
             <div class="actions">
-              <button id="taskRunPreflightBtn">手动自检</button>
+              <button id="taskRunPreflightBtn">开机基础自检</button>
             </div>
           </div>
           <div class="section">
@@ -872,7 +926,8 @@ INDEX_HTML = r"""<!doctype html>
             <h2>当前执行</h2>
             <div id="activeTask" class="mono">无任务</div>
             <div class="actions">
-              <button class="danger" id="stopTaskBtn" disabled>停止当前任务</button>
+              <button class="danger" id="stopTaskBtn">停止当前任务</button>
+              <button id="resetTaskSessionBtn">复位导航状态</button>
             </div>
           </div>
         </section>
@@ -897,8 +952,17 @@ INDEX_HTML = r"""<!doctype html>
       markDraft: null,
       localizeDraft: null,
       markPointer: null,
+      panPointer: null,
+      view: {
+        zoom: 1,
+        panX: 0,
+        panY: 0,
+        panMode: false
+      },
       preflight: null,
-      lastRelocalizationStamp: null
+      lastRelocalizationStamp: null,
+      relocalizationApiLogUntil: 0,
+      scanOverlay: true
     };
     const manualPointTypeNames = {
       transition: "过渡点",
@@ -950,8 +1014,9 @@ INDEX_HTML = r"""<!doctype html>
     function preflightStatusText(result) {
       if (!result) return "尚未自检";
       const ageText = result.age_sec === null || result.age_sec === undefined ? "" : ` / ${fmtAge(result.age_sec)}前`;
-      if (result.ok) return `最近一次自检通过${ageText}`;
-      return `最近一次自检未通过${ageText}`;
+      if (result.summary) return `${result.summary}${ageText}`;
+      if (result.ok) return `最近一次基础自检通过${ageText}`;
+      return `最近一次基础自检未通过${ageText}`;
     }
     function renderPreflight(result) {
       state.preflight = result || null;
@@ -959,7 +1024,10 @@ INDEX_HTML = r"""<!doctype html>
       for (const box of summaries) {
         if (!box) continue;
         box.className = "preflight-summary";
-        if (result) box.classList.add(result.ok ? "ok" : "fail");
+        if (result) {
+          const cls = result.ok ? (result.navigation_ready === false ? "warn" : "ok") : "fail";
+          box.classList.add(cls);
+        }
         box.textContent = preflightStatusText(result);
       }
       const itemsBox = $("preflightItems");
@@ -995,8 +1063,8 @@ INDEX_HTML = r"""<!doctype html>
     async function runPreflight() {
       const buttons = [$("runPreflightBtn"), $("taskRunPreflightBtn")].filter(Boolean);
       for (const btn of buttons) btn.disabled = true;
-      if ($("preflightSummary")) $("preflightSummary").textContent = "自检中...";
-      if ($("taskPreflightSummary")) $("taskPreflightSummary").textContent = "自检中...";
+      if ($("preflightSummary")) $("preflightSummary").textContent = "基础自检中...";
+      if ($("taskPreflightSummary")) $("taskPreflightSummary").textContent = "基础自检中...";
       try {
         const payload = await api("POST", "/api/preflight/run", {mode: "move"});
         renderPreflight(payload.preflight || payload);
@@ -1045,11 +1113,21 @@ INDEX_HTML = r"""<!doctype html>
       return payload;
     }
     function resizeCanvas() {
+      const before = getView();
       const rect = canvas.parentElement.getBoundingClientRect();
       const dpr = window.devicePixelRatio || 1;
       canvas.width = Math.max(1, Math.floor(rect.width * dpr));
       canvas.height = Math.max(1, Math.floor(rect.height * dpr));
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      if (state.map && before && before.rect) {
+        state.view.panX += (before.rect.width - rect.width) * 0.5;
+        state.view.panY += (before.rect.height - rect.height) * 0.5;
+        clampView();
+      } else if (state.map) {
+        state.view.panX = 0;
+        state.view.panY = 0;
+      }
+      updateZoomReadout();
       draw();
     }
     function buildMapImage(map) {
@@ -1077,14 +1155,96 @@ INDEX_HTML = r"""<!doctype html>
       ictx.putImageData(imageData, 0, 0);
       return image;
     }
-    function getView() {
+    function getBaseView(rect = canvas.getBoundingClientRect()) {
       const map = state.map;
-      const rect = canvas.getBoundingClientRect();
       if (!map) return { scale: 1, ox: 0, oy: 0, rect };
       const scale = Math.min(rect.width / map.width, rect.height / map.height);
       const drawW = map.width * scale;
       const drawH = map.height * scale;
       return { scale, ox: (rect.width - drawW) / 2, oy: (rect.height - drawH) / 2, rect };
+    }
+    function getView() {
+      const base = getBaseView();
+      const zoom = clampZoom(state.view.zoom);
+      const scale = base.scale * zoom;
+      const map = state.map;
+      if (!map) return {...base, zoom: 1, baseScale: base.scale};
+      const drawW = map.width * scale;
+      const drawH = map.height * scale;
+      return {
+        scale,
+        baseScale: base.scale,
+        zoom,
+        ox: (base.rect.width - drawW) / 2 + state.view.panX,
+        oy: (base.rect.height - drawH) / 2 + state.view.panY,
+        rect: base.rect
+      };
+    }
+    function clampZoom(value) {
+      const zoom = Number(value);
+      if (!Number.isFinite(zoom)) return 1;
+      return Math.max(0.25, Math.min(12, zoom));
+    }
+    function updateZoomReadout(view = getView()) {
+      if (!$("zoomReadout")) return;
+      $("zoomReadout").textContent = `${Math.round((view.zoom || state.view.zoom || 1) * 100)}%`;
+    }
+    function clampView() {
+      if (!state.map) return;
+      state.view.zoom = clampZoom(state.view.zoom);
+      const view = getView();
+      const drawW = state.map.width * view.scale;
+      const drawH = state.map.height * view.scale;
+      const margin = 80;
+      if (drawW <= view.rect.width) {
+        state.view.panX = 0;
+      } else {
+        const limitX = (drawW - view.rect.width) * 0.5 + margin;
+        state.view.panX = Math.max(-limitX, Math.min(limitX, state.view.panX));
+      }
+      if (drawH <= view.rect.height) {
+        state.view.panY = 0;
+      } else {
+        const limitY = (drawH - view.rect.height) * 0.5 + margin;
+        state.view.panY = Math.max(-limitY, Math.min(limitY, state.view.panY));
+      }
+      updateZoomReadout();
+    }
+    function resetMapView(redraw = true) {
+      state.view.zoom = 1;
+      state.view.panX = 0;
+      state.view.panY = 0;
+      updateZoomReadout();
+      if (redraw) draw();
+    }
+    function setZoomAt(clientX, clientY, nextZoom) {
+      if (!state.map) return;
+      const oldView = getView();
+      const rect = oldView.rect;
+      const cx = clientX - rect.left;
+      const cy = clientY - rect.top;
+      const mx = (cx - oldView.ox) / oldView.scale;
+      const my = (cy - oldView.oy) / oldView.scale;
+      state.view.zoom = clampZoom(nextZoom);
+      const newView = getView();
+      state.view.panX += cx - (newView.ox + mx * newView.scale);
+      state.view.panY += cy - (newView.oy + my * newView.scale);
+      clampView();
+      draw();
+    }
+    function zoomBy(factor) {
+      const rect = canvas.getBoundingClientRect();
+      setZoomAt(rect.left + rect.width * 0.5, rect.top + rect.height * 0.5, state.view.zoom * factor);
+    }
+    function centerMapOnWorld(x, y) {
+      if (!state.map || !Number.isFinite(Number(x)) || !Number.isFinite(Number(y))) return;
+      const view = getView();
+      const target = worldToCanvasWithView(Number(x), Number(y), view);
+      if (!target) return;
+      state.view.panX += view.rect.width * 0.5 - target.x;
+      state.view.panY += view.rect.height * 0.5 - target.y;
+      clampView();
+      draw();
     }
     function worldToCanvasWithView(x, y, view) {
       const map = state.map;
@@ -1246,6 +1406,41 @@ INDEX_HTML = r"""<!doctype html>
         label: "定位"
       });
     }
+    function drawScanOverlay() {
+      if (!state.scanOverlay || !state.map || !state.latest || !state.latest.scan) return;
+      const points = state.latest.scan.points || [];
+      if (!points.length) return;
+      let pose = state.latest.pose;
+      const usingDraft = activeTabName() === "localize" && state.localizeDraft;
+      if (usingDraft) pose = state.localizeDraft;
+      if (!pose || !Number.isFinite(Number(pose.x)) || !Number.isFinite(Number(pose.y))) return;
+      const yaw = normalizeYaw(pose.yaw || 0);
+      const cosYaw = Math.cos(yaw);
+      const sinYaw = Math.sin(yaw);
+      const offset = state.latest.scan_overlay_offset || {};
+      const offX = Number(offset.x || 0);
+      const offY = Number(offset.y || 0);
+      const offYaw = normalizeYaw(offset.yaw || 0);
+      const cosOff = Math.cos(offYaw);
+      const sinOff = Math.sin(offYaw);
+      const view = getView();
+      ctx.save();
+      ctx.fillStyle = usingDraft ? "rgba(220, 38, 38, 0.72)" : "rgba(14, 165, 233, 0.78)";
+      const radius = Math.max(1.4, Math.min(3.2, view.scale * 1.6));
+      for (const point of points) {
+        const px = Number(point.x);
+        const py = Number(point.y);
+        if (!Number.isFinite(px) || !Number.isFinite(py)) continue;
+        const bx = offX + cosOff * px - sinOff * py;
+        const by = offY + sinOff * px + cosOff * py;
+        const wx = Number(pose.x) + cosYaw * bx - sinYaw * by;
+        const wy = Number(pose.y) + sinYaw * bx + cosYaw * by;
+        const p = worldToCanvasWithView(wx, wy, view);
+        if (!p) continue;
+        ctx.fillRect(p.x - radius * 0.5, p.y - radius * 0.5, radius, radius);
+      }
+      ctx.restore();
+    }
     function draw() {
       const rect = canvas.getBoundingClientRect();
       ctx.clearRect(0, 0, rect.width, rect.height);
@@ -1258,6 +1453,7 @@ INDEX_HTML = r"""<!doctype html>
         return;
       }
       const view = getView();
+      updateZoomReadout(view);
       ctx.drawImage(state.mapImage, view.ox, view.oy, state.map.width * view.scale, state.map.height * view.scale);
       ctx.strokeStyle = "#4b5563";
       ctx.lineWidth = 1;
@@ -1267,6 +1463,7 @@ INDEX_HTML = r"""<!doctype html>
         drawPath(latest.path);
         drawObstacles(latest.dynamic_obstacles);
       }
+      drawScanOverlay();
       drawAnnotations();
       drawMarkDraft();
       drawLocalizeDraft();
@@ -1283,6 +1480,7 @@ INDEX_HTML = r"""<!doctype html>
       if (state.selectedMapId || version === state.liveMapVersion) return;
       const map = await fetchJson("/api/map");
       if (!map.available) return;
+      const resetView = !state.map || state.map.width !== map.width || state.map.height !== map.height;
       state.map = map;
       state.mapImage = buildMapImage(map);
       state.selectedMapId = null;
@@ -1291,6 +1489,7 @@ INDEX_HTML = r"""<!doctype html>
       $("mapMeta").textContent = `${map.width} x ${map.height}, ${map.resolution.toFixed(3)} m/格`;
       $("mapMode").textContent = "实时 /map";
       await loadAnnotations();
+      if (resetView) resetMapView(false);
       resizeCanvas();
     }
     async function loadFileMap(mapId) {
@@ -1309,6 +1508,7 @@ INDEX_HTML = r"""<!doctype html>
       $("mapMeta").textContent = `${map.floor || "-"} / ${map.width} x ${map.height}, ${map.resolution.toFixed(3)} m/格`;
       $("mapMode").textContent = map.source === "project_builtin" ? "项目内置地图" : "固定地图";
       await loadAnnotations();
+      resetMapView(false);
       resizeCanvas();
     }
     function updateState(s) {
@@ -1329,6 +1529,19 @@ INDEX_HTML = r"""<!doctype html>
       else if (s.localization_ok === false) $("localization").textContent = "异常/未定位";
       else $("localization").textContent = "-";
       $("factoryNav").textContent = text(s.navigation_status);
+      if ($("scanOverlayStatus")) {
+        const scan = s.scan || {};
+        const points = scan.points || [];
+        if (points.length) {
+          const age = scan.last_update ? Math.max(0, s.node_time - scan.last_update) : null;
+          const mode = activeTabName() === "localize" && state.localizeDraft ? "红色=待重定位预览" : "蓝色=当前位姿";
+          $("scanOverlayStatus").textContent = `激光轮廓 ${points.length} 点 / ${mode} / ${fmtAge(age)}前`;
+        } else if (scan.finite_ranges) {
+          $("scanOverlayStatus").textContent = `收到 /scan，但无可绘制轮廓点`;
+        } else {
+          $("scanOverlayStatus").textContent = "等待 /scan 数据";
+        }
+      }
       if (s.battery && s.battery.primary) {
         const pack = s.battery.primary;
         const tempText = Number.isFinite(Number(pack.temperature_c)) ? ` / ${fmtNumber(Number(pack.temperature_c), 1)}℃` : "";
@@ -1348,7 +1561,11 @@ INDEX_HTML = r"""<!doctype html>
       const det = s.detections && (s.detections.parsed || s.detections.raw);
       $("detections").textContent = det ? JSON.stringify(det, null, 2) : "等待数据";
       $("events").textContent = s.events && s.events.length ? JSON.stringify(s.events.slice(-5), null, 2) : "等待数据";
-      if (s.relocalization_result && s.relocalization_result.last_update !== state.lastRelocalizationStamp) {
+      if (
+        s.relocalization_result
+        && s.relocalization_result.last_update !== state.lastRelocalizationStamp
+        && Date.now() > state.relocalizationApiLogUntil
+      ) {
         state.lastRelocalizationStamp = s.relocalization_result.last_update;
         setLog("localizeLog", {
           重定位结果: s.relocalization_result.raw,
@@ -1356,7 +1573,8 @@ INDEX_HTML = r"""<!doctype html>
         });
       }
       $("activeTask").textContent = s.active_task ? JSON.stringify(s.active_task, null, 2) : "无任务";
-      $("stopTaskBtn").disabled = !(s.active_task && s.active_task.status === "running");
+      $("stopTaskBtn").disabled = false;
+      $("stopTaskBtn").title = "无论页面是否显示任务执行中，都会发送停止和复位指令";
       const table = $("topics");
       table.innerHTML = "";
       for (const [name, info] of Object.entries(s.topics || {})) {
@@ -1473,8 +1691,9 @@ INDEX_HTML = r"""<!doctype html>
         return;
       }
       for (const task of state.tasks) {
-        const active = payload.active_task && payload.active_task.status === "running";
-        const isRunning = task.status === "running";
+        const activeTask = payload.active_task && payload.active_task.status === "running" ? payload.active_task : null;
+        const active = !!activeTask;
+        const isRunning = !!(activeTask && activeTask.task_id === task.id);
         const canStart = !active && !isRunning;
         const canDelete = !isRunning && !(payload.active_task && payload.active_task.task_id === task.id);
         const startLabel = isRunning ? "执行中" : (active ? "先停止当前任务" : "开始执行");
@@ -1494,14 +1713,12 @@ INDEX_HTML = r"""<!doctype html>
       for (const btn of box.querySelectorAll("[data-start-task]")) {
         btn.addEventListener("click", async () => {
           btn.disabled = true;
-          btn.textContent = "自检中...";
+          btn.textContent = "启动中...";
           try {
             const payload = await api("POST", "/api/tasks/start", {task_id: btn.dataset.startTask});
-            if (payload.preflight) renderPreflight(payload.preflight);
             setLog("activeTask", payload.active_task || payload);
             await loadTasks();
           } catch (err) {
-            if (err.preflight) renderPreflight(err.preflight);
             setLog("activeTask", err);
           } finally {
             await loadTasks();
@@ -1558,9 +1775,23 @@ INDEX_HTML = r"""<!doctype html>
         document.querySelectorAll(".panel").forEach(item => item.classList.remove("active"));
         btn.classList.add("active");
         $(`tab-${btn.dataset.tab}`).classList.add("active");
+        draw();
       });
     }
     canvas.addEventListener("pointerdown", (evt) => {
+      if (state.view.panMode || evt.button === 1 || evt.button === 2 || evt.shiftKey || evt.altKey) {
+        evt.preventDefault();
+        state.panPointer = {
+          id: evt.pointerId,
+          x: evt.clientX,
+          y: evt.clientY,
+          panX: state.view.panX,
+          panY: state.view.panY
+        };
+        canvas.classList.add("panning");
+        canvas.setPointerCapture(evt.pointerId);
+        return;
+      }
       const p = canvasToWorld(evt.clientX, evt.clientY);
       if (!p) return;
       evt.preventDefault();
@@ -1579,6 +1810,15 @@ INDEX_HTML = r"""<!doctype html>
       }
     });
     canvas.addEventListener("pointermove", (evt) => {
+      if (state.panPointer && state.panPointer.id === evt.pointerId) {
+        evt.preventDefault();
+        state.view.panX = state.panPointer.panX + (evt.clientX - state.panPointer.x);
+        state.view.panY = state.panPointer.panY + (evt.clientY - state.panPointer.y);
+        clampView();
+        draw();
+        $("cursor").textContent = `地图缩放 ${Math.round(state.view.zoom * 100)}%`;
+        return;
+      }
       const p = canvasToWorld(evt.clientX, evt.clientY);
       if (!p) return;
       if (!state.markPointer || state.markPointer.id !== evt.pointerId) {
@@ -1605,6 +1845,13 @@ INDEX_HTML = r"""<!doctype html>
       }
     });
     function finishMarkPointer(evt) {
+      if (state.panPointer && state.panPointer.id === evt.pointerId) {
+        evt.preventDefault();
+        if (canvas.hasPointerCapture(evt.pointerId)) canvas.releasePointerCapture(evt.pointerId);
+        state.panPointer = null;
+        canvas.classList.remove("panning");
+        return;
+      }
       if (!state.markPointer || state.markPointer.id !== evt.pointerId) return;
       evt.preventDefault();
       if (canvas.hasPointerCapture(evt.pointerId)) canvas.releasePointerCapture(evt.pointerId);
@@ -1617,6 +1864,29 @@ INDEX_HTML = r"""<!doctype html>
     }
     canvas.addEventListener("pointerup", finishMarkPointer);
     canvas.addEventListener("pointercancel", finishMarkPointer);
+    canvas.addEventListener("contextmenu", (evt) => evt.preventDefault());
+    canvas.addEventListener("wheel", (evt) => {
+      if (!state.map) return;
+      evt.preventDefault();
+      const factor = Math.exp(-evt.deltaY * 0.0012);
+      setZoomAt(evt.clientX, evt.clientY, state.view.zoom * factor);
+    }, {passive: false});
+    $("zoomOutBtn").addEventListener("click", () => zoomBy(1 / 1.25));
+    $("zoomInBtn").addEventListener("click", () => zoomBy(1.25));
+    $("panModeBtn").addEventListener("click", () => {
+      state.view.panMode = !state.view.panMode;
+      $("panModeBtn").classList.toggle("active-tool", state.view.panMode);
+      $("cursor").textContent = state.view.panMode ? "平移模式" : "拖拽地图取点和朝向";
+    });
+    $("fitMapBtn").addEventListener("click", () => resetMapView(true));
+    $("centerRobotBtn").addEventListener("click", () => {
+      const pose = state.latest && state.latest.pose;
+      if (!pose) {
+        $("cursor").textContent = "暂无机器人位姿，重定位成功后才能居中";
+        return;
+      }
+      centerMapOnWorld(pose.x, pose.y);
+    });
     $("markYaw").addEventListener("input", () => {
       const pose = state.markDraft;
       if (!pose) return;
@@ -1652,6 +1922,8 @@ INDEX_HTML = r"""<!doctype html>
         const y = Number(yText);
         const yaw = Number($("locYaw").value);
         if (!Number.isFinite(x) || !Number.isFinite(y)) throw {message: "定位坐标无效，请先在地图上拖箭头"};
+        state.relocalizationApiLogUntil = Date.now() + 20000;
+        setLog("localizeLog", "已发送重定位请求，正在等待原厂回执和导航链路恢复...");
         const payload = await api("POST", "/api/localization/initialpose", {
           x,
           y,
@@ -1659,6 +1931,7 @@ INDEX_HTML = r"""<!doctype html>
           yaw: Number.isFinite(yaw) ? yaw : 0,
           floor: $("locFloor").value.trim()
         });
+        state.relocalizationApiLogUntil = Date.now() + 12000;
         setLog("localizeLog", payload);
         $("cursor").textContent = `已发送重定位 x ${x.toFixed(3)} / y ${y.toFixed(3)} / 朝向 ${normalizeYaw(yaw).toFixed(3)} rad`;
       } catch (err) { setLog("localizeLog", err); }
@@ -1668,6 +1941,10 @@ INDEX_HTML = r"""<!doctype html>
       if (!pose) return;
       setLocalizeDraft({x: pose.x, y: pose.y, yaw: pose.yaw}, "已取当前机器人位姿");
       if (state.latest.floor) $("locFloor").value = state.latest.floor;
+    });
+    $("scanOverlayToggle").addEventListener("change", () => {
+      state.scanOverlay = $("scanOverlayToggle").checked;
+      draw();
     });
     $("checkMappingEnvBtn").addEventListener("click", async () => {
       try { setLog("mappingLog", await api("POST", "/api/mapping/check_environment", {})); }
@@ -1797,11 +2074,33 @@ INDEX_HTML = r"""<!doctype html>
       await runPreflight();
     });
     $("stopTaskBtn").addEventListener("click", async () => {
+      const btn = $("stopTaskBtn");
+      const oldText = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "停止中...";
       try {
-        const payload = await api("POST", "/api/tasks/stop", {});
-        setLog("activeTask", payload.active_task || "无任务");
+        const payload = await api("POST", "/api/tasks/stop", {reason: "web_manual_stop"});
+        setLog("activeTask", payload.message || payload.active_task || "已发送停止指令");
         await loadTasks();
-      } catch (err) { setLog("activeTask", err); }
+      } catch (err) {
+        setLog("activeTask", err);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = oldText;
+      }
+    });
+    $("resetTaskSessionBtn").addEventListener("click", async () => {
+      const btn = $("resetTaskSessionBtn");
+      btn.disabled = true;
+      try {
+        const payload = await api("POST", "/api/tasks/stop", {reason: "web_manual_reset"});
+        setLog("activeTask", payload.active_task || "已复位导航状态");
+        await loadTasks();
+      } catch (err) {
+        setLog("activeTask", err);
+      } finally {
+        btn.disabled = false;
+      }
     });
     window.addEventListener("resize", resizeCanvas);
     resizeCanvas();
@@ -1854,6 +2153,12 @@ def _is_finite_pose_dict(pose: Dict[str, float]) -> bool:
         math.isfinite(float(pose.get(key, 0.0)))
         for key in ("x", "y", "z", "yaw", "yaw_deg")
     )
+
+
+def _is_plausible_pose_dict(pose: Dict[str, float], max_abs_position: float = 10000.0) -> bool:
+    if not _is_finite_pose_dict(pose):
+        return False
+    return all(abs(float(pose.get(key, 0.0))) <= max_abs_position for key in ("x", "y", "z"))
 
 
 def _parse_json_text(text: str) -> Any:
@@ -2117,6 +2422,12 @@ class WebDashboardNode(Node):
             str(self.get_parameter("initialpose_topic").value),
             10,
         )
+        self.clear_costmap_clients = []
+        if ClearEntireCostmap is not None:
+            self.clear_costmap_clients = [
+                self.create_client(ClearEntireCostmap, str(service_name))
+                for service_name in self.get_parameter("task_clear_costmap_services").value
+            ]
 
         self._state: Dict[str, Any] = {
             "floor": None,
@@ -2166,7 +2477,21 @@ class WebDashboardNode(Node):
         )
         self.declare_parameter("mapping_command_timeout_s", 120.0)
         self.declare_parameter("map_import_timeout_s", 180.0)
-        self.declare_parameter("goal_reached_tolerance_m", 0.6)
+        self.declare_parameter("goal_reached_tolerance_m", 0.3)
+        self.declare_parameter("task_goal_resend_interval_s", 5.0)
+        self.declare_parameter("task_start_settle_s", 0.5)
+        self.declare_parameter("task_start_pose_timeout_s", 3.0)
+        self.declare_parameter("task_start_require_localization_ok", True)
+        self.declare_parameter("task_start_require_pose_on_map", True)
+        self.declare_parameter("task_start_require_current_floor_match", False)
+        self.declare_parameter("task_stop_zero_cmd_samples", 10)
+        self.declare_parameter(
+            "task_clear_costmap_services",
+            [
+                "/global_costmap/clear_entirely_global_costmap",
+                "/local_costmap/clear_entirely_local_costmap",
+            ],
+        )
         self.declare_parameter("default_task_dwell_s", 5.0)
         self.declare_parameter("default_transition_dwell_s", 0.0)
         self.declare_parameter("default_charge_dwell_s", 0.0)
@@ -2179,6 +2504,7 @@ class WebDashboardNode(Node):
         self.declare_parameter("initialpose_covariance_yaw", 0.0685)
         self.declare_parameter("initialpose_publish_repeats", 5)
         self.declare_parameter("initialpose_publish_interval_s", 0.1)
+        self.declare_parameter("relocalization_verify_timeout_s", 8.0)
         self.declare_parameter("robot_pose_display_yaw_offset_rad", 0.0)
         self.declare_parameter("current_floor_topic", "/m20pro/current_floor")
         self.declare_parameter("stair_status_topic", "/m20pro/stair_status")
@@ -2188,6 +2514,12 @@ class WebDashboardNode(Node):
         self.declare_parameter("battery_topic", "/BATTERY_DATA")
         self.declare_parameter("lidar_points_topic", "/LIDAR/POINTS")
         self.declare_parameter("scan_topic", "/scan")
+        self.declare_parameter("scan_overlay_max_points", 720)
+        self.declare_parameter("scan_overlay_min_range_m", 0.05)
+        self.declare_parameter("scan_overlay_max_range_m", 30.0)
+        self.declare_parameter("scan_overlay_offset_x_m", 0.0)
+        self.declare_parameter("scan_overlay_offset_y_m", 0.0)
+        self.declare_parameter("scan_overlay_offset_yaw_rad", 0.0)
         self.declare_parameter("odom_topic", "/ODOM")
         self.declare_parameter("pose_topic", "/m20pro_tcp_bridge/map_pose")
         self.declare_parameter("plan_topic", "/plan")
@@ -2367,6 +2699,8 @@ class WebDashboardNode(Node):
         map_qos = QoSProfile(depth=1)
         map_qos.reliability = ReliabilityPolicy.RELIABLE
         map_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        scan_qos = QoSProfile(depth=5)
+        scan_qos.reliability = ReliabilityPolicy.BEST_EFFORT
 
         self.create_subscription(String, self._topic("current_floor_topic"), self._on_current_floor, 10)
         self.create_subscription(String, self._topic("stair_status_topic"), self._on_stair_status, 10)
@@ -2378,7 +2712,7 @@ class WebDashboardNode(Node):
         else:
             self.get_logger().warning("drdds.msg.BatteryData is unavailable; battery display is disabled")
         self.create_subscription(PointCloud2, self._topic("lidar_points_topic"), self._on_lidar_points, 2)
-        self.create_subscription(LaserScan, self._topic("scan_topic"), self._on_scan, 5)
+        self.create_subscription(LaserScan, self._topic("scan_topic"), self._on_scan, scan_qos)
         self.create_subscription(Odometry, self._topic("odom_topic"), self._on_odom, 10)
         self.create_subscription(PoseStamped, self._topic("pose_topic"), self._on_pose, 20)
         self.create_subscription(RosPath, self._topic("plan_topic"), self._on_path, 5)
@@ -2413,6 +2747,7 @@ class WebDashboardNode(Node):
         with self._lock:
             self._state["stair_status"] = msg.data
             self._mark_topic("stair_status")
+        self._handle_navigation_status_for_task(msg.data)
 
     def _on_gait_command(self, msg: String) -> None:
         with self._lock:
@@ -2504,6 +2839,34 @@ class WebDashboardNode(Node):
     def _on_scan(self, msg: LaserScan) -> None:
         ranges_count = len(msg.ranges)
         finite_count = sum(1 for value in msg.ranges if math.isfinite(float(value)))
+        min_range = max(
+            float(getattr(msg, "range_min", 0.0) or 0.0),
+            float(self.get_parameter("scan_overlay_min_range_m").value),
+        )
+        max_range_param = float(self.get_parameter("scan_overlay_max_range_m").value)
+        sensor_max = float(getattr(msg, "range_max", 0.0) or 0.0)
+        max_range = max_range_param if max_range_param > 0.0 else sensor_max
+        if sensor_max > 0.0:
+            max_range = min(max_range, sensor_max)
+        max_points = max(0, int(self.get_parameter("scan_overlay_max_points").value))
+        step = 1
+        if max_points > 0 and ranges_count > max_points:
+            step = max(1, math.ceil(ranges_count / max_points))
+        points = []
+        for index in range(0, ranges_count, step):
+            try:
+                distance = float(msg.ranges[index])
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(distance) or distance < min_range or distance > max_range:
+                continue
+            angle = float(msg.angle_min) + index * float(msg.angle_increment)
+            points.append(
+                {
+                    "x": distance * math.cos(angle),
+                    "y": distance * math.sin(angle),
+                }
+            )
         with self._lock:
             self._state["scan"] = {
                 "last_update": time.time(),
@@ -2513,6 +2876,10 @@ class WebDashboardNode(Node):
                 "finite_ranges": finite_count,
                 "angle_min": float(msg.angle_min),
                 "angle_max": float(msg.angle_max),
+                "range_min": float(getattr(msg, "range_min", 0.0) or 0.0),
+                "range_max": float(getattr(msg, "range_max", 0.0) or 0.0),
+                "overlay_points": len(points),
+                "points": points,
             }
             self._mark_topic("scan")
 
@@ -2532,7 +2899,7 @@ class WebDashboardNode(Node):
     def _on_pose(self, msg: PoseStamped) -> None:
         with self._lock:
             pose = _pose_to_dict(msg.pose)
-            if not _is_finite_pose_dict(pose):
+            if not _is_plausible_pose_dict(pose):
                 self._mark_topic("pose_invalid")
                 return
             raw_display_offset = float(self.get_parameter("robot_pose_display_yaw_offset_rad").value)
@@ -2706,6 +3073,11 @@ class WebDashboardNode(Node):
         snapshot["ok"] = True
         snapshot["node_time"] = now
         snapshot["node_time_text"] = _now_text()
+        snapshot["scan_overlay_offset"] = {
+            "x": float(self.get_parameter("scan_overlay_offset_x_m").value),
+            "y": float(self.get_parameter("scan_overlay_offset_y_m").value),
+            "yaw": float(self.get_parameter("scan_overlay_offset_yaw_rad").value),
+        }
         for value in snapshot["topics"].values():
             last_update = value.get("last_update")
             value["age_sec"] = None if last_update is None else max(0.0, now - float(last_update))
@@ -2757,13 +3129,7 @@ class WebDashboardNode(Node):
         timestamp = payload.get("timestamp")
         if timestamp is not None:
             payload["age_sec"] = max(0.0, time.time() - float(timestamp))
-            payload["valid"] = bool(payload.get("ok"))
         return payload
-
-    def _preflight_is_valid(self) -> bool:
-        with self._preflight_lock:
-            result = self._preflight_with_age_unlocked()
-        return bool(result and result.get("valid"))
 
     def _run_preflight(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         mode = str(payload.get("mode") or "move").strip()
@@ -2773,8 +3139,22 @@ class WebDashboardNode(Node):
         timeout_s = max(1.0, float(self.get_parameter("preflight_topic_timeout_s").value))
         items: List[Dict[str, Any]] = []
 
-        def add(key: str, label: str, status: str, message: str = "") -> None:
-            items.append({"key": key, "label": label, "status": status, "message": message})
+        def add(
+            key: str,
+            label: str,
+            status: str,
+            message: str = "",
+            group: str = "base",
+        ) -> None:
+            items.append(
+                {
+                    "key": key,
+                    "label": label,
+                    "status": status,
+                    "message": message,
+                    "group": group,
+                }
+            )
 
         node_names = set(self.get_node_names())
         required_nodes = [
@@ -2796,23 +3176,33 @@ class WebDashboardNode(Node):
         )
 
         topic_names = {name for name, _types in self.get_topic_names_and_types()}
-        required_topics = [
+        base_topics = [
             self._topic("lidar_points_topic"),
+            self._topic("navigation_status_topic"),
+            self._topic("map_topic"),
+        ]
+        navigation_topics = [
             self._topic("scan_topic"),
             self._topic("odom_topic"),
             self._topic("pose_topic"),
             self._topic("localization_ok_topic"),
-            self._topic("navigation_status_topic"),
-            self._topic("map_topic"),
             self._topic("local_costmap_topic"),
             self._topic("global_costmap_topic"),
         ]
-        missing_topics = [topic for topic in required_topics if topic not in topic_names]
+        missing_topics = [topic for topic in base_topics if topic not in topic_names]
         add(
             "topics",
-            "关键话题",
+            "基础话题",
             "ok" if not missing_topics else "fail",
             "全部存在" if not missing_topics else "缺少：" + "、".join(missing_topics),
+        )
+        missing_navigation_topics = [topic for topic in navigation_topics if topic not in topic_names]
+        add(
+            "navigation_topics",
+            "导航话题",
+            "ok" if not missing_navigation_topics else "warn",
+            "全部存在" if not missing_navigation_topics else "重定位后应出现：" + "、".join(missing_navigation_topics),
+            group="navigation",
         )
 
         with self._lock:
@@ -2858,8 +3248,13 @@ class WebDashboardNode(Node):
         add(
             "scan",
             "二维激光",
-            "ok" if scan_ok and finite_ranges > 0 else "fail",
-            f"有效距离 {finite_ranges} / {fmt_age_text(scan_age)}" if scan_age is not None else "未收到 /scan",
+            "ok" if scan_ok and finite_ranges > 0 else "warn",
+            (
+                f"有效距离 {finite_ranges} / {fmt_age_text(scan_age)}"
+                if scan_age is not None
+                else "未收到 /scan；未定位或 TF 未建立时可能暂时没有"
+            ),
+            group="navigation",
         )
 
         odom_ok, odom_age, odom = fresh("odom")
@@ -2867,32 +3262,39 @@ class WebDashboardNode(Node):
         add(
             "odom",
             "原厂里程计",
-            "ok" if odom_ok and odom_finite else "fail",
-            f"位姿有效 / {fmt_age_text(odom_age)}" if odom_age is not None and odom_finite else "未收到有效 /ODOM",
+            "ok" if odom_ok and odom_finite else "warn",
+            (
+                f"位姿有效 / {fmt_age_text(odom_age)}"
+                if odom_age is not None and odom_finite
+                else "未收到有效 /ODOM；原厂未定位时可能出现 inf/异常坐标"
+            ),
+            group="navigation",
         )
 
         pose = current_state.get("pose")
-        pose_has_stamp = isinstance(pose, dict) and _is_finite_pose_dict(pose)
+        pose_has_stamp = isinstance(pose, dict) and _is_plausible_pose_dict(pose)
         pose_age = None
         if isinstance(pose, dict) and pose.get("stamp"):
             pose_age = max(0.0, now - float(pose["stamp"]))
         add(
             "map_pose",
             "地图位姿",
-            "ok" if pose_has_stamp else "fail",
+            "ok" if pose_has_stamp else "warn",
             (
                 f"x={float(pose.get('x', 0.0)):.2f} y={float(pose.get('y', 0.0)):.2f}"
                 if pose_has_stamp
-                else "未收到有效 /m20pro_tcp_bridge/map_pose"
+                else "未收到有效 /m20pro_tcp_bridge/map_pose；到测试场地后先重定位"
             ),
+            group="navigation",
         )
 
         loc_ok = current_state.get("localization_ok") is True
         add(
             "localization",
             "定位状态",
-            "ok" if loc_ok else "fail",
-            "localization_ok=true" if loc_ok else "定位未确认，请先重定位",
+            "ok" if loc_ok else "warn",
+            "localization_ok=true" if loc_ok else "定位未确认；这是重定位前的预期状态",
+            group="navigation",
         )
 
         nav_status = current_state.get("navigation_status")
@@ -2911,8 +3313,13 @@ class WebDashboardNode(Node):
         add(
             "local_costmap",
             "局部代价地图",
-            "ok" if local_ok and local_size_ok else "fail",
-            f"{local_costmap.get('width')}x{local_costmap.get('height')} / {fmt_age_text(local_age)}" if isinstance(local_costmap, dict) else "未收到 local_costmap",
+            "ok" if local_ok and local_size_ok else "warn",
+            (
+                f"{local_costmap.get('width')}x{local_costmap.get('height')} / {fmt_age_text(local_age)}"
+                if isinstance(local_costmap, dict)
+                else "未收到 local_costmap；重定位后再确认"
+            ),
+            group="navigation",
         )
 
         global_ok, global_age, global_costmap = fresh("global_costmap")
@@ -2920,8 +3327,13 @@ class WebDashboardNode(Node):
         add(
             "global_costmap",
             "全局代价地图",
-            "ok" if global_ok and global_size_ok else "fail",
-            f"{global_costmap.get('width')}x{global_costmap.get('height')} / {fmt_age_text(global_age)}" if isinstance(global_costmap, dict) else "未收到 global_costmap",
+            "ok" if global_ok and global_size_ok else "warn",
+            (
+                f"{global_costmap.get('width')}x{global_costmap.get('height')} / {fmt_age_text(global_age)}"
+                if isinstance(global_costmap, dict)
+                else "未收到 global_costmap；重定位后再确认"
+            ),
+            group="navigation",
         )
 
         battery = current_state.get("battery")
@@ -2942,8 +3354,9 @@ class WebDashboardNode(Node):
             add(
                 f"lifecycle:{node_name}",
                 f"{node_name} 生命周期",
-                "ok" if lifecycle.get("active") else "fail",
+                "ok" if lifecycle.get("active") else "warn",
                 lifecycle.get("message", ""),
+                group="navigation",
             )
 
         motion = self._detect_motion_mode()
@@ -2963,19 +3376,33 @@ class WebDashboardNode(Node):
                 motion.get("message") or "未确认运动模式",
             )
 
-        failures = [item for item in items if item["status"] == "fail"]
+        failures = [item for item in items if item["status"] == "fail" and item.get("group") == "base"]
+        navigation_failures = [
+            item
+            for item in items
+            if item.get("group") == "navigation" and item["status"] in ("fail", "warn")
+        ]
         warnings = [item for item in items if item["status"] == "warn"]
         result = {
             "ok": not failures,
-            "valid": not failures,
+            "navigation_ready": not navigation_failures,
             "mode": mode,
             "timestamp": now,
             "time_text": _now_text(),
             "age_sec": 0.0,
             "items": items,
             "failures": len(failures),
+            "navigation_warnings": len(navigation_failures),
             "warnings": len(warnings),
-            "summary": "自检通过" if not failures else f"自检未通过：{len(failures)} 项失败",
+            "summary": (
+                (
+                    "基础自检通过，导航已就绪"
+                    if not navigation_failures
+                    else "基础自检通过，导航待重定位后确认"
+                )
+                if not failures
+                else f"基础自检未通过：{len(failures)} 项失败"
+            ),
         }
         with self._preflight_lock:
             self._last_preflight = result
@@ -3474,8 +3901,18 @@ class WebDashboardNode(Node):
 
     def _tasks_payload(self) -> Dict[str, Any]:
         with self._data_lock:
-            tasks = list(self._tasks)
             active_task = self._settings.get("active_task")
+            active_running = active_task if isinstance(active_task, dict) and active_task.get("status") == "running" else None
+            active_task_id = active_running.get("task_id") if active_running else None
+            stale_changed = False
+            for task in self._tasks:
+                if task.get("status") == "running" and task.get("id") != active_task_id:
+                    task["status"] = "stopped"
+                    task["updated_at"] = _now_text()
+                    stale_changed = True
+            if stale_changed:
+                self._save_json("tasks.json", self._tasks)
+            tasks = list(self._tasks)
         with self._preflight_lock:
             preflight = self._preflight_with_age_unlocked()
         return {
@@ -3528,6 +3965,80 @@ class WebDashboardNode(Node):
         self._append_event("删除任务", {"task_id": task_id})
         return {"ok": True, "deleted": task_id}
 
+    def _reset_navigation_session(
+        self,
+        reason: str,
+        clear_costmaps: bool = True,
+        publish_idle: bool = True,
+    ) -> None:
+        msg = String()
+        msg.data = reason
+        for _ in range(3):
+            self.stop_task_pub.publish(msg)
+            time.sleep(0.02)
+        zero_samples = max(3, int(self.get_parameter("task_stop_zero_cmd_samples").value))
+        self._publish_zero_cmd(samples=zero_samples)
+        if clear_costmaps:
+            self._clear_task_costmaps(reason)
+        if publish_idle:
+            self._publish_idle_waypoint(reason)
+        self._append_event("复位导航会话", {"reason": reason, "clear_costmaps": clear_costmaps})
+
+    def _publish_zero_cmd(self, samples: int = 1) -> None:
+        count = max(1, int(samples))
+        for index in range(count):
+            self.cmd_vel_pub.publish(Twist())
+            if index + 1 < count:
+                time.sleep(0.03)
+
+    def _clear_task_costmaps(self, reason: str) -> None:
+        if ClearEntireCostmap is None:
+            return
+        for client in self.clear_costmap_clients:
+            try:
+                if not client.wait_for_service(timeout_sec=0.05):
+                    continue
+                future = client.call_async(ClearEntireCostmap.Request())
+                future.add_done_callback(
+                    lambda done, service_name=client.srv_name: self._on_clear_task_costmap_done(
+                        done, service_name, reason
+                    )
+                )
+            except Exception as exc:
+                self.get_logger().warning("task costmap clear request failed for %s: %s" % (client.srv_name, exc))
+
+    def _on_clear_task_costmap_done(self, future: Any, service_name: str, reason: str) -> None:
+        try:
+            future.result()
+        except Exception as exc:
+            self.get_logger().warning("task costmap clear failed for %s reason=%s: %s" % (service_name, reason, exc))
+
+    def _publish_idle_waypoint(self, reason: str) -> None:
+        payload = {
+            "phase": "idle",
+            "reason": reason,
+            "updated_at": _now_text(),
+        }
+        msg = String()
+        msg.data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        self.active_waypoint_pub.publish(msg)
+
+    def _handle_navigation_status_for_task(self, status_text: str) -> None:
+        status_text = str(status_text or "").strip()
+        if not status_text.startswith("error "):
+            return
+        with self._data_lock:
+            active = dict(self._settings.get("active_task") or {})
+            if active.get("status") != "running":
+                return
+            task_id = active.get("task_id")
+            self._mark_task_status(task_id, "error")
+            self._settings["active_task"] = None
+            self._save_json("settings.json", self._settings)
+            self._save_json("tasks.json", self._tasks)
+        self._reset_navigation_session("navigation_error", clear_costmaps=True)
+        self._append_event("前端任务因导航错误停止", {"task_id": task_id, "status": status_text})
+
     def _create_task(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         annotation_ids = payload.get("annotation_ids") or []
         annotation_ids = [str(item) for item in annotation_ids if str(item).strip()]
@@ -3557,10 +4068,7 @@ class WebDashboardNode(Node):
 
     def _start_task(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         task_id = str(payload.get("task_id") or "").strip()
-        preflight_response = self._run_preflight({"mode": "move", "reason": "task_start"})
-        preflight = preflight_response.get("preflight") or {}
-        if not preflight.get("ok"):
-            return self._error("自动自检未通过，任务未启动", {"preflight": preflight})
+        first_annotation = None
         with self._data_lock:
             current_active = self._settings.get("active_task") or {}
             if current_active.get("status") == "running":
@@ -3591,6 +4099,23 @@ class WebDashboardNode(Node):
                     "当前地图与任务地图不一致，请先切换到任务对应地图",
                     {"task_map_id": task_map_id, "selected_map_id": selected_map_id},
                 )
+            first_annotation = known.get((task.get("annotation_ids") or [""])[0])
+        ready_error = self._validate_task_start_readiness(first_annotation, task_map_id)
+        if ready_error:
+            return ready_error
+        self._reset_navigation_session("before_start_task", clear_costmaps=True)
+        settle_s = max(0.0, float(self.get_parameter("task_start_settle_s").value))
+        if settle_s > 0.0:
+            time.sleep(min(settle_s, 2.0))
+        with self._data_lock:
+            current_active = self._settings.get("active_task") or {}
+            if current_active.get("status") == "running":
+                return self._error("已有任务正在执行，请先停止当前任务")
+            task = self._find_by_id(self._tasks, task_id)
+            if task is None:
+                return self._error("任务不存在")
+            selected_map_id = self._settings.get("selected_map_id") or "live_map"
+            task_map_id = str(task.get("map_id") or "").strip() or selected_map_id
             active = {
                 "task_id": task["id"],
                 "task_name": task.get("name"),
@@ -3600,6 +4125,7 @@ class WebDashboardNode(Node):
                 "annotation_ids": list(task.get("annotation_ids") or []),
                 "started_at": _now_text(),
                 "last_goal_annotation_id": None,
+                "last_goal_sent_monotonic": 0.0,
                 "phase": "navigating",
             }
             self._settings["active_task"] = active
@@ -3612,11 +4138,10 @@ class WebDashboardNode(Node):
             return {
                 "ok": True,
                 "active_task": self._settings.get("active_task"),
-                "preflight": preflight,
             }
 
     def _stop_task(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        reason = str(payload.get("reason") or "web_stop").strip() or "web_stop"
+        reason = str(payload.get("reason") or "web_manual_stop").strip() or "web_manual_stop"
         stopped_task_id = None
         with self._data_lock:
             active = dict(self._settings.get("active_task") or {})
@@ -3626,18 +4151,21 @@ class WebDashboardNode(Node):
             self._settings["active_task"] = None
             self._save_json("settings.json", self._settings)
             self._save_json("tasks.json", self._tasks)
-        msg = String()
-        msg.data = reason
-        self.stop_task_pub.publish(msg)
-        self.cmd_vel_pub.publish(Twist())
+        self._reset_navigation_session(reason, clear_costmaps=True)
         self._append_event("停止前端任务", {"task_id": stopped_task_id, "reason": reason})
-        return {"ok": True, "active_task": None, "stopped_task_id": stopped_task_id}
+        return {
+            "ok": True,
+            "active_task": None,
+            "stopped_task_id": stopped_task_id,
+            "message": "已发送停止/复位指令",
+        }
 
     def _publish_initialpose(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self._data_lock:
             active = self._settings.get("active_task") or {}
             if active.get("status") == "running":
                 return self._error("任务执行中不能重定位，请先停止当前任务")
+        request_started_at = time.time()
         try:
             x = float(payload.get("x"))
             y = float(payload.get("y"))
@@ -3669,17 +4197,144 @@ class WebDashboardNode(Node):
             self.initialpose_pub.publish(msg)
             if interval_s > 0.0:
                 time.sleep(interval_s)
+        verification = self._wait_for_relocalization_verification(
+            request_started_at,
+            {"x": x, "y": y, "z": z, "yaw": yaw},
+        )
         result = {
-            "ok": True,
-            "message": "已发布网页重定位请求。请等待几秒后确认点云、地图和网页位姿是否对齐。",
+            "ok": bool(verification.get("request_accepted")),
+            "navigation_ready": bool(verification.get("navigation_ready")),
+            "message": verification.get("message", "已发布网页重定位请求"),
             "topic": str(self.get_parameter("initialpose_topic").value),
             "publish_repeats": repeats,
             "frame_id": frame_id,
             "floor": floor,
             "pose": {"x": x, "y": y, "z": z, "yaw": yaw},
+            "verification": verification,
         }
         self._append_event("网页发布重定位", result)
         return result
+
+    def _wait_for_relocalization_verification(
+        self,
+        request_started_at: float,
+        requested_pose: Dict[str, float],
+    ) -> Dict[str, Any]:
+        timeout_s = max(0.5, float(self.get_parameter("relocalization_verify_timeout_s").value))
+        deadline = time.time() + timeout_s
+        accepted = False
+        result_text = ""
+        result_age_ok = False
+        pose_ok = False
+        pose_near_request = False
+        localization_ok = False
+        scan_ok = False
+        local_costmap_ok = False
+        global_costmap_ok = False
+        pose_error_m = None
+        yaw_error_rad = None
+
+        while time.time() < deadline:
+            with self._lock:
+                relocalization = dict(self._state.get("relocalization_result") or {})
+                pose = dict(self._state.get("pose") or {})
+                localization = self._state.get("localization_ok")
+                scan = dict(self._state.get("scan") or {})
+                local_costmap = dict(self._state.get("local_costmap") or {})
+                global_costmap = dict(self._state.get("global_costmap") or {})
+
+            result_age_ok = float(relocalization.get("last_update", 0.0) or 0.0) >= request_started_at
+            if result_age_ok:
+                result_text = str(relocalization.get("raw") or "")
+                accepted = result_text.startswith("success")
+
+            pose_update = float(pose.get("last_update", pose.get("stamp", 0.0)) or 0.0)
+            pose_ok = pose_update >= request_started_at and _is_plausible_pose_dict(pose)
+            if pose_ok:
+                try:
+                    pose_error_m = math.hypot(
+                        float(pose.get("x", 0.0)) - float(requested_pose.get("x", 0.0)),
+                        float(pose.get("y", 0.0)) - float(requested_pose.get("y", 0.0)),
+                    )
+                    yaw_error_rad = abs(
+                        _wrap_angle(
+                            float(pose.get("yaw", 0.0)) - float(requested_pose.get("yaw", 0.0))
+                        )
+                    )
+                    pose_near_request = pose_error_m <= 1.0
+                except (TypeError, ValueError):
+                    pose_near_request = False
+            localization_ok = localization is True
+            scan_ok = (
+                float(scan.get("last_update", 0.0) or 0.0) >= request_started_at
+                and int(scan.get("finite_ranges", 0) or 0) > 0
+            )
+            local_costmap_ok = (
+                float(local_costmap.get("last_update", 0.0) or 0.0) >= request_started_at
+                and bool(local_costmap.get("width"))
+                and bool(local_costmap.get("height"))
+            )
+            global_costmap_ok = (
+                float(global_costmap.get("last_update", 0.0) or 0.0) >= request_started_at
+                and bool(global_costmap.get("width"))
+                and bool(global_costmap.get("height"))
+            )
+
+            if (
+                (accepted or (localization_ok and pose_ok and pose_near_request))
+                and scan_ok
+                and local_costmap_ok
+                and global_costmap_ok
+            ):
+                break
+            time.sleep(0.2)
+
+        factory_pose_accepted = localization_ok and pose_ok and pose_near_request
+        checks = {
+            "factory_initialpose": "ok" if factory_pose_accepted else "warn",
+            "tcp_2101": "ok" if accepted else ("fail" if result_text.startswith("failed:") else "warn"),
+            "localization": "ok" if localization_ok else "warn",
+            "map_pose": "ok" if pose_ok else "warn",
+            "pose_near_request": "ok" if pose_near_request else "warn",
+            "scan": "ok" if scan_ok else "warn",
+            "local_costmap": "ok" if local_costmap_ok else "warn",
+            "global_costmap": "ok" if global_costmap_ok else "warn",
+        }
+        required_checks = (
+            checks["factory_initialpose"],
+            checks["localization"],
+            checks["map_pose"],
+            checks["pose_near_request"],
+            checks["scan"],
+            checks["local_costmap"],
+            checks["global_costmap"],
+        )
+        navigation_ready = all(value == "ok" for value in required_checks)
+        vendor_failed = result_age_ok and result_text.startswith("failed:")
+        if navigation_ready:
+            message = "重定位已生效，导航链路已恢复"
+        elif accepted:
+            message = "103 TCP 已接受重定位请求，但导航链路尚未全部恢复，请看 verification 检查项"
+        elif factory_pose_accepted:
+            message = "原厂定位位姿已更新，但导航链路尚未全部恢复，请看 verification 检查项"
+        elif vendor_failed and "ErrorCode=0x0001" in result_text:
+            message = "103 TCP 拒绝本次重定位；若地图位姿未更新，请确认 106 当前激活地图、机器人实际位置和朝向"
+        elif vendor_failed:
+            message = "103 TCP 重定位请求失败；请查看 result 中的原厂返回信息"
+        else:
+            message = "未确认重定位生效；请检查 106 原厂定位、当前激活地图和地图坐标"
+        return {
+            "request_accepted": bool(accepted or factory_pose_accepted),
+            "tcp_2101_accepted": accepted,
+            "factory_pose_accepted": factory_pose_accepted,
+            "navigation_ready": navigation_ready,
+            "message": message,
+            "result": result_text or "未收到 103 TCP /m20pro_tcp_bridge/relocalization_result；将以 106 /initialpose 后的定位状态为准",
+            "pose_error_m": pose_error_m,
+            "yaw_error_rad": yaw_error_rad,
+            "checks": checks,
+            "timeout_s": timeout_s,
+        }
 
     def _tick_active_task(self) -> None:
         with self._data_lock:
@@ -3711,6 +4366,7 @@ class WebDashboardNode(Node):
         except (KeyError, TypeError, ValueError):
             return
         if distance <= float(self.get_parameter("goal_reached_tolerance_m").value):
+            self._reset_navigation_session("waypoint_reached", clear_costmaps=False, publish_idle=False)
             dwell_s = self._annotation_dwell_s(annotation)
             if dwell_s > 0.0:
                 with self._data_lock:
@@ -3760,6 +4416,7 @@ class WebDashboardNode(Node):
             self._save_json("settings.json", self._settings)
             self._save_json("tasks.json", self._tasks)
         if completed_task_id:
+            self._reset_navigation_session("task_completed", clear_costmaps=True)
             self._append_event("前端任务完成", {"task_id": completed_task_id})
         self._dispatch_active_goal(force=True)
 
@@ -3771,8 +4428,12 @@ class WebDashboardNode(Node):
         annotation = self._active_annotation(active)
         if annotation is None:
             return
+        now_monotonic = time.monotonic()
         if not force and active.get("last_goal_annotation_id") == annotation.get("id"):
-            return
+            last_sent = float(active.get("last_goal_sent_monotonic", 0.0) or 0.0)
+            resend_interval = max(1.0, float(self.get_parameter("task_goal_resend_interval_s").value))
+            if now_monotonic - last_sent < resend_interval:
+                return
         pose = annotation.get("pose") or {}
         try:
             self._publish_floor_goal(
@@ -3791,6 +4452,7 @@ class WebDashboardNode(Node):
             active["last_goal_annotation_id"] = annotation.get("id")
             active["last_goal_label"] = annotation.get("label")
             active["last_goal_sent_at"] = _now_text()
+            active["last_goal_sent_monotonic"] = now_monotonic
             active["phase"] = "navigating"
             active["last_goal_semantics"] = self._annotation_semantics_payload(annotation)
             self._settings["active_task"] = active
@@ -3886,6 +4548,158 @@ class WebDashboardNode(Node):
                     {"annotation_id": annotation.get("id"), "label": annotation.get("label")},
                 )
         return None
+
+    def _validate_task_start_readiness(
+        self,
+        first_annotation: Optional[Dict[str, Any]],
+        task_map_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        if first_annotation is None:
+            return self._error("任务首个点位不存在，请重新生成任务")
+        with self._lock:
+            pose = dict(self._state.get("pose") or {})
+            localization_ok = self._state.get("localization_ok")
+            current_floor = self._state.get("floor")
+            live_map = dict(self._state.get("map") or {})
+        now = time.time()
+        pose_age = None
+        if pose.get("last_update") is not None:
+            try:
+                pose_age = max(0.0, now - float(pose.get("last_update")))
+            except (TypeError, ValueError):
+                pose_age = None
+        pose_timeout_s = max(0.5, float(self.get_parameter("task_start_pose_timeout_s").value))
+        if bool(self.get_parameter("task_start_require_localization_ok").value) and localization_ok is not True:
+            return self._error(
+                "定位未确认，先在网页定位页完成重定位，再开始任务",
+                {
+                    "localization_ok": localization_ok,
+                    "first_waypoint": first_annotation.get("label") or first_annotation.get("id"),
+                },
+            )
+        if not _is_plausible_pose_dict(pose) or pose_age is None or pose_age > pose_timeout_s:
+            return self._error(
+                "地图位姿无效或已过期，先重定位并确认机器人位置稳定",
+                {
+                    "pose_age_sec": pose_age,
+                    "pose_timeout_s": pose_timeout_s,
+                    "pose": pose,
+                },
+            )
+        target_floor = str(first_annotation.get("floor") or "").strip()
+        if (
+            bool(self.get_parameter("task_start_require_current_floor_match").value)
+            and current_floor
+            and target_floor
+            and current_floor != target_floor
+        ):
+            return self._error(
+                "当前楼层与任务首点楼层不一致，请先切换/确认地图和楼层",
+                {"current_floor": current_floor, "target_floor": target_floor},
+            )
+        if bool(self.get_parameter("task_start_require_pose_on_map").value):
+            robot_map_payload = live_map
+            pose_error = self._pose_map_bounds_error(pose, robot_map_payload, "机器人当前位置")
+            if pose_error:
+                return pose_error
+            target_map_payload = live_map
+            if task_map_id and task_map_id != "live_map":
+                target_map_payload = self._map_file_snapshot(task_map_id)
+            target_pose = first_annotation.get("pose") or {}
+            target_error = self._pose_map_bounds_error(target_pose, target_map_payload, "任务首点")
+            if target_error:
+                return target_error
+            if current_floor and target_floor and current_floor == target_floor and task_map_id != "live_map":
+                metadata_error = self._map_metadata_mismatch_error(live_map, target_map_payload)
+                if metadata_error:
+                    return metadata_error
+        return None
+
+    def _pose_map_bounds_error(
+        self,
+        pose: Dict[str, Any],
+        map_payload: Dict[str, Any],
+        label: str,
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(map_payload, dict) or not map_payload.get("available"):
+            return self._error(
+                "当前地图不可用，不能开始任务",
+                {"label": label, "map_message": map_payload.get("message") if isinstance(map_payload, dict) else None},
+            )
+        try:
+            width = int(map_payload.get("width"))
+            height = int(map_payload.get("height"))
+            resolution = float(map_payload.get("resolution"))
+            origin = map_payload.get("origin") or {}
+            x = float(pose.get("x"))
+            y = float(pose.get("y"))
+            ox = float(origin.get("x", 0.0))
+            oy = float(origin.get("y", 0.0))
+        except (TypeError, ValueError):
+            return self._error("地图或位姿数据无效，不能开始任务", {"label": label})
+        if width <= 0 or height <= 0 or resolution <= 0.0:
+            return self._error("地图尺寸无效，不能开始任务", {"label": label})
+        mx = (x - ox) / resolution
+        my = (y - oy) / resolution
+        if mx < 0.0 or my < 0.0 or mx >= float(width) or my >= float(height):
+            return self._error(
+                f"{label}不在当前地图范围内，请确认地图和重定位结果",
+                {
+                    "label": label,
+                    "x": x,
+                    "y": y,
+                    "map_width": width,
+                    "map_height": height,
+                    "map_resolution": resolution,
+                    "map_origin": origin,
+                },
+            )
+        return None
+
+    def _map_metadata_mismatch_error(
+        self,
+        live_map: Dict[str, Any],
+        selected_map: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(live_map, dict) or not live_map.get("available"):
+            return self._error("Nav2 当前 /map 不可用，不能开始任务")
+        if not isinstance(selected_map, dict) or not selected_map.get("available"):
+            return self._error("当前选择的任务地图不可用，不能开始任务")
+        try:
+            live_origin = live_map.get("origin") or {}
+            selected_origin = selected_map.get("origin") or {}
+            checks = {
+                "width": int(live_map.get("width")) == int(selected_map.get("width")),
+                "height": int(live_map.get("height")) == int(selected_map.get("height")),
+                "resolution": abs(float(live_map.get("resolution")) - float(selected_map.get("resolution"))) < 1e-6,
+                "origin_x": abs(float(live_origin.get("x", 0.0)) - float(selected_origin.get("x", 0.0))) < 1e-4,
+                "origin_y": abs(float(live_origin.get("y", 0.0)) - float(selected_origin.get("y", 0.0))) < 1e-4,
+            }
+        except (TypeError, ValueError):
+            return self._error("地图元数据无效，不能开始任务")
+        if all(checks.values()):
+            return None
+        return self._error(
+            "网页选择地图与 Nav2 当前加载地图不一致，请先切换到正确地图并重定位",
+            {
+                "checks": checks,
+                "live_map": {
+                    "width": live_map.get("width"),
+                    "height": live_map.get("height"),
+                    "resolution": live_map.get("resolution"),
+                    "origin": live_map.get("origin"),
+                },
+                "selected_map": {
+                    "map_id": selected_map.get("map_id"),
+                    "name": selected_map.get("name"),
+                    "floor": selected_map.get("floor"),
+                    "width": selected_map.get("width"),
+                    "height": selected_map.get("height"),
+                    "resolution": selected_map.get("resolution"),
+                    "origin": selected_map.get("origin"),
+                },
+            },
+        )
 
     def _active_annotation(self, active: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         ids = active.get("annotation_ids") or []

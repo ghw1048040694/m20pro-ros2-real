@@ -1,0 +1,22 @@
+[Unit]
+Description=M20Pro full real system and web dashboard
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=-/etc/default/m20pro-real
+WorkingDirectory=/home/user/m20pro_ros2_ws
+ExecStart=/home/user/m20pro_ros2_ws/scripts/104_autostart_entrypoint.sh
+KillSignal=SIGINT
+KillMode=control-group
+TimeoutStartSec=0
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

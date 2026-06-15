@@ -26,6 +26,7 @@ def generate_launch_description():
     real_nav2_params_file = LaunchConfiguration("real_nav2_params_file")
     cloud_topic = LaunchConfiguration("cloud_topic")
     enable_axis_command = LaunchConfiguration("enable_axis_command")
+    enable_initialpose_relocalization = LaunchConfiguration("enable_initialpose_relocalization")
     enable_initialpose_3d_adapter = LaunchConfiguration("enable_initialpose_3d_adapter")
     initialpose_3d_z = LaunchConfiguration("initialpose_3d_z")
     enable_dynamic_obstacles = LaunchConfiguration("enable_dynamic_obstacles")
@@ -95,6 +96,11 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument("cloud_topic", default_value="/LIDAR/POINTS"),
         DeclareLaunchArgument("enable_axis_command", default_value="false"),
+        DeclareLaunchArgument(
+            "enable_initialpose_relocalization",
+            default_value="true",
+            description="Let m20pro_tcp_bridge consume /initialpose and forward it to 103 TCP 2101/1.",
+        ),
         DeclareLaunchArgument("enable_initialpose_3d_adapter", default_value="false"),
         DeclareLaunchArgument("initialpose_3d_z", default_value="0.0"),
         DeclareLaunchArgument("enable_dynamic_obstacles", default_value="true"),
@@ -197,6 +203,7 @@ def generate_launch_description():
                 "nav2_params_file": real_nav2_params_file,
                 "cloud_topic": cloud_topic,
                 "enable_axis_command": enable_axis_command,
+                "enable_initialpose_relocalization": enable_initialpose_relocalization,
                 "enable_initialpose_3d_adapter": enable_initialpose_3d_adapter,
                 "initialpose_3d_z": initialpose_3d_z,
                 "enable_web_dashboard": enable_web_dashboard,

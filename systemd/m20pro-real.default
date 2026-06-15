@@ -1,0 +1,5 @@
+# M20Pro real autostart configuration.
+# move: full real system with motion-control chain enabled, but no task starts automatically.
+# shadow: full real system for observation only; web task dispatch will not move the robot.
+M20PRO_REAL_MODE=move
+M20PRO_WS=/home/user/m20pro_ros2_ws

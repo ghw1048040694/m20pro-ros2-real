@@ -111,6 +111,8 @@ lifecycle_active() {
 
 echo "M20Pro preflight check"
 echo "mode=${MODE} timeout=${TIMEOUT_S}s web=${WEB_URL}"
+echo "基础自检用于确认全量系统、网页、原始点云、电量和原厂状态链路。"
+echo "定位、/scan 和 costmap 需要到测试场地重定位后再确认；未重定位时只作为 WARN。"
 echo
 
 wait_for_cmd "ROS graph available" timeout 5 ros2 node list || true
@@ -135,12 +137,14 @@ done
 
 required_topics=(
   /LIDAR/POINTS
+  /m20pro_tcp_bridge/navigation_status
+  /map
+)
+navigation_topics=(
   /scan
   /ODOM
   /m20pro_tcp_bridge/map_pose
   /m20pro_tcp_bridge/localization_ok
-  /m20pro_tcp_bridge/navigation_status
-  /map
   /local_costmap/costmap
   /global_costmap/costmap
 )
@@ -149,6 +153,13 @@ for topic in "${required_topics[@]}"; do
     pass "topic ${topic}"
   else
     fail "topic ${topic} not found"
+  fi
+done
+for topic in "${navigation_topics[@]}"; do
+  if topic_exists "$topic"; then
+    pass "navigation topic ${topic}"
+  else
+    warn "navigation topic ${topic} not found; relocalize before judging navigation"
   fi
 done
 
@@ -161,37 +172,37 @@ fi
 if topic_once 8 /scan; then
   pass "/scan has data"
 else
-  fail "/scan has no data within 8s"
+  warn "/scan has no data within 8s; this can be expected before relocalization/TF is ready"
 fi
 
 if topic_once 8 /m20pro_tcp_bridge/map_pose; then
   if contains_nonfinite /tmp/m20pro_preflight_topic.out; then
-    fail "/m20pro_tcp_bridge/map_pose contains nan/inf"
+    warn "/m20pro_tcp_bridge/map_pose contains nan/inf; relocalize before task"
   else
     pass "/m20pro_tcp_bridge/map_pose is finite"
   fi
 else
-  fail "/m20pro_tcp_bridge/map_pose has no data within 8s"
+  warn "/m20pro_tcp_bridge/map_pose has no data within 8s; relocalize before task"
 fi
 
 if topic_once 8 /ODOM; then
   if contains_nonfinite /tmp/m20pro_preflight_topic.out; then
-    fail "/ODOM contains nan/inf; relocalize before task"
+    warn "/ODOM contains nan/inf; relocalize before task"
   else
     pass "/ODOM is finite"
   fi
 else
-  fail "/ODOM has no data within 8s"
+  warn "/ODOM has no data within 8s; relocalize before task"
 fi
 
 if topic_once 8 /m20pro_tcp_bridge/localization_ok; then
   if grep -Eq 'data:[[:space:]]*true' /tmp/m20pro_preflight_topic.out; then
     pass "localization_ok=true"
   else
-    fail "localization_ok is not true; relocalize before task"
+    warn "localization_ok is not true; relocalize before task"
   fi
 else
-  fail "/m20pro_tcp_bridge/localization_ok has no data within 8s"
+  warn "/m20pro_tcp_bridge/localization_ok has no data within 8s; relocalize before task"
 fi
 
 if topic_once 8 /m20pro_tcp_bridge/navigation_status; then
@@ -205,7 +216,7 @@ for lifecycle_node in /map_server /controller_server /planner_server /bt_navigat
   if lifecycle_active "$lifecycle_node"; then
     pass "${lifecycle_node} active"
   else
-    fail "${lifecycle_node} is not active"
+    warn "${lifecycle_node} is not active; confirm again after relocalization"
   fi
 done
 
@@ -221,10 +232,11 @@ import json
 from pathlib import Path
 
 payload = json.loads(Path("/tmp/m20pro_preflight_state.json").read_text())
-pose = payload.get("pose")
-if not pose:
-    raise SystemExit("no pose")
+pose = payload.get("pose") or {}
 loc = payload.get("localization_ok")
+if not pose:
+    print("[WARN] web state has no valid pose yet; relocalize before task")
+    raise SystemExit(0)
 print("[OK] web state pose x={:.3f} y={:.3f} yaw={:.3f} localization_ok={}".format(
     float(pose.get("x", 0.0)),
     float(pose.get("y", 0.0)),

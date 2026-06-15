@@ -70,13 +70,16 @@ source install/setup.bash
 ```bash
 ./scripts/104_start_real_shadow.sh         # 启动 real，不放开运动控制
 ./scripts/104_start_real_move.sh           # 启动 real，放开运动控制
-./scripts/104_preflight_check.sh move      # 作业前自检，OK 后再开始任务
+./scripts/104_preflight_check.sh move      # 终端备用自检，网页自检异常时使用
 ./scripts/104_stop_real.sh                 # 停止 real
 ./scripts/104_record_bag.sh 180 m20_test   # 录包
 ./scripts/104_check_lidar.sh               # 检查 /LIDAR/POINTS
 ./scripts/104_status.sh                    # 查看服务状态
 ./scripts/104_start_web.sh                 # 仅开发预览网页，不用于真机测试
 ./scripts/104_stop_web.sh                  # 停止单独预览网页
+./scripts/104_enable_autostart.sh move     # 安装开机自启动全量 real
+./scripts/104_autostart_status.sh          # 查看自启动服务状态
+./scripts/104_disable_autostart.sh         # 关闭并移除自启动服务
 ```
 
 在上位机拉回 104 录包：
@@ -87,7 +90,35 @@ source install/setup.bash
 
 现场真机测试只走全量 real 启动：`104_start_real_shadow.sh` 或 `104_start_real_move.sh`。全量 real 会同时拉起 tcp_bridge、Nav2、点云融合和网页前端。
 
-`104_start_real_move.sh` 会放开运动控制，只能在现场有人看护、手柄急停可用时执行。启动后先跑 `104_preflight_check.sh move`，看到 `M20PRO PREFLIGHT OK` 再打开网页执行作业任务。`104_start_web.sh` 只用于开发预览网页界面，不会拉起 tcp_bridge/Nav2/点云融合，不能作为重定位、标点、下发任务的现场流程。
+`104_start_real_move.sh` 会放开运动控制，只能在现场有人看护、手柄急停可用时执行。启动后打开网页，在“自检”页点一次“开机基础自检”。基础自检用于确认全量系统、网页、原始点云、电量和原厂状态链路；定位、`/scan`、Nav2 生命周期和代价地图需要到测试场地重定位后再确认。`104_start_web.sh` 只用于开发预览网页界面，不会拉起 tcp_bridge/Nav2/点云融合，不能作为重定位、标点、下发任务的现场流程。
+
+## 开机自启动
+
+104 可以安装 `m20pro-real.service`，开机后自动启动全量 real 系统和网页前端，但不会自动执行任务。手柄或笔记本连上机器狗网络后访问 `http://10.21.31.104:8080`，先在网页“自检”页点一次“开机基础自检”，确认基础链路正常；到测试场地后再做网页重定位，导航项恢复正常后再标点和开始任务。
+
+安装自启动：
+
+```bash
+ssh user@10.21.31.104
+source /opt/robot/scripts/setup_ros2.sh
+su
+cd /home/user/m20pro_ros2_ws
+./scripts/104_enable_autostart.sh move
+systemctl start m20pro-real.service
+./scripts/104_autostart_status.sh
+```
+
+停用自启动：
+
+```bash
+su
+cd /home/user/m20pro_ros2_ws
+./scripts/104_disable_autostart.sh
+```
+
+自启动服务只启动本工程，不修改原厂 multicast/FastDDS 服务。`move` 模式会把运动控制链路准备好，但任务仍必须在网页中人工点击开始。
+
+`m20pro_real_full.sh move` 会在 `/tmp` 生成运行时参数文件，把 `m20pro_tcp_bridge.enable_axis_command` 明确覆盖为 `true`；`shadow` 会覆盖为 `false`。这样不会改动原始 `m20pro_real.yaml`，也能避免 Foxy 中节点专属参数压过 launch 参数的问题。
 
 ## 启动方式
 
@@ -111,7 +142,7 @@ ros2 launch m20pro_bringup m20pro.launch.py mode:=sim
 ./scripts/104_start_real_move.sh
 ```
 
-另开一个 104 终端执行作业前自检：
+终端自检脚本作为备用排查工具。网页自检异常、或现场需要保存终端输出时再另开 104 终端执行：
 
 ```bash
 ssh user@10.21.31.104
@@ -122,7 +153,7 @@ source install/setup.bash
 ./scripts/104_preflight_check.sh move
 ```
 
-看到 `M20PRO PREFLIGHT OK` 后，浏览器访问 `http://10.21.31.104:8080`，直接做网页重定位、标点、任务下发。自检失败时不要开始任务，按脚本列出的失败项处理。
+正常作业时，浏览器访问 `http://10.21.31.104:8080`，在网页“自检”页点一次“开机基础自检”。基础自检失败时先处理基础链路；如果基础自检通过但提示“导航待重定位后确认”，先在测试场地完成网页重定位，再看定位、`/scan`、代价地图和 Nav2 状态是否恢复正常。
 
 开发预览网页：
 
@@ -159,7 +190,7 @@ http://10.21.31.104:8080
 
 当前项目内置地图入口有 `F19`、`F20`、`F21`。其中 `F19` 和 `F21` 目前仍复用编辑后的 `F20` 地图产品，真实交付前应替换为各楼层实测建图结果。
 
-网页重定位通过 `/initialpose` 发布当前位置和朝向，`m20pro_tcp_bridge` 会转成 M20 Pro 原厂 `2101/1` 初始化定位请求。执行任务时不能重定位；需要先停止当前任务，再到 `定位` 页拖箭头并点击 `执行重定位`。
+网页重定位通过 `/initialpose` 发布当前位置和朝向，优先复刻 106 RViz `2D Pose Estimate` 的原厂定位链路。现场全量脚本默认不让 `m20pro_tcp_bridge` 抢占 `/initialpose` 去转 103 TCP `2101/1`，因为当前实测 103 接口在定位丢失时会返回拒绝或坏包。执行任务时不能重定位；需要先停止当前任务，再到 `定位` 页拖箭头并点击 `执行重定位`。
 
 如果网页箭头方向看起来不对，不要直接改 180 度偏置。先检查：
 
@@ -221,7 +252,7 @@ NavMode=1    自主导航
 当前现场测试顺序：
 
 1. 本工程 real 影子测试：全量启动，不放开运动控制，确认点云、定位、地图、路径、网页状态。
-2. 同楼层真导航：使用 `104_start_real_move.sh` 全量启动，`104_preflight_check.sh move` 返回 OK 后再做短距离、长距离和避障连续测试。
+2. 同楼层真导航：使用 `104_start_real_move.sh` 全量启动，基础自检通过后在测试场地重定位；导航项正常后再做短距离、长距离和避障连续测试。
 3. 跨楼层真导航：确认各楼层真实地图、楼梯点和原厂步态后再测。
 
 任务 2 和任务 3 必须录包。出现原地转圈、明显偏航、贴障碍物、路径穿墙、地图和当前位置明显不匹配时，立即点击网页停止任务或使用手柄急停。
