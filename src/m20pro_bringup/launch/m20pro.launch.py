@@ -98,8 +98,8 @@ def generate_launch_description():
         DeclareLaunchArgument("enable_axis_command", default_value="false"),
         DeclareLaunchArgument(
             "enable_initialpose_relocalization",
-            default_value="true",
-            description="Let m20pro_tcp_bridge consume /initialpose and forward it to 103 TCP 2101/1.",
+            default_value="false",
+            description="Diagnostic only: let m20pro_tcp_bridge consume /initialpose and forward it to 103 TCP 2101/1.",
         ),
         DeclareLaunchArgument("enable_initialpose_3d_adapter", default_value="false"),
         DeclareLaunchArgument("initialpose_3d_z", default_value="0.0"),

@@ -1066,10 +1066,22 @@ INDEX_HTML = r"""<!doctype html>
       if ($("preflightSummary")) $("preflightSummary").textContent = "基础自检中...";
       if ($("taskPreflightSummary")) $("taskPreflightSummary").textContent = "基础自检中...";
       try {
-        const payload = await api("POST", "/api/preflight/run", {mode: "move"});
+        const payload = await apiWithTimeout("POST", "/api/preflight/run", {mode: "move"}, 15000);
         renderPreflight(payload.preflight || payload);
         await loadTasks();
       } catch (err) {
+        renderPreflight({
+          ok: false,
+          navigation_ready: false,
+          summary: err.message || "自检请求失败",
+          age_sec: 0,
+          items: [{
+            key: "preflight_request",
+            label: "自检请求",
+            status: "fail",
+            message: err.message || JSON.stringify(err)
+          }]
+        });
         setLog("preflightRaw", err);
       } finally {
         for (const btn of buttons) btn.disabled = false;
@@ -1111,6 +1123,28 @@ INDEX_HTML = r"""<!doctype html>
       const payload = await res.json();
       if (!res.ok || payload.ok === false) throw payload;
       return payload;
+    }
+    async function apiWithTimeout(method, url, body, timeoutMs) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const res = await fetch(url, {
+          method,
+          headers: {"Content-Type": "application/json"},
+          body: body === undefined ? undefined : JSON.stringify(body),
+          signal: controller.signal
+        });
+        const payload = await res.json();
+        if (!res.ok || payload.ok === false) throw payload;
+        return payload;
+      } catch (err) {
+        if (err && err.name === "AbortError") {
+          throw {ok: false, message: `请求超时：${Math.round(timeoutMs / 1000)} 秒内未收到返回`};
+        }
+        throw err;
+      } finally {
+        clearTimeout(timer);
+      }
     }
     function resizeCanvas() {
       const before = getView();
@@ -2396,6 +2430,7 @@ class WebDashboardNode(Node):
         self._camera_workers: Dict[str, _CameraProxyWorker] = {}
         self._last_preflight: Optional[Dict[str, Any]] = None
         self._preflight_lock = threading.Lock()
+        self._preflight_run_lock = threading.Lock()
 
         self.floor_goal_pub = self.create_publisher(
             PoseStamped,
@@ -2502,9 +2537,10 @@ class WebDashboardNode(Node):
         self.declare_parameter("initialpose_topic", "/initialpose")
         self.declare_parameter("initialpose_covariance_xy", 0.25)
         self.declare_parameter("initialpose_covariance_yaw", 0.0685)
-        self.declare_parameter("initialpose_publish_repeats", 5)
-        self.declare_parameter("initialpose_publish_interval_s", 0.1)
+        self.declare_parameter("initialpose_publish_repeats", 10)
+        self.declare_parameter("initialpose_publish_interval_s", 0.15)
         self.declare_parameter("relocalization_verify_timeout_s", 8.0)
+        self.declare_parameter("relocalization_pose_tolerance_m", 2.0)
         self.declare_parameter("robot_pose_display_yaw_offset_rad", 0.0)
         self.declare_parameter("current_floor_topic", "/m20pro/current_floor")
         self.declare_parameter("stair_status_topic", "/m20pro/stair_status")
@@ -3132,6 +3168,48 @@ class WebDashboardNode(Node):
         return payload
 
     def _run_preflight(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not self._preflight_run_lock.acquire(blocking=False):
+            with self._preflight_lock:
+                last = self._preflight_with_age_unlocked()
+            return {
+                "ok": True,
+                "running": True,
+                "preflight": last,
+                "message": "自检正在执行，请稍后刷新结果",
+            }
+        try:
+            return self._run_preflight_locked(payload)
+        except Exception as exc:
+            self.get_logger().exception("preflight failed unexpectedly")
+            now = time.time()
+            result = {
+                "ok": False,
+                "navigation_ready": False,
+                "mode": str(payload.get("mode") or "move").strip() or "move",
+                "timestamp": now,
+                "time_text": _now_text(),
+                "age_sec": 0.0,
+                "items": [
+                    {
+                        "key": "preflight_exception",
+                        "label": "自检程序",
+                        "status": "fail",
+                        "message": str(exc) or exc.__class__.__name__,
+                        "group": "base",
+                    }
+                ],
+                "failures": 1,
+                "navigation_warnings": 0,
+                "warnings": 0,
+                "summary": "基础自检异常中断，请重启全量系统或查看服务日志",
+            }
+            with self._preflight_lock:
+                self._last_preflight = result
+            return {"ok": True, "preflight": result, "message": result["summary"]}
+        finally:
+            self._preflight_run_lock.release()
+
+    def _run_preflight_locked(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         mode = str(payload.get("mode") or "move").strip()
         if mode not in ("move", "shadow"):
             mode = "move"
@@ -4221,6 +4299,10 @@ class WebDashboardNode(Node):
         requested_pose: Dict[str, float],
     ) -> Dict[str, Any]:
         timeout_s = max(0.5, float(self.get_parameter("relocalization_verify_timeout_s").value))
+        pose_tolerance_m = max(
+            0.1,
+            float(self.get_parameter("relocalization_pose_tolerance_m").value),
+        )
         deadline = time.time() + timeout_s
         accepted = False
         result_text = ""
@@ -4261,7 +4343,7 @@ class WebDashboardNode(Node):
                             float(pose.get("yaw", 0.0)) - float(requested_pose.get("yaw", 0.0))
                         )
                     )
-                    pose_near_request = pose_error_m <= 1.0
+                    pose_near_request = pose_error_m <= pose_tolerance_m
                 except (TypeError, ValueError):
                     pose_near_request = False
             localization_ok = localization is True
@@ -4280,19 +4362,19 @@ class WebDashboardNode(Node):
                 and bool(global_costmap.get("height"))
             )
 
-            if (
-                (accepted or (localization_ok and pose_ok and pose_near_request))
-                and scan_ok
-                and local_costmap_ok
-                and global_costmap_ok
-            ):
+            if localization_ok and pose_ok and pose_near_request:
                 break
             time.sleep(0.2)
 
         factory_pose_accepted = localization_ok and pose_ok and pose_near_request
         checks = {
+            "initialpose_published": "ok",
             "factory_initialpose": "ok" if factory_pose_accepted else "warn",
-            "tcp_2101": "ok" if accepted else ("fail" if result_text.startswith("failed:") else "warn"),
+            "tcp_2101_diagnostic": (
+                "ok"
+                if accepted
+                else ("warn" if result_text.startswith("failed:") or not result_text else "warn")
+            ),
             "localization": "ok" if localization_ok else "warn",
             "map_pose": "ok" if pose_ok else "warn",
             "pose_near_request": "ok" if pose_near_request else "warn",
@@ -4313,25 +4395,29 @@ class WebDashboardNode(Node):
         vendor_failed = result_age_ok and result_text.startswith("failed:")
         if navigation_ready:
             message = "重定位已生效，导航链路已恢复"
-        elif accepted:
-            message = "103 TCP 已接受重定位请求，但导航链路尚未全部恢复，请看 verification 检查项"
         elif factory_pose_accepted:
             message = "原厂定位位姿已更新，但导航链路尚未全部恢复，请看 verification 检查项"
-        elif vendor_failed and "ErrorCode=0x0001" in result_text:
-            message = "103 TCP 拒绝本次重定位；若地图位姿未更新，请确认 106 当前激活地图、机器人实际位置和朝向"
+        elif accepted:
+            message = "103 TCP 接受了诊断重定位请求，但还未看到地图位姿更新"
         elif vendor_failed:
-            message = "103 TCP 重定位请求失败；请查看 result 中的原厂返回信息"
+            message = "已发布 /initialpose，但未看到原厂定位更新；103 TCP 诊断失败不作为网页重定位成败依据"
         else:
-            message = "未确认重定位生效；请检查 106 原厂定位、当前激活地图和地图坐标"
+            message = "已发布 /initialpose，但未确认 106 原厂定位生效；请确认 106 能订阅 /initialpose、当前地图正确、激光轮廓与地图大致重合"
         return {
-            "request_accepted": bool(accepted or factory_pose_accepted),
+            "request_accepted": bool(factory_pose_accepted),
+            "initialpose_published": True,
             "tcp_2101_accepted": accepted,
+            "tcp_2101_diagnostic_only": True,
             "factory_pose_accepted": factory_pose_accepted,
             "navigation_ready": navigation_ready,
             "message": message,
-            "result": result_text or "未收到 103 TCP /m20pro_tcp_bridge/relocalization_result；将以 106 /initialpose 后的定位状态为准",
+            "result": (
+                result_text
+                or "未收到 103 TCP /m20pro_tcp_bridge/relocalization_result；网页重定位以 /initialpose 后的 106 定位状态为准"
+            ),
             "pose_error_m": pose_error_m,
             "yaw_error_rad": yaw_error_rad,
+            "pose_tolerance_m": pose_tolerance_m,
             "checks": checks,
             "timeout_s": timeout_s,
         }

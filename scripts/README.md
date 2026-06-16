@@ -26,6 +26,7 @@ source install/setup.bash
 ./scripts/104_stop_real.sh
 ./scripts/104_record_bag.sh 180 m20_test
 ./scripts/104_check_lidar.sh
+./scripts/104_check_initialpose_to_106.sh 0.0 0.0 0.0
 ./scripts/104_status.sh
 ./scripts/104_start_web.sh
 ./scripts/104_stop_web.sh
@@ -59,6 +60,7 @@ source install/setup.bash
 - 网页“自检”页是开机基础自检主入口；点一次“开机基础自检”，确认全量系统、网页、原始点云、电量和原厂状态链路。
 - 定位、`/scan`、代价地图和 Nav2 生命周期需要到测试场地重定位后再确认；未重定位时这些项可能是 WARN。
 - `104_preflight_check.sh move` 是终端备用基础自检；网页自检异常、或现场需要保存终端输出时使用。
+- `104_check_initialpose_to_106.sh x y yaw` 用于排查网页重定位链路：104 发布 `/initialpose`，106 临时监听一次，确认 106 是否真的收到。
 - `104_start_web.sh` 只用于开发预览网页界面，不会拉起 tcp_bridge/Nav2/点云融合，不能作为重定位、标点、下发任务的现场流程。
 - `127.0.0.1:8080` 只适合在运行前端的那台机器本机自测。
 - `shadow` 不放开运动控制。

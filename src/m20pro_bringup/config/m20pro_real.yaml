@@ -36,8 +36,8 @@ m20pro_tcp_bridge:
     gait_command_topic: "/m20pro/gait_command"
     gait_flat_param: 1
     gait_stair_param: 14
-    enable_initialpose_relocalization: true
-    enable_initialpose_3d_relocalization: true
+    enable_initialpose_relocalization: false
+    enable_initialpose_3d_relocalization: false
     initialpose_topic: "/initialpose"
     initialpose_3d_topic: "/m20pro/initialpose_3d"
     relocalization_response_timeout_s: 2.0

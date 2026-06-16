@@ -241,6 +241,26 @@ Naming note: this file replaced the previous local-only `codex.md`. Going forwar
   - this change has not yet been validated by restarting/deploying the running 104 full system during the field session;
   - next field test should restart the full real service from the updated code, go to the mapped test area, drag the red scan overlay to match the map, click `执行重定位`, and check whether `factory_pose_accepted=true`.
 
+## 2026-06-16 relocalization field failure follow-up
+
+- Field result:
+  - web relocalization still failed;
+  - `/scan` overlay had live points, but verification showed `tcp_2101` failure and no confirmed factory pose update;
+  - first boot attempt showed web preflight stuck until the frontend was reopened.
+- Current conclusion:
+  - the failure is not simply "arrow not accurate";
+  - normal web relocalization should not depend on 103 TCP `2101/1`, because 106 RViz succeeds through `/initialpose`.
+- Code changes:
+  - real/full startup now forces tcp_bridge `enable_initialpose_relocalization=false` and `enable_initialpose_3d_relocalization=false` in the runtime params;
+  - `m20pro.launch.py`, `m20pro_real.launch.py`, `m20pro.yaml`, and `m20pro_real.yaml` now default TCP initialpose forwarding to false;
+  - project FastDDS UDP profile now whitelists `10.21.31.103`, `10.21.31.104`, and `10.21.31.106`, so 104-published `/initialpose` is not constrained to a 104-only interface list;
+  - web relocalization treats 103 TCP result as diagnostic only, and top-level success now requires actual factory map pose update near the requested pose;
+  - `/initialpose` publish repeats increased to 10 with 0.15 s interval to reduce cross-host DDS miss probability;
+  - web preflight now has a run lock and frontend 15 s request timeout, so the UI should not stay stuck at "自检中".
+- Added script:
+  - `scripts/104_check_initialpose_to_106.sh x y yaw`;
+  - use it to verify whether a `/initialpose` published on 104 is visible on 106.
+
 ## 2026-06-12 web relocalization verification feedback
 
 - User noted that 106 RViz `2D Pose Estimate` can be rough and still converge because the factory localization uses the click as an initial guess and then aligns live pointcloud to the 106 active map.

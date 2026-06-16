@@ -177,8 +177,8 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "enable_initialpose_relocalization",
-            default_value="true",
-            description="Forward RViz /initialpose to the vendor localization reset API.",
+            default_value="false",
+            description="Diagnostic only: forward /initialpose to the 103 TCP 2101/1 reset API.",
         ),
 
         Node(

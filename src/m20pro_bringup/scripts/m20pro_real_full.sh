@@ -67,6 +67,8 @@ with open(src, "r", encoding="utf-8") as file:
 
 bridge = data.setdefault("m20pro_tcp_bridge", {}).setdefault("ros__parameters", {})
 bridge["enable_axis_command"] = axis_text.lower() in ("1", "true", "yes", "on")
+bridge["enable_initialpose_relocalization"] = False
+bridge["enable_initialpose_3d_relocalization"] = False
 
 with open(dst, "w", encoding="utf-8") as file:
     yaml.safe_dump(data, file, allow_unicode=True, sort_keys=False)
