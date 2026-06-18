@@ -307,7 +307,7 @@ def generate_launch_description():
                     "diagnostic_period_s": 2.0,
                 },
             ],
-            condition=IfCondition(use_fusion if nav2_stack_available else "false"),
+            condition=IfCondition(use_fusion),
         ),
         *(
             [

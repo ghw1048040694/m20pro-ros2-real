@@ -30,6 +30,8 @@ cd "${WS_DIR}"
 set +u
 source install/setup.bash
 set -u
+BRINGUP_PREFIX="$(ros2 pkg prefix m20pro_bringup)"
+BRINGUP_LIBEXEC="${BRINGUP_PREFIX}/lib/m20pro_bringup"
 
 PROJECT_FASTDDS="${WS_DIR}/install/m20pro_bringup/share/m20pro_bringup/config/m20pro_fastdds_udp.xml"
 if [[ -f "${PROJECT_FASTDDS}" && "${M20PRO_USE_PROJECT_FASTDDS:-0}" == "1" ]]; then
@@ -58,7 +60,7 @@ fi
 
 if [[ "${M20PRO_RUN_RAW_LIDAR_GUARD:-0}" == "1" ]]; then
   set +e
-  ros2 run m20pro_bringup m20pro_lidar_guard.sh startup
+  "${BRINGUP_LIBEXEC}/m20pro_lidar_guard.sh" startup
   status="$?"
   set -e
   if [[ "${status}" -ne 0 ]]; then
@@ -75,7 +77,7 @@ fi
 LIDAR_RELAY_TOPIC="${M20PRO_LIDAR_RELAY_TOPIC:-/m20pro/lidar_points_relay}"
 set +e
 M20PRO_LIDAR_RELAY_WAIT_S="${M20PRO_LIDAR_RELAY_WAIT_S:-45}" \
-  ros2 run m20pro_bringup m20pro_lidar_relay_guard.sh start-wait
+  "${BRINGUP_LIBEXEC}/m20pro_lidar_relay_guard.sh" start-wait
 relay_status="$?"
 set -e
 if [[ "${relay_status}" -ne 0 ]]; then
