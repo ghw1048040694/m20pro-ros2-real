@@ -1033,9 +1033,13 @@ INDEX_HTML = r"""<!doctype html>
     function setLog(id, payload) {
       $(id).textContent = typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
     }
+    function sleepMs(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
     function preflightStatusText(result) {
       if (!result) return "尚未自检";
       const ageText = result.age_sec === null || result.age_sec === undefined ? "" : ` / ${fmtAge(result.age_sec)}前`;
+      if (result.running) return `${result.summary || "基础自检后台执行中，请稍候"}${ageText}`;
       if (result.summary) return `${result.summary}${ageText}`;
       if (result.ok && result.navigation_ready === false) return `最近一次基础自检通过；导航待重定位${ageText}`;
       if (result.ok) return `最近一次基础自检通过${ageText}`;
@@ -1048,7 +1052,7 @@ INDEX_HTML = r"""<!doctype html>
         if (!box) continue;
         box.className = "preflight-summary";
         if (result) {
-          const cls = result.ok ? "ok" : "fail";
+          const cls = result.running ? "warn" : (result.ok ? "ok" : "fail");
           box.classList.add(cls);
         }
         box.textContent = preflightStatusText(result);
@@ -1078,10 +1082,23 @@ INDEX_HTML = r"""<!doctype html>
     async function loadPreflight() {
       try {
         const payload = await fetchJson("/api/preflight");
-        renderPreflight(payload.preflight || null);
+        const result = payload.preflight || null;
+        renderPreflight(result);
+        return result;
       } catch (err) {
         renderPreflight(null);
+        return null;
       }
+    }
+    async function pollPreflightUntilDone(maxMs = 90000) {
+      const deadline = Date.now() + maxMs;
+      let result = null;
+      while (Date.now() < deadline) {
+        await sleepMs(1500);
+        result = await loadPreflight();
+        if (result && !result.running) return result;
+      }
+      throw {ok: false, message: "后台自检仍在执行，请刷新自检结果或查看 m20pro-real.service 日志"};
     }
     async function runPreflight() {
       const buttons = [$("runPreflightBtn"), $("taskRunPreflightBtn")].filter(Boolean);
@@ -1089,8 +1106,10 @@ INDEX_HTML = r"""<!doctype html>
       if ($("preflightSummary")) $("preflightSummary").textContent = "基础自检中（工位/未重定位时只确认基础链路）...";
       if ($("taskPreflightSummary")) $("taskPreflightSummary").textContent = "基础自检中（工位/未重定位时只确认基础链路）...";
       try {
-        const payload = await apiWithTimeout("POST", "/api/preflight/run", {mode: "move", site: "workstation"}, 45000);
-        renderPreflight(payload.preflight || payload);
+        const payload = await apiWithTimeout("POST", "/api/preflight/run", {mode: "move", site: "workstation", wait: false}, 10000);
+        const result = payload.preflight || payload;
+        renderPreflight(result);
+        if (payload.running || (result && result.running)) await pollPreflightUntilDone();
         await loadTasks();
       } catch (err) {
         renderPreflight({
@@ -2846,6 +2865,7 @@ class WebDashboardNode(Node):
         self._last_preflight: Optional[Dict[str, Any]] = None
         self._preflight_lock = threading.Lock()
         self._preflight_run_lock = threading.Lock()
+        self._preflight_running: Optional[Dict[str, Any]] = None
 
         self.floor_goal_pub = self.create_publisher(
             PoseStamped,
@@ -3680,6 +3700,9 @@ class WebDashboardNode(Node):
 
     def _preflight_payload(self) -> Dict[str, Any]:
         with self._preflight_lock:
+            running = self._preflight_running_payload_unlocked()
+            if running:
+                return {"ok": True, "running": True, "preflight": running}
             return {"ok": True, "preflight": self._preflight_with_age_unlocked()}
 
     def _preflight_with_age_unlocked(self) -> Optional[Dict[str, Any]]:
@@ -3691,10 +3714,21 @@ class WebDashboardNode(Node):
             payload["age_sec"] = max(0.0, time.time() - float(timestamp))
         return payload
 
+    def _preflight_running_payload_unlocked(self) -> Optional[Dict[str, Any]]:
+        if not self._preflight_running:
+            return None
+        payload = dict(self._preflight_running)
+        timestamp = payload.get("timestamp")
+        if timestamp is not None:
+            payload["age_sec"] = max(0.0, time.time() - float(timestamp))
+        return payload
+
     def _run_preflight(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not self._as_bool(payload.get("wait", False)):
+            return self._start_preflight_background(payload)
         if not self._preflight_run_lock.acquire(blocking=False):
             with self._preflight_lock:
-                last = self._preflight_with_age_unlocked()
+                last = self._preflight_running_payload_unlocked() or self._preflight_with_age_unlocked()
             return {
                 "ok": True,
                 "running": True,
@@ -3731,6 +3765,89 @@ class WebDashboardNode(Node):
                 self._last_preflight = result
             return {"ok": True, "preflight": result, "message": result["summary"]}
         finally:
+            self._preflight_run_lock.release()
+
+    def _start_preflight_background(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not self._preflight_run_lock.acquire(blocking=False):
+            with self._preflight_lock:
+                running = self._preflight_running_payload_unlocked() or self._preflight_with_age_unlocked()
+            return {
+                "ok": True,
+                "running": True,
+                "preflight": running,
+                "message": "自检正在后台执行，请稍后刷新结果",
+            }
+        now = time.time()
+        request_id = _new_id("preflight")
+        running = {
+            "ok": True,
+            "running": True,
+            "navigation_ready": False,
+            "relocalization_ready": False,
+            "mode": str(payload.get("mode") or "move").strip() or "move",
+            "site": str(payload.get("site") or "workstation").strip() or "workstation",
+            "timestamp": now,
+            "time_text": _now_text(),
+            "age_sec": 0.0,
+            "items": [],
+            "failures": 0,
+            "navigation_warnings": 0,
+            "warnings": 0,
+            "summary": "基础自检后台执行中，请稍候",
+            "request_id": request_id,
+        }
+        with self._preflight_lock:
+            self._preflight_running = running
+        thread = threading.Thread(
+            target=self._run_preflight_background_worker,
+            args=(dict(payload), request_id),
+            daemon=True,
+        )
+        thread.start()
+        return {
+            "ok": True,
+            "running": True,
+            "preflight": dict(running),
+            "message": running["summary"],
+        }
+
+    def _run_preflight_background_worker(self, payload: Dict[str, Any], request_id: str) -> None:
+        try:
+            response = self._run_preflight_locked(payload)
+            result = dict(response.get("preflight") or response)
+            result["running"] = False
+            result["request_id"] = request_id
+        except Exception as exc:
+            self.get_logger().exception("background preflight failed unexpectedly")
+            now = time.time()
+            result = {
+                "ok": False,
+                "running": False,
+                "navigation_ready": False,
+                "relocalization_ready": False,
+                "mode": str(payload.get("mode") or "move").strip() or "move",
+                "timestamp": now,
+                "time_text": _now_text(),
+                "age_sec": 0.0,
+                "items": [
+                    {
+                        "key": "preflight_exception",
+                        "label": "自检程序",
+                        "status": "fail",
+                        "message": str(exc) or exc.__class__.__name__,
+                        "group": "base",
+                    }
+                ],
+                "failures": 1,
+                "navigation_warnings": 0,
+                "warnings": 0,
+                "summary": "基础自检异常中断，请重启全量系统或查看服务日志",
+                "request_id": request_id,
+            }
+        finally:
+            with self._preflight_lock:
+                self._last_preflight = result
+                self._preflight_running = None
             self._preflight_run_lock.release()
 
     def _run_preflight_locked(self, payload: Dict[str, Any]) -> Dict[str, Any]:
