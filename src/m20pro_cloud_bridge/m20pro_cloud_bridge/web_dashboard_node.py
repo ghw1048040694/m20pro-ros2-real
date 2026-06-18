@@ -4025,9 +4025,30 @@ class WebDashboardNode(Node):
             if item.get("group") == "navigation" and item["status"] in ("fail", "warn")
         ]
         warnings = [item for item in items if item["status"] == "warn"]
+        relocalization_blockers = [
+            item
+            for item in failures
+            if item.get("key") in ("nodes", "topics", "lidar_points", "perception_chain", "map")
+        ]
+        relocalization_ready = bool(map_ok and perception_ok and not relocalization_blockers)
+        failure_labels = "、".join(str(item.get("label") or item.get("key")) for item in failures)
+        if not failures:
+            summary = (
+                "基础自检通过，导航已就绪"
+                if not navigation_failures
+                else "基础自检通过，当前在工位，导航待到测试场地重定位后确认"
+            )
+        elif relocalization_ready:
+            summary = (
+                f"基础自检未通过：{len(failures)} 项失败"
+                f"（{failure_labels}）；地图/点云/scan 可用，仍可先做重定位排查，不要开始移动任务"
+            )
+        else:
+            summary = f"基础自检未通过：{len(failures)} 项失败"
         result = {
             "ok": not failures,
             "navigation_ready": not navigation_failures,
+            "relocalization_ready": relocalization_ready,
             "mode": mode,
             "site": "workstation" if workstation_mode else site,
             "workstation_mode": workstation_mode,
@@ -4038,15 +4059,7 @@ class WebDashboardNode(Node):
             "failures": len(failures),
             "navigation_warnings": len(navigation_failures),
             "warnings": len(warnings),
-            "summary": (
-                (
-                    "基础自检通过，导航已就绪"
-                    if not navigation_failures
-                    else "基础自检通过，当前在工位，导航待到测试场地重定位后确认"
-                )
-                if not failures
-                else f"基础自检未通过：{len(failures)} 项失败"
-            ),
+            "summary": summary,
         }
         with self._preflight_lock:
             self._last_preflight = result
