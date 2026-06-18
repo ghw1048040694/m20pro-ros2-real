@@ -57,11 +57,13 @@ source install/setup.bash
 说明：
 - 真机现场测试只用 `104_start_real_shadow.sh` 或 `104_start_real_move.sh` 全量启动。
 - 全量 real 会同时拉起 tcp_bridge、Nav2、点云融合和网页前端；笔记本/手柄访问 `http://10.21.31.104:8080`。
+- 全量 real 启动前必须实际收到 `/LIDAR/POINTS` 的 `PointCloud2` 样本；只看到 topic 名不算通过。点云未就绪时脚本会停止启动，避免反复创建 DDS 参与者。
 - 网页“自检”页是开机基础自检主入口；点一次“开机基础自检”，确认全量系统、网页、原始点云、电量和原厂状态链路。
 - 定位、`/scan`、代价地图和 Nav2 生命周期需要到测试场地重定位后再确认；未重定位时这些项可能是 WARN。
 - `104_preflight_check.sh move` 是终端备用基础自检；网页自检异常、或现场需要保存终端输出时使用。
 - `104_check_initialpose_to_106.sh x y yaw` 用于排查网页重定位链路：104 发布 `/initialpose`，106 临时监听一次，确认 106 是否真的收到。
 - `104_start_web.sh` 只用于开发预览网页界面，不会拉起 tcp_bridge/Nav2/点云融合，不能作为重定位、标点、下发任务的现场流程。
+- 如果 `/LIDAR/POINTS` 进入 topic 可见但无样本状态，只停止本工程 real stack；不要清 `/dev/shm/fastrtps_*`，不要从本工程脚本重启原厂 multicast/lidar 服务。
 - `127.0.0.1:8080` 只适合在运行前端的那台机器本机自测。
 - `shadow` 不放开运动控制。
 - `move` 会放开运动控制，现场必须有人看护，并准备手柄急停。

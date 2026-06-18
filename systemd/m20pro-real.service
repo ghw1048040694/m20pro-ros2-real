@@ -16,6 +16,7 @@ KillMode=control-group
 TimeoutStartSec=0
 TimeoutStopSec=30
 Restart=on-failure
+RestartPreventExitStatus=70 75
 RestartSec=5
 
 [Install]

@@ -111,8 +111,8 @@ lifecycle_active() {
 
 echo "M20Pro preflight check"
 echo "mode=${MODE} timeout=${TIMEOUT_S}s web=${WEB_URL}"
-echo "基础自检用于确认全量系统、网页、原始点云、电量和原厂状态链路。"
-echo "定位、/scan 和 costmap 需要到测试场地重定位后再确认；未重定位时只作为 WARN。"
+echo "基础自检用于确认全量系统、网页、感知链路、电量和原厂状态链路。"
+echo "当前默认按工位/未重定位状态处理：定位、/scan 和 costmap 需要到测试场地重定位后再确认；未重定位时只作为 WARN。"
 echo
 
 wait_for_cmd "ROS graph available" timeout 5 ros2 node list || true
@@ -162,12 +162,6 @@ for topic in "${navigation_topics[@]}"; do
     warn "navigation topic ${topic} not found; relocalize before judging navigation"
   fi
 done
-
-if topic_once 12 /LIDAR/POINTS; then
-  pass "/LIDAR/POINTS has data"
-else
-  fail "/LIDAR/POINTS has no data within 12s"
-fi
 
 if topic_once 8 /scan; then
   pass "/scan has data"
@@ -234,8 +228,20 @@ from pathlib import Path
 payload = json.loads(Path("/tmp/m20pro_preflight_state.json").read_text())
 pose = payload.get("pose") or {}
 loc = payload.get("localization_ok")
+topics = payload.get("topics") or {}
+scan_topic = topics.get("scan") or {}
+scan = payload.get("scan") or {}
+scan_age = scan_topic.get("age_sec")
+finite_ranges = int(scan.get("finite_ranges") or 0)
+if scan_topic.get("available") and scan_age is not None and float(scan_age) <= 8.0 and finite_ranges > 0:
+    print("[OK] web perception chain scan fresh: finite_ranges={} age={:.2f}s".format(
+        finite_ranges,
+        float(scan_age),
+    ))
+else:
+    print("[WARN] web scan is not fresh; confirm perception again after relocalization")
 if not pose:
-    print("[WARN] web state has no valid pose yet; relocalize before task")
+    print("[WARN] 工位/未重定位状态：web state has no valid pose yet; 到测试场地后先重定位再开始任务")
     raise SystemExit(0)
 print("[OK] web state pose x={:.3f} y={:.3f} yaw={:.3f} localization_ok={}".format(
     float(pose.get("x", 0.0)),

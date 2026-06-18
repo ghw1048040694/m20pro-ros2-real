@@ -74,6 +74,9 @@ def generate_launch_description():
     factory_mapping_start_command = LaunchConfiguration("factory_mapping_start_command")
     factory_mapping_finish_command = LaunchConfiguration("factory_mapping_finish_command")
     factory_mapping_cancel_command = LaunchConfiguration("factory_mapping_cancel_command")
+    enable_map_pcd_postprocess = LaunchConfiguration("enable_map_pcd_postprocess")
+    pcd_terrain_cell_size = LaunchConfiguration("pcd_terrain_cell_size")
+    stair_zones_topic = LaunchConfiguration("stair_zones_topic")
     enable_camera_proxy = LaunchConfiguration("enable_camera_proxy")
     front_camera_url = LaunchConfiguration("front_camera_url")
     rear_camera_url = LaunchConfiguration("rear_camera_url")
@@ -167,6 +170,9 @@ def generate_launch_description():
                 "\"sudo -n drmap stop_mapping\""
             ),
         ),
+        DeclareLaunchArgument("enable_map_pcd_postprocess", default_value="true"),
+        DeclareLaunchArgument("pcd_terrain_cell_size", default_value="0.25"),
+        DeclareLaunchArgument("stair_zones_topic", default_value="/m20pro/stair_zones"),
         DeclareLaunchArgument("rviz", default_value="true"),
         DeclareLaunchArgument("rviz_config", default_value=default_rviz),
         DeclareLaunchArgument("rviz_delay_s", default_value="5.0"),
@@ -275,6 +281,7 @@ def generate_launch_description():
             parameters=[
                 {
                     "input_cloud_topic": cloud_topic,
+                    "backup_cloud_topic": "",
                     "front_lidar_topic": "",
                     "rear_lidar_topic": "",
                     "output_scan_topic": "/scan",
@@ -291,11 +298,13 @@ def generate_launch_description():
                     "transform_cloud": False,
                     "use_latest_tf": True,
                     "transform_timeout_s": 0.05,
-                    "max_source_age_s": 0.25,
+                    "max_source_age_s": 1.0,
                     "cloud_reliability": "reliable",
                     "scan_reliability": "best_effort",
                     "max_points_per_cloud": 12000,
                     "min_cloud_interval_s": 0.05,
+                    "publish_on_cloud_update": True,
+                    "diagnostic_period_s": 2.0,
                 },
             ],
             condition=IfCondition(use_fusion if nav2_stack_available else "false"),
@@ -343,6 +352,7 @@ def generate_launch_description():
                     "config_file": floor_config,
                     "initial_floor": initial_floor,
                     "load_initial_floor": ParameterValue(load_initial_floor, value_type=bool),
+                    "stair_zones_topic": stair_zones_topic,
                 }
             ],
             condition=IfCondition(enable_floor_manager if nav2_stack_available else "false"),
@@ -428,6 +438,18 @@ def generate_launch_description():
                     "factory_mapping_start_command": factory_mapping_start_command,
                     "factory_mapping_finish_command": factory_mapping_finish_command,
                     "factory_mapping_cancel_command": factory_mapping_cancel_command,
+                    "enable_map_pcd_postprocess": ParameterValue(
+                        enable_map_pcd_postprocess,
+                        value_type=bool,
+                    ),
+                    "pcd_terrain_cell_size": ParameterValue(
+                        pcd_terrain_cell_size,
+                        value_type=float,
+                    ),
+                    "stair_zones_topic": stair_zones_topic,
+                    "lidar_points_topic": "/LIDAR/POINTS",
+                    "enable_lidar_points_relay": False,
+                    "lidar_points_relay_topic": "/m20pro/lidar_points_relay",
                     "enable_camera_proxy": ParameterValue(enable_camera_proxy, value_type=bool),
                     "front_camera_url": front_camera_url,
                     "rear_camera_url": rear_camera_url,

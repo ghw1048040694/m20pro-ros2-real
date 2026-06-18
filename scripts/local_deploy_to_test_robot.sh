@@ -18,11 +18,22 @@ fi
 
 ssh "${HOST}" "mkdir -p '${REMOTE_WS}'"
 
+ssh "${HOST}" "bash -lc '
+if [ -d \"${REMOTE_WS}/build\" ] || [ -d \"${REMOTE_WS}/install\" ] || [ -d \"${REMOTE_WS}/log\" ]; then
+  chown -R user:user \"${REMOTE_WS}\" 2>/dev/null || true
+  rm -rf \"${REMOTE_WS}/build\" \"${REMOTE_WS}/install\" \"${REMOTE_WS}/log\" 2>/dev/null || {
+    echo \"remote build/install/log contain root-owned files; clean them from a root shell on 104, then rerun deploy\" >&2
+    exit 13
+  }
+fi
+'"
+
 rsync -az --delete \
   --exclude='.git/' \
   --exclude='build/' \
   --exclude='install/' \
   --exclude='log/' \
+  --exclude='__pycache__/' \
   --exclude='bags/' \
   --exclude='.colcon/' \
   --exclude='*.bag' \

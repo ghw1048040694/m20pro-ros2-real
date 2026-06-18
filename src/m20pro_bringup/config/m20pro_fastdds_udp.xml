@@ -15,11 +15,6 @@
             <maxMessageSize>65500</maxMessageSize>
             <non_blocking_send>true</non_blocking_send>
         </transport_descriptor>
-        <transport_descriptor>
-            <transport_id>m20pro_shm_transport</transport_id>
-            <type>SHM</type>
-            <segment_size>67108864</segment_size>
-        </transport_descriptor>
     </transport_descriptors>
 
     <participant profile_name="m20pro_lightweight" is_default_profile="true">
@@ -36,7 +31,6 @@
             </builtin>
             <userTransports>
                 <transport_id>m20pro_udp_transport</transport_id>
-                <transport_id>m20pro_shm_transport</transport_id>
             </userTransports>
             <useBuiltinTransports>false</useBuiltinTransports>
         </rtps>

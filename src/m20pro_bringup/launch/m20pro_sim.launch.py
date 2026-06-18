@@ -7,6 +7,7 @@ from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -45,6 +46,9 @@ def generate_launch_description():
     factory_mapping_start_command = LaunchConfiguration("factory_mapping_start_command")
     factory_mapping_finish_command = LaunchConfiguration("factory_mapping_finish_command")
     factory_mapping_cancel_command = LaunchConfiguration("factory_mapping_cancel_command")
+    enable_map_pcd_postprocess = LaunchConfiguration("enable_map_pcd_postprocess")
+    pcd_terrain_cell_size = LaunchConfiguration("pcd_terrain_cell_size")
+    stair_zones_topic = LaunchConfiguration("stair_zones_topic")
     initial_floor = LaunchConfiguration("initial_floor")
     use_rviz = LaunchConfiguration("rviz")
     rviz_config = LaunchConfiguration("rviz_config")
@@ -99,6 +103,9 @@ def generate_launch_description():
                 "\"sudo -n drmap stop_mapping\""
             ),
         ),
+        DeclareLaunchArgument("enable_map_pcd_postprocess", default_value="true"),
+        DeclareLaunchArgument("pcd_terrain_cell_size", default_value="0.25"),
+        DeclareLaunchArgument("stair_zones_topic", default_value="/m20pro/stair_zones"),
         DeclareLaunchArgument("initial_floor", default_value="F20"),
         DeclareLaunchArgument("rviz", default_value="true"),
         DeclareLaunchArgument("rviz_config", default_value=default_rviz),
@@ -226,6 +233,7 @@ def generate_launch_description():
                 {
                     "config_file": floor_config,
                     "initial_floor": initial_floor,
+                    "stair_zones_topic": stair_zones_topic,
                 }
             ],
             condition=IfCondition(enable_floor_manager),
@@ -300,6 +308,15 @@ def generate_launch_description():
                     "factory_mapping_start_command": factory_mapping_start_command,
                     "factory_mapping_finish_command": factory_mapping_finish_command,
                     "factory_mapping_cancel_command": factory_mapping_cancel_command,
+                    "enable_map_pcd_postprocess": ParameterValue(
+                        enable_map_pcd_postprocess,
+                        value_type=bool,
+                    ),
+                    "pcd_terrain_cell_size": ParameterValue(
+                        pcd_terrain_cell_size,
+                        value_type=float,
+                    ),
+                    "stair_zones_topic": stair_zones_topic,
                 }
             ],
             condition=IfCondition(enable_web_dashboard),

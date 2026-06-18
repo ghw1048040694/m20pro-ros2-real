@@ -23,6 +23,9 @@ def generate_launch_description():
     factory_mapping_start_command = LaunchConfiguration("factory_mapping_start_command")
     factory_mapping_finish_command = LaunchConfiguration("factory_mapping_finish_command")
     factory_mapping_cancel_command = LaunchConfiguration("factory_mapping_cancel_command")
+    enable_map_pcd_postprocess = LaunchConfiguration("enable_map_pcd_postprocess")
+    pcd_terrain_cell_size = LaunchConfiguration("pcd_terrain_cell_size")
+    stair_zones_topic = LaunchConfiguration("stair_zones_topic")
     enable_camera_proxy = LaunchConfiguration("enable_camera_proxy")
     front_camera_url = LaunchConfiguration("front_camera_url")
     rear_camera_url = LaunchConfiguration("rear_camera_url")
@@ -74,6 +77,9 @@ def generate_launch_description():
             ),
             description="Shell command template for cancelling drmap mapping on 106.",
         ),
+        DeclareLaunchArgument("enable_map_pcd_postprocess", default_value="true"),
+        DeclareLaunchArgument("pcd_terrain_cell_size", default_value="0.25"),
+        DeclareLaunchArgument("stair_zones_topic", default_value="/m20pro/stair_zones"),
         DeclareLaunchArgument("enable_camera_proxy", default_value="false"),
         DeclareLaunchArgument("front_camera_url", default_value="rtsp://10.21.31.103:8554/video1"),
         DeclareLaunchArgument("rear_camera_url", default_value="rtsp://10.21.31.103:8554/video2"),
@@ -108,6 +114,15 @@ def generate_launch_description():
                     "factory_mapping_start_command": factory_mapping_start_command,
                     "factory_mapping_finish_command": factory_mapping_finish_command,
                     "factory_mapping_cancel_command": factory_mapping_cancel_command,
+                    "enable_map_pcd_postprocess": ParameterValue(
+                        enable_map_pcd_postprocess,
+                        value_type=bool,
+                    ),
+                    "pcd_terrain_cell_size": ParameterValue(
+                        pcd_terrain_cell_size,
+                        value_type=float,
+                    ),
+                    "stair_zones_topic": stair_zones_topic,
                     "enable_camera_proxy": ParameterValue(enable_camera_proxy, value_type=bool),
                     "front_camera_url": front_camera_url,
                     "rear_camera_url": rear_camera_url,

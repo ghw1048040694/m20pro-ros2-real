@@ -1,10 +1,331 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-06-15 18:14 CST
+Last updated: 2026-06-18 11:23 CST
 
 This file is maintained by Codex as the local M20 Pro project memory for future ChatGPT review. It records the current architecture, important decisions, recent changes, verification status, and next steps.
 
 Naming note: this file replaced the previous local-only `codex.md`. Going forward, maintain `m20pro.md`.
+
+## 2026-06-17 New session handoff summary
+
+- Current preferred first read for any new assistant/session:
+  - this file, especially this section and `2026-06-17 104 pointcloud recovery experience book`;
+  - then inspect current `git status` before changing code.
+- Current 104 runtime status after the last recovery:
+  - full real frontend is running at `http://10.21.31.104:8080`;
+  - `m20pro-real.service` is now `enabled` and `active`;
+  - boot autostart is installed in `move` mode, but it still does not automatically start any inspection task;
+  - web `/healthz` returned `{"ok":true}`;
+  - service log shows the startup lidar guard received a real `/LIDAR/POINTS` sample before full real startup;
+  - service log shows `PointCloud fusion ready: /LIDAR/POINTS -> /scan in m20pro_base_link`;
+  - web `/api/state` reported fresh `/scan`, `/ODOM`, battery, navigation status, localization status, and current floor.
+- Current full real startup choices:
+  - `m20pro_real_full.sh move` uses the factory FastDDS profile by default;
+  - set `M20PRO_USE_PROJECT_FASTDDS=1` only for deliberate DDS experiments;
+  - full real runtime params must keep `enable_initialpose_relocalization: true`, `enable_axis_command: true`, and `send_idle_zero_commands: false`.
+- Current navigation boundary:
+  - the robot is still unlocalized (`Location=1`, `localization_ok=false`) in the current parking/charging state;
+  - web/frontend/perception are up, but navigation readiness requires field relocalization before starting a task.
+- Current important dirty changes are intentional unless a later human says otherwise:
+  - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py`: web map/3D map/relocalization/task robustness work;
+  - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/pcd_derived.py`: PCD-derived lightweight 3D terrain, height grid, and stair zone generation;
+  - `src/m20pro_navigation/m20pro_navigation/floor_manager.py`: stair-zone subscription and safer repeated task behavior;
+  - `src/m20pro_bringup/scripts/m20pro_real_full.sh`: factory FastDDS by default, relocalization bridge enabled, move mode can send axis commands;
+  - `src/m20pro_bringup/scripts/m20pro_record_real.sh`: factory FastDDS by default for field recording;
+  - `scripts/local_deploy_to_test_robot.sh`: local-to-104 rsync/deploy path for the second/test robot and 104 rebuilds.
+- Field test rule:
+  - do not start navigation just because the web page opens;
+  - first use the web relocalization page, enable the live scan overlay, drag the arrow until scan and map match, then execute relocalization;
+  - after relocalization, run the web preflight/self-check and only start a task if localization and navigation are ready.
+- Hard prohibition:
+  - do not clear `/dev/shm/fastrtps_*`;
+  - do not restart or edit factory multicast/lidar services;
+  - do not start multiple real stacks at the same time;
+  - do not “fake” localization when `Location=1`.
+
+## 2026-06-18 104 workstation lidar/scan stabilization
+
+- User correctly clarified that being at the workstation can explain unlocalized/Nav2 warnings, but must not explain missing `/LIDAR/POINTS` or `/scan`.
+- Diagnosis from 104:
+  - the startup guard could receive a real `/LIDAR/POINTS` sample;
+  - the web node sometimes received fresh `/LIDAR/POINTS`;
+  - `m20pro_pointcloud_fusion` had a publisher on `/scan` but its new diagnostics showed `cloud=0`, meaning its `/LIDAR/POINTS` subscription was discovered but received no callbacks;
+  - this proved the failure was not TF, height filtering, source-age filtering, or workstation location. It was the fragile 104 DDS raw pointcloud subscription path.
+- Added `m20pro_navigation.lidar_relay_node`:
+  - executable: `ros2 run m20pro_navigation lidar_relay`;
+  - subscribes to the factory `/LIDAR/POINTS`;
+  - republishes the same real `PointCloud2` frames to `/m20pro/lidar_points_relay`;
+  - publishes status on `/m20pro/lidar_relay/status`;
+  - logs real sample confirmations such as `frame=lidar_link points=... messages=...`.
+- Added `m20pro_lidar_relay_guard.sh`:
+  - starts the relay as a minimal long-lived process before the full real launch;
+  - waits for a real relay sample from the relay log;
+  - detects an existing matching relay instead of starting duplicates;
+  - stop mode cleans all matching relay processes.
+- Real full startup now uses the relay path:
+  - by default it no longer runs a short-lived raw `/LIDAR/POINTS` echo guard before full launch;
+  - it starts/waits for the long-lived relay first;
+  - it passes `cloud_topic:=/m20pro/lidar_points_relay` to the full real launch;
+  - `m20pro_pointcloud_fusion` therefore subscribes to the project-internal relay topic instead of directly competing for the factory raw pointcloud.
+- `pointcloud_fusion.py` was hardened:
+  - added diagnostics on `/m20pro/pointcloud_fusion/status`;
+  - logs cloud callback count, processed count, skipped/stale/drop reasons, finite scan bins, source topic, and scan publish count;
+  - real launch now uses `max_source_age_s=1.0` and `publish_on_cloud_update=true`.
+- Web dashboard now treats either raw or relay pointcloud as the real lidar state:
+  - subscribes to `/m20pro/lidar_points_relay` for metadata;
+  - marks `lidar_points.source` as `raw` or `relay`;
+  - `/api/state` and workstation preflight no longer fail just because the web raw subscriber missed the factory topic while the relay is healthy.
+- Verification on 104 at the workstation:
+  - `m20pro-real.service` active;
+  - exactly one long-lived `m20pro_lidar_relay` process remained after the duplicate-relay cleanup;
+  - full launch command uses `cloud_topic:=/m20pro/lidar_points_relay`;
+  - `/api/state` showed fresh `lidar_points` with `source="relay"` and fresh `/scan`;
+  - `pointcloud_fusion` log showed `source=/m20pro/lidar_points_relay`, `processed>0`, `scan>0`, `finite_bins` around 200+, and `reason=published`;
+  - workstation preflight returned `ok=true`, `navigation_ready=false`, with `/LIDAR/POINTS`/lidar and `/scan` OK and only localization/Nav2/costmap warnings left for field relocalization.
+- Current operator interpretation:
+  - lidar and `/scan` must be healthy at the workstation and in the test field;
+  - localization/Nav2 readiness is still expected to remain warning at the workstation until field relocalization;
+  - do not use missing `/scan` as a workstation explanation anymore.
+
+## 2026-06-17 104 lidar startup hardening
+
+- User asked to reduce the recurring state where 104 can no longer receive radar pointcloud data.
+- Added a project-side guard script:
+  - `src/m20pro_bringup/scripts/m20pro_lidar_guard.sh`;
+  - installed by `m20pro_bringup`;
+  - checks actual `/LIDAR/POINTS` `PointCloud2` sample reception, not only topic names;
+  - defaults to the factory `/opt/robot/fastdds.xml` when no FastDDS profile is set;
+  - prints the forbidden recovery actions directly: do not clear `/dev/shm/fastrtps_*`, do not restart factory multicast/lidar services from this project, and stop only the project real stack first.
+- Full real startup is now stricter:
+  - `m20pro_real_full.sh` refuses to start if another real `m20pro.launch.py mode:=real` is already running;
+  - before starting Nav2/web/tcp_bridge/pointcloud_fusion it runs the lidar guard in `startup` mode;
+  - if `/LIDAR/POINTS` is visible but no sample arrives, startup exits instead of creating more DDS participants.
+- Project FastDDS experiment profile was made genuinely UDP-only:
+  - `src/m20pro_bringup/config/m20pro_fastdds_udp.xml` no longer declares or uses SHM transport;
+  - default runtime still prefers the factory `/opt/robot/fastdds.xml`;
+  - `M20PRO_USE_PROJECT_FASTDDS=1` remains an explicit experiment switch.
+- Systemd behavior was adjusted:
+  - `m20pro-real.service` treats duplicate-stack exit `70` and lidar-not-ready exit `75` as non-restart statuses;
+  - this prevents a boot-time pointcloud issue from becoming a 5-second restart loop that repeatedly creates ROS/DDS participants.
+- Field scripts now share the same sample-level rule:
+  - `m20pro_record_real.sh` uses the lidar guard before recording;
+  - `scripts/104_check_lidar.sh` uses the lidar guard;
+  - `scripts/104_status.sh` includes a quick sample check.
+- This hardening intentionally does not change 106 services, factory multicast settings, or FastDDS shared-memory runtime files.
+
+## 2026-06-17 104 autostart enabled after charging pause
+
+- User paused because the robot battery was low; deployment was resumed after charging.
+- Resumed state before deployment:
+  - no local deploy/rsync/ssh residual process was running;
+  - 104 was reachable;
+  - `m20pro-real.service` was `inactive` and `disabled`;
+  - 104 had about 5.2 GB free on `/`.
+- Synchronized the current local workspace to `user@10.21.31.104:/home/user/m20pro_ros2_ws`.
+- Full 104 build succeeded for all five packages:
+  - `m20pro_cloud_bridge`;
+  - `m20pro_description`;
+  - `m20pro_inspection`;
+  - `m20pro_navigation`;
+  - `m20pro_bringup`.
+- Installed and enabled autostart:
+  - command: `./scripts/104_enable_autostart.sh move`;
+  - `systemctl is-enabled m20pro-real.service` -> `enabled`;
+  - `/etc/default/m20pro-real` contains:
+    - `M20PRO_REAL_MODE=move`;
+    - `M20PRO_WS=/home/user/m20pro_ros2_ws`;
+    - `M20PRO_LIDAR_STARTUP_WAIT_S=45`.
+- Started the service once for validation:
+  - `systemctl is-active m20pro-real.service` -> `active`;
+  - `systemctl show` reported `Restart=on-failure`, `RestartPreventExitStatus=70 75`, `NRestarts=0`;
+  - `http://10.21.31.104:8080/healthz` returned `{"ok":true}`;
+  - port `0.0.0.0:8080` is listening.
+- Startup robustness verification:
+  - lidar guard used factory `/opt/robot/fastdds.xml`;
+  - lidar guard saw `/LIDAR/POINTS` and `/LIDAR/POINTS2`;
+  - lidar guard received `/LIDAR/POINTS` sample `width=46432 height=1`;
+  - `m20pro_tcp_bridge` started with `axis command enabled; idle zero disabled`;
+  - `pointcloud_fusion` reported `/LIDAR/POINTS -> /scan`;
+  - web dashboard reported listening on `http://0.0.0.0:8080`.
+- Runtime web state from `/api/state`:
+  - `scan available=True`, age about 0.015 s;
+  - `odom available=True`, age about 0.011 s;
+  - `battery available=True`, primary battery about 97%, about 82.1 V;
+  - `navigation_status=location=1 obstacle=0`;
+  - `localization_ok=False`.
+- Interpretation:
+  - boot autostart and full frontend availability are confirmed;
+  - the frontend/perception chain is alive after startup;
+  - the robot is still unlocalized, so the operator must relocalize in the field before considering Nav2/navigation ready or starting a task.
+- Note:
+  - opening a new CLI `ros2 topic echo /LIDAR/POINTS` while the full real stack is already running can still fail to receive raw samples in this fragile DDS state;
+  - for startup safety, rely on the built-in startup lidar guard and web `/api/state` `/scan` freshness;
+  - do not repeatedly start extra real stacks or manual raw pointcloud subscribers for routine checks.
+
+## 2026-06-17 workstation-friendly base self-check
+
+- User reported that the web base self-check often shows "15 seconds without response" while the robot is at the workstation, not in the mapped test field.
+- Important operator context:
+  - the robot is currently at the workstation/charging area;
+  - `Location=1` and `localization_ok=false` are expected until field relocalization;
+  - local/global costmaps and Nav2 lifecycle may remain waiting before relocalization and must not block the "开机基础自检" response.
+- Frontend change:
+  - `runPreflight()` now sends `{mode: "move", site: "workstation"}`;
+  - request timeout was increased from 15 s to 30 s;
+  - the pending text now says workstation/unlocalized state only checks base links;
+  - timeout text now tells the operator to refresh/check service status instead of implying field navigation failure.
+- Backend change:
+  - preflight defaults to workstation mode;
+  - topic freshness window is bounded to 2-8 s;
+  - if raw `/LIDAR/POINTS` is not directly cached by the web node but `/scan` is fresh and has finite ranges, base perception is treated as usable with a warning instead of a hard failure;
+  - localization warnings now explicitly say workstation/unlocalized state is expected and relocalization must be done in the test field;
+  - Nav2 lifecycle queries are deferred in workstation/unlocalized state, so they no longer add blocking waits to the base self-check.
+- Terminal fallback `scripts/104_preflight_check.sh` was aligned:
+  - removed raw `/LIDAR/POINTS` CLI echo as a base hard gate;
+  - reports web `/api/state` scan freshness;
+  - explicitly labels missing pose as workstation/unlocalized and tells the operator to relocalize in the test field before starting tasks.
+- Startup guard correction after 104 validation:
+  - the previous strict lidar startup guard could keep the full frontend down at the workstation when `/LIDAR/POINTS` was temporarily not visible even though the operator still needed the web UI;
+  - `m20pro_real_full.sh` now defaults to `M20PRO_LIDAR_GUARD_MODE=warn`, meaning lidar guard failures are logged but the full frontend still starts;
+  - set `M20PRO_LIDAR_GUARD_MODE=strict` only for a deliberate field mode where no frontend should start unless raw lidar samples are confirmed before launch;
+  - `systemd/m20pro-real.default` and `104_enable_autostart.sh` now write `M20PRO_LIDAR_GUARD_MODE=warn`.
+- Local verification:
+  - `python3 -m py_compile web_dashboard_node.py` passed;
+  - `bash -n scripts/104_preflight_check.sh` passed;
+  - extracted dashboard JavaScript passed `node --check`;
+  - `git diff --check` passed.
+
+## 2026-06-17 104 pointcloud recovery experience book
+
+### What happened
+
+- The user rebooted the robot and manually confirmed that 104 again exposed both factory pointcloud topics:
+  - `/LIDAR/POINTS`;
+  - `/LIDAR/POINTS2`.
+- During later recovery/debug work, the assistant started and stopped the full real stack repeatedly and also previously touched FastDDS shared-memory runtime state while factory DDS participants were alive.
+- That produced a misleading intermediate state on 104:
+  - topic discovery could still show `/LIDAR/POINTS` and `/LIDAR/POINTS2`;
+  - `ros2 topic info` could still show publishers;
+  - but `ros2 topic echo` / `ros2 topic hz` could fail to receive samples.
+- This was not evidence that the lidar hardware or 106 publisher was gone. 106 still had healthy lidar services and 104 could still see multicast UDP from 106. The failure was in the 104 DDS/subscriber side being destabilized.
+
+### Why it was disturbed
+
+- FastDDS shared-memory transport on 104 is fragile in this environment.
+- Clearing or disturbing `/dev/shm/fastrtps_*` while factory DDS participants are running can break live DDS participants.
+- The project FastDDS XML name says `udp`, but the file still contains SHM transport entries. Using it unintentionally can bring SHM warnings and unstable discovery/subscription behavior.
+- Full real startup/stopping also creates many ROS participants. If mixed with manual DDS cleanup or multiple stacks, 104 can enter a bad state even though topic names remain visible.
+
+### Correct baseline check
+
+Use the exact known-good manual sequence when verifying factory lidar:
+
+```bash
+ssh user@10.21.31.104
+source /opt/robot/scripts/setup_ros2.sh
+su
+ros2 topic list | grep -E '^/LIDAR/POINTS$|^/LIDAR/POINTS2$'
+timeout 8 ros2 topic echo /LIDAR/POINTS --no-arr
+```
+
+Interpretation:
+
+- Seeing the topic name is not enough.
+- Seeing publisher count is not enough.
+- At least one `PointCloud2` sample or a positive `ros2 topic hz /LIDAR/POINTS` result is the useful confirmation.
+
+### Correct recovery order
+
+1. Stop our stack only:
+
+```bash
+systemctl stop m20pro-real.service 2>/dev/null || true
+pkill -INT -f 'm20pro_real_full.sh|m20pro.launch.py|web_dashboard|pointcloud_fusion' 2>/dev/null || true
+```
+
+2. Do not touch factory services unless the user explicitly asks:
+
+```text
+Do not restart multicast-relay.service.
+Do not restart rsdriver.service.
+Do not clear /dev/shm/fastrtps_*.
+```
+
+3. Reboot the robot if 104 is in the bad topic-name-only state.
+
+4. After reboot, first verify factory lidar with the baseline check above.
+
+5. Only after pointcloud samples are readable, start the full real frontend.
+
+### Current frontend recovery command pattern
+
+For the current manual/systemd-hosted test run:
+
+```bash
+ssh user@10.21.31.104
+source /opt/robot/scripts/setup_ros2.sh
+su
+cd /home/user/m20pro_ros2_ws
+source install/setup.bash
+systemctl start m20pro-real.service
+curl -fsS http://127.0.0.1:8080/healthz
+```
+
+Expected state:
+
+```text
+m20pro-real.service: active
+m20pro-real.service enabled state: disabled
+http://10.21.31.104:8080/healthz -> {"ok":true}
+runtime params:
+  enable_initialpose_relocalization: true
+  enable_axis_command: true
+  send_idle_zero_commands: false
+```
+
+### Lessons for future assistants
+
+- Do not debug 104 pointcloud by repeatedly changing DDS profile, clearing SHM, or restarting factory services.
+- Do not assume `/LIDAR/POINTS` is healthy just because the topic exists.
+- Do not assume CLI `ros2 param get` or lifecycle commands are reliable when FastDDS SHM errors appear; use process args, logs, web health, and runtime parameter files as secondary checks.
+- If the robot is not localized, Nav2 may be active and the web page may load, but real navigation is still not ready.
+- If localization is invalid (`Location=1`), fix relocalization. Do not publish fake odom or bypass the localization check.
+
+## 2026-06-17 Web 3D map integrated into the main map viewport
+
+- User clarified that the frontend must not add another crowded right-side panel for 3D.
+- The separate `3D地图` tab/panel was removed.
+- The left main map viewport now has `2D地图` and `3D地图` mode buttons:
+  - `2D地图` remains the default operation mode for relocalization, waypoint marking, paths, scan overlay, and normal navigation work;
+  - `3D地图` renders the PCD-derived lightweight terrain and stair zones directly in the big map area;
+  - in 3D mode, dragging pans the 3D terrain and wheel/buttons zoom the 3D terrain; waypoint marking and relocalization are intentionally done after switching back to 2D.
+- This preserves the single main spatial view and keeps the right-side panels focused on operations.
+- While consolidating the 104 runtime back to a single default `install`, the full real startup path was changed to prefer the factory FastDDS profile by default. The project `m20pro_fastdds_udp.xml` still contains SHM entries despite its name, so it must only be enabled deliberately with `M20PRO_USE_PROJECT_FASTDDS=1` after a separate DDS test.
+
+## 2026-06-16 PCD lightweight 3D map and stair semantic zones
+
+- Customer-facing goal:
+  - show a 3D-looking map/stair area in the web frontend without loading the full raw PCD in the browser;
+  - avoid asking the customer to run manual post-processing commands after mapping;
+  - move toward automatic stair gait switching based on semantic stair zones instead of manually adding gait-switch points in every task.
+- Implementation direction:
+  - map import from 106 now runs PCD post-processing on 104 after the map is copied;
+  - generated files live under the imported map directory `derived/`: `terrain_mesh.json`, `height_grid.json`, `stair_zones.json`, plus optional local stair pointcloud JSON files;
+  - if no PCD is found or post-processing fails, the imported 2D map remains usable and the map record stores `derived.status` plus a readable message.
+- Web dashboard:
+  - added `/api/map_3d`, `/api/stair_zones`, and `/api/stair_pointcloud`;
+  - 3D rendering uses the left main map viewport, not a separate right-side panel;
+  - stair zones are shown as translucent overlays, and the robot pose is drawn on the 3D view when available.
+- Stair automation:
+  - the web dashboard publishes formal stair zones on `/m20pro/stair_zones`;
+  - `floor_manager` subscribes to that topic and only trusts zones with `trigger_gait=true`;
+  - PCD-only height candidates are displayed but do not trigger gait automatically until manually/semantically confirmed.
+- Controller decision:
+  - DWB/DWA is not replaced as part of this work;
+  - PCD display cost is handled by offline downsampling/height-grid derivation, not by changing the local planner.
+- Verification:
+  - local temporary PCD derivation test used `Original_map/full_cloud.pcd` with 1,434,319 points and produced a 125x148 height grid in about 0.7s;
+  - generated terrain mesh was about 98KB in the test, far below raw PCD browser cost.
 
 ## 2026-06-15 second M20Pro configured as test robot
 
@@ -5889,3 +6210,19 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
   - record a short bag while running one waypoint;
   - compare selected waypoint pose, `/m20pro_tcp_bridge/map_pose` final pose, and video/frame reference;
   - if final pose is close in `/map` but looks wrong physically, the issue is relocalization/map alignment; if final pose is far in `/map`, inspect Nav2/controller behavior.
+
+## 2026-06-17 104 frontend recovery before field test
+
+- 104 factory lidar baseline was restored by robot reboot; `/LIDAR/POINTS` and `/LIDAR/POINTS2` are visible again.
+- Re-synced the current workspace to 104 and rebuilt all five packages.
+- Restored full real web stack on 104 through `m20pro-real.service` for this test:
+  - service is `active` but still `disabled`, so it is not configured for automatic boot start in this recovery pass;
+  - web health returns `{"ok":true}` at `http://10.21.31.104:8080/healthz`;
+  - system check log reports `M20PRO REAL OK`.
+- Fixed a relocalization regression in `m20pro_real_full.sh`:
+  - full real launch now passes `enable_initialpose_relocalization:=true`;
+  - the generated runtime params now keep `enable_initialpose_relocalization: true`;
+  - runtime params verified on 104 also keep `enable_axis_command: true` and `send_idle_zero_commands: false`.
+- DDS note:
+  - FastDDS SHM warnings still appear in logs during startup, but this run completed and web/Nav2 became active;
+  - do not clear `/dev/shm/fastrtps_*` while factory ROS/DDS participants are running.

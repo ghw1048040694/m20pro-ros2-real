@@ -24,6 +24,8 @@ from sensor_msgs.msg import Image, LaserScan, PointCloud2
 from std_msgs.msg import Bool, String
 from visualization_msgs.msg import Marker, MarkerArray
 
+from .pcd_derived import process_imported_map
+
 try:
     from lifecycle_msgs.srv import GetState
 except ImportError:  # pragma: no cover - ROS lifecycle package should exist on robot.
@@ -215,6 +217,9 @@ INDEX_HTML = r"""<!doctype html>
       min-height: 30px;
       padding: 5px 9px;
       font-size: 12px;
+    }
+    .map-tools button.mode {
+      min-width: 58px;
     }
     .zoom-readout {
       min-width: 48px;
@@ -589,6 +594,8 @@ INDEX_HTML = r"""<!doctype html>
           <button id="panModeBtn" title="开启后拖动地图，不会标点">平移</button>
           <button id="fitMapBtn" title="恢复整图适配">适配</button>
           <button id="centerRobotBtn" title="把机器人位置移动到视图中心">居中机器人</button>
+          <button id="map2dBtn" class="mode active-tool" title="显示 2D 栅格地图">2D地图</button>
+          <button id="map3dBtn" class="mode" title="显示 PCD 派生轻量 3D 地形">3D地图</button>
           <span id="mapMode" class="pill">实时 /map</span>
         </span>
       </div>
@@ -962,7 +969,21 @@ INDEX_HTML = r"""<!doctype html>
       preflight: null,
       lastRelocalizationStamp: null,
       relocalizationApiLogUntil: 0,
-      scanOverlay: true
+      scanOverlay: true,
+      mapViewMode: "2d",
+      mapModeLabel: "实时 /map",
+      terrainMessage: "请选择固定地图；实时 /map 没有离线 PCD 派生 3D 地形。",
+      terrain: null,
+      stairZones: [],
+      terrainView: {
+        zoom: 1,
+        panX: 0,
+        panY: 0,
+        rotX: 0.95,
+        rotZ: -0.65,
+        zScale: 1.8,
+        pointer: null
+      }
     };
     const manualPointTypeNames = {
       transition: "过渡点",
@@ -1063,10 +1084,10 @@ INDEX_HTML = r"""<!doctype html>
     async function runPreflight() {
       const buttons = [$("runPreflightBtn"), $("taskRunPreflightBtn")].filter(Boolean);
       for (const btn of buttons) btn.disabled = true;
-      if ($("preflightSummary")) $("preflightSummary").textContent = "基础自检中...";
-      if ($("taskPreflightSummary")) $("taskPreflightSummary").textContent = "基础自检中...";
+      if ($("preflightSummary")) $("preflightSummary").textContent = "基础自检中（工位/未重定位时只确认基础链路）...";
+      if ($("taskPreflightSummary")) $("taskPreflightSummary").textContent = "基础自检中（工位/未重定位时只确认基础链路）...";
       try {
-        const payload = await apiWithTimeout("POST", "/api/preflight/run", {mode: "move"}, 15000);
+        const payload = await apiWithTimeout("POST", "/api/preflight/run", {mode: "move", site: "workstation"}, 30000);
         renderPreflight(payload.preflight || payload);
         await loadTasks();
       } catch (err) {
@@ -1139,7 +1160,7 @@ INDEX_HTML = r"""<!doctype html>
         return payload;
       } catch (err) {
         if (err && err.name === "AbortError") {
-          throw {ok: false, message: `请求超时：${Math.round(timeoutMs / 1000)} 秒内未收到返回`};
+          throw {ok: false, message: `请求超时：${Math.round(timeoutMs / 1000)} 秒内未收到返回；工位未重定位时请刷新结果或查看服务状态`};
         }
         throw err;
       } finally {
@@ -1221,6 +1242,12 @@ INDEX_HTML = r"""<!doctype html>
     }
     function updateZoomReadout(view = getView()) {
       if (!$("zoomReadout")) return;
+      if (state.mapViewMode === "3d") {
+        const base = state.terrainView.baseZoom || state.terrainView.zoom || 1;
+        const ratio = base > 0 ? state.terrainView.zoom / base : 1;
+        $("zoomReadout").textContent = `${Math.round(ratio * 100)}%`;
+        return;
+      }
       $("zoomReadout").textContent = `${Math.round((view.zoom || state.view.zoom || 1) * 100)}%`;
     }
     function clampView() {
@@ -1267,8 +1294,44 @@ INDEX_HTML = r"""<!doctype html>
       draw();
     }
     function zoomBy(factor) {
+      if (state.mapViewMode === "3d") {
+        terrainZoomBy(factor);
+        return;
+      }
       const rect = canvas.getBoundingClientRect();
       setZoomAt(rect.left + rect.width * 0.5, rect.top + rect.height * 0.5, state.view.zoom * factor);
+    }
+    function terrainZoomBy(factor) {
+      state.terrainView.zoom *= factor;
+      const base = state.terrainView.baseZoom || state.terrainView.zoom || 1;
+      state.terrainView.zoom = Math.max(base * 0.35, Math.min(base * 8, state.terrainView.zoom));
+      updateZoomReadout();
+      draw();
+    }
+    function resetTerrainView(redraw = true) {
+      state.terrainView.panX = 0;
+      state.terrainView.panY = 0;
+      state.terrainView.baseZoom = null;
+      updateZoomReadout();
+      if (redraw) draw();
+    }
+    function updateMapModeUi() {
+      $("map2dBtn").classList.toggle("active-tool", state.mapViewMode === "2d");
+      $("map3dBtn").classList.toggle("active-tool", state.mapViewMode === "3d");
+      if (state.mapViewMode === "3d") {
+        $("mapMode").textContent = terrainPayload() ? "3D 派生地图" : "3D 暂无地形";
+        $("cursor").textContent = "3D地图：拖动平移，滚轮缩放；切回2D后可标点/重定位";
+      } else {
+        $("mapMode").textContent = state.mapModeLabel || "实时 /map";
+        $("cursor").textContent = state.view.panMode ? "平移模式" : "拖拽地图取点和朝向";
+      }
+      updateZoomReadout();
+    }
+    async function setMapViewMode(mode) {
+      state.mapViewMode = mode === "3d" ? "3d" : "2d";
+      if (state.mapViewMode === "3d") await loadTerrain();
+      updateMapModeUi();
+      draw();
     }
     function centerMapOnWorld(x, y) {
       if (!state.map || !Number.isFinite(Number(x)) || !Number.isFinite(Number(y))) return;
@@ -1279,6 +1342,17 @@ INDEX_HTML = r"""<!doctype html>
       state.view.panY += view.rect.height * 0.5 - target.y;
       clampView();
       draw();
+    }
+    function centerTerrainOnWorld(x, y) {
+      const terrain = terrainPayload();
+      if (!terrain || !Number.isFinite(Number(x)) || !Number.isFinite(Number(y))) return false;
+      const rect = canvas.getBoundingClientRect();
+      const h = Number((terrain.bounds || {}).max_z || 0) + 0.3;
+      const p = projectTerrainPoint(Number(x), Number(y), h, terrain, state.terrainView, rect);
+      state.terrainView.panX += rect.width * 0.5 - p.x;
+      state.terrainView.panY += rect.height * 0.5 - p.y;
+      draw();
+      return true;
     }
     function worldToCanvasWithView(x, y, view) {
       const map = state.map;
@@ -1478,6 +1552,10 @@ INDEX_HTML = r"""<!doctype html>
     function draw() {
       const rect = canvas.getBoundingClientRect();
       ctx.clearRect(0, 0, rect.width, rect.height);
+      if (state.mapViewMode === "3d") {
+        drawTerrain();
+        return;
+      }
       ctx.fillStyle = "#cfd5dc";
       ctx.fillRect(0, 0, rect.width, rect.height);
       if (!state.map || !state.mapImage) {
@@ -1510,6 +1588,233 @@ INDEX_HTML = r"""<!doctype html>
         drawArrow(robotPose);
       }
     }
+    function terrainPayload() {
+      return state.terrain && state.terrain.terrain ? state.terrain.terrain : null;
+    }
+    function terrainHeightAt(col, row, terrain) {
+      const cols = Number(terrain.cols || 0);
+      if (col < 0 || row < 0 || col >= cols) return null;
+      const value = terrain.heights[row * cols + col];
+      return value === null || value === undefined ? null : Number(value);
+    }
+    function projectTerrainPoint(x, y, z, terrain, view, rect) {
+      const bounds = terrain.bounds || {};
+      const cx = (Number(bounds.min_x || 0) + Number(bounds.max_x || 0)) * 0.5;
+      const cy = (Number(bounds.min_y || 0) + Number(bounds.max_y || 0)) * 0.5;
+      const cz = (Number(bounds.min_z || 0) + Number(bounds.max_z || 0)) * 0.5;
+      const px = x - cx;
+      const py = y - cy;
+      const pz = (z - cz) * view.zScale;
+      const cosZ = Math.cos(view.rotZ);
+      const sinZ = Math.sin(view.rotZ);
+      const rx = cosZ * px - sinZ * py;
+      const ry = sinZ * px + cosZ * py;
+      const cosX = Math.cos(view.rotX);
+      const sinX = Math.sin(view.rotX);
+      const sy = cosX * ry - sinX * pz;
+      return {
+        x: rect.width * 0.5 + view.panX + rx * view.zoom,
+        y: rect.height * 0.55 + view.panY - sy * view.zoom
+      };
+    }
+    function terrainColor(value, terrain) {
+      const bounds = terrain.bounds || {};
+      const minZ = Number(bounds.min_z || 0);
+      const maxZ = Number(bounds.max_z || minZ + 1);
+      const ratio = Math.max(0, Math.min(1, (Number(value) - minZ) / Math.max(0.001, maxZ - minZ)));
+      if (ratio < 0.48) {
+        const t = ratio / 0.48;
+        return `rgb(${Math.round(37 + t * 6)}, ${Math.round(99 + t * 96)}, ${Math.round(235 - t * 114)})`;
+      }
+      const t = (ratio - 0.48) / 0.52;
+      return `rgb(${Math.round(34 + t * 215)}, ${Math.round(197 - t * 82)}, ${Math.round(94 - t * 72)})`;
+    }
+    function drawTerrain() {
+      const rect = canvas.getBoundingClientRect();
+      ctx.clearRect(0, 0, rect.width, rect.height);
+      ctx.fillStyle = "#eef2f6";
+      ctx.fillRect(0, 0, rect.width, rect.height);
+      const terrain = terrainPayload();
+      if (!terrain || !terrain.heights) {
+        ctx.fillStyle = "#667483";
+        ctx.font = "15px system-ui, sans-serif";
+        ctx.fillText(state.terrainMessage || "当前地图暂无 3D 地形，2D 地图仍可用。", 20, 32);
+        updateZoomReadout();
+        return;
+      }
+      const cols = Number(terrain.cols || 0);
+      const rows = Number(terrain.rows || 0);
+      const cell = Number(terrain.cell_size || 0.25);
+      if (cols <= 0 || rows <= 0) return;
+      const bounds = terrain.bounds || {};
+      const span = Math.max(
+        Number(bounds.max_x || 0) - Number(bounds.min_x || 0),
+        Number(bounds.max_y || 0) - Number(bounds.min_y || 0),
+        1
+      );
+      if (!state.terrainView.baseZoom) {
+        state.terrainView.baseZoom = Math.min(rect.width, rect.height) * 0.78 / span;
+        state.terrainView.zoom = state.terrainView.baseZoom;
+      }
+      const maxCells = 9000;
+      const step = Math.max(1, Math.ceil(Math.sqrt((rows * cols) / maxCells)));
+      const view = state.terrainView;
+      ctx.save();
+      for (let row = rows - step; row >= 0; row -= step) {
+        for (let col = 0; col < cols - step; col += step) {
+          const h00 = terrainHeightAt(col, row, terrain);
+          const h10 = terrainHeightAt(Math.min(cols - 1, col + step), row, terrain);
+          const h11 = terrainHeightAt(Math.min(cols - 1, col + step), Math.min(rows - 1, row + step), terrain);
+          const h01 = terrainHeightAt(col, Math.min(rows - 1, row + step), terrain);
+          if (h00 === null && h10 === null && h11 === null && h01 === null) continue;
+          const h = [h00, h10, h11, h01].filter(v => v !== null).reduce((a, b) => a + b, 0) /
+            [h00, h10, h11, h01].filter(v => v !== null).length;
+          const x0 = Number(terrain.origin.x || 0) + col * cell;
+          const y0 = Number(terrain.origin.y || 0) + row * cell;
+          const x1 = x0 + step * cell;
+          const y1 = y0 + step * cell;
+          const p0 = projectTerrainPoint(x0, y0, h00 === null ? h : h00, terrain, view, rect);
+          const p1 = projectTerrainPoint(x1, y0, h10 === null ? h : h10, terrain, view, rect);
+          const p2 = projectTerrainPoint(x1, y1, h11 === null ? h : h11, terrain, view, rect);
+          const p3 = projectTerrainPoint(x0, y1, h01 === null ? h : h01, terrain, view, rect);
+          ctx.beginPath();
+          ctx.moveTo(p0.x, p0.y);
+          ctx.lineTo(p1.x, p1.y);
+          ctx.lineTo(p2.x, p2.y);
+          ctx.lineTo(p3.x, p3.y);
+          ctx.closePath();
+          ctx.fillStyle = terrainColor(h, terrain);
+          ctx.fill();
+        }
+      }
+      ctx.strokeStyle = "rgba(15, 23, 42, 0.08)";
+      ctx.lineWidth = 1;
+      for (let row = 0; row < rows; row += step * 4) {
+        ctx.beginPath();
+        let started = false;
+        for (let col = 0; col < cols; col += step * 4) {
+          const h = terrainHeightAt(col, row, terrain);
+          if (h === null) continue;
+          const p = projectTerrainPoint(Number(terrain.origin.x || 0) + col * cell, Number(terrain.origin.y || 0) + row * cell, h, terrain, view, rect);
+          if (!started) { ctx.moveTo(p.x, p.y); started = true; }
+          else ctx.lineTo(p.x, p.y);
+        }
+        ctx.stroke();
+      }
+      drawTerrainZones(terrain, view, rect);
+      drawTerrainRobot(terrain, view, rect);
+      drawTerrainLegend(rect);
+      ctx.restore();
+      updateZoomReadout();
+    }
+    function drawTerrainZones(terrain, view, rect) {
+      const zones = state.stairZones || [];
+      if (!zones.length) return;
+      const baseZ = Number((terrain.bounds || {}).max_z || 0);
+      for (const zone of zones) {
+        const poly = zone.polygon || [];
+        if (poly.length < 3) continue;
+        ctx.beginPath();
+        let started = false;
+        for (const point of poly) {
+          const p = projectTerrainPoint(Number(point.x), Number(point.y), baseZ + 0.2, terrain, view, rect);
+          if (!started) { ctx.moveTo(p.x, p.y); started = true; }
+          else ctx.lineTo(p.x, p.y);
+        }
+        ctx.closePath();
+        ctx.fillStyle = zone.trigger_gait ? "rgba(249, 115, 22, 0.42)" : "rgba(124, 58, 237, 0.26)";
+        ctx.strokeStyle = zone.trigger_gait ? "#c2410c" : "#7c3aed";
+        ctx.lineWidth = 2;
+        ctx.fill();
+        ctx.stroke();
+        if (zone.center) {
+          const label = projectTerrainPoint(Number(zone.center.x), Number(zone.center.y), baseZ + 0.35, terrain, view, rect);
+          ctx.fillStyle = "#17212b";
+          ctx.font = "12px system-ui, sans-serif";
+          ctx.fillText(zone.name || zone.id || "楼梯区", label.x + 4, label.y - 4);
+        }
+      }
+    }
+    function drawTerrainRobot(terrain, view, rect) {
+      const pose = state.latest && state.latest.pose;
+      if (!pose) return;
+      const h = Number((terrain.bounds || {}).max_z || 0) + 0.3;
+      const p = projectTerrainPoint(Number(pose.x), Number(pose.y), h, terrain, view, rect);
+      ctx.fillStyle = "#dc2626";
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
+    function drawTerrainLegend(rect) {
+      const items = [
+        ["低处", "#2563eb"],
+        ["平面", "#22c55e"],
+        ["高处", "#f97316"],
+        ["楼梯区", "rgba(249,115,22,0.55)"],
+        ["机器人", "#dc2626"]
+      ];
+      ctx.save();
+      ctx.font = "12px system-ui, sans-serif";
+      const width = Math.min(390, rect.width - 24);
+      const height = 34;
+      const x = 12;
+      const y = rect.height - height - 12;
+      ctx.fillStyle = "rgba(255, 255, 255, 0.9)";
+      ctx.strokeStyle = "rgba(148, 163, 184, 0.75)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.rect(x, y, width, height);
+      ctx.fill();
+      ctx.stroke();
+      let cursorX = x + 10;
+      for (const [label, color] of items) {
+        if (cursorX + 58 > x + width) break;
+        ctx.fillStyle = color;
+        ctx.fillRect(cursorX, y + 11, 12, 12);
+        ctx.strokeStyle = "rgba(0, 0, 0, 0.18)";
+        ctx.strokeRect(cursorX, y + 11, 12, 12);
+        ctx.fillStyle = "#475569";
+        ctx.fillText(label, cursorX + 17, y + 21);
+        cursorX += label.length > 2 ? 62 : 50;
+      }
+      ctx.restore();
+    }
+    async function loadTerrain() {
+      if (!state.selectedMapId) {
+        state.terrain = null;
+        state.stairZones = [];
+        state.terrainMessage = "请选择固定地图；实时 /map 没有离线 PCD 派生 3D 地形。";
+        updateMapModeUi();
+        draw();
+        return;
+      }
+      try {
+        const [terrain, zones] = await Promise.all([
+          fetchJson(`/api/map_3d?map_id=${encodeURIComponent(state.selectedMapId)}`),
+          fetchJson(`/api/stair_zones?map_id=${encodeURIComponent(state.selectedMapId)}`)
+        ]);
+        state.terrain = terrain && terrain.available ? terrain : null;
+        state.stairZones = zones && zones.zones ? zones.zones : [];
+        state.terrainView.baseZoom = null;
+        if (state.terrain) {
+          const t = state.terrain.terrain || {};
+          state.terrainMessage = `${(state.terrain.map || {}).name || state.selectedMapId} / ${t.cols || 0}x${t.rows || 0} 高度网格 / ${(state.stairZones || []).length} 个楼梯区域`;
+        } else {
+          state.terrainMessage = (terrain && terrain.message) || "当前地图暂无 3D 地形，2D 地图仍可用。";
+        }
+        updateMapModeUi();
+        draw();
+      } catch (err) {
+        state.terrain = null;
+        state.stairZones = [];
+        state.terrainMessage = err.message || JSON.stringify(err);
+        updateMapModeUi();
+        draw();
+      }
+    }
     async function refreshLiveMap(version) {
       if (state.selectedMapId || version === state.liveMapVersion) return;
       const map = await fetchJson("/api/map");
@@ -1521,7 +1826,8 @@ INDEX_HTML = r"""<!doctype html>
       state.liveMapVersion = map.version;
       $("mapTitle").textContent = `实时地图版本 ${map.version}`;
       $("mapMeta").textContent = `${map.width} x ${map.height}, ${map.resolution.toFixed(3)} m/格`;
-      $("mapMode").textContent = "实时 /map";
+      state.mapModeLabel = "实时 /map";
+      updateMapModeUi();
       await loadAnnotations();
       if (resetView) resetMapView(false);
       resizeCanvas();
@@ -1540,10 +1846,12 @@ INDEX_HTML = r"""<!doctype html>
       state.fileMapVersion = map.version;
       $("mapTitle").textContent = map.name || `固定地图 ${mapId}`;
       $("mapMeta").textContent = `${map.floor || "-"} / ${map.width} x ${map.height}, ${map.resolution.toFixed(3)} m/格`;
-      $("mapMode").textContent = map.source === "project_builtin" ? "项目内置地图" : "固定地图";
+      state.mapModeLabel = map.source === "project_builtin" ? "项目内置地图" : "固定地图";
+      updateMapModeUi();
       await loadAnnotations();
       resetMapView(false);
       resizeCanvas();
+      await loadTerrain();
     }
     function updateState(s) {
       state.latest = s;
@@ -1813,6 +2121,19 @@ INDEX_HTML = r"""<!doctype html>
       });
     }
     canvas.addEventListener("pointerdown", (evt) => {
+      if (state.mapViewMode === "3d") {
+        evt.preventDefault();
+        state.terrainView.pointer = {
+          id: evt.pointerId,
+          x: evt.clientX,
+          y: evt.clientY,
+          panX: state.terrainView.panX,
+          panY: state.terrainView.panY,
+        };
+        canvas.classList.add("panning");
+        canvas.setPointerCapture(evt.pointerId);
+        return;
+      }
       if (state.view.panMode || evt.button === 1 || evt.button === 2 || evt.shiftKey || evt.altKey) {
         evt.preventDefault();
         state.panPointer = {
@@ -1844,6 +2165,17 @@ INDEX_HTML = r"""<!doctype html>
       }
     });
     canvas.addEventListener("pointermove", (evt) => {
+      if (state.mapViewMode === "3d") {
+        const pointer = state.terrainView.pointer;
+        if (pointer && pointer.id === evt.pointerId) {
+          evt.preventDefault();
+          state.terrainView.panX = pointer.panX + (evt.clientX - pointer.x);
+          state.terrainView.panY = pointer.panY + (evt.clientY - pointer.y);
+          draw();
+        }
+        $("cursor").textContent = state.terrainMessage || "3D地图：拖动平移，滚轮缩放";
+        return;
+      }
       if (state.panPointer && state.panPointer.id === evt.pointerId) {
         evt.preventDefault();
         state.view.panX = state.panPointer.panX + (evt.clientX - state.panPointer.x);
@@ -1879,6 +2211,13 @@ INDEX_HTML = r"""<!doctype html>
       }
     });
     function finishMarkPointer(evt) {
+      if (state.terrainView.pointer && state.terrainView.pointer.id === evt.pointerId) {
+        evt.preventDefault();
+        if (canvas.hasPointerCapture(evt.pointerId)) canvas.releasePointerCapture(evt.pointerId);
+        state.terrainView.pointer = null;
+        canvas.classList.remove("panning");
+        return;
+      }
       if (state.panPointer && state.panPointer.id === evt.pointerId) {
         evt.preventDefault();
         if (canvas.hasPointerCapture(evt.pointerId)) canvas.releasePointerCapture(evt.pointerId);
@@ -1900,8 +2239,12 @@ INDEX_HTML = r"""<!doctype html>
     canvas.addEventListener("pointercancel", finishMarkPointer);
     canvas.addEventListener("contextmenu", (evt) => evt.preventDefault());
     canvas.addEventListener("wheel", (evt) => {
-      if (!state.map) return;
       evt.preventDefault();
+      if (state.mapViewMode === "3d") {
+        terrainZoomBy(Math.exp(-evt.deltaY * 0.001));
+        return;
+      }
+      if (!state.map) return;
       const factor = Math.exp(-evt.deltaY * 0.0012);
       setZoomAt(evt.clientX, evt.clientY, state.view.zoom * factor);
     }, {passive: false});
@@ -1912,15 +2255,24 @@ INDEX_HTML = r"""<!doctype html>
       $("panModeBtn").classList.toggle("active-tool", state.view.panMode);
       $("cursor").textContent = state.view.panMode ? "平移模式" : "拖拽地图取点和朝向";
     });
-    $("fitMapBtn").addEventListener("click", () => resetMapView(true));
+    $("fitMapBtn").addEventListener("click", () => {
+      if (state.mapViewMode === "3d") resetTerrainView(true);
+      else resetMapView(true);
+    });
     $("centerRobotBtn").addEventListener("click", () => {
       const pose = state.latest && state.latest.pose;
       if (!pose) {
         $("cursor").textContent = "暂无机器人位姿，重定位成功后才能居中";
         return;
       }
-      centerMapOnWorld(pose.x, pose.y);
+      if (state.mapViewMode === "3d") {
+        if (!centerTerrainOnWorld(pose.x, pose.y)) $("cursor").textContent = "当前地图暂无 3D 地形，不能在 3D 中居中机器人";
+      } else {
+        centerMapOnWorld(pose.x, pose.y);
+      }
     });
+    $("map2dBtn").addEventListener("click", () => setMapViewMode("2d"));
+    $("map3dBtn").addEventListener("click", () => setMapViewMode("3d"));
     $("markYaw").addEventListener("input", () => {
       const pose = state.markDraft;
       if (!pose) return;
@@ -2026,6 +2378,7 @@ INDEX_HTML = r"""<!doctype html>
         else {
           state.selectedMapId = null;
           state.liveMapVersion = -1;
+          await loadTerrain();
         }
         await loadAnnotations();
       } catch (err) { console.warn(err); }
@@ -2138,8 +2491,9 @@ INDEX_HTML = r"""<!doctype html>
     });
     window.addEventListener("resize", resizeCanvas);
     resizeCanvas();
+    updateMapModeUi();
     syncManualDefaults(false);
-    loadMaps().then(loadAnnotations).then(loadPreflight).then(loadTasks).catch(console.warn);
+    loadMaps().then(loadAnnotations).then(loadTerrain).then(loadPreflight).then(loadTasks).catch(console.warn);
     mainLoop();
   </script>
 </body>
@@ -2457,6 +2811,21 @@ class WebDashboardNode(Node):
             str(self.get_parameter("initialpose_topic").value),
             10,
         )
+        self.stair_zones_pub = self.create_publisher(
+            String,
+            str(self.get_parameter("stair_zones_topic").value),
+            10,
+        )
+        self.lidar_points_relay_pub = None
+        if bool(self.get_parameter("enable_lidar_points_relay").value):
+            relay_topic = str(self.get_parameter("lidar_points_relay_topic").value)
+            relay_qos = QoSProfile(depth=2)
+            relay_qos.reliability = ReliabilityPolicy.RELIABLE
+            self.lidar_points_relay_pub = self.create_publisher(PointCloud2, relay_topic, relay_qos)
+            self.get_logger().info(
+                "LIDAR pointcloud relay enabled: %s -> %s"
+                % (str(self.get_parameter("lidar_points_topic").value), relay_topic)
+            )
         self.clear_costmap_clients = []
         if ClearEntireCostmap is not None:
             self.clear_costmap_clients = [
@@ -2484,6 +2853,7 @@ class WebDashboardNode(Node):
 
         self._create_subscriptions()
         self.create_timer(1.0, self._tick_active_task)
+        self.create_timer(2.0, self._publish_selected_stair_zones)
         self._server = self._start_http_server()
 
     def _declare_parameters(self) -> None:
@@ -2512,6 +2882,9 @@ class WebDashboardNode(Node):
         )
         self.declare_parameter("mapping_command_timeout_s", 120.0)
         self.declare_parameter("map_import_timeout_s", 180.0)
+        self.declare_parameter("enable_map_pcd_postprocess", True)
+        self.declare_parameter("pcd_terrain_cell_size", 0.25)
+        self.declare_parameter("stair_zones_topic", "/m20pro/stair_zones")
         self.declare_parameter("goal_reached_tolerance_m", 0.3)
         self.declare_parameter("task_goal_resend_interval_s", 5.0)
         self.declare_parameter("task_start_settle_s", 0.5)
@@ -2549,6 +2922,9 @@ class WebDashboardNode(Node):
         self.declare_parameter("navigation_status_topic", "/m20pro_tcp_bridge/navigation_status")
         self.declare_parameter("battery_topic", "/BATTERY_DATA")
         self.declare_parameter("lidar_points_topic", "/LIDAR/POINTS")
+        self.declare_parameter("lidar_points_relay_subscribe_topic", "/m20pro/lidar_points_relay")
+        self.declare_parameter("enable_lidar_points_relay", False)
+        self.declare_parameter("lidar_points_relay_topic", "/m20pro/lidar_points_relay")
         self.declare_parameter("scan_topic", "/scan")
         self.declare_parameter("scan_overlay_max_points", 720)
         self.declare_parameter("scan_overlay_min_range_m", 0.05)
@@ -2640,6 +3016,14 @@ class WebDashboardNode(Node):
             except Exception as exc:
                 self.get_logger().warning(f"failed to resolve builtin map {floor}: {exc}")
                 continue
+            pcd_value = str(info.get("pcd_map") or map_set.get("global_pcd") or "").strip()
+            pcd_path = ""
+            if pcd_value:
+                try:
+                    pcd_path = self._resolve_path(pcd_value)
+                except Exception:
+                    pcd_path = pcd_value
+            derived = self._builtin_map_derived(yaml_path, str(floor), f"builtin_{floor}", pcd_path)
             maps.append(
                 {
                     "id": f"builtin_{floor}",
@@ -2650,12 +3034,44 @@ class WebDashboardNode(Node):
                     "yaml_path": str(yaml_path),
                     "source": "project_builtin",
                     "readonly": True,
+                    "pcd_path": pcd_path,
+                    "derived": derived,
                     "source_note": source_note,
                     "created_at": "项目内置地图",
                 }
             )
         maps.sort(key=lambda item: (int(item.get("level") or 0), str(item.get("floor") or "")))
         return maps
+
+    def _builtin_map_derived(
+        self,
+        yaml_path: FsPath,
+        floor: str,
+        map_id: str,
+        pcd_path: str,
+    ) -> Dict[str, Any]:
+        derived_dir = yaml_path.parent / "derived"
+        terrain_path = derived_dir / "terrain_mesh.json"
+        zones_path = derived_dir / "stair_zones.json"
+        if terrain_path.exists() and zones_path.exists():
+            return {
+                "status": "ready",
+                "message": "项目内置地图已有 PCD 派生 3D 地形",
+                "terrain_mesh": str(terrain_path.relative_to(yaml_path.parent)),
+                "height_grid": str((derived_dir / "height_grid.json").relative_to(yaml_path.parent)),
+                "stair_zones": str(zones_path.relative_to(yaml_path.parent)),
+                "pcd_path": pcd_path,
+            }
+        if pcd_path and FsPath(pcd_path).exists():
+            return {
+                "status": "pending",
+                "message": "项目内置地图可执行 PCD 派生；为避免启动时改动仓库文件，请在导入归档地图时自动生成",
+                "pcd_path": pcd_path,
+            }
+        return {
+            "status": "missing_pcd",
+            "message": "项目内置地图未配置可用 PCD",
+        }
 
     def _map_manifest_path(self) -> Optional[FsPath]:
         value = str(self.get_parameter("map_manifest").value or "").strip()
@@ -2748,6 +3164,14 @@ class WebDashboardNode(Node):
         else:
             self.get_logger().warning("drdds.msg.BatteryData is unavailable; battery display is disabled")
         self.create_subscription(PointCloud2, self._topic("lidar_points_topic"), self._on_lidar_points, 2)
+        relay_subscribe_topic = self._topic("lidar_points_relay_subscribe_topic")
+        if relay_subscribe_topic and relay_subscribe_topic != self._topic("lidar_points_topic"):
+            self.create_subscription(
+                PointCloud2,
+                relay_subscribe_topic,
+                self._on_lidar_points_relay,
+                2,
+            )
         self.create_subscription(LaserScan, self._topic("scan_topic"), self._on_scan, scan_qos)
         self.create_subscription(Odometry, self._topic("odom_topic"), self._on_odom, 10)
         self.create_subscription(PoseStamped, self._topic("pose_topic"), self._on_pose, 20)
@@ -2858,6 +3282,14 @@ class WebDashboardNode(Node):
             self._mark_topic("battery")
 
     def _on_lidar_points(self, msg: PointCloud2) -> None:
+        self._remember_lidar_points(msg, "raw")
+        if self.lidar_points_relay_pub is not None:
+            self.lidar_points_relay_pub.publish(msg)
+
+    def _on_lidar_points_relay(self, msg: PointCloud2) -> None:
+        self._remember_lidar_points(msg, "relay")
+
+    def _remember_lidar_points(self, msg: PointCloud2, source: str) -> None:
         stamp = _stamp_to_float(msg.header.stamp)
         with self._lock:
             self._state["lidar_points"] = {
@@ -2869,6 +3301,7 @@ class WebDashboardNode(Node):
                 "point_step": int(msg.point_step),
                 "row_step": int(msg.row_step),
                 "is_dense": bool(msg.is_dense),
+                "source": source,
             }
             self._mark_topic("lidar_points")
 
@@ -3213,8 +3646,10 @@ class WebDashboardNode(Node):
         mode = str(payload.get("mode") or "move").strip()
         if mode not in ("move", "shadow"):
             mode = "move"
+        site = str(payload.get("site") or "workstation").strip().lower()
+        workstation_mode = site in ("workstation", "bench", "desk", "office", "charging")
         now = time.time()
-        timeout_s = max(1.0, float(self.get_parameter("preflight_topic_timeout_s").value))
+        timeout_s = max(2.0, min(8.0, float(self.get_parameter("preflight_topic_timeout_s").value)))
         items: List[Dict[str, Any]] = []
 
         def add(
@@ -3310,19 +3745,33 @@ class WebDashboardNode(Node):
             age = max(0.0, now - float(last_update))
             return age <= timeout_s, age, value
 
+        scan_ok, scan_age, scan = fresh("scan")
+        finite_ranges = int(scan.get("finite_ranges", 0)) if isinstance(scan, dict) else 0
+
         lidar_ok, lidar_age, lidar = fresh("lidar_points")
         lidar_points = 0
         if isinstance(lidar, dict):
             lidar_points = int(lidar.get("width", 0)) * max(1, int(lidar.get("height", 1)))
+        perception_ok = (lidar_ok and lidar_points > 0) or (scan_ok and finite_ranges > 0)
+        if lidar_ok and lidar_points > 0:
+            lidar_status = "ok"
+            lidar_message = f"{lidar_points} 点 / {fmt_age_text(lidar_age)}"
+        elif scan_ok and finite_ranges > 0:
+            lidar_status = "warn"
+            lidar_message = (
+                f"未直接缓存原始点云，但 /scan 新鲜且有效距离 {finite_ranges}；"
+                "工位自检按感知链路可用处理"
+            )
+        else:
+            lidar_status = "fail"
+            lidar_message = "未收到 /LIDAR/POINTS，也没有可用 /scan"
         add(
             "lidar_points",
             "原始点云",
-            "ok" if lidar_ok and lidar_points > 0 else "fail",
-            f"{lidar_points} 点 / {fmt_age_text(lidar_age)}" if lidar_age is not None else "未收到 /LIDAR/POINTS",
+            lidar_status,
+            lidar_message,
         )
 
-        scan_ok, scan_age, scan = fresh("scan")
-        finite_ranges = int(scan.get("finite_ranges", 0)) if isinstance(scan, dict) else 0
         add(
             "scan",
             "二维激光",
@@ -3367,20 +3816,25 @@ class WebDashboardNode(Node):
         )
 
         loc_ok = current_state.get("localization_ok") is True
+        nav_status_text = str(current_state.get("navigation_status") or "")
+        unlocalized = (not loc_ok) or ("location=1" in nav_status_text.lower())
         add(
             "localization",
             "定位状态",
             "ok" if loc_ok else "warn",
-            "localization_ok=true" if loc_ok else "定位未确认；这是重定位前的预期状态",
+            (
+                "localization_ok=true"
+                if loc_ok
+                else "当前在工位/未重定位，定位未确认是预期状态；到测试场地后先重定位"
+            ),
             group="navigation",
         )
 
-        nav_status = current_state.get("navigation_status")
         add(
             "navigation_status",
             "原厂导航状态",
-            "ok" if nav_status else "warn",
-            str(nav_status or "暂未收到 navigation_status"),
+            "ok" if nav_status_text else "warn",
+            nav_status_text or "暂未收到 navigation_status",
         )
 
         map_ok = isinstance(current_state.get("map"), dict)
@@ -3425,17 +3879,26 @@ class WebDashboardNode(Node):
             f"{battery_level}% / 最低要求 {min_level}%" if isinstance(primary, dict) else "未收到电池数据",
         )
 
-        lifecycle_results = self._check_lifecycle_nodes(
-            ["/map_server", "/controller_server", "/planner_server", "/bt_navigator"]
-        )
-        for node_name, lifecycle in lifecycle_results.items():
+        if workstation_mode or unlocalized:
             add(
-                f"lifecycle:{node_name}",
-                f"{node_name} 生命周期",
-                "ok" if lifecycle.get("active") else "warn",
-                lifecycle.get("message", ""),
+                "nav2_lifecycle_deferred",
+                "Nav2 生命周期",
+                "warn",
+                "当前在工位/未重定位，不阻塞基础自检；到测试场地重定位后再确认 Nav2 active",
                 group="navigation",
             )
+        else:
+            lifecycle_results = self._check_lifecycle_nodes(
+                ["/map_server", "/controller_server", "/planner_server", "/bt_navigator"]
+            )
+            for node_name, lifecycle in lifecycle_results.items():
+                add(
+                    f"lifecycle:{node_name}",
+                    f"{node_name} 生命周期",
+                    "ok" if lifecycle.get("active") else "warn",
+                    lifecycle.get("message", ""),
+                    group="navigation",
+                )
 
         motion = self._detect_motion_mode()
         if mode == "move":
@@ -3455,6 +3918,16 @@ class WebDashboardNode(Node):
             )
 
         failures = [item for item in items if item["status"] == "fail" and item.get("group") == "base"]
+        if not perception_ok and not any(item.get("key") == "lidar_points" for item in failures):
+            failures.append(
+                {
+                    "key": "perception_chain",
+                    "label": "感知链路",
+                    "status": "fail",
+                    "message": "原始点云和 /scan 都不可用",
+                    "group": "base",
+                }
+            )
         navigation_failures = [
             item
             for item in items
@@ -3465,6 +3938,8 @@ class WebDashboardNode(Node):
             "ok": not failures,
             "navigation_ready": not navigation_failures,
             "mode": mode,
+            "site": "workstation" if workstation_mode else site,
+            "workstation_mode": workstation_mode,
             "timestamp": now,
             "time_text": _now_text(),
             "age_sec": 0.0,
@@ -3476,7 +3951,7 @@ class WebDashboardNode(Node):
                 (
                     "基础自检通过，导航已就绪"
                     if not navigation_failures
-                    else "基础自检通过，导航待重定位后确认"
+                    else "基础自检通过，当前在工位，导航待到测试场地重定位后确认"
                 )
                 if not failures
                 else f"基础自检未通过：{len(failures)} 项失败"
@@ -3759,6 +4234,7 @@ class WebDashboardNode(Node):
             "source_path": source,
             "created_at": _now_text(),
         }
+        map_record["derived"] = self._generate_map_derived(map_record, dest, yaml_path, floor)
         with self._data_lock:
             self._maps.append(map_record)
             self._settings["selected_map_id"] = map_record["id"]
@@ -3776,6 +4252,265 @@ class WebDashboardNode(Node):
             "command": command_text,
             "output": command_output,
         }
+
+    def _generate_map_derived(
+        self,
+        map_record: Dict[str, Any],
+        map_dir: FsPath,
+        yaml_path: FsPath,
+        floor: str,
+    ) -> Dict[str, Any]:
+        if not self._as_bool(self.get_parameter("enable_map_pcd_postprocess").value):
+            return {
+                "status": "disabled",
+                "message": "PCD 后处理未启用",
+            }
+        try:
+            floor_config = self._floor_config_path()
+            result = process_imported_map(
+                FsPath(map_dir),
+                FsPath(yaml_path),
+                floor,
+                str(map_record.get("id") or ""),
+                floor_config_path=floor_config,
+                cell_size=float(self.get_parameter("pcd_terrain_cell_size").value),
+            )
+            self._append_event(
+                "地图 PCD 派生完成",
+                {
+                    "map_id": map_record.get("id"),
+                    "floor": floor,
+                    "status": result.get("status"),
+                    "message": result.get("message"),
+                },
+            )
+            return result
+        except Exception as exc:
+            self.get_logger().warning("map PCD postprocess failed: %s" % exc)
+            return {
+                "status": "failed",
+                "message": str(exc) or exc.__class__.__name__,
+            }
+
+    def _floor_config_path(self) -> Optional[FsPath]:
+        try:
+            return FsPath(get_package_share_directory("m20pro_bringup")) / "config" / "inspection_waypoints.yaml"
+        except PackageNotFoundError:
+            return None
+
+    def _map_3d_payload(self, map_id: Optional[str]) -> Dict[str, Any]:
+        with self._data_lock:
+            if not map_id:
+                map_id = self._settings.get("selected_map_id")
+            record = self._find_map_record_unlocked(map_id)
+        if record is None:
+            return {"ok": True, "available": False, "message": "未选择固定地图"}
+        derived = record.get("derived") if isinstance(record.get("derived"), dict) else {}
+        terrain_rel = str(derived.get("terrain_mesh") or "").strip()
+        if not terrain_rel:
+            if (
+                record.get("source") == "project_builtin"
+                and derived.get("status") == "pending"
+                and str(record.get("pcd_path") or "").strip()
+                and self._as_bool(self.get_parameter("enable_map_pcd_postprocess").value)
+            ):
+                terrain_rel = self._ensure_builtin_map_derived(record, derived)
+                derived = record.get("derived") if isinstance(record.get("derived"), dict) else derived
+        if not terrain_rel:
+            return {
+                "ok": True,
+                "available": False,
+                "map_id": record.get("id"),
+                "status": derived.get("status") or "missing",
+                "message": derived.get("message") or "当前地图没有 PCD/3D 地形，2D 地图仍可用",
+            }
+        terrain_path = self._resolve_map_asset_path(record, terrain_rel)
+        if terrain_path is None or not terrain_path.exists():
+            return {
+                "ok": True,
+                "available": False,
+                "map_id": record.get("id"),
+                "status": "missing_file",
+                "message": "3D 地形文件不存在，请重新从 106 拉取地图",
+            }
+        try:
+            payload = self._read_json_file(terrain_path)
+        except Exception as exc:
+            return {
+                "ok": True,
+                "available": False,
+                "map_id": record.get("id"),
+                "status": "failed",
+                "message": str(exc),
+            }
+        payload["ok"] = True
+        payload["available"] = True
+        payload["map"] = {
+            "id": record.get("id"),
+            "name": record.get("name"),
+            "floor": record.get("floor"),
+            "derived_status": derived.get("status"),
+            "derived_message": derived.get("message"),
+        }
+        return payload
+
+    def _ensure_builtin_map_derived(self, record: Dict[str, Any], derived: Dict[str, Any]) -> str:
+        yaml_path = FsPath(self._resolve_path(str(record.get("yaml_path") or "")))
+        pcd_path = FsPath(self._resolve_path(str(record.get("pcd_path") or "")))
+        if not yaml_path.exists() or not pcd_path.exists():
+            return ""
+        cache_dir = self.data_dir / "builtin_derived" / _sanitize_name(str(record.get("id") or "builtin"), "builtin")
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        result = process_imported_map(
+            cache_dir,
+            yaml_path,
+            str(record.get("floor") or ""),
+            str(record.get("id") or ""),
+            floor_config_path=self._floor_config_path(),
+            pcd_path_override=pcd_path,
+            cell_size=float(self.get_parameter("pcd_terrain_cell_size").value),
+        )
+        result["base_dir"] = str(cache_dir)
+        record["derived"] = result
+        with self._data_lock:
+            for builtin in self._builtin_maps:
+                if builtin.get("id") == record.get("id"):
+                    builtin["derived"] = result
+                    break
+        return str(result.get("terrain_mesh") or "")
+
+    def _stair_zones_payload(self, map_id: Optional[str]) -> Dict[str, Any]:
+        with self._data_lock:
+            if not map_id:
+                map_id = self._settings.get("selected_map_id")
+            record = self._find_map_record_unlocked(map_id)
+        if record is None:
+            return {"ok": True, "available": False, "message": "未选择固定地图", "zones": []}
+        derived = record.get("derived") if isinstance(record.get("derived"), dict) else {}
+        zones_rel = str(derived.get("stair_zones") or "").strip()
+        if not zones_rel:
+            if (
+                record.get("source") == "project_builtin"
+                and derived.get("status") == "pending"
+                and str(record.get("pcd_path") or "").strip()
+                and self._as_bool(self.get_parameter("enable_map_pcd_postprocess").value)
+            ):
+                self._ensure_builtin_map_derived(record, derived)
+                derived = record.get("derived") if isinstance(record.get("derived"), dict) else derived
+                zones_rel = str(derived.get("stair_zones") or "").strip()
+        if not zones_rel:
+            return {
+                "ok": True,
+                "available": False,
+                "map_id": record.get("id"),
+                "floor": record.get("floor"),
+                "message": "当前地图没有楼梯语义区",
+                "zones": [],
+            }
+        zones_path = self._resolve_map_asset_path(record, zones_rel)
+        if zones_path is None or not zones_path.exists():
+            return {
+                "ok": True,
+                "available": False,
+                "map_id": record.get("id"),
+                "floor": record.get("floor"),
+                "message": "楼梯语义区文件不存在",
+                "zones": [],
+            }
+        try:
+            payload = self._read_json_file(zones_path)
+        except Exception as exc:
+            return {
+                "ok": True,
+                "available": False,
+                "map_id": record.get("id"),
+                "floor": record.get("floor"),
+                "message": str(exc),
+                "zones": [],
+            }
+        payload["ok"] = True
+        payload["available"] = True
+        payload["map"] = {
+            "id": record.get("id"),
+            "name": record.get("name"),
+            "floor": record.get("floor"),
+            "derived_status": derived.get("status"),
+        }
+        return payload
+
+    def _stair_pointcloud_payload(self, map_id: Optional[str], zone_id: Optional[str]) -> Dict[str, Any]:
+        if not zone_id:
+            return self._error("缺少 zone_id")
+        zones_payload = self._stair_zones_payload(map_id)
+        zones = zones_payload.get("zones") or []
+        zone = next((item for item in zones if str(item.get("id")) == str(zone_id)), None)
+        if zone is None:
+            return {"ok": True, "available": False, "message": "楼梯区域不存在"}
+        pointcloud_rel = str(zone.get("pointcloud") or "").strip()
+        if not pointcloud_rel:
+            return {"ok": True, "available": False, "message": "该楼梯区域没有局部点云"}
+        with self._data_lock:
+            record = self._find_map_record_unlocked(map_id or zones_payload.get("map_id"))
+        if record is None:
+            return {"ok": True, "available": False, "message": "地图不存在"}
+        path = self._resolve_map_asset_path(record, pointcloud_rel)
+        if path is None or not path.exists():
+            return {"ok": True, "available": False, "message": "局部点云文件不存在"}
+        try:
+            payload = self._read_json_file(path)
+        except Exception as exc:
+            return {"ok": True, "available": False, "message": str(exc)}
+        payload["ok"] = True
+        payload["available"] = True
+        return payload
+
+    def _publish_selected_stair_zones(self) -> None:
+        try:
+            with self._data_lock:
+                map_id = self._settings.get("selected_map_id")
+            payload = self._stair_zones_payload(map_id)
+            zones = payload.get("zones") or []
+            if not payload.get("available") and not map_id:
+                return
+            msg = String()
+            msg.data = json.dumps(
+                {
+                    "map_id": payload.get("map_id") or ((payload.get("map") or {}).get("id")),
+                    "floor": payload.get("floor") or ((payload.get("map") or {}).get("floor")),
+                    "zones": zones,
+                    "available": bool(payload.get("available")),
+                    "updated_at": _now_text(),
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            self.stair_zones_pub.publish(msg)
+        except Exception as exc:
+            self.get_logger().debug("failed to publish stair zones: %s" % exc)
+
+    def _resolve_map_asset_path(self, record: Dict[str, Any], relative_path: str) -> Optional[FsPath]:
+        value = str(relative_path or "").strip()
+        if not value:
+            return None
+        path = FsPath(os.path.expandvars(os.path.expanduser(value)))
+        if path.is_absolute():
+            return path
+        derived = record.get("derived") if isinstance(record.get("derived"), dict) else {}
+        base_dir = str(derived.get("base_dir") or "").strip()
+        if base_dir:
+            return FsPath(self._resolve_path(base_dir)) / path
+        directory = str(record.get("directory") or "").strip()
+        if not directory:
+            return None
+        return FsPath(self._resolve_path(directory)) / path
+
+    @staticmethod
+    def _read_json_file(path: FsPath) -> Dict[str, Any]:
+        with FsPath(path).open("r", encoding="utf-8") as file:
+            payload = json.load(file)
+        if not isinstance(payload, dict):
+            raise RuntimeError("JSON payload is not an object")
+        return payload
 
     def _annotations_payload(self, query: Dict[str, List[str]]) -> Dict[str, Any]:
         map_id = (query.get("map_id") or [None])[0]
@@ -5093,6 +5828,16 @@ class WebDashboardNode(Node):
                 elif parsed.path == "/api/map_file":
                     map_id = (query.get("map_id") or [None])[0]
                     self._send_json(node._map_file_snapshot(map_id))
+                elif parsed.path == "/api/map_3d":
+                    map_id = (query.get("map_id") or [None])[0]
+                    self._send_json(node._map_3d_payload(map_id))
+                elif parsed.path == "/api/stair_zones":
+                    map_id = (query.get("map_id") or [None])[0]
+                    self._send_json(node._stair_zones_payload(map_id))
+                elif parsed.path == "/api/stair_pointcloud":
+                    map_id = (query.get("map_id") or [None])[0]
+                    zone_id = (query.get("zone_id") or [None])[0]
+                    self._send_json(node._stair_pointcloud_payload(map_id, zone_id))
                 elif parsed.path == "/api/projects":
                     self._send_json(node._projects_payload())
                 elif parsed.path == "/api/maps":

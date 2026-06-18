@@ -19,9 +19,4 @@ echo "[104_check_lidar] key topics:"
 ros2 topic list | grep -E '^/(LIDAR/POINTS|LIDAR/POINTS2|scan|ODOM|IMU)$' || true
 
 echo "[104_check_lidar] waiting /LIDAR/POINTS for ${TIMEOUT_S}s"
-if timeout "${TIMEOUT_S}" ros2 topic echo /LIDAR/POINTS --no-arr; then
-  exit 0
-fi
-
-echo "[104_check_lidar] no /LIDAR/POINTS data within ${TIMEOUT_S}s" >&2
-exit 3
+M20PRO_LIDAR_WAIT_S="${TIMEOUT_S}" ros2 run m20pro_bringup m20pro_lidar_guard.sh check

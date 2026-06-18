@@ -169,4 +169,5 @@ m20pro_pointcloud_fusion:
     transform_cloud: true
     use_latest_tf: true
     transform_timeout_s: 0.05
-    max_source_age_s: 0.25
+    max_source_age_s: 1.0
+    publish_on_cloud_update: true

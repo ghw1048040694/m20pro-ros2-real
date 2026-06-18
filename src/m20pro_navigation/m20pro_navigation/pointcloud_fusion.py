@@ -9,6 +9,7 @@ from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPo
 from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2, LaserScan
 import sensor_msgs_py.point_cloud2 as pc2
+from std_msgs.msg import String
 from tf2_ros import Buffer, TransformListener
 
 
@@ -18,6 +19,7 @@ class PointCloudFusion(Node):
         
         # === 声明参数 ===
         self.declare_parameter("input_cloud_topic", "")
+        self.declare_parameter("backup_cloud_topic", "")
         self.declare_parameter("front_lidar_topic", "/LIDAR/FRONT/POINTS")
         self.declare_parameter("rear_lidar_topic", "/LIDAR/REAR/POINTS")
         self.declare_parameter("output_scan_topic", "/scan")
@@ -41,8 +43,11 @@ class PointCloudFusion(Node):
         self.declare_parameter("max_points_per_cloud", 12000)
         self.declare_parameter("min_cloud_interval_s", 0.05)
         self.declare_parameter("publish_on_cloud_update", False)
+        self.declare_parameter("diagnostic_topic", "/m20pro/pointcloud_fusion/status")
+        self.declare_parameter("diagnostic_period_s", 2.0)
 
         self.input_cloud_topic = str(self.get_parameter("input_cloud_topic").value)
+        self.backup_cloud_topic = str(self.get_parameter("backup_cloud_topic").value)
         self.front_lidar_topic = str(self.get_parameter("front_lidar_topic").value)
         self.rear_lidar_topic = str(self.get_parameter("rear_lidar_topic").value)
         self.output_scan_topic = str(self.get_parameter("output_scan_topic").value)
@@ -61,6 +66,8 @@ class PointCloudFusion(Node):
         self.max_points_per_cloud = int(self.get_parameter("max_points_per_cloud").value)
         self.min_cloud_interval_s = float(self.get_parameter("min_cloud_interval_s").value)
         self.publish_on_cloud_update = bool(self.get_parameter("publish_on_cloud_update").value)
+        self.diagnostic_topic = str(self.get_parameter("diagnostic_topic").value)
+        self.diagnostic_period_s = max(0.5, float(self.get_parameter("diagnostic_period_s").value))
         if bool(self.get_parameter("no_return_as_inf").value):
             self.empty_range_value = float("inf")
         else:
@@ -80,6 +87,27 @@ class PointCloudFusion(Node):
         self.front_update_time = None
         self.rear_update_time = None
         self.last_tf_warning_time = None
+        self.cloud_messages = 0
+        self.cloud_processed = 0
+        self.cloud_skipped_by_interval = 0
+        self.cloud_skipped_duplicate = 0
+        self.cloud_dropped = 0
+        self.scan_published = 0
+        self.publish_skipped_no_source = 0
+        self.publish_skipped_stale = 0
+        self.last_cloud_frame = ""
+        self.last_cloud_source_topic = ""
+        self.last_processed_cloud_key = None
+        self.last_cloud_input_points = 0
+        self.last_cloud_sampled_points = 0
+        self.last_cloud_finite_points = 0
+        self.last_cloud_kept_points = 0
+        self.last_cloud_finite_bins = 0
+        self.last_drop_reason = "not_started"
+        self.last_scan_finite_bins = 0
+        self.last_scan_min_range = None
+        self.last_scan_source_age_s = None
+        self.last_diag_log_time = None
         self.tf_buffer = None
         self.tf_listener = None
         if self.transform_cloud:
@@ -125,9 +153,16 @@ class PointCloudFusion(Node):
             self.create_subscription(
                 PointCloud2,
                 self.input_cloud_topic,
-                self._on_cloud,
+                lambda msg: self._on_cloud(msg, self.input_cloud_topic),
                 cloud_qos
             )
+            if self.backup_cloud_topic and self.backup_cloud_topic != self.input_cloud_topic:
+                self.create_subscription(
+                    PointCloud2,
+                    self.backup_cloud_topic,
+                    lambda msg: self._on_cloud(msg, self.backup_cloud_topic),
+                    cloud_qos
+                )
         else:
             self.create_subscription(
                 PointCloud2,
@@ -149,14 +184,24 @@ class PointCloudFusion(Node):
             self.output_scan_topic,
             scan_qos
         )
+        self.diagnostic_pub = None
+        if self.diagnostic_topic:
+            self.diagnostic_pub = self.create_publisher(String, self.diagnostic_topic, 10)
         
         # === 创建定时器（定期发布融合后的 scan）===
         publish_rate = max(1.0, float(self.get_parameter("publish_rate_hz").value))
         self.scan_period = 1.0 / publish_rate
         self.create_timer(self.scan_period, self._publish_scan)
+        self.create_timer(self.diagnostic_period_s, self._publish_diagnostics)
         
         if self.input_cloud_topic:
-            source_desc = self.input_cloud_topic
+            if self.backup_cloud_topic and self.backup_cloud_topic != self.input_cloud_topic:
+                source_desc = "%s + backup %s" % (
+                    self.input_cloud_topic,
+                    self.backup_cloud_topic,
+                )
+            else:
+                source_desc = self.input_cloud_topic
         else:
             source_desc = "%s + %s" % (
                 self.front_lidar_topic,
@@ -170,17 +215,28 @@ class PointCloudFusion(Node):
             )
         )
 
-    def _on_cloud(self, msg: PointCloud2) -> None:
+    def _on_cloud(self, msg: PointCloud2, source_topic: str = "") -> None:
         """处理导航主链路点云。"""
+        self.cloud_messages += 1
+        self.last_cloud_frame = self._clean_frame(msg.header.frame_id)
+        self.last_cloud_source_topic = source_topic
+        cloud_key = self._cloud_key(msg)
+        if cloud_key == self.last_processed_cloud_key:
+            self.cloud_skipped_duplicate += 1
+            return
         if not self._should_process_cloud():
+            self.cloud_skipped_by_interval += 1
             return
         ranges = self._pointcloud_to_ranges(msg)
         if ranges is None:
+            self.cloud_dropped += 1
             return
         self.cloud_ranges = ranges
         self.cloud_stamp = self._output_stamp_for_cloud(msg)
         self.cloud_update_time = self.get_clock().now()
         self.cloud_received = True
+        self.cloud_processed += 1
+        self.last_processed_cloud_key = cloud_key
         if self.publish_on_cloud_update:
             self._publish_scan()
     
@@ -217,7 +273,16 @@ class PointCloudFusion(Node):
         if transform is False:
             return None
 
+        input_points = max(0, int(cloud_msg.width) * max(1, int(cloud_msg.height)))
+        self.last_cloud_input_points = input_points
+        sampled_points = 0
+        finite_points = 0
+        kept_points = 0
         for x, y, z in points:
+            sampled_points += 1
+            if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(z)):
+                continue
+            finite_points += 1
             if transform is not None:
                 x, y, z = self._transform_point(x, y, z, transform)
 
@@ -247,7 +312,13 @@ class PointCloudFusion(Node):
                 # 取最小距离（最近的障碍物）
                 if distance < ranges[idx]:
                     ranges[idx] = distance
-        
+                kept_points += 1
+
+        self.last_cloud_sampled_points = sampled_points
+        self.last_cloud_finite_points = finite_points
+        self.last_cloud_kept_points = kept_points
+        self.last_cloud_finite_bins = self._count_finite_ranges(ranges)
+        self.last_drop_reason = "ok" if self.last_cloud_finite_bins > 0 else "all_points_filtered"
         return ranges
 
     def _extract_xyz_arrays(self, cloud_msg: PointCloud2):
@@ -271,7 +342,10 @@ class PointCloudFusion(Node):
             }
         )
         point_count = len(cloud_msg.data) // point_step
+        input_points = max(0, int(cloud_msg.width) * max(1, int(cloud_msg.height)))
+        self.last_cloud_input_points = input_points or point_count
         if point_count <= 0:
+            self.last_drop_reason = "empty_cloud"
             return None
         cloud = np.frombuffer(cloud_msg.data, dtype=dtype, count=point_count)
 
@@ -282,12 +356,17 @@ class PointCloudFusion(Node):
         x = cloud["x"].astype(np.float32, copy=False)
         y = cloud["y"].astype(np.float32, copy=False)
         z = cloud["z"].astype(np.float32, copy=False)
+        self.last_cloud_sampled_points = int(len(x))
         return x, y, z
 
     def _point_arrays_to_ranges(self, cloud_msg: PointCloud2, xyz) -> Optional[np.ndarray]:
         x, y, z = xyz
         valid = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+        self.last_cloud_finite_points = int(np.count_nonzero(valid))
         if not np.any(valid):
+            self.last_cloud_kept_points = 0
+            self.last_cloud_finite_bins = 0
+            self.last_drop_reason = "no_finite_xyz"
             return self.empty_ranges_template.copy()
 
         x = x[valid]
@@ -308,7 +387,11 @@ class PointCloudFusion(Node):
             & (distance_sq >= min_keep_range * min_keep_range)
             & (distance_sq <= self.max_range * self.max_range)
         )
+        kept_points = int(np.count_nonzero(valid))
+        self.last_cloud_kept_points = kept_points
         if not np.any(valid):
+            self.last_cloud_finite_bins = 0
+            self.last_drop_reason = "all_points_filtered"
             return self.empty_ranges_template.copy()
 
         distance = np.sqrt(distance_sq[valid]).astype(np.float32, copy=False)
@@ -319,6 +402,8 @@ class PointCloudFusion(Node):
         ranges = self.empty_ranges_template.copy()
         if np.any(valid_idx):
             np.minimum.at(ranges, idx[valid_idx], distance[valid_idx])
+        self.last_cloud_finite_bins = self._count_finite_ranges(ranges)
+        self.last_drop_reason = "ok" if self.last_cloud_finite_bins > 0 else "no_angle_bins"
         return ranges
 
     def _lookup_cloud_transform(self, cloud_msg: PointCloud2):
@@ -344,6 +429,7 @@ class PointCloudFusion(Node):
                 timeout=self.transform_timeout,
             )
         except Exception as exc:
+            self.last_drop_reason = "no_tf"
             self._warn_tf_throttled(
                 "skip cloud: no TF %s -> %s (%s)" % (
                     source_frame,
@@ -370,6 +456,7 @@ class PointCloudFusion(Node):
         if self.max_source_age_s <= 0.0:
             return True
         age = (self.get_clock().now() - update_time).nanoseconds * 1e-9
+        self.last_scan_source_age_s = age
         return age <= self.max_source_age_s
 
     def _should_process_cloud(self) -> bool:
@@ -395,9 +482,96 @@ class PointCloudFusion(Node):
     def _empty_range_value(self) -> float:
         return self.empty_range_value
 
+    def _count_finite_ranges(self, ranges: np.ndarray) -> int:
+        return int(np.count_nonzero(np.isfinite(ranges)))
+
+    def _min_finite_range(self, ranges: np.ndarray):
+        finite = ranges[np.isfinite(ranges)]
+        if finite.size == 0:
+            return None
+        return float(np.min(finite))
+
+    def _source_age_s(self, update_time) -> Optional[float]:
+        if update_time is None:
+            return None
+        return (self.get_clock().now() - update_time).nanoseconds * 1e-9
+
+    def _publish_diagnostics(self) -> None:
+        now = self.get_clock().now()
+        source_age = self._source_age_s(self.cloud_update_time)
+        status = {
+            "input": self.input_cloud_topic or "%s+%s" % (self.front_lidar_topic, self.rear_lidar_topic),
+            "output": self.output_scan_topic,
+            "target_frame": self.target_frame,
+            "cloud_messages": self.cloud_messages,
+            "cloud_processed": self.cloud_processed,
+            "cloud_skipped_by_interval": self.cloud_skipped_by_interval,
+            "cloud_skipped_duplicate": self.cloud_skipped_duplicate,
+            "cloud_dropped": self.cloud_dropped,
+            "scan_published": self.scan_published,
+            "publish_skipped_no_source": self.publish_skipped_no_source,
+            "publish_skipped_stale": self.publish_skipped_stale,
+            "last_cloud_frame": self.last_cloud_frame,
+            "last_cloud_source_topic": self.last_cloud_source_topic,
+            "last_cloud_input_points": self.last_cloud_input_points,
+            "last_cloud_sampled_points": self.last_cloud_sampled_points,
+            "last_cloud_finite_points": self.last_cloud_finite_points,
+            "last_cloud_kept_points": self.last_cloud_kept_points,
+            "last_cloud_finite_bins": self.last_cloud_finite_bins,
+            "last_drop_reason": self.last_drop_reason,
+            "last_scan_finite_bins": self.last_scan_finite_bins,
+            "last_scan_min_range": self.last_scan_min_range,
+            "last_source_age_s": source_age,
+            "max_source_age_s": self.max_source_age_s,
+            "publish_on_cloud_update": self.publish_on_cloud_update,
+        }
+        text = (
+            "cloud=%d processed=%d skipped_interval=%d skipped_duplicate=%d "
+            "dropped=%d scan=%d finite_bins=%d source_age=%s source=%s "
+            "input_points=%d sampled=%d kept=%d reason=%s"
+        ) % (
+            self.cloud_messages,
+            self.cloud_processed,
+            self.cloud_skipped_by_interval,
+            self.cloud_skipped_duplicate,
+            self.cloud_dropped,
+            self.scan_published,
+            self.last_scan_finite_bins,
+            "%.3f" % source_age if source_age is not None else "none",
+            self.last_cloud_source_topic or "none",
+            self.last_cloud_input_points,
+            self.last_cloud_sampled_points,
+            self.last_cloud_kept_points,
+            self.last_drop_reason,
+        )
+        if self.last_diag_log_time is None or (now - self.last_diag_log_time).nanoseconds * 1e-9 >= self.diagnostic_period_s:
+            self.last_diag_log_time = now
+            if self.scan_published == 0 or self.last_scan_finite_bins == 0:
+                self.get_logger().warning("PointCloud fusion status: %s" % text)
+            else:
+                self.get_logger().info("PointCloud fusion status: %s" % text)
+        if self.diagnostic_pub is not None:
+            msg = String()
+            import json
+
+            msg.data = json.dumps(status, ensure_ascii=True, separators=(",", ":"))
+            self.diagnostic_pub.publish(msg)
+
     @staticmethod
     def _clean_frame(frame_id: str) -> str:
         return frame_id.strip().lstrip("/")
+
+    @staticmethod
+    def _cloud_key(cloud_msg: PointCloud2):
+        stamp = cloud_msg.header.stamp
+        return (
+            int(stamp.sec),
+            int(stamp.nanosec),
+            str(cloud_msg.header.frame_id),
+            int(cloud_msg.width),
+            int(cloud_msg.height),
+            int(cloud_msg.row_step),
+        )
 
     @staticmethod
     def _transform_point(x: float, y: float, z: float, transform) -> Tuple[float, float, float]:
@@ -467,8 +641,10 @@ class PointCloudFusion(Node):
         """发布融合后的 LaserScan"""
         if self.input_cloud_topic:
             if not self.cloud_received or self.cloud_ranges is None:
+                self.publish_skipped_no_source += 1
                 return
             if not self._source_is_fresh(self.cloud_update_time):
+                self.publish_skipped_stale += 1
                 return
             fused_ranges = self.cloud_ranges
             stamp = self.cloud_stamp
@@ -478,12 +654,14 @@ class PointCloudFusion(Node):
             or self.front_ranges is None
             or self.rear_ranges is None
         ):
+            self.publish_skipped_no_source += 1
             return
         else:
             if (
                 not self._source_is_fresh(self.front_update_time)
                 or not self._source_is_fresh(self.rear_update_time)
             ):
+                self.publish_skipped_stale += 1
                 return
             # 融合前后雷达数据（取最小值）
             fused_ranges = np.minimum(self.front_ranges, self.rear_ranges)
@@ -504,6 +682,10 @@ class PointCloudFusion(Node):
         scan_msg.intensities = []
         
         self.scan_pub.publish(scan_msg)
+        self.scan_published += 1
+        self.last_scan_finite_bins = self._count_finite_ranges(fused_ranges)
+        self.last_scan_min_range = self._min_finite_range(fused_ranges)
+        self.last_drop_reason = "published"
 
 
 def main(args=None) -> None:

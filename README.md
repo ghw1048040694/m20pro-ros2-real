@@ -3,7 +3,7 @@
 这是面向云深处 M20 Pro 的 ROS 2 二次开发 workspace。当前主要用于：
 
 - 在 104 通用主机上运行 Nav2、楼层管理、点云融合和网页操作台；
-- 使用 106 原厂建图结果做 2D 导航地图；
+- 使用 106 原厂建图结果做 2D 导航地图，并自动派生轻量 3D 地形/楼梯区域；
 - 对接 103 官方 TCP JSON 协议读取位姿/状态，并在允许时下发运动控制；
 - 支持单楼层巡检、多楼层地图切换、巡检点编排、YOLO 检测和现场录包。
 
@@ -90,6 +90,10 @@ source install/setup.bash
 
 现场真机测试只走全量 real 启动：`104_start_real_shadow.sh` 或 `104_start_real_move.sh`。全量 real 会同时拉起 tcp_bridge、Nav2、点云融合和网页前端。
 
+全量 real 启动前会先运行点云守卫，必须在 104 上实际收到 `/LIDAR/POINTS` 的 `PointCloud2` 样本后才继续拉起 Nav2 和网页。只看到 topic 名或 publisher count 不算通过；如果进入“topic 可见但没有样本”的状态，脚本会停止启动，避免反复创建 DDS 参与者。此时只停止本工程 real stack，不要清 `/dev/shm/fastrtps_*`，不要从本工程脚本重启原厂 multicast/lidar 服务。
+
+默认使用原厂 `/opt/robot/fastdds.xml`。项目内 `m20pro_fastdds_udp.xml` 已改为 UDP-only，只在显式设置 `M20PRO_USE_PROJECT_FASTDDS=1` 做 DDS 实验时使用。
+
 `104_start_real_move.sh` 会放开运动控制，只能在现场有人看护、手柄急停可用时执行。启动后打开网页，在“自检”页点一次“开机基础自检”。基础自检用于确认全量系统、网页、原始点云、电量和原厂状态链路；定位、`/scan`、Nav2 生命周期和代价地图需要到测试场地重定位后再确认。`104_start_web.sh` 只用于开发预览网页界面，不会拉起 tcp_bridge/Nav2/点云融合，不能作为重定位、标点、下发任务的现场流程。
 
 ## 开机自启动
@@ -117,6 +121,8 @@ cd /home/user/m20pro_ros2_ws
 ```
 
 自启动服务只启动本工程，不修改原厂 multicast/FastDDS 服务。`move` 模式会把运动控制链路准备好，但任务仍必须在网页中人工点击开始。
+
+自启动同样会先等 `/LIDAR/POINTS` 样本；如果点云未就绪，服务会退出并留下日志，不会 5 秒一轮反复重启。恢复时先用 `./scripts/104_check_lidar.sh` 确认样本，再手动 `systemctl start m20pro-real.service`。
 
 `m20pro_real_full.sh move` 会在 `/tmp` 生成运行时参数文件，把 `m20pro_tcp_bridge.enable_axis_command` 明确覆盖为 `true`；`shadow` 会覆盖为 `false`。这样不会改动原始 `m20pro_real.yaml`，也能避免 Foxy 中节点专属参数压过 launch 参数的问题。
 
@@ -181,14 +187,17 @@ http://10.21.31.104:8080
 2. `建图`：用 106 原厂 `drmap` 建图，或手动在 106 上建图。
 3. `地图`：选择项目内置地图，或从 106 active map 拉取到 104 归档。
 4. `地图`：切换要查看和标点的楼层地图。
-5. `定位`：如果机器人位置不准，在地图上拖箭头并执行网页重定位。
-6. `标点`：在地图上按住并拖出箭头，保存巡检点、过渡点、充电点、楼梯点。
-7. `任务`：勾选点位生成任务。
-8. `任务`：点击开始执行，必要时点击停止当前任务。
+5. 左侧大地图：点击 `2D地图` / `3D地图` 切换二维栅格图和 PCD 派生轻量三维地形。
+6. `定位`：如果机器人位置不准，在地图上拖箭头并执行网页重定位。
+7. `标点`：在地图上按住并拖出箭头，保存巡检点、过渡点、充电点。
+8. `任务`：勾选点位生成任务。
+9. `任务`：点击开始执行，必要时点击停止当前任务。
 
 当前网页一次显示一张单层地图。跨楼层任务通过点位携带的楼层字段和 `/m20pro/floor_goal` 交给 `floor_manager` 处理。
 
 当前项目内置地图入口有 `F19`、`F20`、`F21`。其中 `F19` 和 `F21` 目前仍复用编辑后的 `F20` 地图产品，真实交付前应替换为各楼层实测建图结果。
+
+从 106 拉取地图到 104 后，系统会自动查找 PCD 并生成 `derived/terrain_mesh.json`、`derived/height_grid.json` 和 `derived/stair_zones.json`。网页左侧大地图的 `3D地图` 模式只加载这些轻量派生文件，不直接加载原始 PCD；实时 `/map` 没有离线 PCD 派生数据时会提示暂无 3D 地形。
 
 网页重定位通过 `/initialpose` 发布当前位置和朝向，优先复刻 106 RViz `2D Pose Estimate` 的原厂定位链路。现场全量脚本默认不让 `m20pro_tcp_bridge` 抢占 `/initialpose` 去转 103 TCP `2101/1`，因为当前实测 103 接口在定位丢失时会返回拒绝或坏包。执行任务时不能重定位；需要先停止当前任务，再到 `定位` 页拖箭头并点击 `执行重定位`。
 
@@ -286,9 +295,9 @@ src/m20pro_navigation/m20pro_navigation/tcp_bridge_node.py
 点云：
 
 ```bash
-ros2 topic list | grep LIDAR
-ros2 topic hz /LIDAR/POINTS
-ros2 topic echo /LIDAR/POINTS --no-arr
+./scripts/104_check_lidar.sh 12
+# 或手动确认样本：
+timeout 8 ros2 topic echo /LIDAR/POINTS --no-arr
 ```
 
 Nav2：

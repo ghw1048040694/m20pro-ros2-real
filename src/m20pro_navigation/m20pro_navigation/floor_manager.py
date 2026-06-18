@@ -1,3 +1,4 @@
+import json
 import math
 import os
 import time
@@ -43,6 +44,7 @@ class FloorManager(Node):
         self.declare_parameter("current_floor_topic", "/m20pro/current_floor")
         self.declare_parameter("stair_status_topic", "/m20pro/stair_status")
         self.declare_parameter("gait_command_topic", "/m20pro/gait_command")
+        self.declare_parameter("stair_zones_topic", "/m20pro/stair_zones")
         self.declare_parameter("robot_pose_topic", "/m20pro_tcp_bridge/map_pose")
         self.declare_parameter("initialpose_topic", "/initialpose")
         self.declare_parameter("navigate_to_pose_action", "/navigate_to_pose")
@@ -93,6 +95,7 @@ class FloorManager(Node):
         self.post_exit_goal_timer = None
         self.post_switch_goal_timer = None
         self.robot_pose: Optional[PoseStamped] = None
+        self.stair_zones_by_floor: Dict[str, List[Dict[str, Any]]] = {}
         self.initialpose_repeats_left = 0
         self.pending_initialpose: Optional[PoseWithCovarianceStamped] = None
         self.initial_floor_timer = None
@@ -168,6 +171,12 @@ class FloorManager(Node):
             PoseStamped,
             str(self.get_parameter("robot_pose_topic").value),
             self._on_robot_pose,
+            10,
+        )
+        self.create_subscription(
+            String,
+            str(self.get_parameter("stair_zones_topic").value),
+            self._on_stair_zones,
             10,
         )
         self.create_timer(0.2, self._republish_initialpose)
@@ -395,6 +404,40 @@ class FloorManager(Node):
 
     def _on_robot_pose(self, msg: PoseStamped) -> None:
         self.robot_pose = msg
+
+    def _on_stair_zones(self, msg: String) -> None:
+        try:
+            payload = json.loads(msg.data)
+        except Exception as exc:
+            self.get_logger().warning("ignored invalid stair zones JSON: %s" % exc)
+            return
+        if not isinstance(payload, dict):
+            return
+        zones = payload.get("zones") or []
+        if not isinstance(zones, list):
+            return
+        payload_floor = str(payload.get("floor") or "").strip()
+        if payload_floor and not zones:
+            self.stair_zones_by_floor[payload_floor] = []
+            self.get_logger().debug("cleared stair zones for floor %s" % payload_floor)
+            return
+        grouped: Dict[str, List[Dict[str, Any]]] = {}
+        for zone in zones:
+            if not isinstance(zone, dict):
+                continue
+            if not bool(zone.get("trigger_gait", False)):
+                continue
+            floor = str(zone.get("source_floor") or zone.get("floor") or "").strip()
+            if not floor:
+                continue
+            grouped.setdefault(floor, []).append(zone)
+        if not grouped:
+            return
+        self.stair_zones_by_floor.update(grouped)
+        self.get_logger().debug(
+            "updated stair zones: %s"
+            % ", ".join("%s=%d" % (floor, len(items)) for floor, items in grouped.items())
+        )
 
     def switch_floor(
         self,
@@ -1248,6 +1291,17 @@ class FloorManager(Node):
         distance = math.hypot(dx, dy)
         tolerance = float(self.get_parameter("stair_entry_tolerance_m").value)
         if distance > tolerance:
+            zone = self._active_stair_zone_at_robot()
+            if zone is not None:
+                self.get_logger().warning(
+                    "robot is %.2fm from stair entry but inside semantic stair zone %s"
+                    % (distance, zone.get("id") or zone.get("name") or "unknown")
+                )
+                self._publish_stair_status(
+                    "entry_confirmed_by_zone zone=%s distance=%.2f"
+                    % (zone.get("id") or zone.get("name") or "unknown", distance)
+                )
+                return True
             self.get_logger().warning(
                 "robot is %.2fm from stair entry; tolerance is %.2fm" % (distance, tolerance)
             )
@@ -1256,6 +1310,40 @@ class FloorManager(Node):
             )
             return False
         return True
+
+    def _active_stair_zone_at_robot(self) -> Optional[Dict[str, Any]]:
+        if self.robot_pose is None or not self.current_floor:
+            return None
+        x = float(self.robot_pose.pose.position.x)
+        y = float(self.robot_pose.pose.position.y)
+        for zone in self.stair_zones_by_floor.get(self.current_floor, []):
+            polygon = zone.get("polygon") or []
+            if self._point_in_polygon(x, y, polygon):
+                return zone
+        return None
+
+    @staticmethod
+    def _point_in_polygon(x: float, y: float, polygon: Any) -> bool:
+        if not isinstance(polygon, list) or len(polygon) < 3:
+            return False
+        inside = False
+        previous = polygon[-1]
+        for current in polygon:
+            try:
+                xi = float(current.get("x"))
+                yi = float(current.get("y"))
+                xj = float(previous.get("x"))
+                yj = float(previous.get("y"))
+            except (AttributeError, TypeError, ValueError):
+                previous = current
+                continue
+            intersects = ((yi > y) != (yj > y)) and (
+                x < (xj - xi) * (y - yi) / ((yj - yi) or 1e-9) + xi
+            )
+            if intersects:
+                inside = not inside
+            previous = current
+        return inside
 
     def _finish_pending_stair_transition(self) -> None:
         if self.stair_timer is not None:

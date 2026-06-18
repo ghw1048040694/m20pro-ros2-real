@@ -14,7 +14,7 @@ if [[ -z "${ROS_DISTRO:-}" ]]; then
 fi
 if [[ -z "${FASTRTPS_DEFAULT_PROFILES_FILE:-}" ]]; then
   UDP_PROFILE="/home/user/m20pro_ros2_ws/install/m20pro_bringup/share/m20pro_bringup/config/m20pro_fastdds_udp.xml"
-  if [[ -f "${UDP_PROFILE}" && "${M20PRO_USE_FACTORY_FASTDDS:-0}" != "1" ]]; then
+  if [[ -f "${UDP_PROFILE}" && "${M20PRO_USE_PROJECT_FASTDDS:-0}" == "1" ]]; then
     export FASTRTPS_DEFAULT_PROFILES_FILE="${UDP_PROFILE}"
   else
     export FASTRTPS_DEFAULT_PROFILES_FILE="/opt/robot/fastdds.xml"
@@ -40,11 +40,7 @@ EOF
 fi
 
 echo "[m20pro_record_real] output: ${OUT_PATH}"
-if ! timeout 5s ros2 topic list | grep -qx "/LIDAR/POINTS"; then
-  echo "[m20pro_record_real] /LIDAR/POINTS is not visible." >&2
-  echo "[m20pro_record_real] Use the exact source -> su sequence and do not touch multicast services during the test." >&2
-  exit 3
-fi
+ros2 run m20pro_bringup m20pro_lidar_guard.sh record
 
 exec timeout "${DURATION_S}" ros2 bag record -o "${OUT_PATH}" \
   /LIDAR/POINTS \

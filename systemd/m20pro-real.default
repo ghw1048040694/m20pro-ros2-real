@@ -3,3 +3,7 @@
 # shadow: full real system for observation only; web task dispatch will not move the robot.
 M20PRO_REAL_MODE=move
 M20PRO_WS=/home/user/m20pro_ros2_ws
+M20PRO_LIDAR_STARTUP_WAIT_S=45
+M20PRO_LIDAR_GUARD_MODE=warn
+M20PRO_LIDAR_RELAY_TOPIC=/m20pro/lidar_points_relay
+M20PRO_LIDAR_RELAY_WAIT_S=45

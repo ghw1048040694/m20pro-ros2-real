@@ -13,6 +13,14 @@ echo "[104_status] listening on 8080:"
 ss -ltnp 2>/dev/null | grep ':8080' || true
 
 echo
+echo "[104_status] lidar sample check:"
+if command -v ros2 >/dev/null 2>&1; then
+  M20PRO_LIDAR_WAIT_S="${M20PRO_LIDAR_STATUS_WAIT_S:-6}" ros2 run m20pro_bringup m20pro_lidar_guard.sh check || true
+else
+  echo "ros2 not found; run after the fixed 104 source -> su environment"
+fi
+
+echo
 echo "[104_status] quick health:"
 curl -fsS http://127.0.0.1:8080/healthz 2>/dev/null || true
 echo

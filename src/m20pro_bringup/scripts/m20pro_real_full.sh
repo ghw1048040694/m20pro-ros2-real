@@ -31,25 +31,73 @@ set +u
 source install/setup.bash
 set -u
 
-DEFAULT_FASTDDS="${WS_DIR}/install/m20pro_bringup/share/m20pro_bringup/config/m20pro_fastdds_udp.xml"
-if [[ -f "${DEFAULT_FASTDDS}" && "${M20PRO_USE_FACTORY_FASTDDS:-0}" != "1" ]]; then
-  export FASTRTPS_DEFAULT_PROFILES_FILE="${DEFAULT_FASTDDS}"
+PROJECT_FASTDDS="${WS_DIR}/install/m20pro_bringup/share/m20pro_bringup/config/m20pro_fastdds_udp.xml"
+if [[ -f "${PROJECT_FASTDDS}" && "${M20PRO_USE_PROJECT_FASTDDS:-0}" == "1" ]]; then
+  export FASTRTPS_DEFAULT_PROFILES_FILE="${PROJECT_FASTDDS}"
 else
   export FASTRTPS_DEFAULT_PROFILES_FILE="${FASTRTPS_DEFAULT_PROFILES_FILE:-/opt/robot/fastdds.xml}"
+fi
+
+if ps -eo pid,args | awk '
+  /ros2 launch m20pro_bringup m20pro.launch.py/ &&
+  /mode:=real/ &&
+  !/awk/ {print}
+' >/tmp/m20pro_real_existing_stack.out && [[ -s /tmp/m20pro_real_existing_stack.out ]]; then
+  cat >&2 <<'EOF'
+[m20pro_real_full] another M20Pro real launch is already running.
+
+Do not start multiple real stacks on 104. Stop the existing stack first:
+
+  ./scripts/104_stop_real.sh
+  # or
+  systemctl stop m20pro-real.service
+EOF
+  cat /tmp/m20pro_real_existing_stack.out >&2 || true
+  exit 70
+fi
+
+if [[ "${M20PRO_RUN_RAW_LIDAR_GUARD:-0}" == "1" ]]; then
+  set +e
+  ros2 run m20pro_bringup m20pro_lidar_guard.sh startup
+  status="$?"
+  set -e
+  if [[ "${status}" -ne 0 ]]; then
+    if [[ "${M20PRO_LIDAR_GUARD_MODE:-warn}" == "strict" ]]; then
+      if [[ "${status}" -eq 75 ]]; then
+        echo "[m20pro_real_full] lidar samples are not ready; strict startup is intentionally skipped." >&2
+      fi
+      exit "${status}"
+    fi
+    echo "[m20pro_real_full] lidar guard returned ${status}; continuing so the workstation web frontend stays available." >&2
+  fi
+fi
+
+LIDAR_RELAY_TOPIC="${M20PRO_LIDAR_RELAY_TOPIC:-/m20pro/lidar_points_relay}"
+set +e
+M20PRO_LIDAR_RELAY_WAIT_S="${M20PRO_LIDAR_RELAY_WAIT_S:-45}" \
+  ros2 run m20pro_bringup m20pro_lidar_relay_guard.sh start-wait
+relay_status="$?"
+set -e
+if [[ "${relay_status}" -ne 0 ]]; then
+  if [[ "${M20PRO_LIDAR_GUARD_MODE:-warn}" == "strict" ]]; then
+    echo "[m20pro_real_full] lidar relay is not ready; strict startup is intentionally skipped." >&2
+    exit "${relay_status}"
+  fi
+  echo "[m20pro_real_full] lidar relay returned ${relay_status}; continuing so the workstation web frontend stays available." >&2
 fi
 
 COMMON_ARGS=(
   mode:=real
   rviz:=false
   enable_web_dashboard:=true
-  enable_initialpose_relocalization:=false
+  enable_initialpose_relocalization:=true
   web_dashboard_data_dir:=/home/user/.m20pro_web
   web_dashboard_map_archive_dir:=/home/user/m20pro_maps
   enable_camera_proxy:=true
   camera_proxy_fps:=2.0
   camera_proxy_jpeg_quality:=45
   camera_proxy_max_width:=480
-  cloud_topic:=/LIDAR/POINTS
+  cloud_topic:="${LIDAR_RELAY_TOPIC}"
 )
 
 BASE_REAL_PARAMS="${WS_DIR}/install/m20pro_bringup/share/m20pro_bringup/config/m20pro_real.yaml"
@@ -67,7 +115,7 @@ with open(src, "r", encoding="utf-8") as file:
 
 bridge = data.setdefault("m20pro_tcp_bridge", {}).setdefault("ros__parameters", {})
 bridge["enable_axis_command"] = axis_text.lower() in ("1", "true", "yes", "on")
-bridge["enable_initialpose_relocalization"] = False
+bridge["enable_initialpose_relocalization"] = True
 bridge["enable_initialpose_3d_relocalization"] = False
 
 with open(dst, "w", encoding="utf-8") as file:
