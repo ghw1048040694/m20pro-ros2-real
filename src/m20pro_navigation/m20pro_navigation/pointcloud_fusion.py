@@ -8,9 +8,16 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2, LaserScan
-import sensor_msgs_py.point_cloud2 as pc2
 from std_msgs.msg import String
 from tf2_ros import Buffer, TransformListener
+
+try:
+    import sensor_msgs_py.point_cloud2 as pc2
+except ModuleNotFoundError:
+    try:
+        import sensor_msgs.point_cloud2 as pc2
+    except ModuleNotFoundError:
+        pc2 = None
 
 
 class PointCloudFusion(Node):
@@ -267,6 +274,9 @@ class PointCloudFusion(Node):
 
         # Fallback for unusual PointCloud2 layouts. This path is slower and is
         # mainly kept for compatibility with synthetic/test clouds.
+        if pc2 is None:
+            self.last_drop_reason = "point_cloud2_helper_unavailable"
+            return None
         ranges = self.empty_ranges_template.copy()
         points = pc2.read_points(cloud_msg, field_names=("x", "y", "z"))
         transform = self._lookup_cloud_transform(cloud_msg)
