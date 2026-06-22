@@ -6690,3 +6690,23 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - Note:
   - after deleting `install/`, rebuild locally before running local launch commands:
     `colcon build --symlink-install`.
+
+## 2026-06-22 real-only repository split
+
+- This workspace is now the real-only project:
+  - path: `/home/fabu/桌面/M20Pro/m20pro_real_ros2_ws`;
+  - split commit: `8ed14ae chore: split real project`.
+- Scope kept here:
+  - 104/GOS field deployment scripts;
+  - full real launch and web frontend;
+  - lidar relay/downsampling and `/scan` fusion for the real robot;
+  - preflight, autostart, systemd service, 103/106 integration, and inspection nodes.
+- Scope removed from here:
+  - laptop-only simulation launch/config/RViz/nodes;
+  - the old unified `m20pro.launch.py mode:=...` entry.
+- Validation at split time:
+  - `git diff --check`;
+  - Python compile for real launch, web dashboard, navigation, cloud bridge, and inspection modules;
+  - shell syntax checks for root scripts and package scripts;
+  - `python3 scripts/check_preflight_policy.py`.
+- The sibling sim project is `/home/fabu/桌面/M20Pro/m20pro_sim_ros2_ws`.
