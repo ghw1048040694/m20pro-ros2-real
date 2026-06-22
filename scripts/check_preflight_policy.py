@@ -16,6 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 WEB = ROOT / "src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py"
 REAL_LAUNCH = ROOT / "src/m20pro_bringup/launch/m20pro_real.launch.py"
+WEB_LAUNCH = ROOT / "src/m20pro_bringup/launch/m20pro_web_dashboard.launch.py"
 NAV2_PARAMS = ROOT / "src/m20pro_bringup/config/nav2_params_real.yaml"
 REAL_CONFIG = ROOT / "src/m20pro_bringup/config/m20pro_real.yaml"
 TCP_BRIDGE = ROOT / "src/m20pro_navigation/m20pro_navigation/tcp_bridge_node.py"
@@ -58,6 +59,7 @@ def forbid(text: str, pattern: str, message: str, *, flags: int = 0) -> None:
 def main() -> int:
     web = read(WEB)
     launch = read(REAL_LAUNCH)
+    web_launch = read(WEB_LAUNCH)
     nav2 = read(NAV2_PARAMS)
     real_config = read(REAL_CONFIG)
     tcp = read(TCP_BRIDGE)
@@ -114,6 +116,27 @@ def main() -> int:
         r'\["scp",\s*"-r",\s*\*ssh_options,\s*remote,\s*str\(dest\)\]',
         "web map import scp uses the same root-compatible SSH options",
     )
+    require(
+        web,
+        r'_factory_ssh_file_options\(8\)[\s\S]{0,700}sudo -n -l',
+        "web mapping environment check uses root-compatible SSH and non-mutating sudo permission probes",
+    )
+    forbid(
+        web,
+        r'sudo -n (?:/usr/local/bin/)?drmap stop_mapping -h',
+        "web mapping environment check must not execute stop_mapping as a help probe",
+    )
+    for label, text in (("real launch", launch), ("web launch", web_launch), ("web defaults", web)):
+        require(
+            text,
+            r'factory_mapping_start_command[\s\S]{0,420}-i /home/user/\.ssh/id_ed25519[\s\S]{0,260}UserKnownHostsFile=/home/user/\.ssh/known_hosts[\s\S]{0,260}/usr/local/bin/drmap mapping',
+            f"{label} mapping start command uses root-compatible SSH and absolute drmap",
+        )
+        require(
+            text,
+            r'factory_mapping_finish_command[\s\S]{0,360}-i /home/user/\.ssh/id_ed25519[\s\S]{0,240}UserKnownHostsFile=/home/user/\.ssh/known_hosts[\s\S]{0,220}/usr/local/bin/drmap stop_mapping',
+            f"{label} mapping finish command uses root-compatible SSH and absolute drmap",
+        )
     require(
         web,
         r'def _rewrite_imported_map_image_path',

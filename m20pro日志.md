@@ -1,10 +1,78 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-06-22 20:58 CST
+Last updated: 2026-06-22 21:20 CST
 
 This file is maintained by Codex as the local M20 Pro project memory for future ChatGPT review. It records the current architecture, important decisions, recent changes, verification status, and next steps.
 
 Naming note: this file replaced the previous local-only `codex.md`. Going forward, maintain this file, `m20pro日志.md`, after every meaningful project change or field diagnosis.
+
+## 2026-06-22 frontend mapping and relocalization validation
+
+- User correction:
+  - the required test was not "SSH into 106 and run `drmap` manually";
+  - the required test was to use the web frontend path itself: mapping environment check, create session, start mapping, finish mapping, import map, then relocalize.
+- Frontend mapping blocker reproduced before the fix:
+  - `POST /api/mapping/check_environment` failed from the root-run web service;
+  - failure output: `Host key verification failed`;
+  - root cause: the mapping commands used plain `ssh user@10.21.31.106` and relative `drmap`, while the working SSH identity and known_hosts are under `/home/user/.ssh`;
+  - second blocker: web mapping needs non-interactive `sudo -n /usr/local/bin/drmap ...` on 106.
+- Code hardening:
+  - default web mapping start/finish/cancel commands now use:
+    `/home/user/.ssh/id_ed25519`;
+    `/home/user/.ssh/known_hosts`;
+    `IdentitiesOnly=yes`;
+    `StrictHostKeyChecking=accept-new`;
+    absolute `/usr/local/bin/drmap`;
+  - both `m20pro_real.launch.py` and `m20pro_web_dashboard.launch.py` were updated, because launch parameters override node defaults;
+  - mapping environment check now uses `_factory_ssh_file_options(8)` and `sudo -n -l ...` permission probes;
+  - it no longer probes with `drmap stop_mapping -h`, because that command can actually try to stop mapping on this robot;
+  - `scripts/check_preflight_policy.py` now guards these invariants so future edits cannot silently regress back to plain SSH or destructive probes.
+- 106 sudoers:
+  - configured 106 to allow non-interactive web mapping commands for `/usr/local/bin/drmap mapping...` and `/usr/local/bin/drmap stop_mapping`;
+  - verified with `sudo -n -l /usr/local/bin/drmap mapping -s -n m20pro_probe` and `sudo -n -l /usr/local/bin/drmap stop_mapping`, both returned 0.
+- Deployment:
+  - synced the real repo to 104 `/home/user/m20pro_real_ros2_ws`;
+  - built `m20pro_cloud_bridge` and `m20pro_bringup`;
+  - restarted `m20pro-real.service`;
+  - note: `/home/user/m20pro_ros2_ws` on 104 is a symlink to `/home/user/m20pro_real_ros2_ws`, so the existing service path still points to the real repo.
+- Actual frontend mapping test:
+  - `POST /api/mapping/check_environment`: `ok=true`;
+  - created session `map_session_1782134086923_266d872f`;
+  - map name: `m20pro_frontend_desk_20260622_211145`;
+  - `POST /api/mapping/start`: `ok=true`, command reached 106 and created `/var/opt/robot/data/maps/m20pro_frontend_desk_20260622_211145-20260622-211525`;
+  - 106 log confirmed factory `mapping.service` started;
+  - robot stayed still at the workstation for this static test;
+  - `POST /api/mapping/finish`: `ok=true`, output included `保存地图成功(Map saved successfully)`;
+  - 106 restarted `localization` and `planner`;
+  - `POST /api/mapping/import_active_map`: `ok=true`;
+  - imported 104 map id: `map_1782134175007_4fca66e3`;
+  - imported map directory: `/home/user/m20pro_maps/DESK_20260622_211614`;
+  - imported 2D map: `65 x 58`, resolution `0.1 m`, origin about `(-3.0, -2.8)`;
+  - PCD derived output succeeded: `2904` source points -> `26 x 24` height grid.
+- Actual frontend relocalization test on the new workstation map:
+  - called `POST /api/localization/initialpose` with `x=0.0, y=0.0, yaw=0.0, floor=DESK`;
+  - result: `ok=true`;
+  - `factory_initialpose.ok=true`;
+  - 106 `/initialpose` subscriber count: `subscriptions=1`;
+  - verification:
+    `factory_pose_accepted=true`;
+    `localization=ok`;
+    `map_pose=ok`;
+    `pose_near_request=ok`;
+    `/scan=ok`;
+    `local_costmap=ok`;
+    `global_costmap=ok`;
+    `navigation_ready=true`;
+  - conclusion: after the SSH/sudo/path fixes, the frontend mapping and frontend relocalization chain are usable in the workstation static-map case.
+- Cleanup after the test:
+  - restored 106 active map to `/var/opt/robot/data/maps/map-20260520-205606`;
+  - restarted 106 `localization` and `planner`;
+  - selected `builtin_F20` on 104;
+  - final state: selected map `builtin_F20`, 106 services active, 106 active map restored, `localization_ok=true`, `Location=0`, fresh `/scan` with about `249` finite ranges.
+- Remaining field risk:
+  - this proves the frontend transport/control path can work;
+  - it does not prove every field relocalization pose is correct, because site relocalization still depends on selecting the correct map, placing the initial pose near the true robot pose, and having enough scan/map overlap;
+  - if field relocalization fails now, inspect map selection, pose guess, live `/scan`, and factory `Location`/costmap freshness before blaming the frontend HTTP/SSH path.
 
 ## 2026-06-22 workstation static mapping and relocalization test
 

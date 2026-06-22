@@ -61,8 +61,10 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "factory_mapping_start_command",
             default_value=(
-                "ssh -o BatchMode=yes -o ConnectTimeout=8 {factory_user}@{factory_host} "
-                "\"nohup sudo -n drmap mapping -s -n {map_name} > "
+                "ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new "
+                "-i /home/user/.ssh/id_ed25519 -o IdentitiesOnly=yes "
+                "-o UserKnownHostsFile=/home/user/.ssh/known_hosts {factory_user}@{factory_host} "
+                "\"nohup sudo -n /usr/local/bin/drmap mapping -s -n {map_name} > "
                 "/tmp/m20pro_drmap_mapping_{session_id}.log 2>&1 &\""
             ),
             description="Shell command template for starting drmap mapping on 106.",
@@ -70,16 +72,20 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "factory_mapping_finish_command",
             default_value=(
-                "ssh -o BatchMode=yes -o ConnectTimeout=8 {factory_user}@{factory_host} "
-                "\"sudo -n drmap stop_mapping\""
+                "ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new "
+                "-i /home/user/.ssh/id_ed25519 -o IdentitiesOnly=yes "
+                "-o UserKnownHostsFile=/home/user/.ssh/known_hosts {factory_user}@{factory_host} "
+                "\"sudo -n /usr/local/bin/drmap stop_mapping\""
             ),
             description="Shell command template for stopping/saving drmap mapping on 106.",
         ),
         DeclareLaunchArgument(
             "factory_mapping_cancel_command",
             default_value=(
-                "ssh -o BatchMode=yes -o ConnectTimeout=8 {factory_user}@{factory_host} "
-                "\"sudo -n drmap stop_mapping\""
+                "ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new "
+                "-i /home/user/.ssh/id_ed25519 -o IdentitiesOnly=yes "
+                "-o UserKnownHostsFile=/home/user/.ssh/known_hosts {factory_user}@{factory_host} "
+                "\"sudo -n /usr/local/bin/drmap stop_mapping\""
             ),
             description="Shell command template for cancelling drmap mapping on 106.",
         ),

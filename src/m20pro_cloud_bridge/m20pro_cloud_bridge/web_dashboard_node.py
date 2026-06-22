@@ -3037,18 +3037,24 @@ class WebDashboardNode(Node):
         self.declare_parameter("factory_active_map", "/var/opt/robot/data/maps/active")
         self.declare_parameter(
             "factory_mapping_start_command",
-            'ssh -o BatchMode=yes -o ConnectTimeout=8 {factory_user}@{factory_host} '
-            '"nohup sudo -n drmap mapping -s -n {map_name} > /tmp/m20pro_drmap_mapping_{session_id}.log 2>&1 &"',
+            'ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new '
+            '-i /home/user/.ssh/id_ed25519 -o IdentitiesOnly=yes '
+            '-o UserKnownHostsFile=/home/user/.ssh/known_hosts {factory_user}@{factory_host} '
+            '"nohup sudo -n /usr/local/bin/drmap mapping -s -n {map_name} > /tmp/m20pro_drmap_mapping_{session_id}.log 2>&1 &"',
         )
         self.declare_parameter(
             "factory_mapping_finish_command",
-            'ssh -o BatchMode=yes -o ConnectTimeout=8 {factory_user}@{factory_host} '
-            '"sudo -n drmap stop_mapping"',
+            'ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new '
+            '-i /home/user/.ssh/id_ed25519 -o IdentitiesOnly=yes '
+            '-o UserKnownHostsFile=/home/user/.ssh/known_hosts {factory_user}@{factory_host} '
+            '"sudo -n /usr/local/bin/drmap stop_mapping"',
         )
         self.declare_parameter(
             "factory_mapping_cancel_command",
-            'ssh -o BatchMode=yes -o ConnectTimeout=8 {factory_user}@{factory_host} '
-            '"sudo -n drmap stop_mapping"',
+            'ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new '
+            '-i /home/user/.ssh/id_ed25519 -o IdentitiesOnly=yes '
+            '-o UserKnownHostsFile=/home/user/.ssh/known_hosts {factory_user}@{factory_host} '
+            '"sudo -n /usr/local/bin/drmap stop_mapping"',
         )
         self.declare_parameter("mapping_command_timeout_s", 120.0)
         self.declare_parameter("map_import_timeout_s", 180.0)
@@ -4538,22 +4544,36 @@ class WebDashboardNode(Node):
         factory_user = str(self.get_parameter("factory_user").value).strip()
         active_map = str(self.get_parameter("factory_active_map").value).strip()
         timeout = min(20.0, float(self.get_parameter("mapping_command_timeout_s").value))
+        drmap = "/usr/local/bin/drmap"
         if factory_host in ("", "localhost", "127.0.0.1"):
-            prefix = ""
+            command = (
+                "set -e; "
+                "echo host=$(hostname); "
+                "echo user=$(whoami); "
+                f"echo drmap=$({shlex.quote(drmap)} --help >/dev/null 2>&1; command -v {shlex.quote(drmap)} || true); "
+                f"echo active=$(readlink -f {shlex.quote(active_map)} || true); "
+                f"test -d {shlex.quote(active_map)}; "
+                f"sudo -n -l {shlex.quote(drmap)} mapping -s -n m20pro_preflight >/dev/null; "
+                f"sudo -n -l {shlex.quote(drmap)} stop_mapping >/dev/null"
+            )
         else:
-            prefix = f"ssh -o BatchMode=yes -o ConnectTimeout=8 {factory_user}@{factory_host} "
-
-        remote_probe = (
-            "set -e; "
-            "echo host=$(hostname); "
-            "echo user=$(whoami); "
-            "echo drmap=$(command -v drmap); "
-            f"echo active=$(readlink -f {active_map} || true); "
-            f"test -d {active_map}; "
-            "sudo -n drmap mapping -h >/dev/null; "
-            "sudo -n drmap stop_mapping -h >/dev/null"
-        )
-        command = f"{prefix}{json.dumps(remote_probe)}" if prefix else remote_probe
+            target = f"{factory_user}@{factory_host}" if factory_user else factory_host
+            ssh_options, _used_identity, _used_known_hosts = self._factory_ssh_file_options(8)
+            remote_probe = (
+                "set -e; "
+                "echo host=$(hostname); "
+                "echo user=$(whoami); "
+                f"echo drmap={shlex.quote(drmap)}; "
+                f"test -x {shlex.quote(drmap)}; "
+                f"echo active=$(readlink -f {shlex.quote(active_map)} || true); "
+                f"test -d {shlex.quote(active_map)}; "
+                f"sudo -n -l {shlex.quote(drmap)} mapping -s -n m20pro_preflight >/dev/null; "
+                f"sudo -n -l {shlex.quote(drmap)} stop_mapping >/dev/null"
+            )
+            command = " ".join(
+                shlex.quote(item)
+                for item in ["ssh", *ssh_options, target, f"bash -lc {shlex.quote(remote_probe)}"]
+            )
         try:
             result = subprocess.run(
                 command,
@@ -4586,7 +4606,7 @@ class WebDashboardNode(Node):
             "output": result.stdout or "",
         }
         if ok:
-            payload["message"] = "106 建图环境可用：SSH、drmap、active map、sudo -n 均通过。"
+            payload["message"] = "106 建图环境可用：SSH、drmap、active map、sudo -n 权限均通过。"
         else:
             payload["message"] = (
                 "106 建图环境未通过。常见原因：104 到 106 未配置 SSH 免密，"
