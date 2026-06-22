@@ -440,6 +440,20 @@ INDEX_HTML = r"""<!doctype html>
       object-fit: contain;
       background: #0b1117;
     }
+    .video-status {
+      border-top: 1px solid var(--line);
+      padding: 6px 8px;
+      font-size: 12px;
+      color: var(--muted);
+      background: #fbfcfe;
+      line-height: 1.4;
+    }
+    .video-status.ok {
+      color: var(--good);
+    }
+    .video-status.warn {
+      color: var(--warn);
+    }
     .pill {
       display: inline-flex;
       align-items: center;
@@ -653,10 +667,12 @@ INDEX_HTML = r"""<!doctype html>
               <div class="video-card">
                 <div class="video-head"><strong>前广角相机</strong><a href="/camera/front.mjpg" target="_blank">新窗口</a></div>
                 <img id="frontVideo" src="/camera/front.mjpg" alt="前广角相机画面" />
+                <div id="frontVideoStatus" class="video-status">正在连接视频</div>
               </div>
               <div class="video-card">
                 <div class="video-head"><strong>后广角相机</strong><a href="/camera/rear.mjpg" target="_blank">新窗口</a></div>
                 <img id="rearVideo" src="/camera/rear.mjpg" alt="后广角相机画面" />
+                <div id="rearVideoStatus" class="video-status">正在连接视频</div>
               </div>
             </div>
             <div class="small" style="margin-top:8px;">视频由 103 RTSP 转为网页可看的 MJPEG；如果画面未出现，优先检查 103:8554 是否可达。</div>
@@ -1061,6 +1077,31 @@ INDEX_HTML = r"""<!doctype html>
     }
     function setMarkStatus(payload) {
       if ($("markSaveStatus")) setLog("markSaveStatus", payload);
+    }
+    function setVideoStatus(camera, status, text) {
+      const box = $(`${camera}VideoStatus`);
+      if (!box) return;
+      box.className = "video-status";
+      if (status) box.classList.add(status);
+      box.textContent = text;
+    }
+    function setupVideoProbe(camera, url) {
+      const img = $(`${camera}Video`);
+      if (!img) return;
+      let retryTimer = null;
+      const retry = () => {
+        if (retryTimer) return;
+        retryTimer = window.setTimeout(() => {
+          retryTimer = null;
+          const sep = url.includes("?") ? "&" : "?";
+          img.src = `${url}${sep}t=${Date.now()}`;
+        }, 5000);
+      };
+      img.addEventListener("load", () => setVideoStatus(camera, "ok", "视频已连接"));
+      img.addEventListener("error", () => {
+        setVideoStatus(camera, "warn", "视频源不可用，请检查 103 RTSP 路径或相机服务");
+        retry();
+      });
     }
     function sleepMs(ms) {
       return new Promise(resolve => setTimeout(resolve, ms));
@@ -2655,6 +2696,8 @@ INDEX_HTML = r"""<!doctype html>
     });
     window.addEventListener("resize", resizeCanvas);
     resizeCanvas();
+    setupVideoProbe("front", "/camera/front.mjpg");
+    setupVideoProbe("rear", "/camera/rear.mjpg");
     updateMapModeUi();
     syncManualDefaults(false);
     loadMaps().then(loadAnnotations).then(loadTerrain).then(loadPreflight).then(loadTasks).catch(console.warn);
@@ -3088,7 +3131,7 @@ class WebDashboardNode(Node):
         self.declare_parameter("initialpose_covariance_yaw", 0.0685)
         self.declare_parameter("initialpose_publish_repeats", 10)
         self.declare_parameter("initialpose_publish_interval_s", 0.15)
-        self.declare_parameter("relocalization_verify_timeout_s", 8.0)
+        self.declare_parameter("relocalization_verify_timeout_s", 15.0)
         self.declare_parameter("relocalization_pose_tolerance_m", 2.0)
         self.declare_parameter("factory_initialpose_remote_publish", True)
         self.declare_parameter("factory_initialpose_topic", "/initialpose")
@@ -5678,6 +5721,7 @@ class WebDashboardNode(Node):
         pose_ok = False
         pose_near_request = False
         localization_ok = False
+        factory_location_ok = False
         scan_ok = False
         local_costmap_ok = False
         global_costmap_ok = False
@@ -5689,6 +5733,7 @@ class WebDashboardNode(Node):
                 relocalization = dict(self._state.get("relocalization_result") or {})
                 pose = dict(self._state.get("pose") or {})
                 localization = self._state.get("localization_ok")
+                navigation_status = dict(self._state.get("navigation_status_parsed") or {})
                 scan = dict(self._state.get("scan") or {})
                 local_costmap = dict(self._state.get("local_costmap") or {})
                 global_costmap = dict(self._state.get("global_costmap") or {})
@@ -5714,7 +5759,8 @@ class WebDashboardNode(Node):
                     pose_near_request = pose_error_m <= pose_tolerance_m
                 except (TypeError, ValueError):
                     pose_near_request = False
-            localization_ok = localization is True
+            factory_location_ok = navigation_status.get("location") == 0
+            localization_ok = localization is True or factory_location_ok
             scan_ok = (
                 float(scan.get("last_update", 0.0) or 0.0) >= request_started_at
                 and int(scan.get("finite_ranges", 0) or 0) > 0
@@ -5730,7 +5776,7 @@ class WebDashboardNode(Node):
                 and bool(global_costmap.get("height"))
             )
 
-            if localization_ok and pose_ok and pose_near_request:
+            if localization_ok and pose_ok and pose_near_request and scan_ok:
                 break
             time.sleep(0.2)
 
@@ -5744,6 +5790,7 @@ class WebDashboardNode(Node):
                 else ("warn" if result_text.startswith("failed:") or not result_text else "warn")
             ),
             "localization": "ok" if localization_ok else "warn",
+            "factory_location": "ok" if factory_location_ok else "warn",
             "map_pose": "ok" if pose_ok else "warn",
             "pose_near_request": "ok" if pose_near_request else "warn",
             "scan": "ok" if scan_ok else "warn",
@@ -6376,6 +6423,12 @@ class WebDashboardNode(Node):
 
         worker = self._camera_worker(camera_name)
         frame_timeout = max(0.5, float(self.get_parameter("camera_proxy_frame_timeout_s").value))
+        first_sequence, first_payload, first_stamp, first_error = worker.wait_for_frame(-1, frame_timeout)
+        if first_payload is None:
+            detail = first_error or "camera frame timeout"
+            status = HTTPStatus.SERVICE_UNAVAILABLE if first_error else HTTPStatus.GATEWAY_TIMEOUT
+            handler.send_error(status, f"{camera_name} camera unavailable: {detail}")
+            return
 
         handler.send_response(HTTPStatus.OK)
         handler.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
@@ -6384,8 +6437,18 @@ class WebDashboardNode(Node):
         handler.send_header("Access-Control-Allow-Origin", "*")
         handler.end_headers()
 
-        last_sequence = -1
+        last_sequence = first_sequence
         try:
+            handler.wfile.write(b"--frame\r\n")
+            handler.wfile.write(b"Content-Type: image/jpeg\r\n")
+            handler.wfile.write(b"Cache-Control: no-store\r\n")
+            handler.wfile.write(f"X-M20Pro-Frame-Seq: {first_sequence}\r\n".encode("ascii"))
+            handler.wfile.write(
+                f"X-M20Pro-Frame-Age-Ms: {max(0.0, (time.time() - first_stamp) * 1000.0):.1f}\r\n".encode("ascii")
+            )
+            handler.wfile.write(f"Content-Length: {len(first_payload)}\r\n\r\n".encode("ascii"))
+            handler.wfile.write(first_payload)
+            handler.wfile.write(b"\r\n")
             while True:
                 sequence, payload, stamp, error = worker.wait_for_frame(last_sequence, frame_timeout)
                 if payload is None or sequence == last_sequence:

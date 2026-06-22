@@ -1,10 +1,67 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-06-22 21:20 CST
+Last updated: 2026-06-22 21:45 CST
 
 This file is maintained by Codex as the local M20 Pro project memory for future ChatGPT review. It records the current architecture, important decisions, recent changes, verification status, and next steps.
 
 Naming note: this file replaced the previous local-only `codex.md`. Going forward, maintain this file, `m20pro日志.md`, after every meaningful project change or field diagnosis.
+
+## 2026-06-22 frontend field-flow smoke test and fixes
+
+- Goal:
+  - use the web frontend in the same order as a field operator would, not just call backend APIs;
+  - keep the robot still at the workstation and avoid starting any movement task.
+- Tested through an actual browser page:
+  - opened `http://10.21.31.104:8080`;
+  - confirmed the page loaded `builtin_F20`, showed live `Location=0`, battery, pose, `/scan`, and factory navigation status;
+  - clicked the self-check button;
+  - selected/confirmed `builtin_F20`;
+  - used "current robot pose" and clicked web relocalization;
+  - clicked mapping environment check;
+  - created a temporary point, verified it appeared in the point list, then deleted it;
+  - created a temporary task from a temporary point, verified it appeared in the task list, then deleted both the task and point;
+  - did not click "start task", so no motion command was intentionally issued.
+- Results before fixes:
+  - self-check passed from the page:
+    - core nodes online;
+    - raw pointcloud and `/scan` fresh;
+    - local/global costmaps active;
+    - Nav2 lifecycle nodes active;
+    - motion mode confirmed `move`;
+  - map selection worked and kept `builtin_F20`;
+  - point save/delete worked and no longer looked like "pending confirmation";
+  - task create/delete worked in the non-motion part of the workflow;
+  - mapping environment check passed and used 104 -> 106 SSH key/known_hosts plus non-mutating sudo permission probes.
+- Problems found:
+  - video panes could look like they were loading forever when 103 RTSP paths were wrong;
+  - 103 was reachable and TCP 8554 was open, but `rtsp://10.21.31.103:8554/video1` and `video2` returned RTSP `404 Not Found`;
+  - the MJPEG proxy previously returned HTTP 200 before it had a first frame, so the browser image request could hang without a useful page-level error;
+  - one post-restart relocalization attempt published `/initialpose` successfully to 106, but the 8 s verification window missed the factory localization/costmap settling and temporarily reported "not confirmed" even though the robot state recovered to `Location=0`.
+- Fixes:
+  - camera MJPEG proxy now waits for the first frame before returning HTTP 200;
+  - if no frame is available or OpenCV reports the RTSP stream cannot open, `/camera/front.mjpg` or `/camera/rear.mjpg` returns a clear 503/504 error instead of hanging;
+  - frontend video cards now show per-camera status text and automatically retry, so a bad RTSP path is visible as "视频源不可用，请检查 103 RTSP 路径或相机服务";
+  - relocalization verification timeout increased from 8 s to 15 s;
+  - relocalization verification now accepts factory `navigation_status` `location=0` as localization evidence, in addition to the `/m20pro_tcp_bridge/localization_ok` boolean.
+- Verification after fixes:
+  - `/camera/front.mjpg` and `/camera/rear.mjpg` now return clear 503 errors quickly while 103 RTSP still returns 404;
+  - page video status displays "视频源不可用，请检查 103 RTSP 路径或相机服务" for both cameras;
+  - final relocalization test returned:
+    - `factory_initialpose.ok=true`;
+    - `subscriptions=1`;
+    - `factory_location=ok`;
+    - `localization=ok`;
+    - `map_pose=ok`;
+    - `scan=ok`;
+    - `local_costmap=ok`;
+    - `global_costmap=ok`;
+    - `navigation_ready=true`;
+  - final 104 state: selected map `builtin_F20`, `localization_ok=true`, `Location=0`, fresh `/scan`;
+  - final 106 state: active map `/var/opt/robot/data/maps/map-20260520-205606`, `localization` and `planner` services active;
+  - no temporary CODEX test points remained in `builtin_F20`.
+- Remaining known issue:
+  - camera video still depends on the correct 103 RTSP stream names;
+  - current configured/manual paths `video1` and `video2` return 404 on this robot at this time, so the next camera task is to discover the actual 103 RTSP paths or vendor camera service state.
 
 ## 2026-06-22 frontend mapping and relocalization validation
 

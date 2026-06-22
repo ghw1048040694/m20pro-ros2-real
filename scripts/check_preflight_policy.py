@@ -148,6 +148,16 @@ def main() -> int:
         "106 initialpose publish waits for a subscriber before sending",
     )
     require(
+        web,
+        r'declare_parameter\("relocalization_verify_timeout_s",\s*15\.0\)',
+        "web relocalization verification waits through short TF/costmap settling windows",
+    )
+    require(
+        web,
+        r'factory_location_ok\s*=\s*navigation_status\.get\("location"\)\s*==\s*0[\s\S]{0,120}localization_ok\s*=\s*localization\s+is\s+True\s+or\s+factory_location_ok',
+        "web relocalization accepts factory Location=0 as localization evidence",
+    )
+    require(
         launch,
         r'factory_initialpose_ssh_identity_file',
         "real launch forwards the 106 initialpose SSH identity file",
@@ -171,6 +181,21 @@ def main() -> int:
         web,
         r'"navigation_ready":\s*not navigation_failures',
         "navigation_ready is derived from navigation_failures",
+    )
+    require(
+        web,
+        r'first_sequence,\s*first_payload,\s*first_stamp,\s*first_error\s*=\s*worker\.wait_for_frame',
+        "camera MJPEG proxy waits for the first frame before returning HTTP 200",
+    )
+    require(
+        web,
+        r'camera unavailable',
+        "camera MJPEG proxy reports unavailable video sources instead of hanging forever",
+    )
+    require(
+        web,
+        r'setupVideoProbe\("front"[\s\S]{0,120}setupVideoProbe\("rear"',
+        "frontend exposes camera load failure status for both video panes",
     )
 
     forbid(web, r'api/usage_mode|data-usage-mode|setUsageMode', "web has no usage-mode control route/button")
