@@ -35,6 +35,10 @@ def generate_launch_description():
     camera_proxy_transport = LaunchConfiguration("camera_proxy_transport")
     initialpose_topic = LaunchConfiguration("initialpose_topic")
     relocalization_result_topic = LaunchConfiguration("relocalization_result_topic")
+    factory_initialpose_remote_publish = LaunchConfiguration("factory_initialpose_remote_publish")
+    factory_initialpose_topic = LaunchConfiguration("factory_initialpose_topic")
+    factory_initialpose_source_command = LaunchConfiguration("factory_initialpose_source_command")
+    factory_initialpose_command_timeout_s = LaunchConfiguration("factory_initialpose_command_timeout_s")
 
     return LaunchDescription([
         DeclareLaunchArgument("host", default_value="0.0.0.0"),
@@ -92,6 +96,16 @@ def generate_launch_description():
             "relocalization_result_topic",
             default_value="/m20pro_tcp_bridge/relocalization_result",
         ),
+        DeclareLaunchArgument("factory_initialpose_remote_publish", default_value="true"),
+        DeclareLaunchArgument("factory_initialpose_topic", default_value="/initialpose"),
+        DeclareLaunchArgument(
+            "factory_initialpose_source_command",
+            default_value=(
+                "source /opt/robot/scripts/setup_ros2.sh >/dev/null 2>&1 || "
+                "source /opt/ros/foxy/setup.bash"
+            ),
+        ),
+        DeclareLaunchArgument("factory_initialpose_command_timeout_s", default_value="15.0"),
         Node(
             package="m20pro_cloud_bridge",
             executable="web_dashboard",
@@ -138,6 +152,16 @@ def generate_launch_description():
                     "camera_proxy_transport": camera_proxy_transport,
                     "initialpose_topic": initialpose_topic,
                     "relocalization_result_topic": relocalization_result_topic,
+                    "factory_initialpose_remote_publish": ParameterValue(
+                        factory_initialpose_remote_publish,
+                        value_type=bool,
+                    ),
+                    "factory_initialpose_topic": factory_initialpose_topic,
+                    "factory_initialpose_source_command": factory_initialpose_source_command,
+                    "factory_initialpose_command_timeout_s": ParameterValue(
+                        factory_initialpose_command_timeout_s,
+                        value_type=float,
+                    ),
                 }
             ],
         ),

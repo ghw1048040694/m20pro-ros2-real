@@ -70,6 +70,10 @@ def generate_launch_description():
     robot_pose_display_yaw_offset_rad = LaunchConfiguration("robot_pose_display_yaw_offset_rad")
     initialpose_topic = LaunchConfiguration("initialpose_topic")
     relocalization_result_topic = LaunchConfiguration("relocalization_result_topic")
+    factory_initialpose_remote_publish = LaunchConfiguration("factory_initialpose_remote_publish")
+    factory_initialpose_topic = LaunchConfiguration("factory_initialpose_topic")
+    factory_initialpose_source_command = LaunchConfiguration("factory_initialpose_source_command")
+    factory_initialpose_command_timeout_s = LaunchConfiguration("factory_initialpose_command_timeout_s")
     factory_host = LaunchConfiguration("factory_host")
     factory_user = LaunchConfiguration("factory_user")
     factory_active_map = LaunchConfiguration("factory_active_map")
@@ -139,6 +143,16 @@ def generate_launch_description():
             "relocalization_result_topic",
             default_value="/m20pro_tcp_bridge/relocalization_result",
         ),
+        DeclareLaunchArgument("factory_initialpose_remote_publish", default_value="true"),
+        DeclareLaunchArgument("factory_initialpose_topic", default_value="/initialpose"),
+        DeclareLaunchArgument(
+            "factory_initialpose_source_command",
+            default_value=(
+                "source /opt/robot/scripts/setup_ros2.sh >/dev/null 2>&1 || "
+                "source /opt/ros/foxy/setup.bash"
+            ),
+        ),
+        DeclareLaunchArgument("factory_initialpose_command_timeout_s", default_value="15.0"),
         DeclareLaunchArgument("factory_host", default_value="10.21.31.106"),
         DeclareLaunchArgument("factory_user", default_value="user"),
         DeclareLaunchArgument("factory_active_map", default_value="/var/opt/robot/data/maps/active"),
@@ -459,6 +473,16 @@ def generate_launch_description():
                     "map_manifest": map_manifest,
                     "initialpose_topic": initialpose_topic,
                     "relocalization_result_topic": relocalization_result_topic,
+                    "factory_initialpose_remote_publish": ParameterValue(
+                        factory_initialpose_remote_publish,
+                        value_type=bool,
+                    ),
+                    "factory_initialpose_topic": factory_initialpose_topic,
+                    "factory_initialpose_source_command": factory_initialpose_source_command,
+                    "factory_initialpose_command_timeout_s": ParameterValue(
+                        factory_initialpose_command_timeout_s,
+                        value_type=float,
+                    ),
                     "factory_host": factory_host,
                     "factory_user": factory_user,
                     "factory_active_map": factory_active_map,

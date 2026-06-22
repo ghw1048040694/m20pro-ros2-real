@@ -177,7 +177,7 @@ fi
 COMMON_ARGS=(
   rviz:=false
   enable_web_dashboard:=true
-  enable_initialpose_relocalization:=true
+  enable_initialpose_relocalization:=false
   web_dashboard_data_dir:=/home/user/.m20pro_web
   web_dashboard_map_archive_dir:=/home/user/m20pro_maps
   enable_camera_proxy:=true
@@ -205,7 +205,7 @@ with open(src, "r", encoding="utf-8") as file:
 
 bridge = data.setdefault("m20pro_tcp_bridge", {}).setdefault("ros__parameters", {})
 bridge["enable_axis_command"] = axis_text.lower() in ("1", "true", "yes", "on")
-bridge["enable_initialpose_relocalization"] = True
+bridge["enable_initialpose_relocalization"] = False
 bridge["enable_initialpose_3d_relocalization"] = False
 
 with open(dst, "w", encoding="utf-8") as file:

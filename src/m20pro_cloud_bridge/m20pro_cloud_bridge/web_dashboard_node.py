@@ -2,6 +2,7 @@ import json
 import math
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import threading
@@ -702,8 +703,8 @@ INDEX_HTML = r"""<!doctype html>
               <span>显示实时激光轮廓</span>
             </label>
             <div class="small" id="scanOverlayStatus">等待 /scan 数据</div>
-            <div class="small" style="margin-top:8px;">重定位不要求导航已就绪；只要固定地图和 /scan/点云可用，就可以先在工位或测试场地执行重定位。</div>
-            <div id="localizeLog" class="mono" style="margin-top:8px;">先在地图上拖箭头，红色激光轮廓贴合地图后再执行重定位。</div>
+            <div class="small" style="margin-top:8px;">重定位按原厂 106 /initialpose 路径执行；导航不必预先就绪，但固定地图和 /scan/点云必须可用。</div>
+            <div id="localizeLog" class="mono" style="margin-top:8px;">先在地图上拖箭头，让红色激光轮廓贴合地图后再执行重定位。</div>
           </div>
         </section>
 
@@ -2405,7 +2406,7 @@ INDEX_HTML = r"""<!doctype html>
         const yaw = Number($("locYaw").value);
         if (!Number.isFinite(x) || !Number.isFinite(y)) throw {message: "定位坐标无效，请先在地图上拖箭头"};
         state.relocalizationApiLogUntil = Date.now() + 20000;
-        setLog("localizeLog", "正在发布 /initialpose；基础自检或导航未就绪不会阻止本次重定位...");
+        setLog("localizeLog", "正在向 104 和 106 发布 /initialpose；基础自检或导航未就绪不会阻止本次重定位...");
         const payload = await api("POST", "/api/localization/initialpose", {
           x,
           y,
@@ -3031,6 +3032,13 @@ class WebDashboardNode(Node):
         self.declare_parameter("initialpose_publish_interval_s", 0.15)
         self.declare_parameter("relocalization_verify_timeout_s", 8.0)
         self.declare_parameter("relocalization_pose_tolerance_m", 2.0)
+        self.declare_parameter("factory_initialpose_remote_publish", True)
+        self.declare_parameter("factory_initialpose_topic", "/initialpose")
+        self.declare_parameter(
+            "factory_initialpose_source_command",
+            "source /opt/robot/scripts/setup_ros2.sh >/dev/null 2>&1 || source /opt/ros/foxy/setup.bash",
+        )
+        self.declare_parameter("factory_initialpose_command_timeout_s", 15.0)
         self.declare_parameter("robot_pose_display_yaw_offset_rad", 0.0)
         self.declare_parameter("current_floor_topic", "/m20pro/current_floor")
         self.declare_parameter("stair_status_topic", "/m20pro/stair_status")
@@ -5356,6 +5364,17 @@ class WebDashboardNode(Node):
             self.initialpose_pub.publish(msg)
             if interval_s > 0.0:
                 time.sleep(interval_s)
+        factory_initialpose = self._publish_initialpose_on_factory_host(
+            x,
+            y,
+            z,
+            yaw,
+            frame_id,
+            xy_cov,
+            yaw_cov,
+            repeats,
+            interval_s,
+        )
         verification = self._wait_for_relocalization_verification(
             request_started_at,
             {"x": x, "y": y, "z": z, "yaw": yaw},
@@ -5366,13 +5385,130 @@ class WebDashboardNode(Node):
             "message": verification.get("message", "已发布网页重定位请求"),
             "topic": str(self.get_parameter("initialpose_topic").value),
             "publish_repeats": repeats,
+            "factory_initialpose": factory_initialpose,
             "frame_id": frame_id,
             "floor": floor,
             "pose": {"x": x, "y": y, "z": z, "yaw": yaw},
             "verification": verification,
         }
+        if (
+            factory_initialpose.get("enabled")
+            and factory_initialpose.get("ok") is False
+            and not verification.get("factory_pose_accepted")
+        ):
+            result["message"] = "106 /initialpose 远程发布失败；请先配置 104 到 106 SSH 免密，或临时回到 106 RViz 执行 2D Pose Estimate"
         self._append_event("网页发布重定位", result)
         return result
+
+    def _publish_initialpose_on_factory_host(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        yaw: float,
+        frame_id: str,
+        xy_cov: float,
+        yaw_cov: float,
+        repeats: int,
+        interval_s: float,
+    ) -> Dict[str, Any]:
+        if not bool(self.get_parameter("factory_initialpose_remote_publish").value):
+            return {
+                "enabled": False,
+                "ok": None,
+                "message": "106 remote /initialpose publish disabled",
+            }
+        factory_host = str(self.get_parameter("factory_host").value).strip()
+        factory_user = str(self.get_parameter("factory_user").value).strip()
+        if factory_host in ("", "localhost", "127.0.0.1"):
+            return {
+                "enabled": False,
+                "ok": None,
+                "message": "factory host is local/empty; only local /initialpose was published",
+            }
+
+        topic = str(self.get_parameter("factory_initialpose_topic").value).strip() or "/initialpose"
+        source_command = str(self.get_parameter("factory_initialpose_source_command").value).strip()
+        timeout_s = max(2.0, float(self.get_parameter("factory_initialpose_command_timeout_s").value))
+        sleep_s = max(0.0, float(interval_s))
+        count = max(1, int(repeats))
+        py_code = "\n".join([
+            "import math",
+            "import time",
+            "",
+            "import rclpy",
+            "from geometry_msgs.msg import PoseWithCovarianceStamped",
+            "",
+            "rclpy.init(args=None)",
+            'node = rclpy.create_node("m20pro_factory_initialpose_once")',
+            f"pub = node.create_publisher(PoseWithCovarianceStamped, {topic!r}, 10)",
+            "time.sleep(0.3)",
+            f"for _ in range({count!r}):",
+            "    msg = PoseWithCovarianceStamped()",
+            "    msg.header.stamp = node.get_clock().now().to_msg()",
+            f"    msg.header.frame_id = {frame_id!r}",
+            f"    msg.pose.pose.position.x = {float(x)!r}",
+            f"    msg.pose.pose.position.y = {float(y)!r}",
+            f"    msg.pose.pose.position.z = {float(z)!r}",
+            f"    msg.pose.pose.orientation.z = math.sin({float(yaw)!r} * 0.5)",
+            f"    msg.pose.pose.orientation.w = math.cos({float(yaw)!r} * 0.5)",
+            f"    msg.pose.covariance[0] = {float(xy_cov)!r}",
+            f"    msg.pose.covariance[7] = {float(xy_cov)!r}",
+            f"    msg.pose.covariance[35] = {float(yaw_cov)!r}",
+            "    pub.publish(msg)",
+            "    rclpy.spin_once(node, timeout_sec=0.05)",
+            f"    time.sleep({sleep_s!r})",
+            "node.destroy_node()",
+            "rclpy.shutdown()",
+            "",
+        ])
+        python_command = f"python3 -c {shlex.quote(py_code)}"
+        payload = f"{{ {source_command}; }} && {python_command}" if source_command else python_command
+        remote_command = f"bash -lc {shlex.quote(payload)}"
+        target = f"{factory_user}@{factory_host}" if factory_user else factory_host
+        command = [
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=5",
+            target,
+            remote_command,
+        ]
+        try:
+            result = subprocess.run(
+                command,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=timeout_s,
+                check=False,
+            )
+        except Exception as exc:
+            return {
+                "enabled": True,
+                "ok": False,
+                "host": factory_host,
+                "topic": topic,
+                "message": "106 /initialpose remote publish failed before command completed",
+                "error": str(exc),
+            }
+
+        output = result.stdout or ""
+        ok = result.returncode == 0
+        return {
+            "enabled": True,
+            "ok": ok,
+            "host": factory_host,
+            "topic": topic,
+            "returncode": result.returncode,
+            "output": output[-2000:],
+            "message": (
+                "106 /initialpose remote publish completed"
+                if ok
+                else "106 /initialpose remote publish command failed"
+            ),
+        }
 
     def _wait_for_relocalization_verification(
         self,
@@ -5479,9 +5615,9 @@ class WebDashboardNode(Node):
         elif factory_pose_accepted:
             message = "原厂定位位姿已更新，但导航链路尚未全部恢复，请看 verification 检查项"
         elif accepted:
-            message = "103 TCP 接受了诊断重定位请求，但还未看到地图位姿更新"
+            message = "103 TCP 诊断路径接受了重定位请求，但还未看到 106 地图位姿更新"
         elif vendor_failed:
-            message = "已发布 /initialpose，但未看到原厂定位更新；103 TCP 诊断失败不作为网页重定位成败依据"
+            message = "已发布 /initialpose，但未看到 106 原厂定位更新；103 TCP 诊断失败不作为网页重定位成败依据"
         else:
             message = "已发布 /initialpose；暂未确认 106 原厂定位生效，请继续按地图和激光轮廓调整后重试"
         return {
@@ -5494,7 +5630,7 @@ class WebDashboardNode(Node):
             "message": message,
             "result": (
                 result_text
-                or "未收到 103 TCP /m20pro_tcp_bridge/relocalization_result；网页重定位以 /initialpose 后的 106 定位状态为准"
+                or "未收到 103 TCP /m20pro_tcp_bridge/relocalization_result；网页重定位以 106 /initialpose 后的定位状态为准"
             ),
             "pose_error_m": pose_error_m,
             "yaw_error_rad": yaw_error_rad,

@@ -1,10 +1,45 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-06-22 12:58 CST
+Last updated: 2026-06-22 17:51 CST
 
 This file is maintained by Codex as the local M20 Pro project memory for future ChatGPT review. It records the current architecture, important decisions, recent changes, verification status, and next steps.
 
 Naming note: this file replaced the previous local-only `codex.md`. Going forward, maintain this file, `m20pro日志.md`, after every meaningful project change or field diagnosis.
+
+## 2026-06-22 web relocalization changed to 106-first path
+
+- User challenged the previous `/initialpose` explanation:
+  - the factory manual workflow is effectively on 106/NOS through RViz `2D Pose Estimate`;
+  - web relocalization had been tested several times and did not visibly work;
+  - therefore the project must not claim that publishing `/initialpose` on 104 or sending the 103 TCP diagnostic request guarantees relocalization.
+- Clarified meaning:
+  - `/initialpose` is the ROS standard initial-pose topic used by RViz `2D Pose Estimate`;
+  - it is only an input/guess for the localization system;
+  - success must be verified by 106/factory localization state, not by the mere fact that 104 published a ROS message.
+- Previous risk:
+  - the web backend published `/initialpose` locally on 104;
+  - full real startup also forced `tcp_bridge enable_initialpose_relocalization=true`, so the same message was intercepted and sent to 103 TCP `Type=2101 Command=1`;
+  - if 106 factory localization is actually listening on 106's own ROS graph, then 104-side DDS delivery may be missed or blocked by DDS/network/participant issues;
+  - 103 TCP `2101/1` is useful diagnostics but should not be treated as the main relocalization path.
+- Code change:
+  - web relocalization now still publishes local 104 `/initialpose`, but also SSHes to `user@10.21.31.106` and publishes the same `PoseWithCovarianceStamped` on 106 itself;
+  - new web parameters:
+    - `factory_initialpose_remote_publish` default `true`;
+    - `factory_initialpose_topic` default `/initialpose`;
+    - `factory_initialpose_source_command` default `source /opt/robot/scripts/setup_ros2.sh || source /opt/ros/foxy/setup.bash`;
+    - `factory_initialpose_command_timeout_s` default `15.0`;
+  - `m20pro_real_full.sh` now keeps `enable_initialpose_relocalization=false` in the full real runtime params, so 103 TCP `2101/1` no longer hijacks the normal `/initialpose` path.
+- Runtime requirement:
+  - 104 must have non-interactive SSH access to 106 as `user@10.21.31.106`;
+  - current local check failed with `Permission denied (publickey,password)`, so this must be fixed on the robot before the new web relocalization can use the 106 path.
+- Correct success criteria:
+  - remote 106 `/initialpose` command returns OK;
+  - `/m20pro_tcp_bridge/localization_ok` becomes true;
+  - `/m20pro_tcp_bridge/map_pose` updates after the request;
+  - updated pose is close to the requested pose;
+  - `/scan` and costmaps recover after localization.
+- Interview-ready explanation:
+  - "I initially exposed relocalization through the ROS `/initialpose` convention, but field tests showed that the factory stack's reliable path is the 106/NOS RViz path. I then changed the web dashboard to publish the initial pose directly on 106 via SSH while keeping the 104 publish as a local mirror, and I stopped treating the 103 TCP `2101/1` response as the main success signal. The final acceptance is based on factory localization state and map pose update, not just API return."
 
 ## 2026-06-22 development dog costmap/Nav2 startup hardening
 
