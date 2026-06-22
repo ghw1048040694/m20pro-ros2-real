@@ -86,8 +86,38 @@ def main() -> int:
     )
     require(
         web,
+        r'base_required_nodes\s*=\s*\[[\s\S]{0,280}"m20pro_nav2_startup_gate"[\s\S]{0,160}\]',
+        "web preflight separates base nodes from Nav2 nodes",
+    )
+    require(
+        web,
+        r'navigation_required_nodes\s*=\s*\[[\s\S]{0,180}"bt_navigator"[\s\S]{0,120}"waypoint_follower"',
+        "web preflight treats Nav2 nodes as navigation readiness",
+    )
+    forbid(
+        web,
+        r'base_required_nodes\s*=\s*\[[\s\S]{0,260}"bt_navigator"',
+        "bt_navigator must not block base preflight",
+    )
+    require(
+        web,
         r'"nav2_lifecycle_deferred"[\s\S]{0,300}"info"',
         "unlocalized/workstation Nav2 lifecycle is informational",
+    )
+    require(
+        web,
+        r'factory_initialpose_ssh_identity_file",\s*"/home/user/\.ssh/id_ed25519"',
+        "web 106 initialpose uses the user SSH key even when service runs as root",
+    )
+    require(
+        web,
+        r'pub\.get_subscription_count\(\)',
+        "106 initialpose publish waits for a subscriber before sending",
+    )
+    require(
+        launch,
+        r'factory_initialpose_ssh_identity_file',
+        "real launch forwards the 106 initialpose SSH identity file",
     )
     require(
         web,

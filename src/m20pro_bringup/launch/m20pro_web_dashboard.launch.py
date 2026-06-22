@@ -39,6 +39,8 @@ def generate_launch_description():
     factory_initialpose_topic = LaunchConfiguration("factory_initialpose_topic")
     factory_initialpose_source_command = LaunchConfiguration("factory_initialpose_source_command")
     factory_initialpose_command_timeout_s = LaunchConfiguration("factory_initialpose_command_timeout_s")
+    factory_initialpose_ssh_identity_file = LaunchConfiguration("factory_initialpose_ssh_identity_file")
+    factory_initialpose_ssh_known_hosts_file = LaunchConfiguration("factory_initialpose_ssh_known_hosts_file")
 
     return LaunchDescription([
         DeclareLaunchArgument("host", default_value="0.0.0.0"),
@@ -106,6 +108,14 @@ def generate_launch_description():
             ),
         ),
         DeclareLaunchArgument("factory_initialpose_command_timeout_s", default_value="15.0"),
+        DeclareLaunchArgument(
+            "factory_initialpose_ssh_identity_file",
+            default_value="/home/user/.ssh/id_ed25519",
+        ),
+        DeclareLaunchArgument(
+            "factory_initialpose_ssh_known_hosts_file",
+            default_value="/home/user/.ssh/known_hosts",
+        ),
         Node(
             package="m20pro_cloud_bridge",
             executable="web_dashboard",
@@ -162,6 +172,8 @@ def generate_launch_description():
                         factory_initialpose_command_timeout_s,
                         value_type=float,
                     ),
+                    "factory_initialpose_ssh_identity_file": factory_initialpose_ssh_identity_file,
+                    "factory_initialpose_ssh_known_hosts_file": factory_initialpose_ssh_known_hosts_file,
                 }
             ],
         ),

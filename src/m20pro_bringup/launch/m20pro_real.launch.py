@@ -74,6 +74,8 @@ def generate_launch_description():
     factory_initialpose_topic = LaunchConfiguration("factory_initialpose_topic")
     factory_initialpose_source_command = LaunchConfiguration("factory_initialpose_source_command")
     factory_initialpose_command_timeout_s = LaunchConfiguration("factory_initialpose_command_timeout_s")
+    factory_initialpose_ssh_identity_file = LaunchConfiguration("factory_initialpose_ssh_identity_file")
+    factory_initialpose_ssh_known_hosts_file = LaunchConfiguration("factory_initialpose_ssh_known_hosts_file")
     factory_host = LaunchConfiguration("factory_host")
     factory_user = LaunchConfiguration("factory_user")
     factory_active_map = LaunchConfiguration("factory_active_map")
@@ -153,6 +155,14 @@ def generate_launch_description():
             ),
         ),
         DeclareLaunchArgument("factory_initialpose_command_timeout_s", default_value="15.0"),
+        DeclareLaunchArgument(
+            "factory_initialpose_ssh_identity_file",
+            default_value="/home/user/.ssh/id_ed25519",
+        ),
+        DeclareLaunchArgument(
+            "factory_initialpose_ssh_known_hosts_file",
+            default_value="/home/user/.ssh/known_hosts",
+        ),
         DeclareLaunchArgument("factory_host", default_value="10.21.31.106"),
         DeclareLaunchArgument("factory_user", default_value="user"),
         DeclareLaunchArgument("factory_active_map", default_value="/var/opt/robot/data/maps/active"),
@@ -483,6 +493,8 @@ def generate_launch_description():
                         factory_initialpose_command_timeout_s,
                         value_type=float,
                     ),
+                    "factory_initialpose_ssh_identity_file": factory_initialpose_ssh_identity_file,
+                    "factory_initialpose_ssh_known_hosts_file": factory_initialpose_ssh_known_hosts_file,
                     "factory_host": factory_host,
                     "factory_user": factory_user,
                     "factory_active_map": factory_active_map,

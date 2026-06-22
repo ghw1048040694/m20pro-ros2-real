@@ -1,10 +1,53 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-06-22 17:51 CST
+Last updated: 2026-06-22 18:35 CST
 
 This file is maintained by Codex as the local M20 Pro project memory for future ChatGPT review. It records the current architecture, important decisions, recent changes, verification status, and next steps.
 
 Naming note: this file replaced the previous local-only `codex.md`. Going forward, maintain this file, `m20pro日志.md`, after every meaningful project change or field diagnosis.
+
+## 2026-06-22 field frontend failure postmortem and hardening
+
+- Field report from the user:
+  - on the development dog at the real site, web self-check timed out/failed;
+  - web relocalization stayed at "sending /initialpose to 104 and 106" and did not complete;
+  - marking points kept looking like "pending confirmation" and did not give trustworthy saved feedback;
+  - after using the official 106 RViz `2D Pose Estimate`, the web frontend did not clearly reflect the localization recovery.
+- Root causes identified:
+  - `m20pro-real.service` runs as `root`, while the verified 104 -> 106 SSH setup was for `user`; the web process could therefore fail or hang on the remote 106 `/initialpose` path even though manual `user` SSH looked OK;
+  - the one-shot remote `/initialpose` publisher could exit too quickly after creating a ROS 2 publisher; if DDS discovery had not found the 106 subscriber yet, the command could return success without the factory localization actually receiving the message;
+  - preflight incorrectly allowed missing `/bt_navigator`/Nav2 node-name details to block the base self-check, even when map, lidar, `/scan`, localization, battery, and factory status were already OK;
+  - annotation save feedback was written only to the map cursor/status text, so normal pointer movement could overwrite "saved" with "pending" text and make a successful save look unconfirmed.
+- Code hardening:
+  - web relocalization now explicitly uses `/home/user/.ssh/id_ed25519` and `/home/user/.ssh/known_hosts` for the 106 SSH hop, so it still works when the service process is `root`;
+  - the remote 106 publisher waits up to 5 s for `/initialpose` subscribers, prints `subscriptions=N`, and reports `subscriptions=0` as a failed remote publish instead of pretending success;
+  - the relocalization button now has a 45 s browser-side timeout, disables itself while running, and shows the full 106 SSH/initialpose/localization/map-pose/costmap verification result instead of staying in a vague "sending" state;
+  - the localization tab now continuously displays live localization state, map pose, `/scan`, local/global costmap freshness, and factory navigation status, so official 106 RViz relocalization should also become visible in the web UI;
+  - web preflight now splits base nodes from navigation nodes: `m20pro_tcp_bridge`, `m20pro_pointcloud_fusion`, `m20pro_web_dashboard`, `map_server`, `m20pro_nav2_startup_gate`, and `m20pro_floor_manager` remain base; `controller_server`, `planner_server`, `bt_navigator`, and `waypoint_follower` are navigation readiness warnings;
+  - the marking tab now has persistent `markSaveStatus` feedback with saved id/label, floor, x/y/yaw, and current point count; delete operations also report that the list was refreshed.
+- Guardrails:
+  - `scripts/check_preflight_policy.py` now prevents future regressions where `/bt_navigator` blocks base preflight;
+  - the same policy check verifies the root-compatible 106 SSH identity parameter and the subscriber wait in the remote `/initialpose` publisher.
+- Verification on local real workspace:
+  - Python compile passed for real launch, standalone web launch, web dashboard, and policy script;
+  - shell syntax passed for `scripts/*.sh` and `src/m20pro_bringup/scripts/*.sh`;
+  - `git diff --check` passed;
+  - `python3 scripts/check_preflight_policy.py` passed;
+  - `colcon build --symlink-install --packages-select m20pro_description m20pro_inspection m20pro_cloud_bridge m20pro_navigation m20pro_bringup` passed.
+- Deployment verification on the development dog 104:
+  - synced the real workspace to `/home/user/m20pro_real_ros2_ws`;
+  - rebuilt the same five packages on 104 successfully;
+  - restarted `m20pro-real.service`;
+  - web `/healthz` returned `{"ok":true}`;
+  - blocking web preflight returned `ok=true`, `navigation_ready=true`, `relocalization_ready=true`, `failures=0`, `warnings=0`;
+  - `/api/state` showed `localization_ok=true`, fresh relay lidar, fresh `/scan`, fresh local/global costmaps, valid map pose, and battery around 55%;
+  - Nav2 lifecycle states on 104 were active for `/controller_server`, `/planner_server`, `/bt_navigator`, and `/waypoint_follower`;
+  - root-compatible SSH from 104 to 106 using `/home/user/.ssh/id_ed25519` returned the 106 hostname;
+  - 106 `/initialpose` topic info reported type `geometry_msgs/msg/PoseWithCovarianceStamped` and `Subscription count: 1`;
+  - the actual web relocalization API was not fired during this verification to avoid changing the robot's current field pose without operator intent.
+- Important operational note:
+  - being at the workstation can explain unlocalized/costmap-deferred navigation readiness, but it must not explain missing lidar or missing `/scan`;
+  - future field debugging should first look at the relocalization result's `factory_initialpose.ssh_identity_file`, `factory_initialpose.subscriptions`, `verification.factory_pose_accepted`, live `localization_ok`, and `/scan` freshness.
 
 ## 2026-06-22 web relocalization changed to 106-first path
 

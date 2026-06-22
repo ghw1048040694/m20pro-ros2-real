@@ -703,6 +703,7 @@ INDEX_HTML = r"""<!doctype html>
               <span>显示实时激光轮廓</span>
             </label>
             <div class="small" id="scanOverlayStatus">等待 /scan 数据</div>
+            <div id="localizeLiveStatus" class="mono" style="margin-top:8px;">等待定位状态</div>
             <div class="small" style="margin-top:8px;">重定位按原厂 106 /initialpose 路径执行；导航不必预先就绪，但固定地图和 /scan/点云必须可用。</div>
             <div id="localizeLog" class="mono" style="margin-top:8px;">先在地图上拖箭头，让红色激光轮廓贴合地图后再执行重定位。</div>
           </div>
@@ -878,6 +879,7 @@ INDEX_HTML = r"""<!doctype html>
               <button class="primary" id="saveMarkBtn">保存点位</button>
               <button id="useRobotPoseBtn">使用当前机器人位姿</button>
             </div>
+            <div id="markSaveStatus" class="mono" style="margin-top:8px;">尚未保存点位</div>
           </div>
           <div class="section">
             <h2>当前地图点位</h2>
@@ -1056,6 +1058,9 @@ INDEX_HTML = r"""<!doctype html>
     }
     function setLog(id, payload) {
       $(id).textContent = typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
+    }
+    function setMarkStatus(payload) {
+      if ($("markSaveStatus")) setLog("markSaveStatus", payload);
     }
     function sleepMs(ms) {
       return new Promise(resolve => setTimeout(resolve, ms));
@@ -1928,6 +1933,29 @@ INDEX_HTML = r"""<!doctype html>
       resizeCanvas();
       await loadTerrain();
     }
+    function renderLocalizeLiveStatus(s) {
+      const box = $("localizeLiveStatus");
+      if (!box) return;
+      const now = Number(s.node_time || Date.now() / 1000);
+      const pose = s.pose || null;
+      const scan = s.scan || {};
+      const localCostmap = s.local_costmap || {};
+      const globalCostmap = s.global_costmap || {};
+      const poseAge = pose && pose.last_update ? Math.max(0, now - Number(pose.last_update)) : null;
+      const scanAge = scan.last_update ? Math.max(0, now - Number(scan.last_update)) : null;
+      const localAge = localCostmap.last_update ? Math.max(0, now - Number(localCostmap.last_update)) : null;
+      const globalAge = globalCostmap.last_update ? Math.max(0, now - Number(globalCostmap.last_update)) : null;
+      const poseText = pose
+        ? `x ${fmtNumber(Number(pose.x))} / y ${fmtNumber(Number(pose.y))} / 朝向 ${fmtNumber(Number(pose.yaw_deg), 0)}deg / ${fmtAge(poseAge)}前`
+        : "无有效地图位姿";
+      box.textContent = [
+        `定位: ${s.localization_ok === true ? "正常" : (s.localization_ok === false ? "异常/未定位" : "未知")}`,
+        `地图位姿: ${poseText}`,
+        `/scan: ${Number(scan.finite_ranges || 0)} 条有效距离 / ${fmtAge(scanAge)}前`,
+        `代价地图: local ${localCostmap.width || "-"}x${localCostmap.height || "-"} / ${fmtAge(localAge)}前, global ${globalCostmap.width || "-"}x${globalCostmap.height || "-"} / ${fmtAge(globalAge)}前`,
+        `原厂导航: ${s.navigation_status || "-"}`
+      ].join("\n");
+    }
     function updateState(s) {
       state.latest = s;
       $("floor").textContent = text(s.floor);
@@ -1955,6 +1983,7 @@ INDEX_HTML = r"""<!doctype html>
       if (s.localization_ok === true) $("localization").textContent = "正常";
       else if (s.localization_ok === false) $("localization").textContent = "异常/未定位";
       else $("localization").textContent = "-";
+      renderLocalizeLiveStatus(s);
       $("factoryNav").textContent = text(s.navigation_status);
       if ($("scanOverlayStatus")) {
         const scan = s.scan || {};
@@ -2072,6 +2101,7 @@ INDEX_HTML = r"""<!doctype html>
       state.annotations = payload.annotations || [];
       renderAnnotations();
       renderTaskPoints();
+      setMarkStatus(`当前地图已加载 ${state.annotations.length} 个点位`);
     }
     function renderAnnotations() {
       const box = $("annotationList");
@@ -2100,6 +2130,7 @@ INDEX_HTML = r"""<!doctype html>
         btn.addEventListener("click", async () => {
           await api("DELETE", `/api/annotations?id=${encodeURIComponent(btn.dataset.deleteMark)}`);
           await loadAnnotations();
+          setMarkStatus("点位已删除，列表已刷新");
           draw();
         });
       }
@@ -2398,26 +2429,39 @@ INDEX_HTML = r"""<!doctype html>
       draw();
     });
     $("sendInitialPoseBtn").addEventListener("click", async () => {
+      const btn = $("sendInitialPoseBtn");
+      const oldText = btn.textContent;
       try {
+        btn.disabled = true;
+        btn.textContent = "重定位中";
         if (!state.map) throw {message: "还没有固定地图，请先在地图页选择 F20 或等待默认地图加载"};
         const [xText, yText] = $("locXY").value.split(",");
         const x = Number(xText);
         const y = Number(yText);
         const yaw = Number($("locYaw").value);
         if (!Number.isFinite(x) || !Number.isFinite(y)) throw {message: "定位坐标无效，请先在地图上拖箭头"};
-        state.relocalizationApiLogUntil = Date.now() + 20000;
-        setLog("localizeLog", "正在向 104 和 106 发布 /initialpose；基础自检或导航未就绪不会阻止本次重定位...");
-        const payload = await api("POST", "/api/localization/initialpose", {
+        state.relocalizationApiLogUntil = Date.now() + 45000;
+        setLog("localizeLog", "正在向 104 本机和 106 原厂 ROS 发布 /initialpose，最多等待 45 秒；页面会给出 106 SSH、定位、地图位姿和 costmap 检查结果。");
+        const payload = await apiWithTimeout("POST", "/api/localization/initialpose", {
           x,
           y,
           z: 0,
           yaw: Number.isFinite(yaw) ? yaw : 0,
           floor: $("locFloor").value.trim()
-        });
+        }, 45000);
         state.relocalizationApiLogUntil = Date.now() + 12000;
         setLog("localizeLog", payload);
-        $("cursor").textContent = `已发送重定位 x ${x.toFixed(3)} / y ${y.toFixed(3)} / 朝向 ${normalizeYaw(yaw).toFixed(3)} rad`;
-      } catch (err) { setLog("localizeLog", err); }
+        const accepted = !!(payload.verification && payload.verification.factory_pose_accepted);
+        $("cursor").textContent = accepted
+          ? `重定位已生效 x ${x.toFixed(3)} / y ${y.toFixed(3)} / 朝向 ${normalizeYaw(yaw).toFixed(3)} rad`
+          : "重定位已发送但未确认生效，请看定位日志";
+      } catch (err) {
+        setLog("localizeLog", err);
+        $("cursor").textContent = err.message || "重定位请求失败";
+      } finally {
+        btn.disabled = false;
+        btn.textContent = oldText;
+      }
     });
     $("useRobotPoseForLocBtn").addEventListener("click", () => {
       const pose = state.latest && state.latest.pose;
@@ -2504,6 +2548,7 @@ INDEX_HTML = r"""<!doctype html>
     $("manualPointType").addEventListener("change", () => syncManualDefaults(true));
     $("saveMarkBtn").addEventListener("click", async () => {
       try {
+        setMarkStatus("正在保存点位...");
         if (!state.map) throw {message: "还没有地图，等地图加载后再保存点位"};
         const [xText, yText] = $("markXY").value.split(",");
         const x = Number(xText);
@@ -2539,8 +2584,15 @@ INDEX_HTML = r"""<!doctype html>
         draw();
         $("markLabel").value = "";
         $("markResultPrefix").value = "";
-        $("cursor").textContent = `已保存 ${payload.annotation.label || payload.annotation.id}`;
-      } catch (err) { $("cursor").textContent = err.message || JSON.stringify(err); }
+        const saved = payload.annotation || {};
+        const savedPose = saved.pose || {};
+        const savedText = `已保存: ${saved.label || saved.id} / ${saved.floor || "-"} / x ${fmtNumber(Number(savedPose.x), 3)}, y ${fmtNumber(Number(savedPose.y), 3)}, yaw ${fmtNumber(Number(savedPose.yaw), 3)} / 当前列表 ${state.annotations.length} 个点位`;
+        setMarkStatus(savedText);
+        $("cursor").textContent = savedText;
+      } catch (err) {
+        setMarkStatus(err.message || JSON.stringify(err));
+        $("cursor").textContent = err.message || JSON.stringify(err);
+      }
     });
     $("useRobotPoseBtn").addEventListener("click", () => {
       const pose = state.latest && state.latest.pose;
@@ -3039,6 +3091,8 @@ class WebDashboardNode(Node):
             "source /opt/robot/scripts/setup_ros2.sh >/dev/null 2>&1 || source /opt/ros/foxy/setup.bash",
         )
         self.declare_parameter("factory_initialpose_command_timeout_s", 15.0)
+        self.declare_parameter("factory_initialpose_ssh_identity_file", "/home/user/.ssh/id_ed25519")
+        self.declare_parameter("factory_initialpose_ssh_known_hosts_file", "/home/user/.ssh/known_hosts")
         self.declare_parameter("robot_pose_display_yaw_offset_rad", 0.0)
         self.declare_parameter("current_floor_topic", "/m20pro/current_floor")
         self.declare_parameter("stair_status_topic", "/m20pro/stair_status")
@@ -3958,23 +4012,39 @@ class WebDashboardNode(Node):
             )
 
         node_names = set(self.get_node_names())
-        required_nodes = [
+        base_required_nodes = [
             "m20pro_tcp_bridge",
             "m20pro_pointcloud_fusion",
             "m20pro_web_dashboard",
             "map_server",
-            "controller_server",
-            "planner_server",
-            "bt_navigator",
             "m20pro_nav2_startup_gate",
             "m20pro_floor_manager",
         ]
-        missing_nodes = [name for name in required_nodes if name not in node_names]
+        navigation_required_nodes = [
+            "controller_server",
+            "planner_server",
+            "bt_navigator",
+            "waypoint_follower",
+        ]
+        missing_nodes = [name for name in base_required_nodes if name not in node_names]
         add(
             "nodes",
             "核心节点",
             "ok" if not missing_nodes else "fail",
             "全部在线" if not missing_nodes else "缺少：" + "、".join(f"/{name}" for name in missing_nodes),
+        )
+        missing_navigation_nodes = [name for name in navigation_required_nodes if name not in node_names]
+        add(
+            "navigation_nodes",
+            "导航节点",
+            "ok" if not missing_navigation_nodes else "warn",
+            (
+                "全部在线"
+                if not missing_navigation_nodes
+                else "导航节点未完全显示；重定位后若仍缺少再禁止移动任务："
+                + "、".join(f"/{name}" for name in missing_navigation_nodes)
+            ),
+            group="navigation",
         )
 
         topic_names = {name for name, _types in self.get_topic_names_and_types()}
@@ -5442,7 +5512,15 @@ class WebDashboardNode(Node):
             "rclpy.init(args=None)",
             'node = rclpy.create_node("m20pro_factory_initialpose_once")',
             f"pub = node.create_publisher(PoseWithCovarianceStamped, {topic!r}, 10)",
-            "time.sleep(0.3)",
+            "deadline = time.monotonic() + 5.0",
+            "subscriptions = 0",
+            "while time.monotonic() < deadline:",
+            "    subscriptions = pub.get_subscription_count()",
+            "    if subscriptions > 0:",
+            "        break",
+            "    rclpy.spin_once(node, timeout_sec=0.1)",
+            "    time.sleep(0.1)",
+            "print(f'subscriptions={subscriptions}', flush=True)",
             f"for _ in range({count!r}):",
             "    msg = PoseWithCovarianceStamped()",
             "    msg.header.stamp = node.get_clock().now().to_msg()",
@@ -5466,12 +5544,27 @@ class WebDashboardNode(Node):
         payload = f"{{ {source_command}; }} && {python_command}" if source_command else python_command
         remote_command = f"bash -lc {shlex.quote(payload)}"
         target = f"{factory_user}@{factory_host}" if factory_user else factory_host
-        command = [
-            "ssh",
+        ssh_identity = str(self.get_parameter("factory_initialpose_ssh_identity_file").value).strip()
+        ssh_known_hosts = str(self.get_parameter("factory_initialpose_ssh_known_hosts_file").value).strip()
+        ssh_options = [
             "-o",
             "BatchMode=yes",
             "-o",
             "ConnectTimeout=5",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+        ]
+        used_identity = ""
+        used_known_hosts = ""
+        if ssh_identity and FsPath(ssh_identity).exists():
+            used_identity = ssh_identity
+            ssh_options.extend(["-i", ssh_identity, "-o", "IdentitiesOnly=yes"])
+        if ssh_known_hosts and FsPath(ssh_known_hosts).exists():
+            used_known_hosts = ssh_known_hosts
+            ssh_options.extend(["-o", f"UserKnownHostsFile={ssh_known_hosts}"])
+        command = [
+            "ssh",
+            *ssh_options,
             target,
             remote_command,
         ]
@@ -5490,22 +5583,33 @@ class WebDashboardNode(Node):
                 "ok": False,
                 "host": factory_host,
                 "topic": topic,
+                "ssh_identity_file": used_identity,
+                "ssh_known_hosts_file": used_known_hosts,
                 "message": "106 /initialpose remote publish failed before command completed",
                 "error": str(exc),
             }
 
         output = result.stdout or ""
-        ok = result.returncode == 0
+        subscription_match = re.search(r"subscriptions=(\d+)", output)
+        subscriptions = int(subscription_match.group(1)) if subscription_match else None
+        command_ok = result.returncode == 0
+        subscriber_ok = subscriptions is None or subscriptions > 0
+        ok = command_ok and subscriber_ok
         return {
             "enabled": True,
             "ok": ok,
             "host": factory_host,
             "topic": topic,
             "returncode": result.returncode,
+            "ssh_identity_file": used_identity,
+            "ssh_known_hosts_file": used_known_hosts,
+            "subscriptions": subscriptions,
             "output": output[-2000:],
             "message": (
                 "106 /initialpose remote publish completed"
                 if ok
+                else "106 /initialpose has no subscribers"
+                if command_ok and subscriptions == 0
                 else "106 /initialpose remote publish command failed"
             ),
         }
