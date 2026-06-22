@@ -14,7 +14,6 @@ source install/setup.bash
 set -u
 
 COMMON_ARGS=(
-  mode:=real
   cloud_topic:="${CLOUD_TOPIC}"
   rviz:=false
   enable_web_dashboard:=false
@@ -24,17 +23,17 @@ COMMON_ARGS=(
 
 case "${MODE}" in
   safe|shadow)
-    exec ros2 launch m20pro_bringup m20pro.launch.py \
+    exec ros2 launch m20pro_bringup m20pro_real.launch.py \
       "${COMMON_ARGS[@]}" \
       enable_axis_command:=false
     ;;
   move)
-    exec ros2 launch m20pro_bringup m20pro.launch.py \
+    exec ros2 launch m20pro_bringup m20pro_real.launch.py \
       "${COMMON_ARGS[@]}" \
       enable_axis_command:=true
     ;;
   rviz)
-    exec ros2 launch m20pro_bringup m20pro.launch.py \
+    exec ros2 launch m20pro_bringup m20pro_real.launch.py \
       "${COMMON_ARGS[@]}" \
       rviz:=true \
       enable_axis_command:=false

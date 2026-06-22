@@ -16,11 +16,11 @@ from visualization_msgs.msg import MarkerArray
 
 
 class SystemCheckNode(Node):
-    """Compact runtime health check for sim and real bringup."""
+    """Compact runtime health check for the real M20Pro bringup."""
 
     def __init__(self) -> None:
         super().__init__("m20pro_system_check")
-        self.declare_parameter("mode", "sim")
+        self.declare_parameter("mode", "real")
         self.declare_parameter("startup_grace_s", 8.0)
         self.declare_parameter("check_period_s", 2.0)
         self.declare_parameter("cloud_topic", "/cloud_nav")
@@ -58,7 +58,7 @@ class SystemCheckNode(Node):
             ],
         )
 
-        self.mode = str(self.get_parameter("mode").value).strip() or "sim"
+        self.mode = str(self.get_parameter("mode").value).strip() or "real"
         self.start_time = self.get_clock().now()
         self.reported_ok = False
         self.seen_topics: Set[str] = set()
@@ -284,12 +284,8 @@ class SystemCheckNode(Node):
             "planner_server",
             "bt_navigator",
         ]
-        if self.mode == "sim":
-            expected.append("m20pro_dual_lidar_simulator")
         if self._bool("require_floor_manager"):
             expected.append("m20pro_floor_manager")
-        if self._bool("require_dynamic_obstacles"):
-            expected.append("m20pro_dynamic_obstacle_simulator")
         return expected
 
     def _missing_nodes(self, expected: List[str]) -> List[str]:

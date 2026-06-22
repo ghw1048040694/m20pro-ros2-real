@@ -38,7 +38,7 @@ def generate_launch_description():
     default_map_manifest = os.path.join(bringup_share, "config", "map_manifest.yaml")
     default_urdf = os.path.join(desc_share, "urdf", "M20.urdf")
     default_map = os.path.join(bringup_share, "maps", "F20", "occ_grid.yaml")
-    default_rviz = os.path.join(bringup_share, "rviz", "m20pro_sim.rviz")
+    default_rviz = os.path.join(bringup_share, "rviz", "m20pro_navigation.rviz")
     inspection_launch = os.path.join(inspection_share, "launch", "m20pro_inspection.launch.py")
     default_inspection_model = os.path.join(
         inspection_share, "models", "playphone_bg_best_rk3588_int8.rknn"

@@ -96,8 +96,7 @@ relay_fastdds_profile_file() {
 }
 
 if ps -eo pid,args | awk '
-  /ros2 launch m20pro_bringup m20pro.launch.py/ &&
-  /mode:=real/ &&
+  /ros2 launch m20pro_bringup m20pro_real.launch.py/ &&
   !/awk/ {print}
 ' >/tmp/m20pro_real_existing_stack.out && [[ -s /tmp/m20pro_real_existing_stack.out ]]; then
   cat >&2 <<'EOF'
@@ -176,7 +175,6 @@ if [[ "${M20PRO_ENABLE_LIDAR2_RELAY:-1}" == "1" && -n "${LIDAR2_INPUT_TOPIC}" &&
 fi
 
 COMMON_ARGS=(
-  mode:=real
   rviz:=false
   enable_web_dashboard:=true
   enable_initialpose_relocalization:=true
@@ -219,16 +217,16 @@ PY
 case "${MODE}" in
   shadow|safe)
     RUNTIME_PARAMS="$(make_runtime_params false)"
-    exec ros2 launch m20pro_bringup m20pro.launch.py \
+    exec ros2 launch m20pro_bringup m20pro_real.launch.py \
       "${COMMON_ARGS[@]}" \
-      real_params_file:="${RUNTIME_PARAMS}" \
+      params_file:="${RUNTIME_PARAMS}" \
       enable_axis_command:=false
     ;;
   move)
     RUNTIME_PARAMS="$(make_runtime_params true)"
-    exec ros2 launch m20pro_bringup m20pro.launch.py \
+    exec ros2 launch m20pro_bringup m20pro_real.launch.py \
       "${COMMON_ARGS[@]}" \
-      real_params_file:="${RUNTIME_PARAMS}" \
+      params_file:="${RUNTIME_PARAMS}" \
       enable_axis_command:=true
     ;;
   *)

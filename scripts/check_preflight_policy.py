@@ -16,10 +16,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 WEB = ROOT / "src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py"
 REAL_LAUNCH = ROOT / "src/m20pro_bringup/launch/m20pro_real.launch.py"
-WRAPPER_LAUNCH = ROOT / "src/m20pro_bringup/launch/m20pro.launch.py"
 NAV2_PARAMS = ROOT / "src/m20pro_bringup/config/nav2_params_real.yaml"
 REAL_CONFIG = ROOT / "src/m20pro_bringup/config/m20pro_real.yaml"
-SIM_CONFIG = ROOT / "src/m20pro_bringup/config/m20pro.yaml"
 TCP_BRIDGE = ROOT / "src/m20pro_navigation/m20pro_navigation/tcp_bridge_node.py"
 SETUP = ROOT / "src/m20pro_navigation/setup.py"
 POINTCLOUD_FUSION = ROOT / "src/m20pro_navigation/m20pro_navigation/pointcloud_fusion.py"
@@ -60,10 +58,8 @@ def forbid(text: str, pattern: str, message: str, *, flags: int = 0) -> None:
 def main() -> int:
     web = read(WEB)
     launch = read(REAL_LAUNCH)
-    wrapper_launch = read(WRAPPER_LAUNCH)
     nav2 = read(NAV2_PARAMS)
     real_config = read(REAL_CONFIG)
-    sim_config = read(SIM_CONFIG)
     tcp = read(TCP_BRIDGE)
     setup = read(SETUP)
     fusion = read(POINTCLOUD_FUSION)
@@ -116,7 +112,6 @@ def main() -> int:
 
     forbid(web, r'api/usage_mode|data-usage-mode|setUsageMode', "web has no usage-mode control route/button")
     require(real_config, r'enable_usage_mode_command:\s*false', "real config keeps usage-mode command disabled")
-    require(sim_config, r'enable_usage_mode_command:\s*false', "sim config keeps usage-mode command disabled")
     require(tcp, r'declare_parameter\("enable_usage_mode_command",\s*False\)', "TCP bridge default disables usage-mode command")
 
     require(setup, r'nav2_startup_gate\s*=\s*m20pro_navigation\.nav2_startup_gate:main', "Nav2 startup gate is installed")
@@ -131,8 +126,6 @@ def main() -> int:
     )
     require(real_full, r'M20PRO_LIDAR2_TOPIC:-/LIDAR/POINTS2', "real full startup knows the optional second lidar input")
     require(real_full, r'COMMON_ARGS\+=\(backup_cloud_topic:="\$\{BACKUP_CLOUD_TOPIC\}"\)', "real full startup conditionally passes backup cloud topic")
-    require(wrapper_launch, r'DeclareLaunchArgument\("backup_cloud_topic"', "wrapper launch declares backup cloud topic")
-    require(wrapper_launch, r'"backup_cloud_topic":\s*backup_cloud_topic', "wrapper launch forwards backup cloud topic")
     require(launch, r'DeclareLaunchArgument\("backup_cloud_topic"', "real launch declares backup cloud topic")
     require(launch, r'"backup_cloud_topic":\s*backup_cloud_topic', "real launch configures pointcloud fusion backup topic")
     require(

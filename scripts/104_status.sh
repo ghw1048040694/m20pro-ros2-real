@@ -6,7 +6,7 @@ df -h /home/user 2>/dev/null || df -h .
 
 echo
 echo "[104_status] web/real processes:"
-ps -eo pid,args | awk '/web_dashboard|m20pro_real_full|m20pro.launch.py/ && !/awk/ {print}'
+ps -eo pid,args | awk '/web_dashboard|m20pro_real_full|m20pro_real.launch.py/ && !/awk/ {print}'
 
 echo
 echo "[104_status] listening on 8080:"

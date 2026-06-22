@@ -4361,7 +4361,7 @@ class WebDashboardNode(Node):
         launch_lines = [
             line
             for line in output.splitlines()
-            if "m20pro_bringup" in line and ("m20pro.launch.py" in line or "m20pro_real_full.sh" in line)
+            if "m20pro_bringup" in line and ("m20pro_real.launch.py" in line or "m20pro_real_full.sh" in line)
         ]
         joined = "\n".join(launch_lines)
         if "enable_axis_command:=true" in joined or "m20pro_real_full.sh move" in joined:
