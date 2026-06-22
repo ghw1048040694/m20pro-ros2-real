@@ -111,6 +111,16 @@ def main() -> int:
     )
     require(
         web,
+        r'\["scp",\s*"-r",\s*\*ssh_options,\s*remote,\s*str\(dest\)\]',
+        "web map import scp uses the same root-compatible SSH options",
+    )
+    require(
+        web,
+        r'def _rewrite_imported_map_image_path',
+        "web map import rewrites 106 absolute image paths for 104",
+    )
+    require(
+        web,
         r'pub\.get_subscription_count\(\)',
         "106 initialpose publish waits for a subscriber before sending",
     )

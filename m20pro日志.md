@@ -1,10 +1,59 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-06-22 18:35 CST
+Last updated: 2026-06-22 20:58 CST
 
 This file is maintained by Codex as the local M20 Pro project memory for future ChatGPT review. It records the current architecture, important decisions, recent changes, verification status, and next steps.
 
 Naming note: this file replaced the previous local-only `codex.md`. Going forward, maintain this file, `m20pro日志.md`, after every meaningful project change or field diagnosis.
+
+## 2026-06-22 workstation static mapping and relocalization test
+
+- Goal:
+  - test the factory 106 mapping, web map import, and web relocalization chain at the workstation without moving the robot;
+  - this is a chain test, not a navigation-quality map test.
+- Initial state before the test:
+  - 104 full real service was active;
+  - relay lidar and `/scan` were fresh;
+  - 106 active map was `/var/opt/robot/data/maps/map-20260520-205606`.
+- Static mapping:
+  - started 106 `drmap mapping -s -n m20pro_desk_20260622_204142` through SSH with `sudo -S`;
+  - waited about 20 s without moving the robot;
+  - stopped/saved mapping with `drmap stop_mapping`;
+  - 106 saved `/var/opt/robot/data/maps/m20pro_desk_20260622_204142-20260622-204702`;
+  - map products existed: `occ_grid.yaml`, `occ_grid.pgm`, `full_cloud.pcd`, and block files.
+- Import issue found and fixed:
+  - first web import failed because the backend used plain `scp -r user@10.21.31.106:...` from the root-run web service;
+  - root did not have the expected SSH host/key context, so scp failed with `Host key verification failed`;
+  - fixed map import to use the same root-compatible SSH options as web relocalization:
+    `/home/user/.ssh/id_ed25519` and `/home/user/.ssh/known_hosts`;
+  - fixed imported YAML rewriting so a 106 absolute `image:` path becomes the local image filename on 104.
+- Import verification:
+  - web import then succeeded;
+  - new 104 map record: `map_1782132814412_4ee634ca`;
+  - map name: `m20pro_desk_20260622_204142`;
+  - map size: `34 x 63`, resolution `0.1 m`;
+  - PCD derived output succeeded: `942` source points -> `14 x 26` height grid.
+- Relocalization test on the static map:
+  - sent web `/api/localization/initialpose` twice without moving the robot:
+    - first pose: `x=0.0, y=0.0, yaw=0.0`;
+    - second pose: `x=-0.02, y=-0.03, yaw=0.04`;
+  - both calls reached 106 successfully:
+    - `factory_initialpose.ok=true`;
+    - `ssh_identity_file=/home/user/.ssh/id_ed25519`;
+    - `subscriptions=1`;
+  - both calls failed to make factory localization accept the pose:
+    - `factory_pose_accepted=false`;
+    - `localization_ok` stayed false;
+    - 104 logs showed repeated vendor `Location=1` poses, which `tcp_bridge` correctly ignored as unlocalized.
+- Interpretation:
+  - the frontend/SSH/106 `/initialpose` path is now proven to send the request instead of hanging;
+  - the static 20 s workstation map is too small/weak for factory localization to converge reliably;
+  - this failure is now a localization/map-quality result, not a frontend transport failure.
+- Cleanup:
+  - restored 106 active map to `/var/opt/robot/data/maps/map-20260520-205606`;
+  - restarted 106 `localization` and `planner`;
+  - selected `builtin_F20` again on 104;
+  - 104 state recovered to `localization_ok=true`, `location=0`, and fresh `/scan`.
 
 ## 2026-06-22 field frontend failure postmortem and hardening
 

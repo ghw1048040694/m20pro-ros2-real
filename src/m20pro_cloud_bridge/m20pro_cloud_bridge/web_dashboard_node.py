@@ -4619,20 +4619,27 @@ class WebDashboardNode(Node):
                 command_output = ""
             else:
                 remote = f"{factory_user}@{factory_host}:{source.rstrip('/')}"
+                ssh_options, used_identity, used_known_hosts = self._factory_ssh_file_options(8)
+                command = ["scp", "-r", *ssh_options, remote, str(dest)]
                 result = subprocess.run(
-                    ["scp", "-r", remote, str(dest)],
+                    command,
                     text=True,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     timeout=timeout,
                     check=False,
                 )
-                command_text = " ".join(["scp", "-r", remote, str(dest)])
+                command_text = " ".join(shlex.quote(item) for item in command)
                 command_output = result.stdout or ""
                 if result.returncode != 0:
                     return self._error(
                         "从 106 拉取地图失败，请确认 104 到 106 的 SSH/scp 可用",
-                        {"command": command_text, "output": command_output},
+                        {
+                            "command": command_text,
+                            "output": command_output,
+                            "ssh_identity_file": used_identity,
+                            "ssh_known_hosts_file": used_known_hosts,
+                        },
                     )
         except Exception as exc:
             return self._error("从 106 拉取地图失败", {"error": str(exc)})
@@ -4643,6 +4650,7 @@ class WebDashboardNode(Node):
                 "地图已拉取，但没有找到 occ_grid.yaml/map.yaml/jueying.yaml",
                 {"directory": str(dest), "command": command_text, "output": command_output},
             )
+        self._rewrite_imported_map_image_path(yaml_path)
 
         map_record = {
             "id": _new_id("map"),
@@ -4676,6 +4684,42 @@ class WebDashboardNode(Node):
             "command": command_text,
             "output": command_output,
         }
+
+    def _factory_ssh_file_options(self, connect_timeout_s: int = 5) -> Tuple[List[str], str, str]:
+        ssh_identity = str(self.get_parameter("factory_initialpose_ssh_identity_file").value).strip()
+        ssh_known_hosts = str(self.get_parameter("factory_initialpose_ssh_known_hosts_file").value).strip()
+        options = [
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            f"ConnectTimeout={int(connect_timeout_s)}",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+        ]
+        used_identity = ""
+        used_known_hosts = ""
+        if ssh_identity and FsPath(ssh_identity).exists():
+            used_identity = ssh_identity
+            options.extend(["-i", ssh_identity, "-o", "IdentitiesOnly=yes"])
+        if ssh_known_hosts and FsPath(ssh_known_hosts).exists():
+            used_known_hosts = ssh_known_hosts
+            options.extend(["-o", f"UserKnownHostsFile={ssh_known_hosts}"])
+        return options, used_identity, used_known_hosts
+
+    def _rewrite_imported_map_image_path(self, yaml_path: FsPath) -> None:
+        try:
+            with yaml_path.open("r", encoding="utf-8") as file:
+                info = yaml.safe_load(file) or {}
+            image_value = str(info.get("image") or "").strip()
+            if not image_value:
+                return
+            local_image = yaml_path.parent / FsPath(image_value).name
+            if local_image.exists() and image_value != local_image.name:
+                info["image"] = local_image.name
+                with yaml_path.open("w", encoding="utf-8") as file:
+                    yaml.safe_dump(info, file, allow_unicode=True, sort_keys=False)
+        except Exception as exc:
+            self.get_logger().warning(f"failed to rewrite imported map image path: {exc}")
 
     def _generate_map_derived(
         self,
@@ -5544,24 +5588,7 @@ class WebDashboardNode(Node):
         payload = f"{{ {source_command}; }} && {python_command}" if source_command else python_command
         remote_command = f"bash -lc {shlex.quote(payload)}"
         target = f"{factory_user}@{factory_host}" if factory_user else factory_host
-        ssh_identity = str(self.get_parameter("factory_initialpose_ssh_identity_file").value).strip()
-        ssh_known_hosts = str(self.get_parameter("factory_initialpose_ssh_known_hosts_file").value).strip()
-        ssh_options = [
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=5",
-            "-o",
-            "StrictHostKeyChecking=accept-new",
-        ]
-        used_identity = ""
-        used_known_hosts = ""
-        if ssh_identity and FsPath(ssh_identity).exists():
-            used_identity = ssh_identity
-            ssh_options.extend(["-i", ssh_identity, "-o", "IdentitiesOnly=yes"])
-        if ssh_known_hosts and FsPath(ssh_known_hosts).exists():
-            used_known_hosts = ssh_known_hosts
-            ssh_options.extend(["-o", f"UserKnownHostsFile={ssh_known_hosts}"])
+        ssh_options, used_identity, used_known_hosts = self._factory_ssh_file_options(5)
         command = [
             "ssh",
             *ssh_options,
