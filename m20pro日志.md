@@ -6710,3 +6710,204 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
   - shell syntax checks for root scripts and package scripts;
   - `python3 scripts/check_preflight_policy.py`.
 - The sibling sim project is `/home/fabu/桌面/M20Pro/m20pro_sim_ros2_ws`.
+
+## 2026-06-22 current real navigation and obstacle-avoidance architecture
+
+This section is a stable architecture note for future AI assistants and for interview/project review. It summarizes the current real-robot navigation stack as it exists after the real/sim split.
+
+### One-line architecture
+
+The real stack converts factory lidar pointclouds into a lightweight 2D `/scan`, feeds `/scan` into Nav2 local/global costmaps, uses Navfn A* for global planning and DWB for local trajectory sampling/control, then sends `/cmd_vel` through the 103 TCP bridge.
+
+### Runtime data flow
+
+```text
+/LIDAR/POINTS
+  -> m20pro_lidar_relay
+     - subscribes with factory FastDDS profile
+     - down-samples by stride
+     - limits publish rate
+/m20pro/lidar_points_relay
+  -> m20pro_pointcloud_fusion
+     - optional backup input: /m20pro/lidar_points2_relay
+     - converts pointcloud to 360-degree LaserScan
+/scan
+  -> Nav2 local_costmap and global_costmap obstacle layers
+  -> Nav2 planner/controller
+/cmd_vel
+  -> m20pro_tcp_bridge
+  -> 103 robot TCP motion interface
+```
+
+### Lidar relay and pointcloud reduction
+
+- Current relay node: `src/m20pro_navigation/m20pro_navigation/lidar_relay_node.py`.
+- Purpose:
+  - avoid making every downstream node subscribe directly to heavy factory `/LIDAR/POINTS`;
+  - reduce DDS traffic, memory copies, CPU pressure, and `/dev/shm` stress;
+  - keep one long-lived relay as the controlled bridge between factory DDS and project DDS consumers.
+- Current method:
+  - this is not clustering;
+  - it is stride sampling plus rate limiting;
+  - example: if input cloud has about 48000 points and `max_output_points=12000`, stride is about 4, so roughly every fourth point is copied.
+- Current default limits:
+  - `M20PRO_LIDAR_RELAY_MAX_OUTPUT_POINTS=12000`;
+  - `M20PRO_LIDAR_RELAY_MIN_PUBLISH_INTERVAL_S=0.1`;
+  - relay output is therefore capped around 12000 points per message and about 10 Hz.
+- Why not clustering here:
+  - the navigation chain needs nearest obstacle distance per direction, not object identities;
+  - DBSCAN/Euclidean clustering costs more CPU and has sensitive parameters;
+  - clustering can accidentally remove thin poles, edges, legs, or stair-related geometry;
+  - stride sampling is cheap, predictable, and mainly solves the current stability bottleneck.
+
+### Pointcloud to LaserScan fusion
+
+- Current fusion node: `src/m20pro_navigation/m20pro_navigation/pointcloud_fusion.py`.
+- Current real config: `src/m20pro_bringup/config/m20pro_real.yaml`.
+- Main parameters:
+  - `input_cloud_topic: /m20pro/lidar_points_relay`;
+  - `backup_cloud_topic: /m20pro/lidar_points2_relay`;
+  - `output_scan_topic: /scan`;
+  - `min_angle: -3.14159`;
+  - `max_angle: 3.14159`;
+  - `angle_increment: 0.0174533`, about 1 degree;
+  - `min_range: 0.2`;
+  - `max_range: 10.0`;
+  - `height_min: -0.25`;
+  - `height_max: 0.60`;
+  - `robot_radius: 0.28`;
+  - `publish_rate_hz: 10.0`;
+  - `max_points_per_cloud: 6000`;
+  - `min_cloud_interval_s: 0.05`;
+  - `publish_on_cloud_update: false`.
+- Actual point filtering meaning:
+  - points below `height_min` or above `height_max` do not enter `/scan`;
+  - points too near/far do not enter `/scan`;
+  - because `robot_radius=0.28`, the effective near filter is about 0.28 m, not 0.2 m;
+  - accepted points are projected into 2D polar bins;
+  - each angle bin keeps the nearest obstacle distance.
+- If both primary and second lidar relays are fresh:
+  - fusion computes primary and backup scan ranges separately;
+  - final `/scan` takes per-angle nearest obstacle by `np.minimum`;
+  - if the second lidar is absent, startup continues with the primary lidar only.
+
+### Nav2 global planning
+
+- Config file: `src/m20pro_bringup/config/nav2_params_real.yaml`.
+- Planner:
+  - `planner_plugins: ["GridBased"]`;
+  - `plugin: nav2_navfn_planner/NavfnPlanner`;
+  - `use_astar: true`;
+  - `allow_unknown: true`;
+  - `tolerance: 0.5`.
+- Meaning:
+  - global planning is grid-based 2D planning over the map/global costmap;
+  - A* computes a path from current pose to the goal;
+  - this layer answers "where should the robot go globally?" rather than doing close-range collision control.
+
+### Nav2 local controller
+
+- Controller:
+  - `plugin: dwb_core::DWBLocalPlanner`;
+  - `controller_frequency: 20.0`;
+  - `max_vel_x: 0.55`;
+  - `max_vel_theta: 1.10`;
+  - `vx_samples: 16`;
+  - `vtheta_samples: 28`;
+  - `sim_time: 1.2`.
+- DWB behavior:
+  - samples candidate velocity commands;
+  - simulates short future trajectories;
+  - scores them with critics;
+  - chooses the best valid `/cmd_vel`.
+- Current critics:
+  - `RotateToGoal`;
+  - `Oscillation`;
+  - `BaseObstacle`;
+  - `GoalAlign`;
+  - `PathAlign`;
+  - `PathDist`;
+  - `GoalDist`.
+- Important interpretation:
+  - DWB is a local trajectory sampler/scorer;
+  - it does not "understand" objects;
+  - it uses local/global costmap costs to avoid obstacles while trying to stay near the global path and goal direction.
+
+### Local costmap
+
+- Local costmap parameters:
+  - `rolling_window: true`;
+  - `width: 5`;
+  - `height: 5`;
+  - `resolution: 0.05`;
+  - `robot_radius: 0.25`;
+  - `plugins: ["obstacle_layer", "inflation_layer"]`.
+- Meaning:
+  - rolling 5 m x 5 m window centered around the robot;
+  - about 2.5 m in every direction from the robot;
+  - 5 cm grid resolution;
+  - roughly 100 x 100 cells.
+- Obstacle layer:
+  - source topic: `/scan`;
+  - `data_type: LaserScan`;
+  - `obstacle_range: 3.0`;
+  - `raytrace_range: 3.5`;
+  - `observation_persistence: 0.3`;
+  - `clearing: true`;
+  - `marking: true`.
+- Inflation layer:
+  - `inflation_radius: 0.40`;
+  - `cost_scaling_factor: 6.0`.
+- Practical meaning:
+  - `/scan` itself can represent obstacles up to 10 m;
+  - local costmap only keeps a 5 m x 5 m local window;
+  - obstacle marking is mainly within 3 m;
+  - obstacles are expanded by about 40 cm so DWB avoids driving too close.
+
+### Global costmap
+
+- Global costmap plugins:
+  - `static_layer`;
+  - `obstacle_layer`;
+  - `inflation_layer`.
+- Current global costmap also consumes `/scan`:
+  - `obstacle_range: 3.0`;
+  - `raytrace_range: 3.5`;
+  - `observation_persistence: 0.3`;
+  - `inflation_radius: 0.40`.
+- Meaning:
+  - static map gives the known building layout;
+  - `/scan` can add short-lived dynamic obstacle marks;
+  - Navfn can re-plan around nearby dynamic obstacles that enter the global costmap.
+
+### Startup gate and readiness logic
+
+- Nav2 is launched with `autostart: False`.
+- `m20pro_nav2_startup_gate` waits for:
+  - `/map`;
+  - fresh `/scan`;
+  - `localization_ok=true`;
+  - valid `/m20pro_tcp_bridge/map_pose`;
+  - usable TF between `map` and `m20pro_base_link`.
+- Purpose:
+  - avoid starting Nav2/costmaps while the robot is still unlocalized;
+  - reduce misleading self-check failures;
+  - make missing `/scan` a real fault, not something explained away by workstation testing.
+
+### Interview-ready explanation
+
+If asked "How does your robot navigate and avoid obstacles?", the concise answer is:
+
+> We take the factory 3D lidar pointcloud, relay it through a long-lived project node, down-sample and rate-limit it to reduce DDS and CPU pressure, then convert it into a 360-degree LaserScan. Nav2 uses this `/scan` in local and global costmaps. Global planning is Navfn with A*, while local control uses DWB to sample and score candidate trajectories against the costmap, path alignment, goal alignment, oscillation, and obstacle costs. The local costmap is a 5 m by 5 m rolling window at 5 cm resolution, with 3 m obstacle marking and 40 cm inflation. We also added a startup gate so Nav2 only activates after map, scan, localization, pose, and TF are ready.
+
+If asked "Why not cluster the pointcloud?", the answer is:
+
+> For the Nav2 costmap path, clustering is not necessary because the controller mainly needs nearest obstacle distance by direction, not object identity. Clustering would add CPU cost and parameter sensitivity, and could accidentally remove thin obstacles. We therefore use cheap stride sampling and LaserScan binning first. If future perception needs object-level reasoning, clustering should be a separate perception branch, not the base safety chain.
+
+If asked "What was the engineering difficulty?", the answer is:
+
+> The hard part was not just running Nav2. The factory lidar topic was large and DDS-sensitive on 104, sometimes visible in the graph but not delivering samples to project subscribers. We stabilized the chain by introducing a long-lived lidar relay, reducing pointcloud load, adding diagnostics, making `/scan` the primary health signal, and gating Nav2 startup until perception and localization were actually ready.
+
+If asked "What would you optimize next?", the answer is:
+
+> The next optimization is not generic Python multi-threading. Better options are earlier reduction, smarter angle-bin compression before publishing, reducing unused far-range work for local avoidance, and eventually moving pointcloud-to-scan fusion to C++ if profiling shows Python/Numpy is still the bottleneck.
