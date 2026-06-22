@@ -29,6 +29,7 @@ setup(
             "floor_goal_bridge = m20pro_navigation.floor_goal_bridge:main",
             "initialpose_3d_adapter = m20pro_navigation.initialpose_3d_adapter:main",
             "lidar_relay = m20pro_navigation.lidar_relay_node:main",
+            "nav2_startup_gate = m20pro_navigation.nav2_startup_gate:main",
             "dynamic_obstacle_simulator = m20pro_navigation.dynamic_obstacle_simulator:main",
             "dual_lidar_simulator = m20pro_navigation.dual_lidar_simulator:main",
             "pointcloud_fusion = m20pro_navigation.pointcloud_fusion:main",

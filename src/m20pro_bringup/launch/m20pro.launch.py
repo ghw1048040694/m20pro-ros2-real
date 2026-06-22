@@ -25,6 +25,7 @@ def generate_launch_description():
     nav2_params_file = LaunchConfiguration("nav2_params_file")
     real_nav2_params_file = LaunchConfiguration("real_nav2_params_file")
     cloud_topic = LaunchConfiguration("cloud_topic")
+    backup_cloud_topic = LaunchConfiguration("backup_cloud_topic")
     enable_axis_command = LaunchConfiguration("enable_axis_command")
     enable_initialpose_relocalization = LaunchConfiguration("enable_initialpose_relocalization")
     enable_initialpose_3d_adapter = LaunchConfiguration("enable_initialpose_3d_adapter")
@@ -95,6 +96,7 @@ def generate_launch_description():
             default_value=os.path.join(bringup_share, "config", "nav2_params_real.yaml"),
         ),
         DeclareLaunchArgument("cloud_topic", default_value="/LIDAR/POINTS"),
+        DeclareLaunchArgument("backup_cloud_topic", default_value=""),
         DeclareLaunchArgument("enable_axis_command", default_value="false"),
         DeclareLaunchArgument(
             "enable_initialpose_relocalization",
@@ -202,6 +204,7 @@ def generate_launch_description():
                 "params_file": real_params_file,
                 "nav2_params_file": real_nav2_params_file,
                 "cloud_topic": cloud_topic,
+                "backup_cloud_topic": backup_cloud_topic,
                 "enable_axis_command": enable_axis_command,
                 "enable_initialpose_relocalization": enable_initialpose_relocalization,
                 "enable_initialpose_3d_adapter": enable_initialpose_3d_adapter,

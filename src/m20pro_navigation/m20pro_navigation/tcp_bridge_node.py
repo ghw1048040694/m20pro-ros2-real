@@ -43,7 +43,10 @@ class M20TcpBridge(Node):
         self.declare_parameter("enable_gait_command", True)
         self.declare_parameter("gait_command_topic", "/m20pro/gait_command")
         self.declare_parameter("gait_flat_param", 1)
+        self.declare_parameter("gait_assist_param", 12)
         self.declare_parameter("gait_stair_param", 14)
+        self.declare_parameter("enable_usage_mode_command", False)
+        self.declare_parameter("usage_mode_command_topic", "/m20pro/usage_mode_command")
         self.declare_parameter("enable_initialpose_relocalization", True)
         self.declare_parameter("enable_initialpose_3d_relocalization", True)
         self.declare_parameter("initialpose_topic", "/initialpose")
@@ -74,6 +77,7 @@ class M20TcpBridge(Node):
         self.raw_pub = self.create_publisher(String, "~/raw_status_json", 10)
         self.relocalization_pub = self.create_publisher(String, "~/relocalization_result", 10)
         self.gait_result_pub = self.create_publisher(String, "~/gait_result", 10)
+        self.usage_mode_result_pub = self.create_publisher(String, "~/usage_mode_result", 10)
 
         self.create_subscription(Twist, "/cmd_vel", self._on_cmd_vel, 10)
         if bool(self.get_parameter("enable_gait_command").value):
@@ -81,6 +85,13 @@ class M20TcpBridge(Node):
                 String,
                 str(self.get_parameter("gait_command_topic").value),
                 self._on_gait_command,
+                10,
+            )
+        if bool(self.get_parameter("enable_usage_mode_command").value):
+            self.create_subscription(
+                String,
+                str(self.get_parameter("usage_mode_command_topic").value),
+                self._on_usage_mode_command,
                 10,
             )
         if bool(self.get_parameter("enable_native_goal_bridge").value):
@@ -168,6 +179,34 @@ class M20TcpBridge(Node):
         msg = String()
         msg.data = text
         self.gait_result_pub.publish(msg)
+
+    def _on_usage_mode_command(self, msg: String) -> None:
+        mode = self._resolve_usage_mode(msg.data)
+        if mode is None:
+            text = "failed: unknown usage mode command '%s'" % msg.data
+            self.get_logger().warning(text)
+            self._publish_usage_mode_result(text)
+            return
+        if not self._ensure_connected():
+            self._publish_usage_mode_result("failed: tcp connection unavailable")
+            return
+
+        try:
+            self.client.request(1101, 5, {"Mode": mode}, wait_response=False)
+        except OSError as exc:
+            text = "failed: %s" % exc
+            self.get_logger().warning("usage mode command failed: %s" % exc)
+            self._publish_usage_mode_result(text)
+            return
+
+        text = "sent: label=%s Mode=%d" % (msg.data.strip(), mode)
+        self.get_logger().info("vendor usage mode command sent: %s" % text)
+        self._publish_usage_mode_result(text)
+
+    def _publish_usage_mode_result(self, text: str) -> None:
+        msg = String()
+        msg.data = text
+        self.usage_mode_result_pub.publish(msg)
 
     def _on_initial_pose(self, msg: PoseWithCovarianceStamped) -> None:
         """Forward RViz 2D Pose Estimate to the vendor localization reset API."""
@@ -409,7 +448,12 @@ class M20TcpBridge(Node):
         loc.data = int(items.get("Location", 1)) == 0
         self.loc_pub.publish(loc)
         status = String()
-        status.data = "location=%s obstacle=%s" % (items.get("Location"), items.get("ObsState"))
+        status.data = "location=%s obstacle=%s usage_mode=%s ooa=%s" % (
+            items.get("Location"),
+            items.get("ObsState"),
+            items.get("ControlUsageMode"),
+            items.get("OOA"),
+        )
         self.status_pub.publish(status)
         raw = String()
         raw.data = str(items)
@@ -489,6 +533,7 @@ class M20TcpBridge(Node):
             pass
 
         flat = int(self.get_parameter("gait_flat_param").value)
+        assist = int(self.get_parameter("gait_assist_param").value)
         stair = int(self.get_parameter("gait_stair_param").value)
         mapping = {
             "flat": flat,
@@ -496,12 +541,53 @@ class M20TcpBridge(Node):
             "basic": flat,
             "normal": flat,
             "stand": flat,
+            "assist": assist,
+            "assisted": assist,
+            "agile": assist,
+            "rl": assist,
+            "rl_gait": assist,
+            "reinforcement": assist,
+            "terrain": assist,
+            "all_terrain": assist,
             "stair": stair,
             "stairs": stair,
             "stair_up": stair,
             "stair_down": stair,
             "upstairs": stair,
             "downstairs": stair,
+        }
+        return mapping.get(normalized)
+
+    def _resolve_usage_mode(self, command: str) -> Optional[int]:
+        text = command.strip()
+        if not text:
+            return None
+        normalized = text.lower().replace("-", "_").replace(" ", "_")
+        for prefix in ("mode=", "usage_mode=", "controlusagemode="):
+            if normalized.startswith(prefix):
+                normalized = normalized.split("=", 1)[1].strip()
+                break
+        try:
+            return int(normalized, 0)
+        except ValueError:
+            pass
+        mapping = {
+            "normal": 0,
+            "regular": 0,
+            "manual": 0,
+            "axis": 0,
+            "teleop": 0,
+            "navigation": 1,
+            "nav": 1,
+            "task": 1,
+            "assist": 2,
+            "assisted": 2,
+            "aux": 2,
+            "auxiliary": 2,
+            "rl": 2,
+            "rl_gait": 2,
+            "terrain": 2,
+            "all_terrain": 2,
         }
         return mapping.get(normalized)
 

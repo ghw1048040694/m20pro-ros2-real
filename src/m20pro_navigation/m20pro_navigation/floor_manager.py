@@ -65,6 +65,7 @@ class FloorManager(Node):
         self.declare_parameter("stair_entry_tolerance_m", 0.8)
         self.declare_parameter("stair_traversal_duration_s", 6.0)
         self.declare_parameter("flat_gait_label", "flat")
+        self.declare_parameter("publish_flat_gait_before_nav", True)
         self.declare_parameter("stair_up_gait_label", "stair_up")
         self.declare_parameter("stair_down_gait_label", "stair_down")
         self.declare_parameter("post_switch_goal_delay_s", 1.0)
@@ -378,6 +379,7 @@ class FloorManager(Node):
         if target_floor == self.current_floor:
             self.active_floor_mission = True
             self._publish_stair_status("same_floor_goal target_floor=%s" % target_floor)
+            self._publish_flat_gait("same_floor_goal")
             self._send_nav_goal(goal, "floor_goal")
             return
 
@@ -853,6 +855,7 @@ class FloorManager(Node):
                 self._clear_floor_mission_if_needed("floor_goal")
             return
         self._publish_stair_status("navigating_to_floor_goal floor=%s" % self.current_floor)
+        self._publish_flat_gait("floor_goal")
         self._send_nav_goal(goal, "floor_goal")
 
     def _clear_floor_mission_if_needed(self, label: str) -> None:
@@ -1081,6 +1084,7 @@ class FloorManager(Node):
                 metadata["model"],
             )
         )
+        self._publish_flat_gait("stair_entry")
         self._send_nav_goal(stair_goal, "stair_entry")
         return True
 
@@ -1376,6 +1380,15 @@ class FloorManager(Node):
         msg.data = label
         self.gait_command_pub.publish(msg)
         self.get_logger().info("gait command: %s" % label)
+
+    def _publish_flat_gait(self, reason: str) -> None:
+        if not bool(self.get_parameter("publish_flat_gait_before_nav").value):
+            return
+        label = str(self.get_parameter("flat_gait_label").value).strip()
+        if not label:
+            return
+        self._publish_gait(label)
+        self._publish_stair_status("flat_gait_requested label=%s reason=%s" % (label, reason))
 
     def _publish_stair_status(self, status: str) -> None:
         msg = String()

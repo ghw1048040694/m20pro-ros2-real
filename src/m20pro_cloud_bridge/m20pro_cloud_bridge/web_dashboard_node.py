@@ -626,7 +626,7 @@ INDEX_HTML = r"""<!doctype html>
               <div id="stair" class="value">-</div>
             </div>
             <div class="tile">
-              <div class="label">步态指令</div>
+              <div class="label">模式/步态</div>
               <div id="gait" class="value">-</div>
             </div>
             <div class="tile wide">
@@ -1030,6 +1030,29 @@ INDEX_HTML = r"""<!doctype html>
       if (age < 1.0) return "<1s";
       return `${age.toFixed(0)}s`;
     }
+    function formatUsageMode(value) {
+      if (value === null || value === undefined || value === "") return null;
+      const map = {
+        0: "常规",
+        1: "导航",
+        2: "辅助"
+      };
+      const key = Number(value);
+      const label = Number.isFinite(key) && Object.prototype.hasOwnProperty.call(map, key) ? map[key] : String(value);
+      return `使用模式 ${label}`;
+    }
+    function formatOoa(value) {
+      if (value === null || value === undefined || value === "") return null;
+      const map = {
+        0: "未启动",
+        1: "空闲中",
+        2: "未触发避障",
+        3: "主动避障中"
+      };
+      const key = Number(value);
+      const label = Number.isFinite(key) && Object.prototype.hasOwnProperty.call(map, key) ? map[key] : String(value);
+      return `辅助避障 ${label}`;
+    }
     function setLog(id, payload) {
       $(id).textContent = typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
     }
@@ -1067,8 +1090,8 @@ INDEX_HTML = r"""<!doctype html>
           for (const item of items) {
             const row = document.createElement("div");
             row.className = "check-row";
-            const statusClass = item.status === "ok" ? "ok" : (item.status === "warn" ? "warn" : "fail");
-            const statusText = item.status === "ok" ? "通过" : (item.status === "warn" ? "提醒" : "失败");
+            const statusClass = item.status === "ok" ? "ok" : (item.status === "warn" ? "warn" : (item.status === "info" ? "ok" : "fail"));
+            const statusText = item.status === "ok" ? "通过" : (item.status === "warn" ? "提醒" : (item.status === "info" ? "信息" : "失败"));
             row.innerHTML = `
               <div class="check-status ${statusClass}">${statusText}</div>
               <div><strong>${item.label || item.key}</strong><div class="small">${item.message || ""}</div></div>
@@ -1106,7 +1129,7 @@ INDEX_HTML = r"""<!doctype html>
       if ($("preflightSummary")) $("preflightSummary").textContent = "基础自检中（工位/未重定位时只确认基础链路）...";
       if ($("taskPreflightSummary")) $("taskPreflightSummary").textContent = "基础自检中（工位/未重定位时只确认基础链路）...";
       try {
-        const payload = await apiWithTimeout("POST", "/api/preflight/run", {mode: "move", site: "workstation", wait: false}, 10000);
+        const payload = await apiWithTimeout("POST", "/api/preflight/run", {mode: "move", site: "auto", wait: false}, 10000);
         const result = payload.preflight || payload;
         renderPreflight(result);
         if (payload.running || (result && result.running)) await pollPreflightUntilDone();
@@ -1908,7 +1931,17 @@ INDEX_HTML = r"""<!doctype html>
       state.latest = s;
       $("floor").textContent = text(s.floor);
       $("stair").textContent = text(s.stair_status);
-      $("gait").textContent = text(s.gait_command);
+      const gaitParts = [];
+      if (s.usage_mode_result) gaitParts.push(text(s.usage_mode_result));
+      if (s.gait_result) gaitParts.push(text(s.gait_result));
+      else if (s.gait_command) gaitParts.push(text(s.gait_command));
+      const usageMode = s.navigation_status_parsed ? s.navigation_status_parsed.usage_mode : null;
+      const ooa = s.navigation_status_parsed ? s.navigation_status_parsed.ooa : null;
+      const usageModeText = formatUsageMode(usageMode);
+      const ooaText = formatOoa(ooa);
+      if (usageModeText) gaitParts.push(usageModeText);
+      if (ooaText) gaitParts.push(ooaText);
+      $("gait").textContent = gaitParts.length ? gaitParts.join(" / ") : "-";
       if (s.pose) {
         const yawDeg = Number.isFinite(Number(s.pose.display_yaw_deg)) ? s.pose.display_yaw_deg : s.pose.yaw_deg;
         const rawYaw = fmtNumber(s.pose.yaw_deg, 0);
@@ -2918,8 +2951,11 @@ class WebDashboardNode(Node):
             "floor": None,
             "stair_status": None,
             "gait_command": None,
+            "gait_result": None,
+            "usage_mode_result": None,
             "localization_ok": None,
             "navigation_status": None,
+            "navigation_status_parsed": None,
             "battery": None,
             "pose": None,
             "path": {"version": 0, "points": []},
@@ -2999,6 +3035,8 @@ class WebDashboardNode(Node):
         self.declare_parameter("current_floor_topic", "/m20pro/current_floor")
         self.declare_parameter("stair_status_topic", "/m20pro/stair_status")
         self.declare_parameter("gait_command_topic", "/m20pro/gait_command")
+        self.declare_parameter("gait_result_topic", "/m20pro_tcp_bridge/gait_result")
+        self.declare_parameter("usage_mode_result_topic", "/m20pro_tcp_bridge/usage_mode_result")
         self.declare_parameter("localization_ok_topic", "/m20pro_tcp_bridge/localization_ok")
         self.declare_parameter("navigation_status_topic", "/m20pro_tcp_bridge/navigation_status")
         self.declare_parameter("battery_topic", "/BATTERY_DATA")
@@ -3043,6 +3081,7 @@ class WebDashboardNode(Node):
         self.declare_parameter("max_path_points", 800)
         self.declare_parameter("max_events", 30)
         self.declare_parameter("preflight_topic_timeout_s", 5.0)
+        self.declare_parameter("preflight_settle_wait_s", 6.0)
         self.declare_parameter("preflight_min_battery_level", 20)
 
     def _topic(self, name: str) -> str:
@@ -3268,6 +3307,8 @@ class WebDashboardNode(Node):
         self.create_subscription(String, self._topic("current_floor_topic"), self._on_current_floor, 10)
         self.create_subscription(String, self._topic("stair_status_topic"), self._on_stair_status, 10)
         self.create_subscription(String, self._topic("gait_command_topic"), self._on_gait_command, 10)
+        self.create_subscription(String, self._topic("gait_result_topic"), self._on_gait_result, 10)
+        self.create_subscription(String, self._topic("usage_mode_result_topic"), self._on_usage_mode_result, 10)
         self.create_subscription(Bool, self._topic("localization_ok_topic"), self._on_localization_ok, 10)
         self.create_subscription(String, self._topic("navigation_status_topic"), self._on_navigation_status, 10)
         if BatteryData is not None:
@@ -3325,6 +3366,16 @@ class WebDashboardNode(Node):
             self._state["gait_command"] = msg.data
             self._mark_topic("gait_command")
 
+    def _on_gait_result(self, msg: String) -> None:
+        with self._lock:
+            self._state["gait_result"] = msg.data
+            self._mark_topic("gait_result")
+
+    def _on_usage_mode_result(self, msg: String) -> None:
+        with self._lock:
+            self._state["usage_mode_result"] = msg.data
+            self._mark_topic("usage_mode_result")
+
     def _on_localization_ok(self, msg: Bool) -> None:
         with self._lock:
             self._state["localization_ok"] = bool(msg.data)
@@ -3333,7 +3384,26 @@ class WebDashboardNode(Node):
     def _on_navigation_status(self, msg: String) -> None:
         with self._lock:
             self._state["navigation_status"] = msg.data
+            self._state["navigation_status_parsed"] = self._parse_navigation_status(msg.data)
             self._mark_topic("navigation_status")
+
+    @staticmethod
+    def _parse_navigation_status(text: str) -> Dict[str, Any]:
+        parsed: Dict[str, Any] = {}
+        for token in str(text or "").replace(",", " ").split():
+            key, sep, value = token.partition("=")
+            if not sep or not key:
+                continue
+            normalized_key = key.strip().lower()
+            raw_value = value.strip()
+            if raw_value in ("", "None", "none", "null"):
+                parsed[normalized_key] = None
+                continue
+            try:
+                parsed[normalized_key] = int(raw_value, 0)
+            except ValueError:
+                parsed[normalized_key] = raw_value
+        return parsed
 
     def _on_battery(self, msg: Any) -> None:
         batteries = []
@@ -3854,8 +3924,10 @@ class WebDashboardNode(Node):
         mode = str(payload.get("mode") or "move").strip()
         if mode not in ("move", "shadow"):
             mode = "move"
-        site = str(payload.get("site") or "workstation").strip().lower()
-        workstation_mode = site in ("workstation", "bench", "desk", "office", "charging")
+        site = str(payload.get("site") or "auto").strip().lower()
+        explicit_workstation = site in ("workstation", "bench", "desk", "office", "charging")
+        auto_site = site in ("", "auto", "unknown")
+        self._wait_for_preflight_baseline()
         now = time.time()
         timeout_s = max(2.0, min(8.0, float(self.get_parameter("preflight_topic_timeout_s").value)))
         items: List[Dict[str, Any]] = []
@@ -3886,6 +3958,7 @@ class WebDashboardNode(Node):
             "controller_server",
             "planner_server",
             "bt_navigator",
+            "m20pro_nav2_startup_gate",
             "m20pro_floor_manager",
         ]
         missing_nodes = [name for name in required_nodes if name not in node_names]
@@ -4026,6 +4099,7 @@ class WebDashboardNode(Node):
         loc_ok = current_state.get("localization_ok") is True
         nav_status_text = str(current_state.get("navigation_status") or "")
         unlocalized = (not loc_ok) or ("location=1" in nav_status_text.lower())
+        workstation_mode = explicit_workstation or (auto_site and unlocalized)
         add(
             "localization",
             "定位状态",
@@ -4050,31 +4124,55 @@ class WebDashboardNode(Node):
 
         local_ok, local_age, local_costmap = fresh("local_costmap")
         local_size_ok = bool(isinstance(local_costmap, dict) and local_costmap.get("width") and local_costmap.get("height"))
-        add(
-            "local_costmap",
-            "局部代价地图",
-            "ok" if local_ok and local_size_ok else "warn",
-            (
-                f"{local_costmap.get('width')}x{local_costmap.get('height')} / {fmt_age_text(local_age)}"
-                if isinstance(local_costmap, dict)
-                else "未收到 local_costmap；重定位后再确认"
-            ),
-            group="navigation",
-        )
-
         global_ok, global_age, global_costmap = fresh("global_costmap")
         global_size_ok = bool(isinstance(global_costmap, dict) and global_costmap.get("width") and global_costmap.get("height"))
-        add(
-            "global_costmap",
-            "全局代价地图",
-            "ok" if global_ok and global_size_ok else "warn",
-            (
-                f"{global_costmap.get('width')}x{global_costmap.get('height')} / {fmt_age_text(global_age)}"
-                if isinstance(global_costmap, dict)
-                else "未收到 global_costmap；重定位后再确认"
-            ),
-            group="navigation",
-        )
+        costmap_deferred = workstation_mode or unlocalized
+        if costmap_deferred:
+            add(
+                "local_costmap",
+                "局部代价地图",
+                "ok" if local_ok and local_size_ok else "info",
+                (
+                    f"{local_costmap.get('width')}x{local_costmap.get('height')} / {fmt_age_text(local_age)}"
+                    if isinstance(local_costmap, dict)
+                    else "未重定位前 Nav2/costmap 允许延后启动；先完成重定位再严格检查"
+                ),
+                group="navigation",
+            )
+            add(
+                "global_costmap",
+                "全局代价地图",
+                "ok" if global_ok and global_size_ok else "info",
+                (
+                    f"{global_costmap.get('width')}x{global_costmap.get('height')} / {fmt_age_text(global_age)}"
+                    if isinstance(global_costmap, dict)
+                    else "未重定位前 Nav2/costmap 允许延后启动；先完成重定位再严格检查"
+                ),
+                group="navigation",
+            )
+        else:
+            add(
+                "local_costmap",
+                "局部代价地图",
+                "ok" if local_ok and local_size_ok else "warn",
+                (
+                    f"{local_costmap.get('width')}x{local_costmap.get('height')} / {fmt_age_text(local_age)}"
+                    if isinstance(local_costmap, dict)
+                    else "已定位但未收到 local_costmap；不要开始移动任务"
+                ),
+                group="navigation",
+            )
+            add(
+                "global_costmap",
+                "全局代价地图",
+                "ok" if global_ok and global_size_ok else "warn",
+                (
+                    f"{global_costmap.get('width')}x{global_costmap.get('height')} / {fmt_age_text(global_age)}"
+                    if isinstance(global_costmap, dict)
+                    else "已定位但未收到 global_costmap；不要开始移动任务"
+                ),
+                group="navigation",
+            )
 
         battery = current_state.get("battery")
         primary = battery.get("primary") if isinstance(battery, dict) else None
@@ -4091,8 +4189,8 @@ class WebDashboardNode(Node):
             add(
                 "nav2_lifecycle_deferred",
                 "Nav2 生命周期",
-                "warn",
-                "当前在工位/未重定位，不阻塞基础自检；到测试场地重定位后再确认 Nav2 active",
+                "info",
+                "当前在工位/未重定位，Nav2 可由启动门延后激活；重定位后再确认 active",
                 group="navigation",
             )
         else:
@@ -4168,6 +4266,7 @@ class WebDashboardNode(Node):
             "relocalization_ready": relocalization_ready,
             "mode": mode,
             "site": "workstation" if workstation_mode else site,
+            "site_mode": "workstation" if workstation_mode else "field",
             "workstation_mode": workstation_mode,
             "timestamp": now,
             "time_text": _now_text(),
@@ -4182,6 +4281,32 @@ class WebDashboardNode(Node):
             self._last_preflight = result
         self._append_event("作业前自检", {"ok": result["ok"], "failures": result["failures"]})
         return {"ok": True, "preflight": result, "message": result["summary"]}
+
+    def _wait_for_preflight_baseline(self) -> None:
+        deadline = time.time() + max(
+            0.0,
+            min(10.0, float(self.get_parameter("preflight_settle_wait_s").value)),
+        )
+        while time.time() < deadline:
+            now = time.time()
+            with self._lock:
+                lidar = dict(self._state.get("lidar_points") or {})
+                scan = dict(self._state.get("scan") or {})
+                battery = dict(self._state.get("battery") or {})
+                navigation_status = self._state.get("navigation_status")
+                map_seen = isinstance(self._state.get("map"), dict)
+            lidar_ok = (
+                bool(lidar.get("width"))
+                and now - float(lidar.get("last_update", 0.0) or 0.0) <= 2.0
+            )
+            scan_ok = (
+                int(scan.get("finite_ranges", 0) or 0) > 0
+                and now - float(scan.get("last_update", 0.0) or 0.0) <= 2.0
+            )
+            battery_ok = now - float(battery.get("last_update", 0.0) or 0.0) <= 5.0
+            if map_seen and (lidar_ok or scan_ok) and battery_ok and navigation_status:
+                return
+            time.sleep(0.1)
 
     def _check_lifecycle_nodes(self, node_names: List[str]) -> Dict[str, Dict[str, Any]]:
         results: Dict[str, Dict[str, Any]] = {}

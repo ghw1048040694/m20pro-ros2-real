@@ -1,6 +1,6 @@
 import math
 import numpy as np
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import rclpy
 from rclpy.duration import Duration
@@ -82,15 +82,19 @@ class PointCloudFusion(Node):
         
         # === 初始化成员变量 ===
         self.cloud_ranges: Optional[np.ndarray] = None
+        self.backup_cloud_ranges: Optional[np.ndarray] = None
         self.front_ranges: Optional[np.ndarray] = None
         self.rear_ranges: Optional[np.ndarray] = None
         self.cloud_received = False
+        self.backup_cloud_received = False
         self.front_received = False
         self.rear_received = False
         self.cloud_stamp = None
+        self.backup_cloud_stamp = None
         self.front_stamp = None
         self.rear_stamp = None
         self.cloud_update_time = None
+        self.backup_cloud_update_time = None
         self.front_update_time = None
         self.rear_update_time = None
         self.last_tf_warning_time = None
@@ -105,6 +109,9 @@ class PointCloudFusion(Node):
         self.last_cloud_frame = ""
         self.last_cloud_source_topic = ""
         self.last_processed_cloud_key = None
+        self.last_processed_cloud_key_by_topic: Dict[str, Tuple[int, int, str, int, int, int]] = {}
+        self.cloud_update_time_by_topic = {}
+        self.cloud_messages_by_topic: Dict[str, int] = {}
         self.last_cloud_input_points = 0
         self.last_cloud_sampled_points = 0
         self.last_cloud_finite_points = 0
@@ -138,6 +145,7 @@ class PointCloudFusion(Node):
             dtype=np.float32,
         )
         self.cloud_ranges = self.empty_ranges_template.copy()
+        self.backup_cloud_ranges = self.empty_ranges_template.copy()
         self.front_ranges = self.empty_ranges_template.copy()
         self.rear_ranges = self.empty_ranges_template.copy()
         
@@ -225,25 +233,42 @@ class PointCloudFusion(Node):
     def _on_cloud(self, msg: PointCloud2, source_topic: str = "") -> None:
         """处理导航主链路点云。"""
         self.cloud_messages += 1
+        source_key = source_topic or "unknown"
+        self.cloud_messages_by_topic[source_key] = self.cloud_messages_by_topic.get(source_key, 0) + 1
         self.last_cloud_frame = self._clean_frame(msg.header.frame_id)
         self.last_cloud_source_topic = source_topic
         cloud_key = self._cloud_key(msg)
-        if cloud_key == self.last_processed_cloud_key:
+        if cloud_key == self.last_processed_cloud_key_by_topic.get(source_key):
             self.cloud_skipped_duplicate += 1
             return
-        if not self._should_process_cloud():
+        if not self._should_process_cloud(source_key):
             self.cloud_skipped_by_interval += 1
             return
         ranges = self._pointcloud_to_ranges(msg)
         if ranges is None:
             self.cloud_dropped += 1
             return
-        self.cloud_ranges = ranges
-        self.cloud_stamp = self._output_stamp_for_cloud(msg)
-        self.cloud_update_time = self.get_clock().now()
-        self.cloud_received = True
+        stamp = self._output_stamp_for_cloud(msg)
+        update_time = self.get_clock().now()
+        is_backup = bool(
+            self.backup_cloud_topic
+            and source_topic == self.backup_cloud_topic
+            and self.backup_cloud_topic != self.input_cloud_topic
+        )
+        if is_backup:
+            self.backup_cloud_ranges = ranges
+            self.backup_cloud_stamp = stamp
+            self.backup_cloud_update_time = update_time
+            self.backup_cloud_received = True
+        else:
+            self.cloud_ranges = ranges
+            self.cloud_stamp = stamp
+            self.cloud_update_time = update_time
+            self.cloud_received = True
         self.cloud_processed += 1
         self.last_processed_cloud_key = cloud_key
+        self.last_processed_cloud_key_by_topic[source_key] = cloud_key
+        self.cloud_update_time_by_topic[source_key] = update_time
         if self.publish_on_cloud_update:
             self._publish_scan()
     
@@ -469,10 +494,11 @@ class PointCloudFusion(Node):
         self.last_scan_source_age_s = age
         return age <= self.max_source_age_s
 
-    def _should_process_cloud(self) -> bool:
-        if self.min_cloud_interval_s <= 0.0 or self.cloud_update_time is None:
+    def _should_process_cloud(self, source_topic: str) -> bool:
+        update_time = self.cloud_update_time_by_topic.get(source_topic or "unknown")
+        if self.min_cloud_interval_s <= 0.0 or update_time is None:
             return True
-        age = (self.get_clock().now() - self.cloud_update_time).nanoseconds * 1e-9
+        age = (self.get_clock().now() - update_time).nanoseconds * 1e-9
         return age >= self.min_cloud_interval_s
 
     def _warn_tf_throttled(self, message: str) -> None:
@@ -509,11 +535,16 @@ class PointCloudFusion(Node):
     def _publish_diagnostics(self) -> None:
         now = self.get_clock().now()
         source_age = self._source_age_s(self.cloud_update_time)
+        backup_source_age = self._source_age_s(self.backup_cloud_update_time)
+        primary_fresh = self.cloud_received and self._source_is_fresh(self.cloud_update_time)
+        backup_fresh = self.backup_cloud_received and self._source_is_fresh(self.backup_cloud_update_time)
         status = {
             "input": self.input_cloud_topic or "%s+%s" % (self.front_lidar_topic, self.rear_lidar_topic),
+            "backup_input": self.backup_cloud_topic,
             "output": self.output_scan_topic,
             "target_frame": self.target_frame,
             "cloud_messages": self.cloud_messages,
+            "cloud_messages_by_topic": dict(self.cloud_messages_by_topic),
             "cloud_processed": self.cloud_processed,
             "cloud_skipped_by_interval": self.cloud_skipped_by_interval,
             "cloud_skipped_duplicate": self.cloud_skipped_duplicate,
@@ -532,13 +563,16 @@ class PointCloudFusion(Node):
             "last_scan_finite_bins": self.last_scan_finite_bins,
             "last_scan_min_range": self.last_scan_min_range,
             "last_source_age_s": source_age,
+            "last_backup_source_age_s": backup_source_age,
+            "primary_fresh": primary_fresh,
+            "backup_fresh": backup_fresh,
             "max_source_age_s": self.max_source_age_s,
             "publish_on_cloud_update": self.publish_on_cloud_update,
         }
         text = (
             "cloud=%d processed=%d skipped_interval=%d skipped_duplicate=%d "
-            "dropped=%d scan=%d finite_bins=%d source_age=%s source=%s "
-            "input_points=%d sampled=%d kept=%d reason=%s"
+            "dropped=%d scan=%d finite_bins=%d source_age=%s backup_age=%s "
+            "fresh=%s/%s source=%s input_points=%d sampled=%d kept=%d reason=%s"
         ) % (
             self.cloud_messages,
             self.cloud_processed,
@@ -548,6 +582,9 @@ class PointCloudFusion(Node):
             self.scan_published,
             self.last_scan_finite_bins,
             "%.3f" % source_age if source_age is not None else "none",
+            "%.3f" % backup_source_age if backup_source_age is not None else "none",
+            "primary" if primary_fresh else "-",
+            "backup" if backup_fresh else "-",
             self.last_cloud_source_topic or "none",
             self.last_cloud_input_points,
             self.last_cloud_sampled_points,
@@ -650,14 +687,28 @@ class PointCloudFusion(Node):
     def _publish_scan(self) -> None:
         """发布融合后的 LaserScan"""
         if self.input_cloud_topic:
-            if not self.cloud_received or self.cloud_ranges is None:
+            primary_ok = (
+                self.cloud_received
+                and self.cloud_ranges is not None
+                and self._source_is_fresh(self.cloud_update_time)
+            )
+            backup_ok = (
+                self.backup_cloud_received
+                and self.backup_cloud_ranges is not None
+                and self._source_is_fresh(self.backup_cloud_update_time)
+            )
+            if not primary_ok and not backup_ok:
                 self.publish_skipped_no_source += 1
                 return
-            if not self._source_is_fresh(self.cloud_update_time):
-                self.publish_skipped_stale += 1
-                return
-            fused_ranges = self.cloud_ranges
-            stamp = self.cloud_stamp
+            if primary_ok and backup_ok:
+                fused_ranges = np.minimum(self.cloud_ranges, self.backup_cloud_ranges)
+                stamp = self.cloud_stamp or self.backup_cloud_stamp
+            elif primary_ok:
+                fused_ranges = self.cloud_ranges
+                stamp = self.cloud_stamp
+            else:
+                fused_ranges = self.backup_cloud_ranges
+                stamp = self.backup_cloud_stamp
         elif (
             not self.front_received
             or not self.rear_received

@@ -34,11 +34,66 @@ BRINGUP_PREFIX="$(ros2 pkg prefix m20pro_bringup)"
 BRINGUP_LIBEXEC="${BRINGUP_PREFIX}/lib/m20pro_bringup"
 
 PROJECT_FASTDDS="${WS_DIR}/install/m20pro_bringup/share/m20pro_bringup/config/m20pro_fastdds_udp.xml"
-if [[ -f "${PROJECT_FASTDDS}" && "${M20PRO_USE_PROJECT_FASTDDS:-0}" == "1" ]]; then
-  export FASTRTPS_DEFAULT_PROFILES_FILE="${PROJECT_FASTDDS}"
-else
-  export FASTRTPS_DEFAULT_PROFILES_FILE="${FASTRTPS_DEFAULT_PROFILES_FILE:-/opt/robot/fastdds.xml}"
+FACTORY_FASTDDS="/opt/robot/fastdds.xml"
+case "${M20PRO_FASTDDS_PROFILE:-project_udp}" in
+  project_udp|udp)
+    if [[ -f "${PROJECT_FASTDDS}" ]]; then
+      export FASTRTPS_DEFAULT_PROFILES_FILE="${PROJECT_FASTDDS}"
+    elif [[ -f "${FACTORY_FASTDDS}" ]]; then
+      export FASTRTPS_DEFAULT_PROFILES_FILE="${FACTORY_FASTDDS}"
+    fi
+    ;;
+  factory)
+    if [[ -f "${FACTORY_FASTDDS}" ]]; then
+      export FASTRTPS_DEFAULT_PROFILES_FILE="${FACTORY_FASTDDS}"
+    fi
+    ;;
+  auto)
+    if [[ "${M20PRO_USE_PROJECT_FASTDDS:-1}" == "1" && -f "${PROJECT_FASTDDS}" ]]; then
+      export FASTRTPS_DEFAULT_PROFILES_FILE="${PROJECT_FASTDDS}"
+    elif [[ -n "${FASTRTPS_DEFAULT_PROFILES_FILE:-}" ]]; then
+      :
+    elif [[ -f "${FACTORY_FASTDDS}" ]]; then
+      export FASTRTPS_DEFAULT_PROFILES_FILE="${FACTORY_FASTDDS}"
+    fi
+    ;;
+  inherit)
+    ;;
+  *)
+    echo "[m20pro_real_full] invalid M20PRO_FASTDDS_PROFILE=${M20PRO_FASTDDS_PROFILE}; expected project_udp, factory, auto, or inherit" >&2
+    exit 2
+    ;;
+esac
+
+if [[ -n "${FASTRTPS_DEFAULT_PROFILES_FILE:-}" ]]; then
+  echo "[m20pro_real_full] FASTRTPS_DEFAULT_PROFILES_FILE=${FASTRTPS_DEFAULT_PROFILES_FILE}" >&2
 fi
+
+"${BRINGUP_LIBEXEC}/m20pro_runtime_snapshot.sh" || true
+
+relay_fastdds_profile_file() {
+  case "${M20PRO_LIDAR_RELAY_FASTDDS_PROFILE:-factory}" in
+    factory)
+      if [[ -f "${FACTORY_FASTDDS}" ]]; then
+        echo "${FACTORY_FASTDDS}"
+      fi
+      ;;
+    project_udp|udp)
+      if [[ -f "${PROJECT_FASTDDS}" ]]; then
+        echo "${PROJECT_FASTDDS}"
+      elif [[ -f "${FACTORY_FASTDDS}" ]]; then
+        echo "${FACTORY_FASTDDS}"
+      fi
+      ;;
+    inherit)
+      echo "${FASTRTPS_DEFAULT_PROFILES_FILE:-}"
+      ;;
+    *)
+      echo "[m20pro_real_full] invalid M20PRO_LIDAR_RELAY_FASTDDS_PROFILE=${M20PRO_LIDAR_RELAY_FASTDDS_PROFILE}; expected factory, project_udp, or inherit" >&2
+      exit 2
+      ;;
+  esac
+}
 
 if ps -eo pid,args | awk '
   /ros2 launch m20pro_bringup m20pro.launch.py/ &&
@@ -75,8 +130,15 @@ if [[ "${M20PRO_RUN_RAW_LIDAR_GUARD:-0}" == "1" ]]; then
 fi
 
 LIDAR_RELAY_TOPIC="${M20PRO_LIDAR_RELAY_TOPIC:-/m20pro/lidar_points_relay}"
+LIDAR2_INPUT_TOPIC="${M20PRO_LIDAR2_TOPIC:-/LIDAR/POINTS2}"
+LIDAR2_RELAY_TOPIC="${M20PRO_LIDAR2_RELAY_TOPIC:-/m20pro/lidar_points2_relay}"
+LIDAR_RELAY_FASTDDS="$(relay_fastdds_profile_file)"
+if [[ -n "${LIDAR_RELAY_FASTDDS}" ]]; then
+  echo "[m20pro_real_full] LIDAR relay FASTRTPS_DEFAULT_PROFILES_FILE=${LIDAR_RELAY_FASTDDS}" >&2
+fi
 set +e
-M20PRO_LIDAR_RELAY_WAIT_S="${M20PRO_LIDAR_RELAY_WAIT_S:-45}" \
+FASTRTPS_DEFAULT_PROFILES_FILE="${LIDAR_RELAY_FASTDDS}" \
+  M20PRO_LIDAR_RELAY_WAIT_S="${M20PRO_LIDAR_RELAY_WAIT_S:-45}" \
   "${BRINGUP_LIBEXEC}/m20pro_lidar_relay_guard.sh" start-wait
 relay_status="$?"
 set -e
@@ -86,6 +148,31 @@ if [[ "${relay_status}" -ne 0 ]]; then
     exit "${relay_status}"
   fi
   echo "[m20pro_real_full] lidar relay returned ${relay_status}; continuing so the workstation web frontend stays available." >&2
+fi
+
+BACKUP_CLOUD_TOPIC=""
+if [[ "${M20PRO_ENABLE_LIDAR2_RELAY:-1}" == "1" && -n "${LIDAR2_INPUT_TOPIC}" && -n "${LIDAR2_RELAY_TOPIC}" ]]; then
+  set +e
+  FASTRTPS_DEFAULT_PROFILES_FILE="${LIDAR_RELAY_FASTDDS}" \
+    M20PRO_LIDAR_TOPIC="${LIDAR2_INPUT_TOPIC}" \
+    M20PRO_LIDAR_RELAY_TOPIC="${LIDAR2_RELAY_TOPIC}" \
+    M20PRO_LIDAR_RELAY_STATUS_TOPIC="${M20PRO_LIDAR2_RELAY_STATUS_TOPIC:-/m20pro/lidar_relay2/status}" \
+    M20PRO_LIDAR_RELAY_PID_FILE="${M20PRO_LIDAR2_RELAY_PID_FILE:-/tmp/m20pro_lidar_relay2.pid}" \
+    M20PRO_LIDAR_RELAY_LOG_FILE="${M20PRO_LIDAR2_RELAY_LOG_FILE:-/tmp/m20pro_lidar_relay2.log}" \
+    M20PRO_LIDAR_RELAY_WAIT_S="${M20PRO_LIDAR2_RELAY_WAIT_S:-8}" \
+    "${BRINGUP_LIBEXEC}/m20pro_lidar_relay_guard.sh" start-wait
+  relay2_status="$?"
+  set -e
+  if [[ "${relay2_status}" -eq 0 ]]; then
+    BACKUP_CLOUD_TOPIC="${LIDAR2_RELAY_TOPIC}"
+    echo "[m20pro_real_full] optional LIDAR2 relay is ready: ${LIDAR2_INPUT_TOPIC} -> ${LIDAR2_RELAY_TOPIC}" >&2
+  else
+    echo "[m20pro_real_full] optional LIDAR2 relay not ready (${LIDAR2_INPUT_TOPIC}); continuing with primary lidar only." >&2
+    M20PRO_LIDAR_RELAY_PID_FILE="${M20PRO_LIDAR2_RELAY_PID_FILE:-/tmp/m20pro_lidar_relay2.pid}" \
+      M20PRO_LIDAR_TOPIC="${LIDAR2_INPUT_TOPIC}" \
+      M20PRO_LIDAR_RELAY_TOPIC="${LIDAR2_RELAY_TOPIC}" \
+      "${BRINGUP_LIBEXEC}/m20pro_lidar_relay_guard.sh" stop || true
+  fi
 fi
 
 COMMON_ARGS=(
@@ -101,6 +188,9 @@ COMMON_ARGS=(
   camera_proxy_max_width:=480
   cloud_topic:="${LIDAR_RELAY_TOPIC}"
 )
+if [[ -n "${BACKUP_CLOUD_TOPIC}" ]]; then
+  COMMON_ARGS+=(backup_cloud_topic:="${BACKUP_CLOUD_TOPIC}")
+fi
 
 BASE_REAL_PARAMS="${WS_DIR}/install/m20pro_bringup/share/m20pro_bringup/config/m20pro_real.yaml"
 make_runtime_params() {

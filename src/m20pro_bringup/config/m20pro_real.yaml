@@ -35,7 +35,10 @@ m20pro_tcp_bridge:
     enable_gait_command: true
     gait_command_topic: "/m20pro/gait_command"
     gait_flat_param: 1
+    gait_assist_param: 12
     gait_stair_param: 14
+    enable_usage_mode_command: false
+    usage_mode_command_topic: "/m20pro/usage_mode_command"
     enable_initialpose_relocalization: false
     enable_initialpose_3d_relocalization: false
     initialpose_topic: "/initialpose"

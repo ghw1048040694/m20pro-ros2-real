@@ -1,10 +1,204 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-06-18 11:23 CST
+Last updated: 2026-06-22 12:58 CST
 
 This file is maintained by Codex as the local M20 Pro project memory for future ChatGPT review. It records the current architecture, important decisions, recent changes, verification status, and next steps.
 
-Naming note: this file replaced the previous local-only `codex.md`. Going forward, maintain `m20pro.md`.
+Naming note: this file replaced the previous local-only `codex.md`. Going forward, maintain this file, `m20pro日志.md`, after every meaningful project change or field diagnosis.
+
+## 2026-06-22 development dog costmap/Nav2 startup hardening
+
+- User priority:
+  - field tests repeatedly reached a state where base perception was OK but self-check still warned about costmaps;
+  - fix the current development dog/runtime problem before continuing broader navigation work;
+  - also evaluate the hand-controller "assist" mode, described by the user as an RL/all-terrain gait with manual drive and real-time avoidance.
+- Diagnosis on the currently connected development dog 104:
+  - `m20pro-real.service` was `active` and `enabled`;
+  - web frontend was reachable at `http://10.21.31.104:8080`;
+  - `/api/state` showed F20 map loaded, fresh relay lidar pointcloud, fresh `/scan`, valid pose, `localization_ok=true`, and `navigation_status=location=0 obstacle=0`;
+  - therefore the current problem was not missing pointcloud, not missing `/scan`, and not just being at the workstation.
+- Nav2/costmap failure evidence:
+  - `/local_costmap/costmap` and `/global_costmap/costmap` existed as topic names but had no real costmap publishers;
+  - lifecycle states for `/controller_server`, `/planner_server`, `/bt_navigator`, and `/waypoint_follower` were `unconfigured`;
+  - service log stopped at `lifecycle_manager_navigation: Configuring controller_server` and never reached activation;
+  - `system_check` repeatedly reported:
+    `missing_topics=/local_costmap/costmap,/global_costmap/costmap inactive_lifecycle=/controller_server:unconfigured,...`;
+  - this is the concrete reason field self-check kept showing costmap warnings after other basic items were fixed.
+- DDS/SHM runtime issue found on development dog:
+  - `/dev/shm` was about 95% full;
+  - large `fastrtps_*` files were present, many around 477 MB;
+  - logs repeatedly showed FastDDS SHM errors such as `Failed to create segment ... Unable to Register SHM Transport`;
+  - ROS CLI graph output was therefore not fully trustworthy by itself, especially for bare DDS/factory publishers.
+- Startup DDS hardening applied in code:
+  - `m20pro_real_full.sh` now defaults our full real stack to the project UDP-only FastDDS profile `m20pro_fastdds_udp.xml`;
+  - factory `/opt/robot/fastdds.xml` remains available by setting `M20PRO_FASTDDS_PROFILE=factory`;
+  - autostart default files now write `M20PRO_FASTDDS_PROFILE=project_udp`;
+  - added `m20pro_runtime_snapshot.sh`, installed by `m20pro_bringup`, to log active DDS profile, ROS/RMW env, `/dev/shm` usage, largest SHM entries, and selected topics at startup;
+  - `m20pro_lidar_relay_guard.sh` now restarts only the project lidar relay when its inherited DDS profile differs from the new startup profile, avoiding an old relay continuing under the old SHM-heavy profile.
+- Nav2 lifecycle hardening applied in code:
+  - real launch now passes `autostart:=False` into Nav2 `navigation_launch.py`;
+  - added `m20pro_navigation.nav2_startup_gate`;
+  - the gate waits for `/map`, fresh `/scan`, `localization_ok=true`, valid `/m20pro_tcp_bridge/map_pose`, and a usable `map -> m20pro_base_link` TF before requesting `/lifecycle_manager_navigation/manage_nodes` STARTUP;
+  - this prevents Nav2 from trying to configure costmaps while the robot is still unlocalized or while basic prerequisites are not ready;
+  - once the robot is relocalized in the field, the gate should request lifecycle startup and costmap publishers should appear.
+- Self-check behavior corrected:
+  - frontend self-check now sends `site:"auto"` instead of always forcing `site:"workstation"`;
+  - when unlocalized, auto mode still treats costmap/Nav2 as workstation/deferred warnings;
+  - once localization is OK, auto mode treats the robot as field/navigation context, so missing costmaps/Nav2 lifecycle remains a real navigation readiness problem;
+  - preflight now also expects `m20pro_nav2_startup_gate` as a core node.
+- System check diagnostics improved:
+  - `system_check_node.py` now reports high `/dev/shm` usage and the active FastDDS profile in waiting logs;
+  - lifecycle waiting messages include remembered lifecycle query errors where available.
+- Assist/RL gait integration first step:
+  - existing control path is `/m20pro/gait_command` -> `tcp_bridge` -> vendor TCP request `Type=2 Command=23 GaitParam=...`;
+  - existing mappings kept: `flat` -> `GaitParam=1`, `stair_*` -> `GaitParam=14`;
+  - added configurable `gait_assist_param`, default `12`, with labels `assist`, `agile`, `rl`, `terrain`, and `all_terrain`;
+  - real and sim config files now include `gait_assist_param: 12`;
+  - because the hand-controller auxiliary/assist behavior has not been field-tested, `floor_manager` and real launch now default flat navigation gait back to `flat`; assist gait remains available only as an explicit test command.
+- Assist/RL gait task integration follow-up:
+  - `floor_manager` can actively publish the configured flat gait label before same-floor Nav2 goals, before post-switch floor goals, and before navigating to a stair entry;
+  - with the current conservative default `flat_gait_label=flat`, normal patrol/floor goals do not automatically request the untested assist/RL gait;
+  - stair traversal still switches to `stair_up` / `stair_down`, then returns to `flat` after exiting the stair/platform flow;
+  - `publish_flat_gait_before_nav` remains available to control this automatic pre-nav flat gait request;
+  - web dashboard now subscribes to `/m20pro_tcp_bridge/gait_result`, and the status area shows both requested gait and TCP bridge result such as `sent: label=assist GaitParam=12`.
+- Important caveat about assist mode:
+  - this code does not claim that `GaitParam=12` is definitely the exact hand-controller auxiliary/RL mode;
+  - README/manual notes already record `Gait=12` as flat agile/navigation task gait and `ObsMode=0` as stop-obstacle avoidance;
+  - field validation must confirm whether `gait_command=assist` produces the same behavior as the hand-controller auxiliary mode.
+- Local verification:
+  - Python compile passed for changed navigation/cloud bridge modules;
+  - shell syntax check passed for changed startup scripts;
+  - targeted builds passed:
+    `colcon build --symlink-install --packages-select m20pro_navigation m20pro_bringup m20pro_cloud_bridge`.
+  - after the assist-task follow-up, Python compile passed again for `floor_manager.py`, `tcp_bridge_node.py`, `web_dashboard_node.py`, `nav2_startup_gate.py`, and `system_check_node.py`;
+  - extracted frontend JavaScript passed `node --check`;
+  - shell syntax check passed for the changed startup/autostart scripts;
+  - targeted build passed again for `m20pro_navigation`, `m20pro_cloud_bridge`, and `m20pro_bringup`.
+- 104 deployment/current verification:
+  - deployed the current workspace to the development dog 104 path `/home/user/m20pro_ros2_ws_20260529_173921`, which is not a git worktree;
+  - `m20pro-real.service` is `enabled`, `active`, and running with `NRestarts=0`;
+  - web health is OK at `http://10.21.31.104:8080/healthz`, and the listener is intentionally bound to `0.0.0.0:8080` so 104 can serve any connected host interface;
+  - `/etc/default/m20pro-real` now uses `M20PRO_FASTDDS_PROFILE=project_udp` for the main project stack and `M20PRO_LIDAR_RELAY_FASTDDS_PROFILE=factory` for the raw lidar relay;
+  - `/dev/shm` usage dropped from the earlier high-water mark around 95% to about 34% after the mixed-profile restart;
+  - service logs show the relay reading factory lidar, `pointcloud_fusion` publishing `/scan`, `m20pro_nav2_startup_gate` requesting Nav2 lifecycle startup, and `lifecycle_manager_navigation` reporting managed nodes active;
+  - dashboard `/api/state` shows `localization_ok=true`, `navigation_status=location=0 obstacle=0`, relay lidar around 44k-68k points, `/scan` about 211-219 finite ranges, and fresh local/global costmaps;
+  - blocking preflight now returns `ok=true`, `navigation_ready=true`, and `relocalization_ready=true`; all core nodes, lidar, `/scan`, odom, map pose, map, both costmaps, battery, motion mode, and Nav2 lifecycle checks are OK.
+- 104 post-assist deployment verification:
+  - stopped `m20pro-real.service` before replacing the workspace, then rsynced/rebuilt the full workspace on 104 via `scripts/local_deploy_to_test_robot.sh`;
+  - service stop hit a systemd stop-timeout while cleaning child processes, but all project ROS processes were gone afterward; reset the failed state before restart;
+  - after restart, logs again show relay sample OK, `pointcloud_fusion` publishing `/scan`, startup gate requesting Nav2 startup, Nav2 lifecycle active, and `M20PRO REAL OK`;
+  - blocking preflight after deployment returned `ok=true`, `navigation_ready=true`, `warnings=0`, and `failures=0`;
+  - `/api/state` showed relay lidar around 69k points, `/scan` about 202 finite ranges, fresh local/global costmaps, `localization_ok=true`, and `navigation_status=location=0 obstacle=0`;
+  - sent one non-motion gait test command `/m20pro/gait_command: assist`; `/api/state` and service logs confirmed `gait_result=sent: label=assist GaitParam=12`;
+  - this proves the project command path to vendor gait parameter 12 is live, but field behavior still must be compared with the hand-controller auxiliary/RL mode.
+- Runtime note after restart:
+  - `/dev/shm` rose to about 58% after the post-deploy restart; this is below the 90% warning threshold but should be watched during long field runs;
+  - do not clear `/dev/shm/fastrtps_*` while factory DDS participants are alive.
+- Real costmap visibility fix:
+  - changed real Nav2 local/global costmaps to `always_send_full_costmap: true`;
+  - this makes `/local_costmap/costmap` and `/global_costmap/costmap` stay fresh for the web dashboard/self-check instead of relying only on update topics or one-shot full snapshots.
+- Current caveat:
+  - ROS CLI graph/echo remains unreliable for factory/raw DDS topics in this environment: topic names and subscribers may be visible even when `ros2 topic info` under a different FastDDS profile under-reports publishers;
+  - judge the running system by web `/api/state`, service logs, relay sample logs, `/scan`, costmap freshness, and lifecycle states rather than by a single CLI `echo` of `/LIDAR/POINTS`.
+- Field validation standard after deployment:
+  - at workstation/unlocalized: base self-check may defer Nav2, but lidar, `/scan`, map, web, battery, and core nodes must be OK;
+  - after field relocalization: `m20pro_nav2_startup_gate` should log that prerequisites are ready and lifecycle startup was requested/accepted;
+  - `/controller_server`, `/planner_server`, `/bt_navigator`, and `/waypoint_follower` should become `active`;
+  - `/local_costmap/costmap` and `/global_costmap/costmap` should have fresh data in `/api/state`;
+  - if costmaps still do not appear, inspect startup gate logs and `system_check` for explicit DDS/SHM/lifecycle diagnostics rather than treating it as a generic workstation warning.
+
+## 2026-06-18 test robot runtime, preflight, and RJ45 gateway update
+
+- User reminder:
+  - every project improvement must update `m20pro日志.md`;
+  - this log had not been updated after several important 2026-06-18 fixes and field diagnostics.
+- Latest pushed code state:
+  - `f7daad7 Run dashboard preflight asynchronously`;
+  - `8cffba7 Report relocalization readiness in preflight`;
+  - `4f812b2 Clarify preflight and default fixed map flow`;
+  - all three were pushed to GitHub `origin/main` and GitLab `gitlab/main`.
+- Web preflight behavior is now asynchronous:
+  - `/api/preflight/run` defaults to background execution unless the payload explicitly sends `wait:true`;
+  - the web frontend sends `{mode:"move", site:"workstation", wait:false}`;
+  - the POST timeout is now 10 s because the endpoint should return immediately;
+  - the frontend then polls `/api/preflight` for the final result;
+  - direct verification on 104 returned `running=true` in about 0.14-0.18 s.
+- Interpretation of the old "30 seconds timeout" report:
+  - if the browser still shows the old 30 s timeout, first suspect stale code, stale build, stale service, or browser cache;
+  - verify with `curl -s http://127.0.0.1:8080/ | grep -E 'wait: false|10000|30000'`;
+  - the new page should contain `wait: false` and `10000`, not the old synchronous `30000` path.
+- Map/default relocalization behavior:
+  - the frontend defaults to the manifest/default F20 fixed map when available;
+  - changing the map dropdown loads the selected fixed 2D map immediately;
+  - relocalization readiness is now separated from full navigation readiness;
+  - a robot can be allowed to perform relocalization when map, lidar/scan, and core base services are OK even if Nav2/costmaps are still waiting because it is at the workstation or not localized yet.
+- Test dog 104 status after setup:
+  - workspace is a normal git checkout at `~/m20pro_ros2_ws`;
+  - current HEAD verified as `f7daad7`;
+  - `m20pro-real.service` is `active` and `enabled`;
+  - full frontend is reachable at `http://10.21.31.104:8080`;
+  - `/api/state` shows F20 map loaded, fresh relay lidar points, fresh `/scan`, fresh battery, and `navigation_status=location=1 obstacle=0`.
+- Important root cause for the test dog self-check failure:
+  - the failure was not low battery;
+  - the failure was not because the robot was at the workstation;
+  - the failure was not missing lidar or `/scan`;
+  - 104 was missing Nav2 runtime packages, and the service log explicitly said:
+    `Nav2 packages are not installed; starting M20Pro real bringup in observation mode without map_server/navigation.`
+  - because of this, `/map_server`, `/controller_server`, `/planner_server`, `/bt_navigator`, `/m20pro_floor_manager`, and `/map` were absent, so preflight failed on map/Nav2 base items.
+- Fix applied on the test dog 104:
+  - installed `ros-foxy-navigation2` and `ros-foxy-nav2-bringup`;
+  - restarted `m20pro-real.service`;
+  - verified Nav2 packages via `ros2 pkg prefix`;
+  - verified service process tree now includes `map_server`, `controller_server`, `planner_server`, `bt_navigator`, `waypoint_follower`, lifecycle managers, and `m20pro_floor_manager`;
+  - verified `/map`, `/local_costmap/costmap`, `/global_costmap/costmap`, `/scan`, `/m20pro/lidar_points_relay`, `/LIDAR/POINTS`, `/LIDAR/POINTS2`, and `/ODOM` are visible.
+- Current test dog preflight result after the Nav2 dependency fix:
+  - `ok=true`;
+  - `failures=0`;
+  - `relocalization_ready=true`;
+  - `navigation_ready=false` while at the workstation/unlocalized;
+  - lidar points, `/scan`, `/map`, odom, battery, core nodes, and required topics are OK;
+  - warnings are limited to map pose/localization/costmap/Nav2 lifecycle items that should be resolved after field relocalization.
+- Workstation warning interpretation:
+  - `Location=1`, `localization_ok=false`, missing valid `/m20pro_tcp_bridge/map_pose`, and costmap/TF lifecycle warnings can be expected at the workstation before relocalization;
+  - missing lidar, missing `/scan`, missing `/map`, or missing core Nav2 nodes are not acceptable as "workstation" explanations.
+- 103 RJ45-to-Wi-Fi gateway configuration for colleagues' wired-only Ubuntu laptops:
+  - 103 Wi-Fi internet exit is `p2p0` on the workshop Wi-Fi;
+  - 103 RJ45/workstation subnet is `eth2`, `10.21.31.103/24`;
+  - kernel IPv4 forwarding is enabled and persisted by `/etc/sysctl.d/99-m20pro-internet-gateway.conf`;
+  - NAT/forwarding from `10.21.31.0/24` on `eth2` to `p2p0` is active and saved in `/etc/iptables/rules.v4`;
+  - `dnsmasq` is now `active` and `enabled`.
+- 103 DHCP details:
+  - `/etc/dnsmasq.conf` now serves DHCP on `eth2`;
+  - wired laptops receive addresses in `10.21.31.150-10.21.31.199`;
+  - gateway option is `10.21.31.103`;
+  - DNS options are `223.5.5.5`, `114.114.114.114`, and `8.8.8.8`;
+  - the pool deliberately avoids fixed robot addresses such as 104.
+- Operator note for colleague laptops:
+  - set Ubuntu wired IPv4 to automatic DHCP;
+  - after the 103 change, disconnect/reconnect the wired network or renew DHCP;
+  - expected result is an IP in `10.21.31.150-199`, default route via `10.21.31.103`, and working internet through 103's Wi-Fi.
+- Do not confuse the two robots:
+  - the development dog 104 seen earlier is not necessarily a git checkout and may require rsync deployment;
+  - the current test dog 104 is git-enabled and was updated by `git pull`, build, and service restart;
+  - always check `hostname`, `ip -br addr`, and `cd ~/m20pro_ros2_ws && git log --oneline -3` before assuming which robot is connected.
+
+## 2026-06-18 update and build workflow notes
+
+- On a git-enabled robot after pulling new code:
+  - plain `colcon build` is allowed;
+  - it is slower and may rebuild more than necessary, but it avoids typing `--symlink-install --packages-select ...`;
+  - after build, restart the service with `sudo systemctl restart m20pro-real.service`.
+- Faster targeted build remains useful when only web code changed:
+  - `colcon build --symlink-install --packages-select m20pro_cloud_bridge`;
+  - then restart `m20pro-real.service`.
+- Pull failures previously seen on a second robot:
+  - `.git/FETCH_HEAD: Permission denied` was caused by root-owned `.git/FETCH_HEAD`;
+  - fix ownership with `sudo chown -R user:user .git`;
+  - later `Could not resolve hostname github.com` was DNS/network, not git credentials.
+- When diagnosing git/network on robots:
+  - first verify default route and DNS;
+  - then verify `ping 8.8.8.8`, `getent hosts github.com`, and `ping github.com`;
+  - do not assume repository or SSH key failure until name resolution works.
 
 ## 2026-06-17 New session handoff summary
 
@@ -6226,3 +6420,273 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - DDS note:
   - FastDDS SHM warnings still appear in logs during startup, but this run completed and web/Nav2 became active;
   - do not clear `/dev/shm/fastrtps_*` while factory ROS/DDS participants are running.
+
+## 2026-06-22 104 current health and assist-mode boundary
+
+- Current 104/development dog status:
+  - `m20pro-real.service` is `active/running`, enabled, and `NRestarts=0`;
+  - full frontend is reachable at `http://10.21.31.104:8080`;
+  - blocking web preflight passed with `failures=0`, `warnings=0`, and `navigation_ready=true`;
+  - live web state showed fresh relay pointcloud, `/scan`, odom, pose, local costmap, global costmap, localization, and navigation status.
+- Costmap warning root cause and current fix status:
+  - recent startup logs show the lidar relay sample became ready first, then `m20pro_nav2_startup_gate` waited for prerequisites and only then started Nav2 lifecycle;
+  - after the gate requested lifecycle startup, local/global costmaps subscribed to `/scan`, activated cleanly, and `M20PRO REAL OK` was reported;
+  - this is the intended fix for the previous field symptom where Nav2/costmap came up before scan/map/localization were stable and self-check kept reporting costmap warnings.
+- Lidar/DDS observation:
+  - 104 currently exposes `/LIDAR/POINTS`, `/m20pro/lidar_points_relay`, and `/scan`; `/LIDAR/POINTS2` was not present in this check;
+  - despite ROS CLI graph output being incomplete for pointcloud publisher discovery, the reliable runtime evidence is that the web dashboard and `pointcloud_fusion` are receiving fresh relay pointcloud and generating fresh `/scan`;
+  - future field diagnostics should prefer web `/api/state`, `pointcloud_fusion` logs, and relay guard logs over a plain `ros2 topic info` shell unless the shell environment/DDS profile is known to match the service.
+- Assist mode boundary:
+  - manual review indicates the hand-controller usage mode is `Type=1101 Command=5` with `Mode=2` for auxiliary/assist mode, and status fields include `ControlUsageMode` plus `OOA`;
+  - this is different from the gait command `Type=2 Command=23` with `GaitParam=12`, which is only a flat/agile gait parameter already tested through `/m20pro/gait_command assist`;
+  - because the manual says axis control `Type=2 Command=21` only supports normal mode, the project must not automatically switch to `Mode=2` during Nav2 tasks until the auxiliary mode is field-tested.
+- Local code boundary after this check:
+  - usage-mode command support exists in code for later testing but defaults to disabled;
+  - frontend auxiliary/normal/navigation mode buttons were removed for now, so the web UI does not provide an accidental `Mode=2` control path;
+  - local checks passed: `py_compile`, extracted dashboard JavaScript `node --check`, `git diff --check`, and targeted `colcon build --symlink-install --packages-select m20pro_navigation m20pro_cloud_bridge m20pro_bringup`.
+
+## 2026-06-22 preflight costmap warning hardening
+
+- User-facing issue:
+  - field tests repeatedly saw self-check costmap warnings, and that blocked relocalization/navigation work;
+  - at the workstation or immediately after arriving at the test site, Nav2/costmap can legitimately be delayed by the startup gate until map, scan, localization, pose, and TF are ready.
+- Web preflight hardening:
+  - added a short baseline wait before evaluating preflight so the dashboard has time to cache fresh map/perception/battery/navigation status instead of sampling too early;
+  - if the robot is unlocalized or explicitly in workstation mode, local/global costmap and Nav2 lifecycle are now reported as informational deferred checks rather than warnings;
+  - after localization is valid, local/global costmap and Nav2 lifecycle remain strict navigation checks, so real field failures are still visible before moving.
+- Assist-mode safety boundary remains unchanged:
+  - no web button or automatic behavior switches the robot into vendor auxiliary mode;
+  - usage-mode command support stays disabled by default until auxiliary mode is tested deliberately.
+- Verification:
+  - local `py_compile` passed for web dashboard, TCP bridge, and Nav2 startup gate;
+  - extracted dashboard JavaScript passed `node --check`;
+  - `git diff --check` passed;
+  - targeted build passed: `colcon build --symlink-install --packages-select m20pro_navigation m20pro_cloud_bridge m20pro_bringup`;
+  - live 104 check still reports `m20pro-real.service` active/running with `NRestarts=0`, `/dev/shm` 58%, and blocking preflight `failures=0`, `warnings=0`, `navigation_ready=true`.
+
+## 2026-06-22 deployed costmap preflight hardening to 104
+
+- Deployment:
+  - stopped `m20pro-real.service` on 104 before syncing code;
+  - cleaned root-owned remote `build/install/log` artifacts left by the root systemd runtime;
+  - ran `scripts/local_deploy_to_test_robot.sh user@10.21.31.104 /home/user/m20pro_ros2_ws`;
+  - remote `colcon build --symlink-install` completed for all five packages.
+- Restart verification:
+  - reset the failed service state caused by the intentional SIGINT stop, then started `m20pro-real.service`;
+  - service is `active/running`, `NRestarts=0`, `ExecMainPID=18966`;
+  - `/dev/shm` usage is 58%.
+- Runtime evidence:
+  - relay guard reported `LIDAR relay sample OK`;
+  - `m20pro_nav2_startup_gate` waited for `/map`, fresh `/scan`, and `localization_ok=true`, then requested lifecycle startup;
+  - local/global costmaps subscribed to `/scan`, activated, and Nav2 lifecycle became active;
+  - `m20pro_system_check` reported `M20PRO REAL OK`.
+- Web preflight after deployment:
+  - blocking `/api/preflight/run` returned `ok=true`, `navigation_ready=true`, `relocalization_ready=true`;
+  - `failures=0`, `warnings=0`, `navigation_warnings=0`;
+  - `lidar_points`, `/scan`, local costmap, and global costmap were all fresh within 1s.
+- Assist-mode safety:
+  - deployed code still has no `/api/usage_mode` route or frontend usage-mode buttons;
+  - `enable_usage_mode_command` remains `false` in both config and TCP bridge defaults;
+  - status-only parsing of `ControlUsageMode`/`OOA` is present for later observation.
+
+## 2026-06-22 read-only field diagnosis script
+
+- Added `scripts/104_diagnose_preflight.sh` as a field-friendly diagnosis entrypoint.
+- The script is explicitly read-only:
+  - calls web `/healthz`, `/api/state`, and blocking `/api/preflight/run`;
+  - lists selected ROS topics/nodes in an isolated ROS shell;
+  - prints systemd state, `/dev/shm` usage, usage-mode safety flags, and recent relevant logs;
+  - does not publish `/cmd_vel`, gait commands, usage-mode commands, or any relocalization request.
+- Updated `scripts/README.md`:
+  - added `./scripts/104_diagnose_preflight.sh` to common 104 commands;
+  - clarified that web preflight now treats pre-localization costmap/Nav2 delay as an informational deferred state instead of a WARN that blocks relocalization.
+- Deployed the script to 104 without restarting the running service.
+- Verification on 104:
+  - script completed through `==== Done ====`;
+  - service `active/running`, enabled, `NRestarts=0`;
+  - web health OK;
+  - web state showed fresh relay pointcloud, `/scan`, local/global costmaps, localization, and navigation status;
+  - blocking preflight reported `failures=0`, `warnings=0`, `navigation_warnings=0`;
+  - selected ROS graph included `/LIDAR/POINTS`, `/m20pro/lidar_points_relay`, `/scan`, local/global costmap topics, and `m20pro_nav2_startup_gate`;
+  - usage-mode safety check reported `enable_usage_mode_command: false` and no web usage-mode control route/button.
+
+## 2026-06-22 assist-mode read-only display polish
+
+- Purpose:
+  - keep the hand-controller auxiliary/assist mode strictly read-only in the web stack until it is field-tested;
+  - make future observation understandable if the handler or vendor status reports `ControlUsageMode`/`OOA`.
+- Web display change:
+  - added frontend-only mapping for vendor usage mode:
+    - `0` -> 常规;
+    - `1` -> 导航;
+    - `2` -> 辅助.
+  - added frontend-only mapping for auxiliary obstacle avoidance `OOA`:
+    - `0` -> 未启动;
+    - `1` -> 空闲中;
+    - `2` -> 未触发避障;
+    - `3` -> 主动避障中.
+- Safety boundary:
+  - no `/api/usage_mode` route was added;
+  - no frontend usage-mode button was added;
+  - `enable_usage_mode_command` remains `false` in configs and TCP bridge defaults.
+- Verification:
+  - local `py_compile` passed for web dashboard, TCP bridge, and Nav2 startup gate;
+  - extracted dashboard JavaScript passed `node --check`;
+  - `git diff --check` passed;
+  - targeted build passed for `m20pro_cloud_bridge`, `m20pro_navigation`, and `m20pro_bringup`;
+  - deployed to 104, rebuilt all five packages, restarted `m20pro-real.service`;
+  - 104 service is `active/running`, `NRestarts=0`, `/dev/shm` 58%;
+  - blocking web preflight after deployment reported `failures=0`, `warnings=0`, `navigation_warnings=0`;
+  - diagnostic script confirmed `enable_usage_mode_command: false` and no web usage-mode control route/button.
+
+## 2026-06-22 development dog current issue sweep
+
+- Current 104 runtime check:
+  - connected robot is the development dog at `10.21.31.104`;
+  - `m20pro-real.service` is `active/running`, enabled, and `NRestarts=0`;
+  - web health is OK at `http://10.21.31.104:8080/healthz`;
+  - blocking web preflight returned `ok=true`, `failures=0`, `warnings=0`, `navigation_warnings=0`;
+  - relay pointcloud, `/scan`, odom, map pose, `/map`, local costmap, and global costmap were all fresh enough for navigation readiness.
+- Runtime cleanup:
+  - `_ros2_daemon` was consuming about one CPU core; stopped it with `ros2 daemon stop`;
+  - project service and web preflight stayed healthy afterward.
+- Development dog git/network findings:
+  - `/home/user/m20pro_ros2_ws` is a symlink to `/home/user/m20pro_ros2_ws_20260529_173921`;
+  - that deployed directory is not a git worktree, so direct `git pull` cannot work there even if internet is fixed;
+  - current 104 network has only `10.21.31.104/24` on `eth0`, no default route, and no DNS;
+  - a temporary test route through `10.21.31.103` was attempted because 103 is reachable, but 104 still could not reach `8.8.8.8` or resolve `github.com`;
+  - the temporary route/DNS was removed afterward to restore the original robot LAN-only state;
+  - SSH to 103 was not available from this session, so the 103 Wi-Fi/NAT/dnsmasq gateway could not be repaired here.
+- Lidar topic finding:
+  - current development dog ROS graph shows `/LIDAR/POINTS`, `/m20pro/lidar_points_relay`, and `/scan`;
+  - `/LIDAR/POINTS2` is not present on this development dog at the time of the check;
+  - the active navigation chain is `/LIDAR/POINTS -> /m20pro/lidar_points_relay -> /scan`;
+  - plain `ros2 topic info /LIDAR/POINTS` can report publisher count `0` while relay/fusion and web state still receive live data, so use web `/api/state`, relay status, and pointcloud fusion status as stronger evidence.
+- Map finding:
+  - `/home/user/m20pro_maps` is empty, but project builtin maps are available through `/api/maps`;
+  - current selected map is `builtin_F20`, and F20 PCD-derived terrain data is ready;
+  - if the browser map panel appears empty while `/api/maps` is valid, suspect frontend rendering/cache/state before assuming backend map files are missing.
+- New regression guard:
+  - added `scripts/check_preflight_policy.py`;
+  - it verifies that unlocalized/workstation costmap and Nav2 lifecycle checks remain informational, not navigation warnings;
+  - it verifies that localized navigation readiness still counts `fail/warn`, not `info`;
+  - it verifies that the web stack has no `/api/usage_mode`, no `data-usage-mode`, and no `setUsageMode` button/control path;
+  - it verifies `enable_usage_mode_command: false` remains in real/sim config and TCP bridge defaults;
+  - it verifies Nav2 startup gate installation, disabled Nav2 autostart, and `always_send_full_costmap: true`.
+- Field diagnosis update:
+  - enhanced `scripts/104_diagnose_preflight.sh` with read-only network/git readiness checks;
+  - it now prints IPs, routes, DNS, git repo status, lidar topic info for `/LIDAR/POINTS` and `/LIDAR/POINTS2`, pointcloud fusion status, and relay status;
+  - this should make future self-check failures easier to classify as network/git/deploy, lidar/DDS, startup gate, or real Nav2/costmap readiness.
+- Terminal preflight update:
+  - updated `scripts/104_preflight_check.sh` wording so workstation/unlocalized Nav2/costmap delay is treated as a deferred state;
+  - `/scan` absence is now a real failure even at the workstation, matching the user's requirement that missing scan/lidar must not be explained away by being at the desk.
+- Verification:
+  - `python3 scripts/check_preflight_policy.py` passed;
+  - `bash -n scripts/104_diagnose_preflight.sh scripts/104_preflight_check.sh` passed;
+  - 104 service health was rechecked after the temporary network test and remained `active/running`, `NRestarts=0`, web health OK.
+
+## 2026-06-22 optional second lidar relay/fusion hardening
+
+- Reason:
+  - user reported that factory documentation/expectation has front and rear lidar streams (`/LIDAR/POINTS` and `/LIDAR/POINTS2`);
+  - development dog 104 currently publishes only `/LIDAR/POINTS`, but field/test dogs may expose `/LIDAR/POINTS2`;
+  - navigation and obstacle avoidance should use the second lidar when it exists, while not blocking startup on robots where it is absent.
+- Pointcloud fusion change:
+  - `m20pro_pointcloud_fusion` now keeps primary and backup pointcloud ranges separately;
+  - when both primary and backup clouds are fresh, `/scan` is produced by taking the per-angle nearest obstacle (`np.minimum`);
+  - when only one side is fresh, `/scan` continues from that side instead of dropping scan output;
+  - diagnostics now report backup topic, per-topic message counts, primary/backup freshness, and backup source age.
+- Startup change:
+  - full real startup still requires the primary relay `/LIDAR/POINTS -> /m20pro/lidar_points_relay`;
+  - it now optionally tries `/LIDAR/POINTS2 -> /m20pro/lidar_points2_relay` with a short wait;
+  - if the second relay receives a sample, `backup_cloud_topic` is passed into the real launch and fused into `/scan`;
+  - if `/LIDAR/POINTS2` is absent or silent, startup logs a warning and continues with the primary lidar only.
+- Launch/config change:
+  - `m20pro.launch.py` and `m20pro_real.launch.py` now both declare and forward `backup_cloud_topic`;
+  - autostart defaults include:
+    - `M20PRO_ENABLE_LIDAR2_RELAY=1`;
+    - `M20PRO_LIDAR2_TOPIC=/LIDAR/POINTS2`;
+    - `M20PRO_LIDAR2_RELAY_TOPIC=/m20pro/lidar_points2_relay`;
+    - `M20PRO_LIDAR2_RELAY_WAIT_S=8`.
+- Diagnostics/docs:
+  - `104_diagnose_preflight.sh` now lists `/m20pro/lidar_points2_relay` and `/m20pro/lidar_relay2/status`;
+  - runtime snapshot includes the second relay topic when present;
+  - scripts README explains that second lidar is optional and should not block boot/preflight if absent.
+- Verification:
+  - `python3 -m py_compile` passed for `pointcloud_fusion.py`, `m20pro_real.launch.py`, and `m20pro.launch.py`;
+  - `bash -n` passed for changed startup/diagnosis/autostart scripts;
+  - `python3 scripts/check_preflight_policy.py` passed and now guards backup lidar wiring;
+  - `git diff --check` passed;
+  - targeted build passed: `colcon build --symlink-install --packages-select m20pro_navigation m20pro_bringup`.
+- 104 deployment/bugfix notes:
+  - first deployment exposed a real startup bug when `/LIDAR/POINTS2` was absent: passing `backup_cloud_topic:=` with an empty value made ROS launch fail with `malformed launch argument`;
+  - fixed by only appending `backup_cloud_topic:=...` when the optional second relay actually receives a sample;
+  - second deployment exposed a relay cleanup bug: stopping the optional second relay could match relay command lines by substring, so `/LIDAR/POINTS` could be confused with `/LIDAR/POINTS2`;
+  - fixed relay guard matching so start/stop locate relay processes by exact `input_topic:=...` and `output_topic:=...` argument tokens;
+  - after the fix, development dog 104 recovered with only the primary relay running, `pointcloud_fusion` receiving primary clouds, `/scan` publishing, Nav2 startup gate requesting lifecycle startup, and local/global costmaps subscribing to `/scan`;
+  - blocking preflight on 104 returned `ok=true`, `navigation_ready=true`, `relocalization_ready=true`, `failures=0`, `warnings=0`, `navigation_warnings=0`;
+  - this verifies the current development dog behavior: missing `/LIDAR/POINTS2` is informational only and no longer breaks the primary lidar/costmap chain.
+
+## 2026-06-22 developer-shell pointcloud visibility hardening
+
+- Problem found on the development dog:
+  - `m20pro-real.service` runs the real stack as `root`;
+  - plain `user` ROS CLI could receive `/scan`, but could not receive `/LIDAR/POINTS` or `/m20pro/lidar_points_relay`;
+  - the same probe as `root` could receive both raw lidar and relay pointclouds;
+  - when the `user` shell exported the project UDP-only FastDDS profile, it could receive `/m20pro/lidar_points_relay` again.
+- Interpretation:
+  - current navigation and obstacle avoidance were healthy because `/scan` was fresh and web preflight was green;
+  - the recurring "topic exists but echo has no pointcloud samples" symptom can be a root/user FastDDS SHM/profile split, not necessarily a lidar outage;
+  - missing `/scan` remains a real fault and must not be explained away by being at the workstation.
+- Script hardening:
+  - `scripts/104_diagnose_preflight.sh` now auto-runs the current local script on `user@10.21.31.104` when launched from an upper computer, avoiding accidental local service/8080 checks;
+  - the diagnose script now exports the project UDP-only FastDDS profile for ROS CLI probes and runs a small Python subscriber for relay pointcloud, `/scan`, fusion status, and relay status;
+  - Foxy-incompatible and misleading `ros2 topic echo` sampling was removed from the diagnose script; status samples now use a Python subscriber too;
+  - recent log output now summarizes camera RTSP failures separately and filters them out of the navigation/lidar log tail, so camera noise does not hide costmap or pointcloud evidence;
+  - `scripts/104_preflight_check.sh` now also auto-runs on 104 from an upper computer and exports the project UDP-only FastDDS profile before terminal topic checks;
+  - terminal preflight topic sampling now uses Python subscribers by message type instead of `ros2 topic echo`, covering relay pointcloud, `/scan`, pose, odom, localization, and navigation status;
+  - terminal preflight now treats `/scan` with no data as a hard failure even at the workstation, while relay pointcloud CLI failure is a warning if the web `/scan` chain is fresh.
+- Documentation/guardrails:
+  - `scripts/README.md` documents the remote execution behavior and the UDP FastDDS observation profile;
+  - `scripts/check_preflight_policy.py` now guards these diagnostics so future changes do not reintroduce unsupported Foxy echo flags or downgrade missing `/scan` to a workstation warning.
+
+## 2026-06-22 pointcloud load reduction and assist default rollback
+
+- Reason:
+  - raw `/LIDAR/POINTS` clouds often contain tens of thousands of points at high rate;
+  - relaying full clouds through DDS and then parsing them again in Python keeps the robot host under sustained pressure and contributes to `/dev/shm`/DDS stress;
+  - the hand-controller auxiliary/assist mode has not been field-tested, so project task flow must not automatically request assist-like gait behavior.
+- Lidar relay load reduction:
+  - `m20pro_lidar_relay` now supports `max_output_points` and `min_publish_interval_s`;
+  - the default relay output is capped to about 12000 points per cloud and 0.1 s minimum publish interval;
+  - the relay status now reports input/output point counts, stride, published/skipped message counts, and input/output bytes;
+  - raw input subscription still uses the factory DDS profile so the relay can see `/LIDAR/POINTS`, but downstream project consumers receive a lighter `/m20pro/lidar_points_relay`.
+- Fusion load reduction:
+  - real pointcloud fusion now processes at most 6000 points per relay cloud;
+  - `/scan` remains at 10 Hz, but `publish_on_cloud_update` is disabled so cloud callbacks do not trigger extra scan publications beyond the timer;
+  - this keeps obstacle information dense enough for the 1-degree scan while reducing Python/Numpy work.
+- Autostart defaults:
+  - `104_enable_autostart.sh` and `systemd/m20pro-real.default` now record:
+    - `M20PRO_LIDAR_RELAY_MAX_OUTPUT_POINTS=12000`;
+    - `M20PRO_LIDAR_RELAY_MIN_PUBLISH_INTERVAL_S=0.1`.
+- Assist safety rollback:
+  - `floor_manager` default `flat_gait_label` is back to `flat`;
+  - real launch also passes `flat_gait_label=flat`;
+  - `gait_assist_param=12` remains available for explicit future testing, but normal Nav2/floor tasks no longer automatically request it.
+
+## 2026-06-22 local workspace cleanup
+
+- Cleaned only low-risk generated files in the local development workspace:
+  - removed ROS/colcon generated directories `build/`, `install/`, and `log/`;
+  - removed Python `__pycache__`/`.pyc` cache files;
+  - ran `git gc --prune=now` to pack loose Git objects.
+- Size result on the upper-computer workspace:
+  - before cleanup: about 180M;
+  - after cleanup: about 46M;
+  - `.git` was reduced from about 120M to about 5.6M.
+- Files intentionally kept:
+  - `src/m20pro_bringup/maps/Original_map/full_cloud.pcd`, because `m20pro.yaml`, `m20pro_real.yaml`, and `map_manifest.yaml` reference it;
+  - `src/m20pro_inspection/models/playphone_bg_best_rk3588_int8.rknn`, because real/sim launch defaults reference it as the inspection model.
+- Note:
+  - after deleting `install/`, rebuild locally before running local launch commands:
+    `colcon build --symlink-install`.

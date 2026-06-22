@@ -1,4 +1,6 @@
 import math
+import os
+import shutil
 from typing import Any, Dict, List, Optional, Set
 
 import rclpy
@@ -43,6 +45,7 @@ class SystemCheckNode(Node):
         self.declare_parameter("min_scan_close_bins", 1)
         self.declare_parameter("scan_close_range_m", 2.0)
         self.declare_parameter("min_local_costmap_marked_cells", 1)
+        self.declare_parameter("warn_shm_usage_percent", 90.0)
         self.declare_parameter("expected_nodes", [])
         self.declare_parameter(
             "lifecycle_nodes",
@@ -60,6 +63,7 @@ class SystemCheckNode(Node):
         self.reported_ok = False
         self.seen_topics: Set[str] = set()
         self.lifecycle_states: Dict[str, str] = {}
+        self.lifecycle_last_error: Dict[str, str] = {}
         self.scan_stats: Optional[Dict[str, Any]] = None
         self.local_costmap_stats: Optional[Dict[str, int]] = None
         self.tf_buffer = None
@@ -245,6 +249,9 @@ class SystemCheckNode(Node):
             content_problems = self._content_problems()
             if content_problems:
                 problems.extend(content_problems)
+            runtime_problems = self._runtime_problems()
+            if runtime_problems:
+                problems.extend(runtime_problems)
 
         if problems:
             self.reported_ok = False
@@ -297,7 +304,8 @@ class SystemCheckNode(Node):
                 continue
             label = self.lifecycle_states.get(node_name)
             if label != "active":
-                inactive.append("%s:%s" % (node_name, label or "unknown"))
+                detail = self.lifecycle_last_error.get(node_name) or label or "unknown"
+                inactive.append("%s:%s" % (node_name, detail))
             future = client.call_async(GetState.Request())
             future.add_done_callback(
                 lambda done, lifecycle_name=node_name: self._on_state(done, lifecycle_name)
@@ -351,6 +359,28 @@ class SystemCheckNode(Node):
                 problems.append(transform_problem)
         return problems
 
+    def _runtime_problems(self) -> List[str]:
+        problems: List[str] = []
+        shm_problem = self._shm_problem()
+        if shm_problem:
+            problems.append(shm_problem)
+        return problems
+
+    def _shm_problem(self) -> Optional[str]:
+        try:
+            usage = shutil.disk_usage("/dev/shm")
+        except Exception:
+            return None
+        total = float(usage.total)
+        if total <= 0.0:
+            return None
+        used_percent = 100.0 * float(usage.used) / total
+        warn_percent = float(self.get_parameter("warn_shm_usage_percent").value)
+        if used_percent < warn_percent:
+            return None
+        profile = os.environ.get("FASTRTPS_DEFAULT_PROFILES_FILE", "unset")
+        return "shm_usage=%.1f%%,profile=%s" % (used_percent, profile)
+
     def _tf_height_problem(self) -> Optional[str]:
         global_frame = str(self.get_parameter("tf_global_frame").value).strip() or "odom"
         base_frame = str(self.get_parameter("tf_base_frame").value).strip() or "m20pro_base_link"
@@ -370,9 +400,11 @@ class SystemCheckNode(Node):
         try:
             response = future.result()
         except Exception as exc:
+            self.lifecycle_last_error[node_name] = str(exc)
             self.get_logger().warning("lifecycle check failed for %s: %s" % (node_name, exc))
             return
         self.lifecycle_states[node_name] = response.current_state.label
+        self.lifecycle_last_error.pop(node_name, None)
 
     def _publisher_count(self, topic_name: str) -> int:
         return len(self.get_publishers_info_by_topic(topic_name))

@@ -14,7 +14,7 @@ if [[ -z "${ROS_DISTRO:-}" ]]; then
 fi
 if [[ -z "${FASTRTPS_DEFAULT_PROFILES_FILE:-}" ]]; then
   UDP_PROFILE="/home/user/m20pro_ros2_ws/install/m20pro_bringup/share/m20pro_bringup/config/m20pro_fastdds_udp.xml"
-  if [[ -f "${UDP_PROFILE}" && "${M20PRO_USE_PROJECT_FASTDDS:-0}" == "1" ]]; then
+  if [[ -f "${UDP_PROFILE}" && "${M20PRO_FASTDDS_PROFILE:-project_udp}" != "factory" ]]; then
     export FASTRTPS_DEFAULT_PROFILES_FILE="${UDP_PROFILE}"
   else
     export FASTRTPS_DEFAULT_PROFILES_FILE="/opt/robot/fastdds.xml"

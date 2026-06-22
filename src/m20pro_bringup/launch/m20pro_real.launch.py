@@ -51,6 +51,7 @@ def generate_launch_description():
     map_manifest = LaunchConfiguration("map_manifest")
     map_yaml = LaunchConfiguration("map")
     cloud_topic = LaunchConfiguration("cloud_topic")
+    backup_cloud_topic = LaunchConfiguration("backup_cloud_topic")
     use_fusion = LaunchConfiguration("fusion")
     enable_nav2 = LaunchConfiguration("enable_nav2")
     enable_floor_manager = LaunchConfiguration("enable_floor_manager")
@@ -62,6 +63,7 @@ def generate_launch_description():
     enable_initialpose_3d_adapter = LaunchConfiguration("enable_initialpose_3d_adapter")
     initialpose_3d_z = LaunchConfiguration("initialpose_3d_z")
     enable_web_dashboard = LaunchConfiguration("enable_web_dashboard")
+    enable_nav2_startup_gate = LaunchConfiguration("enable_nav2_startup_gate")
     web_dashboard_port = LaunchConfiguration("web_dashboard_port")
     web_dashboard_data_dir = LaunchConfiguration("web_dashboard_data_dir")
     web_dashboard_map_archive_dir = LaunchConfiguration("web_dashboard_map_archive_dir")
@@ -107,6 +109,7 @@ def generate_launch_description():
         DeclareLaunchArgument("map_manifest", default_value=default_map_manifest),
         DeclareLaunchArgument("map", default_value=default_map),
         DeclareLaunchArgument("cloud_topic", default_value="/LIDAR/POINTS"),
+        DeclareLaunchArgument("backup_cloud_topic", default_value=""),
         DeclareLaunchArgument("fusion", default_value="true"),
         DeclareLaunchArgument(
             "enable_nav2",
@@ -122,6 +125,11 @@ def generate_launch_description():
         DeclareLaunchArgument("enable_initialpose_3d_adapter", default_value="false"),
         DeclareLaunchArgument("initialpose_3d_z", default_value="0.0"),
         DeclareLaunchArgument("enable_web_dashboard", default_value="false"),
+        DeclareLaunchArgument(
+            "enable_nav2_startup_gate",
+            default_value="true",
+            description="Delay Nav2 lifecycle startup until map, scan, localization and TF are ready.",
+        ),
         DeclareLaunchArgument("web_dashboard_port", default_value="8080"),
         DeclareLaunchArgument("web_dashboard_data_dir", default_value="~/.m20pro_web"),
         DeclareLaunchArgument("web_dashboard_map_archive_dir", default_value="~/m20pro_maps"),
@@ -281,7 +289,7 @@ def generate_launch_description():
             parameters=[
                 {
                     "input_cloud_topic": cloud_topic,
-                    "backup_cloud_topic": "",
+                    "backup_cloud_topic": backup_cloud_topic,
                     "front_lidar_topic": "",
                     "rear_lidar_topic": "",
                     "output_scan_topic": "/scan",
@@ -301,9 +309,9 @@ def generate_launch_description():
                     "max_source_age_s": 1.0,
                     "cloud_reliability": "reliable",
                     "scan_reliability": "best_effort",
-                    "max_points_per_cloud": 12000,
+                    "max_points_per_cloud": 6000,
                     "min_cloud_interval_s": 0.05,
-                    "publish_on_cloud_update": True,
+                    "publish_on_cloud_update": False,
                     "diagnostic_period_s": 2.0,
                 },
             ],
@@ -353,6 +361,7 @@ def generate_launch_description():
                     "initial_floor": initial_floor,
                     "load_initial_floor": ParameterValue(load_initial_floor, value_type=bool),
                     "stair_zones_topic": stair_zones_topic,
+                    "flat_gait_label": "flat",
                 }
             ],
             condition=IfCondition(enable_floor_manager if nav2_stack_available else "false"),
@@ -396,12 +405,30 @@ def generate_launch_description():
                         "use_sim_time": "False",
                         "use_composition": "False",
                         "map_subscribe_transient_local": "True",
+                        "autostart": "False",
                     }.items(),
                     condition=IfCondition(enable_nav2),
                 )
             ]
             if nav2_stack_available
             else []
+        ),
+        Node(
+            package="m20pro_navigation",
+            executable="nav2_startup_gate",
+            name="m20pro_nav2_startup_gate",
+            output="screen",
+            parameters=[
+                {
+                    "enabled": ParameterValue(enable_nav2_startup_gate, value_type=bool),
+                    "required_fresh_age_s": 3.0,
+                    "startup_retry_s": 10.0,
+                    "startup_timeout_s": 20.0,
+                    "tf_global_frame": "map",
+                    "tf_base_frame": "m20pro_base_link",
+                }
+            ],
+            condition=IfCondition(enable_nav2 if nav2_stack_available else "false"),
         ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(inspection_launch),
