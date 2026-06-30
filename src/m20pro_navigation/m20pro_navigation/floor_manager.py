@@ -17,7 +17,7 @@ from rclpy.action import ActionClient
 from rclpy.node import Node
 from std_msgs.msg import String
 
-from .geometry import yaw_to_quaternion
+from .geometry import quaternion_to_yaw, yaw_to_quaternion
 
 
 class FloorManager(Node):
@@ -69,6 +69,9 @@ class FloorManager(Node):
         self.declare_parameter("stair_up_gait_label", "stair_up")
         self.declare_parameter("stair_down_gait_label", "stair_down")
         self.declare_parameter("post_switch_goal_delay_s", 1.0)
+        self.declare_parameter("duplicate_goal_tolerance_m", 0.08)
+        self.declare_parameter("duplicate_goal_yaw_tolerance_rad", 0.12)
+        self.declare_parameter("nav_feedback_status_period_s", 1.0)
 
         self.config_file = self._resolve_path(str(self.get_parameter("config_file").value))
         self.config = self._load_config(self.config_file)
@@ -89,8 +92,11 @@ class FloorManager(Node):
         self.active_floor_mission = False
         self.active_nav_goal_handle: Optional[Any] = None
         self.active_nav_goal_label = ""
+        self.active_nav_goal_pose: Optional[PoseStamped] = None
+        self.active_nav_goal_sequence = 0
         self.nav_goal_sequence = 0
         self.stop_nav_goal_sequence = 0
+        self.last_nav_feedback_publish_monotonic = 0.0
         self.cancelled_nav_goal_handle_ids: Set[int] = set()
         self.stair_timer = None
         self.post_exit_goal_timer = None
@@ -360,7 +366,13 @@ class FloorManager(Node):
             self._publish_stair_status("error reason=unknown_goal_floor floor=%s" % target_floor)
             return
 
+        goal = self._pose_in_map_frame(msg)
+
         if self.active_floor_mission:
+            if self._is_duplicate_active_floor_goal(target_floor, goal):
+                self.get_logger().info("duplicate active floor goal ignored")
+                self._publish_stair_status("ignored reason=duplicate_floor_goal target_floor=%s" % target_floor)
+                return
             if self._can_replace_active_floor_goal(target_floor):
                 self.get_logger().warning("replacing active same-floor goal with a new floor goal")
                 self._publish_stair_status("replacing_active_floor_goal target_floor=%s" % target_floor)
@@ -370,7 +382,6 @@ class FloorManager(Node):
                 self._publish_stair_status("ignored reason=floor_mission_active")
                 return
 
-        goal = self._pose_in_map_frame(msg)
         self.get_logger().info(
             "received floor goal target_floor=%s x=%.2f y=%.2f"
             % (target_floor, goal.pose.position.x, goal.pose.position.y)
@@ -620,11 +631,23 @@ class FloorManager(Node):
         )
         self.nav_goal_sequence += 1
         goal_sequence = self.nav_goal_sequence
-        future = self.navigate_to_pose_client.send_goal_async(goal)
-        future.add_done_callback(lambda done: self._on_nav_goal_response(done, label, goal_sequence))
+        future = self.navigate_to_pose_client.send_goal_async(
+            goal,
+            feedback_callback=lambda feedback: self._on_nav_feedback(feedback, label, goal_sequence),
+        )
+        future.add_done_callback(
+            lambda done: self._on_nav_goal_response(done, label, goal_sequence, pose)
+        )
 
-    def _on_nav_goal_response(self, future: Any, label: str, goal_sequence: int) -> None:
+    def _on_nav_goal_response(
+        self,
+        future: Any,
+        label: str,
+        goal_sequence: int,
+        pose: PoseStamped,
+    ) -> None:
         stale_after_stop = goal_sequence <= self.stop_nav_goal_sequence
+        status_suffix = self._goal_status_suffix(label, goal_sequence, pose)
         try:
             goal_handle = future.result()
         except Exception as exc:
@@ -632,26 +655,28 @@ class FloorManager(Node):
                 self.get_logger().warning(
                     "ignored stale Nav2 goal request failure after stop for %s: %s" % (label, exc)
                 )
-                self._publish_stair_status("ignored reason=stale_nav_goal_request label=%s" % label)
+                self._publish_stair_status("ignored reason=stale_nav_goal_request %s" % status_suffix)
                 return
             self.get_logger().error("Nav2 goal request failed for %s: %s" % (label, exc))
-            self._publish_stair_status("error reason=nav_goal_request_failed label=%s" % label)
+            self._publish_stair_status("error reason=nav_goal_request_failed %s" % status_suffix)
             self._clear_floor_mission_if_needed(label)
             return
         if not goal_handle.accepted:
             if stale_after_stop:
                 self.get_logger().warning("ignored stale Nav2 goal rejection after stop: %s" % label)
-                self._publish_stair_status("ignored reason=stale_nav_goal_rejected label=%s" % label)
+                self._publish_stair_status("ignored reason=stale_nav_goal_rejected %s" % status_suffix)
                 return
             self.get_logger().error("Nav2 goal rejected: %s" % label)
-            self._publish_stair_status("error reason=nav_goal_rejected label=%s" % label)
+            self._publish_stair_status("error reason=nav_goal_rejected %s" % status_suffix)
             self._clear_floor_mission_if_needed(label)
             return
         if stale_after_stop:
             self.get_logger().warning("cancelling stale Nav2 goal after stop request: %s" % label)
             self.cancelled_nav_goal_handle_ids.add(id(goal_handle))
             result_future = goal_handle.get_result_async()
-            result_future.add_done_callback(lambda done: self._on_nav_result(done, label, goal_handle))
+            result_future.add_done_callback(
+                lambda done: self._on_nav_result(done, label, goal_handle, goal_sequence, pose)
+            )
             try:
                 cancel_future = goal_handle.cancel_goal_async()
                 cancel_future.add_done_callback(
@@ -664,12 +689,54 @@ class FloorManager(Node):
             return
         self.active_nav_goal_handle = goal_handle
         self.active_nav_goal_label = label
-        self._publish_stair_status("nav_goal_accepted label=%s" % label)
+        self.active_nav_goal_pose = pose
+        self.active_nav_goal_sequence = goal_sequence
+        self._publish_stair_status("nav_goal_accepted %s" % status_suffix)
         result_future = goal_handle.get_result_async()
-        result_future.add_done_callback(lambda done: self._on_nav_result(done, label, goal_handle))
+        result_future.add_done_callback(
+            lambda done: self._on_nav_result(done, label, goal_handle, goal_sequence, pose)
+        )
 
-    def _on_nav_result(self, future: Any, label: str, goal_handle: Any) -> None:
+    def _on_nav_feedback(self, feedback_msg: Any, label: str, goal_sequence: int) -> None:
+        if goal_sequence <= self.stop_nav_goal_sequence:
+            return
+        if self.active_nav_goal_sequence and self.active_nav_goal_sequence != goal_sequence:
+            return
+        if self.active_nav_goal_label and self.active_nav_goal_label != label:
+            return
+        now_monotonic = time.monotonic()
+        period_s = max(0.2, float(self.get_parameter("nav_feedback_status_period_s").value))
+        if now_monotonic - self.last_nav_feedback_publish_monotonic < period_s:
+            return
+        feedback = getattr(feedback_msg, "feedback", None)
+        if feedback is None:
+            return
+        self.last_nav_feedback_publish_monotonic = now_monotonic
+        pose_text = self._nav_feedback_pose_text(getattr(feedback, "current_pose", None))
+        status_suffix = self._goal_status_suffix(label, goal_sequence, self.active_nav_goal_pose)
+        self._publish_stair_status(
+            "nav_goal_feedback %s distance_remaining=%.3f navigation_time=%.2f "
+            "estimated_time_remaining=%.2f recoveries=%d%s"
+            % (
+                status_suffix,
+                float(getattr(feedback, "distance_remaining", 0.0)),
+                self._duration_to_sec(getattr(feedback, "navigation_time", None)),
+                self._duration_to_sec(getattr(feedback, "estimated_time_remaining", None)),
+                int(getattr(feedback, "number_of_recoveries", 0) or 0),
+                pose_text,
+            )
+        )
+
+    def _on_nav_result(
+        self,
+        future: Any,
+        label: str,
+        goal_handle: Any,
+        goal_sequence: int,
+        pose: PoseStamped,
+    ) -> None:
         was_current_goal = self.active_nav_goal_handle is goal_handle
+        status_suffix = self._goal_status_suffix(label, goal_sequence, pose)
         try:
             result = future.result()
         except Exception as exc:
@@ -677,11 +744,11 @@ class FloorManager(Node):
                 self.get_logger().warning(
                     "ignored stale Nav2 result failure label=%s: %s" % (label, exc)
                 )
-                self._publish_stair_status("ignored reason=stale_nav_result_failed label=%s" % label)
+                self._publish_stair_status("ignored reason=stale_nav_result_failed %s" % status_suffix)
                 return
             self.get_logger().error("Nav2 result failed for %s: %s" % (label, exc))
             self._clear_active_nav_goal(goal_handle)
-            self._publish_stair_status("error reason=nav_result_failed label=%s" % label)
+            self._publish_stair_status("error reason=nav_result_failed %s" % status_suffix)
             self._clear_floor_mission_if_needed(label)
             return
 
@@ -691,7 +758,7 @@ class FloorManager(Node):
         self._clear_active_nav_goal(goal_handle)
         if status == GoalStatus.STATUS_CANCELED and was_cancel_requested:
             self.get_logger().warning("Nav2 goal %s finished as cancelled" % label)
-            self._publish_stair_status("nav_goal_cancelled_result label=%s" % label)
+            self._publish_stair_status("nav_goal_cancelled_result %s" % status_suffix)
             if was_current_goal:
                 self._clear_floor_mission_if_needed(label)
             else:
@@ -701,17 +768,17 @@ class FloorManager(Node):
             self.get_logger().warning(
                 "ignored stale Nav2 result label=%s status=%d" % (label, status)
             )
-            self._publish_stair_status("ignored reason=stale_nav_result label=%s status=%d" % (label, status))
+            self._publish_stair_status("ignored reason=stale_nav_result %s status=%d" % (status_suffix, status))
             return
         if status != GoalStatus.STATUS_SUCCEEDED:
             self.get_logger().warning("Nav2 goal %s finished with status %d" % (label, status))
             self._publish_stair_status(
-                "error reason=nav_goal_failed label=%s status=%d" % (label, status)
+                "error reason=nav_goal_failed %s status=%d" % (status_suffix, status)
             )
             self._clear_floor_mission_if_needed(label)
             return
 
-        self._publish_stair_status("nav_goal_succeeded label=%s" % label)
+        self._publish_stair_status("nav_goal_succeeded %s" % status_suffix)
         if label == "stair_entry":
             self._start_stair_after_entry()
         elif label == "stair_traverse":
@@ -754,6 +821,8 @@ class FloorManager(Node):
         label = self.active_nav_goal_label
         self.active_nav_goal_handle = None
         self.active_nav_goal_label = ""
+        self.active_nav_goal_pose = None
+        self.active_nav_goal_sequence = 0
         self._publish_zero_cmd()
         if goal_handle is None:
             self.get_logger().info("no active Nav2 goal to cancel for stop request")
@@ -784,6 +853,8 @@ class FloorManager(Node):
         if self.active_nav_goal_handle is goal_handle:
             self.active_nav_goal_handle = None
             self.active_nav_goal_label = ""
+            self.active_nav_goal_pose = None
+            self.active_nav_goal_sequence = 0
 
     def _publish_zero_cmd(self, samples: int = 5) -> None:
         count = max(1, int(samples))
@@ -794,6 +865,74 @@ class FloorManager(Node):
 
     def _is_floor_mission_label(self, label: str) -> bool:
         return label in ("stair_entry", "stair_traverse", "stair_exit", "floor_goal")
+
+    def _is_duplicate_active_floor_goal(self, target_floor: str, goal: PoseStamped) -> bool:
+        if target_floor != self.current_floor:
+            return False
+        if self.active_nav_goal_label != "floor_goal" or self.active_nav_goal_pose is None:
+            return False
+        active_pose = self.active_nav_goal_pose.pose
+        dx = active_pose.position.x - goal.pose.position.x
+        dy = active_pose.position.y - goal.pose.position.y
+        distance = math.hypot(dx, dy)
+        tolerance = max(0.0, float(self.get_parameter("duplicate_goal_tolerance_m").value))
+        if distance > tolerance:
+            return False
+        active_yaw = quaternion_to_yaw(active_pose.orientation)
+        goal_yaw = quaternion_to_yaw(goal.pose.orientation)
+        yaw_error = abs(self._wrap_angle(active_yaw - goal_yaw))
+        yaw_tolerance = max(0.0, float(self.get_parameter("duplicate_goal_yaw_tolerance_rad").value))
+        return yaw_error <= yaw_tolerance
+
+    @staticmethod
+    def _wrap_angle(value: float) -> float:
+        while value > math.pi:
+            value -= math.tau
+        while value <= -math.pi:
+            value += math.tau
+        return value
+
+    @staticmethod
+    def _duration_to_sec(value: Any) -> float:
+        if value is None:
+            return 0.0
+        try:
+            return float(getattr(value, "sec", 0)) + float(getattr(value, "nanosec", 0)) * 1e-9
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def _nav_feedback_pose_text(current_pose: Any) -> str:
+        pose = getattr(current_pose, "pose", None)
+        if pose is None:
+            return ""
+        try:
+            return " pose_x=%.3f pose_y=%.3f pose_yaw=%.4f" % (
+                float(pose.position.x),
+                float(pose.position.y),
+                quaternion_to_yaw(pose.orientation),
+            )
+        except (TypeError, ValueError):
+            return ""
+
+    @staticmethod
+    def _goal_status_suffix(label: str, goal_sequence: int, pose: Optional[PoseStamped]) -> str:
+        parts = ["label=%s" % label, "goal_seq=%d" % int(goal_sequence)]
+        if pose is None:
+            return " ".join(parts)
+        try:
+            parts.extend(
+                [
+                    "goal_frame=%s" % (str(pose.header.frame_id or "map").replace(" ", "_")),
+                    "goal_x=%.3f" % float(pose.pose.position.x),
+                    "goal_y=%.3f" % float(pose.pose.position.y),
+                    "goal_z=%.3f" % float(pose.pose.position.z),
+                    "goal_yaw=%.4f" % quaternion_to_yaw(pose.pose.orientation),
+                ]
+            )
+        except (TypeError, ValueError):
+            pass
+        return " ".join(parts)
 
     def _start_stair_after_entry(self) -> None:
         route = self.pending_stair_after_nav

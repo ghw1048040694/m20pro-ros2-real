@@ -52,6 +52,7 @@ class PointCloudFusion(Node):
         self.declare_parameter("publish_on_cloud_update", False)
         self.declare_parameter("diagnostic_topic", "/m20pro/pointcloud_fusion/status")
         self.declare_parameter("diagnostic_period_s", 2.0)
+        self.declare_parameter("stamp_scan_with_current_time", False)
 
         self.input_cloud_topic = str(self.get_parameter("input_cloud_topic").value)
         self.backup_cloud_topic = str(self.get_parameter("backup_cloud_topic").value)
@@ -75,6 +76,9 @@ class PointCloudFusion(Node):
         self.publish_on_cloud_update = bool(self.get_parameter("publish_on_cloud_update").value)
         self.diagnostic_topic = str(self.get_parameter("diagnostic_topic").value)
         self.diagnostic_period_s = max(0.5, float(self.get_parameter("diagnostic_period_s").value))
+        self.stamp_scan_with_current_time = bool(
+            self.get_parameter("stamp_scan_with_current_time").value
+        )
         if bool(self.get_parameter("no_return_as_inf").value):
             self.empty_range_value = float("inf")
         else:
@@ -475,6 +479,8 @@ class PointCloudFusion(Node):
             return False
 
     def _output_stamp_for_cloud(self, cloud_msg: PointCloud2):
+        if self.stamp_scan_with_current_time:
+            return self.get_clock().now().to_msg()
         if not self.transform_cloud:
             return cloud_msg.header.stamp
         source_frame = self._clean_frame(cloud_msg.header.frame_id)

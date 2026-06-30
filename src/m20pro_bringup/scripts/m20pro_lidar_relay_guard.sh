@@ -7,8 +7,9 @@ STATUS_TOPIC="${M20PRO_LIDAR_RELAY_STATUS_TOPIC:-/m20pro/lidar_relay/status}"
 WAIT_S="${M20PRO_LIDAR_RELAY_WAIT_S:-45}"
 PID_FILE="${M20PRO_LIDAR_RELAY_PID_FILE:-/tmp/m20pro_lidar_relay.pid}"
 LOG_FILE="${M20PRO_LIDAR_RELAY_LOG_FILE:-/tmp/m20pro_lidar_relay.log}"
-MAX_OUTPUT_POINTS="${M20PRO_LIDAR_RELAY_MAX_OUTPUT_POINTS:-12000}"
-MIN_PUBLISH_INTERVAL_S="${M20PRO_LIDAR_RELAY_MIN_PUBLISH_INTERVAL_S:-0.1}"
+MAX_OUTPUT_POINTS="${M20PRO_LIDAR_RELAY_MAX_OUTPUT_POINTS:-6000}"
+MIN_PUBLISH_INTERVAL_S="${M20PRO_LIDAR_RELAY_MIN_PUBLISH_INTERVAL_S:-0.2}"
+CLOUD_RELIABILITY="${M20PRO_LIDAR_RELAY_CLOUD_RELIABILITY:-auto}"
 
 if [[ -z "${ROS_DISTRO:-}" || ! -x "$(command -v ros2)" ]]; then
   set +u
@@ -50,6 +51,19 @@ relay_profile_for_pid() {
     | awk -F= '$1 == "FASTRTPS_DEFAULT_PROFILES_FILE" {print $2; exit}' || true
 }
 
+pid_has_arg() {
+  local pid="$1"
+  local expected="$2"
+  tr '\0' '\n' <"/proc/${pid}/cmdline" 2>/dev/null | grep -Fxq -- "${expected}"
+}
+
+relay_args_match_for_pid() {
+  local pid="$1"
+  pid_has_arg "${pid}" "cloud_reliability:=${CLOUD_RELIABILITY}" \
+    && pid_has_arg "${pid}" "max_output_points:=${MAX_OUTPUT_POINTS}" \
+    && pid_has_arg "${pid}" "min_publish_interval_s:=${MIN_PUBLISH_INTERVAL_S}"
+}
+
 stop_pid() {
   local pid="$1"
   if [[ -z "${pid}" ]] || ! ps -p "${pid}" >/dev/null 2>&1; then
@@ -82,6 +96,14 @@ start_relay() {
       && "${existing_profile}" != "${current_profile}" ]]; then
       echo "[m20pro_lidar_relay_guard] restarting relay pid=${existing_pid} for DDS profile change: ${existing_profile:-unset} -> ${current_profile}"
       stop_pid "${existing_pid}"
+    elif [[ "${M20PRO_LIDAR_RELAY_RESTART_ON_PARAM_MISMATCH:-1}" == "1" ]]; then
+      if relay_args_match_for_pid "${existing_pid}"; then
+        echo "${existing_pid}" >"${PID_FILE}"
+        echo "[m20pro_lidar_relay_guard] relay already running pid=${existing_pid}"
+        return
+      fi
+      echo "[m20pro_lidar_relay_guard] restarting relay pid=${existing_pid} for param change: reliability=${CLOUD_RELIABILITY} max_points=${MAX_OUTPUT_POINTS} min_interval=${MIN_PUBLISH_INTERVAL_S}"
+      stop_pid "${existing_pid}"
     else
       echo "${existing_pid}" >"${PID_FILE}"
       echo "[m20pro_lidar_relay_guard] relay already running pid=${existing_pid}"
@@ -111,6 +133,7 @@ start_relay() {
     -p input_topic:="${INPUT_TOPIC}" \
     -p output_topic:="${RELAY_TOPIC}" \
     -p status_topic:="${STATUS_TOPIC}" \
+    -p cloud_reliability:="${CLOUD_RELIABILITY}" \
     -p max_output_points:="${MAX_OUTPUT_POINTS}" \
     -p min_publish_interval_s:="${MIN_PUBLISH_INTERVAL_S}" \
     >"${LOG_FILE}" 2>&1 &
@@ -189,7 +212,10 @@ stop_relay() {
   rm -f "${PID_FILE}"
 }
 
-case "${1:-start-wait}" in
+case "${1:-start}" in
+  start)
+    start_relay
+    ;;
   start-wait)
     start_relay
     wait_relay_sample
@@ -201,7 +227,7 @@ case "${1:-start-wait}" in
     wait_relay_sample
     ;;
   *)
-    echo "Usage: $0 [start-wait|wait|stop]" >&2
+    echo "Usage: $0 [start|start-wait|wait|stop]" >&2
     exit 2
     ;;
 esac

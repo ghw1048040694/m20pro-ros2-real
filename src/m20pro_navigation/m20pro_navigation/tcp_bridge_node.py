@@ -30,7 +30,7 @@ class M20TcpBridge(Node):
         self.declare_parameter("map_frame", "map")
         self.declare_parameter("odom_frame", "odom")
         self.declare_parameter("base_frame", "base_link")
-        self.declare_parameter("vendor_position_scale", 0.001)
+        self.declare_parameter("vendor_position_scale", 1.0)
         self.declare_parameter("vendor_position_offset_x", 0.0)
         self.declare_parameter("vendor_position_offset_y", 0.0)
         self.declare_parameter("vendor_position_offset_z", 0.0)
@@ -444,9 +444,8 @@ class M20TcpBridge(Node):
         obs = Bool()
         obs.data = int(items.get("ObsState", 0)) == 1
         self.obs_pub.publish(obs)
-        loc = Bool()
-        loc.data = int(items.get("Location", 1)) == 0
-        self.loc_pub.publish(loc)
+        # Keep localization_ok owned by _publish_map_pose(): it requires a fresh,
+        # plausible map pose and avoids this status poll racing that decision.
         status = String()
         status.data = "location=%s obstacle=%s usage_mode=%s ooa=%s" % (
             items.get("Location"),

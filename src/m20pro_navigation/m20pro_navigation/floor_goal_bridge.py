@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import rclpy
 from geometry_msgs.msg import PoseStamped

@@ -13,7 +13,7 @@ case "${MODE}" in
   move)
     exec "${WS_DIR}/scripts/104_start_real_move.sh"
     ;;
-  shadow|safe)
+  shadow)
     exec "${WS_DIR}/scripts/104_start_real_shadow.sh"
     ;;
   *)

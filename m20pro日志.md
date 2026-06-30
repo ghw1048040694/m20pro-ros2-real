@@ -1,262 +1,3375 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-06-22 21:45 CST
+Last updated: 2026-06-30 20:28 CST
 
 This file is maintained by Codex as the local M20 Pro project memory for future ChatGPT review. It records the current architecture, important decisions, recent changes, verification status, and next steps.
 
 Naming note: this file replaced the previous local-only `codex.md`. Going forward, maintain this file, `m20pro日志.md`, after every meaningful project change or field diagnosis.
 
-## 2026-06-22 frontend field-flow smoke test and fixes
+## 2026-06-30 20:28 CST - README 和 git 提交前收口
 
-- Goal:
-  - use the web frontend in the same order as a field operator would, not just call backend APIs;
-  - keep the robot still at the workstation and avoid starting any movement task.
-- Tested through an actual browser page:
-  - opened `http://10.21.31.104:8080`;
-  - confirmed the page loaded `builtin_F20`, showed live `Location=0`, battery, pose, `/scan`, and factory navigation status;
-  - clicked the self-check button;
-  - selected/confirmed `builtin_F20`;
-  - used "current robot pose" and clicked web relocalization;
-  - clicked mapping environment check;
-  - created a temporary point, verified it appeared in the point list, then deleted it;
-  - created a temporary task from a temporary point, verified it appeared in the task list, then deleted both the task and point;
-  - did not click "start task", so no motion command was intentionally issued.
-- Results before fixes:
-  - self-check passed from the page:
-    - core nodes online;
-    - raw pointcloud and `/scan` fresh;
-    - local/global costmaps active;
-    - Nav2 lifecycle nodes active;
-    - motion mode confirmed `move`;
-  - map selection worked and kept `builtin_F20`;
-  - point save/delete worked and no longer looked like "pending confirmation";
-  - task create/delete worked in the non-motion part of the workflow;
-  - mapping environment check passed and used 104 -> 106 SSH key/known_hosts plus non-mutating sudo permission probes.
-- Problems found:
-  - video panes could look like they were loading forever when 103 RTSP paths were wrong;
-  - 103 was reachable and TCP 8554 was open, but `rtsp://10.21.31.103:8554/video1` and `video2` returned RTSP `404 Not Found`;
-  - the MJPEG proxy previously returned HTTP 200 before it had a first frame, so the browser image request could hang without a useful page-level error;
-  - one post-restart relocalization attempt published `/initialpose` successfully to 106, but the 8 s verification window missed the factory localization/costmap settling and temporarily reported "not confirmed" even though the robot state recovered to `Location=0`.
-- Fixes:
-  - camera MJPEG proxy now waits for the first frame before returning HTTP 200;
-  - if no frame is available or OpenCV reports the RTSP stream cannot open, `/camera/front.mjpg` or `/camera/rear.mjpg` returns a clear 503/504 error instead of hanging;
-  - frontend video cards now show per-camera status text and automatically retry, so a bad RTSP path is visible as "视频源不可用，请检查 103 RTSP 路径或相机服务";
-  - relocalization verification timeout increased from 8 s to 15 s;
-  - relocalization verification now accepts factory `navigation_status` `location=0` as localization evidence, in addition to the `/m20pro_tcp_bridge/localization_ok` boolean.
-- Verification after fixes:
-  - `/camera/front.mjpg` and `/camera/rear.mjpg` now return clear 503 errors quickly while 103 RTSP still returns 404;
-  - page video status displays "视频源不可用，请检查 103 RTSP 路径或相机服务" for both cameras;
-  - final relocalization test returned:
-    - `factory_initialpose.ok=true`;
-    - `subscriptions=1`;
-    - `factory_location=ok`;
-    - `localization=ok`;
-    - `map_pose=ok`;
-    - `scan=ok`;
-    - `local_costmap=ok`;
-    - `global_costmap=ok`;
-    - `navigation_ready=true`;
-  - final 104 state: selected map `builtin_F20`, `localization_ok=true`, `Location=0`, fresh `/scan`;
-  - final 106 state: active map `/var/opt/robot/data/maps/map-20260520-205606`, `localization` and `planner` services active;
-  - no temporary CODEX test points remained in `builtin_F20`.
-- Remaining known issue:
-  - camera video still depends on the correct 103 RTSP stream names;
-  - current configured/manual paths `video1` and `video2` return 404 on this robot at this time, so the next camera task is to discover the actual 103 RTSP paths or vendor camera service state.
+- README maintenance:
+  - 补充当前视频链路说明：103 RTSP -> 104 FFmpeg MJPEG -> 前端 fetch MJPEG 解析 -> latest-frame-only 显示。
+  - 明确前/后摄像头画面仍保留为按需辅助视图，移除的是旧摄像头全开关和诊断面板。
+  - 补充拆分后的功能视角索引，按前端、Web/ROS 集成、地图、重定位、任务、Nav2/路径、感知/自检划分。
+- Architecture docs:
+  - `docs/single_floor_navigation_architecture.md` 已同步当前口径：单层 2D 任务闭环优先，3D 地图/点云 HTTP 接口不再作为当前主链路；视频只作为辅助视图。
+- Git intent:
+  - 本次准备把这两天 104 现场同步、前端视频低延时修复、Web/contract 拆分、测试脚本和文档收口作为一个集成状态提交。
+  - 提交前本地验证通过：
+    - `python3 scripts/check_preflight_policy.py`；
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/check_preflight_policy.py scripts/104_frontend_task_smoke.py`；
+    - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js`；
+    - `git diff --check`；
+    - `for f in scripts/test_*_contract.py scripts/test_pcd_derived.py; do python3 "$f" || exit 1; done`。
+  - 不调用重定位、不启动任务、不发布 `/m20pro/floor_goal` 或 `/cmd_vel`。
 
-## 2026-06-22 frontend mapping and relocalization validation
+## 2026-06-30 20:23 CST - 视频 5 秒以上体感延时后再修：强制刷新前端脚本 + 只显示最新帧
 
-- User correction:
-  - the required test was not "SSH into 106 and run `drmap` manually";
-  - the required test was to use the web frontend path itself: mapping environment check, create session, start mapping, finish mapping, import map, then relocalize.
-- Frontend mapping blocker reproduced before the fix:
-  - `POST /api/mapping/check_environment` failed from the root-run web service;
-  - failure output: `Host key verification failed`;
-  - root cause: the mapping commands used plain `ssh user@10.21.31.106` and relative `drmap`, while the working SSH identity and known_hosts are under `/home/user/.ssh`;
-  - second blocker: web mapping needs non-interactive `sudo -n /usr/local/bin/drmap ...` on 106.
-- Code hardening:
-  - default web mapping start/finish/cancel commands now use:
-    `/home/user/.ssh/id_ed25519`;
-    `/home/user/.ssh/known_hosts`;
-    `IdentitiesOnly=yes`;
-    `StrictHostKeyChecking=accept-new`;
-    absolute `/usr/local/bin/drmap`;
-  - both `m20pro_real.launch.py` and `m20pro_web_dashboard.launch.py` were updated, because launch parameters override node defaults;
-  - mapping environment check now uses `_factory_ssh_file_options(8)` and `sudo -n -l ...` permission probes;
-  - it no longer probes with `drmap stop_mapping -h`, because that command can actually try to stop mapping on this robot;
-  - `scripts/check_preflight_policy.py` now guards these invariants so future edits cannot silently regress back to plain SSH or destructive probes.
-- 106 sudoers:
-  - configured 106 to allow non-interactive web mapping commands for `/usr/local/bin/drmap mapping...` and `/usr/local/bin/drmap stop_mapping`;
-  - verified with `sudo -n -l /usr/local/bin/drmap mapping -s -n m20pro_probe` and `sudo -n -l /usr/local/bin/drmap stop_mapping`, both returned 0.
-- Deployment:
-  - synced the real repo to 104 `/home/user/m20pro_real_ros2_ws`;
-  - built `m20pro_cloud_bridge` and `m20pro_bringup`;
-  - restarted `m20pro-real.service`;
-  - note: `/home/user/m20pro_ros2_ws` on 104 is a symlink to `/home/user/m20pro_real_ros2_ws`, so the existing service path still points to the real repo.
-- Actual frontend mapping test:
-  - `POST /api/mapping/check_environment`: `ok=true`;
-  - created session `map_session_1782134086923_266d872f`;
-  - map name: `m20pro_frontend_desk_20260622_211145`;
-  - `POST /api/mapping/start`: `ok=true`, command reached 106 and created `/var/opt/robot/data/maps/m20pro_frontend_desk_20260622_211145-20260622-211525`;
-  - 106 log confirmed factory `mapping.service` started;
-  - robot stayed still at the workstation for this static test;
-  - `POST /api/mapping/finish`: `ok=true`, output included `保存地图成功(Map saved successfully)`;
-  - 106 restarted `localization` and `planner`;
-  - `POST /api/mapping/import_active_map`: `ok=true`;
-  - imported 104 map id: `map_1782134175007_4fca66e3`;
-  - imported map directory: `/home/user/m20pro_maps/DESK_20260622_211614`;
-  - imported 2D map: `65 x 58`, resolution `0.1 m`, origin about `(-3.0, -2.8)`;
-  - PCD derived output succeeded: `2904` source points -> `26 x 24` height grid.
-- Actual frontend relocalization test on the new workstation map:
-  - called `POST /api/localization/initialpose` with `x=0.0, y=0.0, yaw=0.0, floor=DESK`;
-  - result: `ok=true`;
-  - `factory_initialpose.ok=true`;
-  - 106 `/initialpose` subscriber count: `subscriptions=1`;
-  - verification:
-    `factory_pose_accepted=true`;
-    `localization=ok`;
-    `map_pose=ok`;
-    `pose_near_request=ok`;
-    `/scan=ok`;
-    `local_costmap=ok`;
-    `global_costmap=ok`;
-    `navigation_ready=true`;
-  - conclusion: after the SSH/sudo/path fixes, the frontend mapping and frontend relocalization chain are usable in the workstation static-map case.
-- Cleanup after the test:
-  - restored 106 active map to `/var/opt/robot/data/maps/map-20260520-205606`;
-  - restarted 106 `localization` and `planner`;
-  - selected `builtin_F20` on 104;
-  - final state: selected map `builtin_F20`, 106 services active, 106 active map restored, `localization_ok=true`, `Location=0`, fresh `/scan` with about `249` finite ranges.
-- Remaining field risk:
-  - this proves the frontend transport/control path can work;
-  - it does not prove every field relocalization pose is correct, because site relocalization still depends on selecting the correct map, placing the initial pose near the true robot pose, and having enough scan/map overlap;
-  - if field relocalization fails now, inspect map selection, pose guess, live `/scan`, and factory `Location`/costmap freshness before blaming the frontend HTTP/SSH path.
+- User issue:
+  - 用户反馈体感视频延时仍在 5 秒以上。
+  - 这说明上一轮“前端 fetch 解析 MJPEG”还不够：如果浏览器解码/绘制跟不上，前端仍可能把积压帧一帧帧显示出来，导致越看越落后。
+- Facts checked before fix:
+  - 104 实际发出的 `/static/dashboard.js` 已包含 `response.body.getReader()` 和 `parseMjpegHeaders`，不是旧 `<img src=/camera/*.mjpg>` 直连脚本；
+  - 104 HTTP 静态响应此前只有 `Cache-Control: no-store`，为了避免用户浏览器继续跑旧 JS，本轮继续加强；
+  - FFmpeg 直接从 103 拉流测试：
+    - TCP：5.089 秒 44 帧，窗口帧率约 `9.98fps`；
+    - UDP：5.068 秒 43 帧，窗口帧率约 `10.63fps`；
+    - 说明 104 从 103 拉视频流本身可以接近 10fps，5 秒级延时更像显示队列/前端缓存或 103 源端缓存问题。
+- Fix:
+  - `dashboard.html` 静态资源加版本号：
+    - `/static/dashboard.css?v=20260630-video-latest`；
+    - `/static/dashboard.js?v=20260630-video-latest`。
+  - `web_dashboard_node.py` 静态响应缓存头加强为：
+    - `Cache-Control: no-store, no-cache, must-revalidate, max-age=0`；
+    - `Pragma: no-cache`；
+    - `Expires: 0`。
+  - `dashboard.js` 视频显示逻辑改为 latest-frame-only：
+    - MJPEG 仍由 `fetch(...).body.getReader()` 读取；
+    - 每解析到一帧只写入 `viewer.latestPayload`；
+    - 通过 `requestAnimationFrame(...)` 在浏览器绘制周期只显示当前最新帧；
+    - 如果前端短时解析出多帧，旧帧会被覆盖丢弃，不再进入 `<img>` 解码/绘制队列；
+    - 关闭视频时清理 `latestPayload` 和 `renderScheduled`。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - HTML 必须使用带版本号的 split CSS/JS；
+    - 前端必须使用 MJPEG fetch stream parsing；
+    - 前端必须通过 `queueLatestVideoFrame(...)` 丢弃积压旧帧；
+    - 静态响应必须使用严格 no-cache 头。
+- Local verification:
+  - passed:
+    - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js`；
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/check_preflight_policy.py`；
+    - `python3 scripts/check_preflight_policy.py`；
+    - `git diff --check -- ...`。
+- 104 deploy / build:
+  - 已同步到 104：
+    - `web_dashboard_node.py`；
+    - `static/dashboard.html`；
+    - `static/dashboard.js`；
+    - `scripts/check_preflight_policy.py`。
+  - 104 上通过：
+    - `python3 -m py_compile ...`；
+    - `python3 scripts/check_preflight_policy.py`；
+    - `colcon build --packages-select m20pro_cloud_bridge --symlink-install`。
+  - 已重启 `m20pro-real.service`；
+  - `/healthz` 在重启后约 26 秒恢复。
+- 104 verification after deploy:
+  - `/` 已返回带版本号的 `dashboard.js?v=20260630-video-latest`；
+  - `/static/dashboard.js?v=20260630-video-latest` 包含：
+    - `queueLatestVideoFrame`；
+    - `latestPayload`；
+    - `requestAnimationFrame`。
+  - 真 Chrome 页面测试：
+    - `scriptOk=true`；
+    - `hasLatestFrame=true`；
+    - 首帧约 `1009ms`；
+    - 约 6.5 秒内替换 `51` 个 blob 帧；
+    - 画面尺寸 `480x270`；
+    - 关闭后按钮回到“打开”，`img.src=null`。
+  - 停止观看后再次确认：
+    - 无残留 `ffmpeg .*rtsp://10.21.31.103`；
+    - `front.clients=0`；
+    - `front.running=false`；
+    - `front.has_frame=false`。
+- Current robot state after this video-only deploy:
+  - `perception_status.code=perception_ready`；
+  - `selected_map_status.code=ready`；
+  - `localization_status.code=localized_task_not_ready`；
+  - `task_readiness.code=battery_low`，这是电量门槛状态，不是视频改动导致。
+- Operator note:
+  - 现场必须刷新页面，最好 Ctrl+F5；
+  - 新页面源码应加载 `/static/dashboard.js?v=20260630-video-latest`；
+  - 如果刷新后仍有 5 秒级延时，下一步应重点查 103 源码流/编码 GOP/RTSP 服务端缓存，或者转向 WebRTC/H.264/H.265 硬解链路；继续在 104 的 MJPEG 显示层调参收益会很小。
+- Safety status:
+  - 本轮没有调用 `/api/localization/initialpose`；
+  - 没有启动任务；
+  - 没有发布 `/m20pro/floor_goal`；
+  - 没有发送 `/cmd_vel`。
 
-## 2026-06-22 workstation static mapping and relocalization test
+## 2026-06-30 18:18 CST - 前端视频低延时路径已部署到 104
 
-- Goal:
-  - test the factory 106 mapping, web map import, and web relocalization chain at the workstation without moving the robot;
-  - this is a chain test, not a navigation-quality map test.
-- Initial state before the test:
-  - 104 full real service was active;
-  - relay lidar and `/scan` were fresh;
-  - 106 active map was `/var/opt/robot/data/maps/map-20260520-205606`.
-- Static mapping:
-  - started 106 `drmap mapping -s -n m20pro_desk_20260622_204142` through SSH with `sudo -S`;
-  - waited about 20 s without moving the robot;
-  - stopped/saved mapping with `drmap stop_mapping`;
-  - 106 saved `/var/opt/robot/data/maps/m20pro_desk_20260622_204142-20260622-204702`;
-  - map products existed: `occ_grid.yaml`, `occ_grid.pgm`, `full_cloud.pcd`, and block files.
-- Import issue found and fixed:
-  - first web import failed because the backend used plain `scp -r user@10.21.31.106:...` from the root-run web service;
-  - root did not have the expected SSH host/key context, so scp failed with `Host key verification failed`;
-  - fixed map import to use the same root-compatible SSH options as web relocalization:
-    `/home/user/.ssh/id_ed25519` and `/home/user/.ssh/known_hosts`;
-  - fixed imported YAML rewriting so a 106 absolute `image:` path becomes the local image filename on 104.
-- Import verification:
-  - web import then succeeded;
-  - new 104 map record: `map_1782132814412_4ee634ca`;
-  - map name: `m20pro_desk_20260622_204142`;
-  - map size: `34 x 63`, resolution `0.1 m`;
-  - PCD derived output succeeded: `942` source points -> `14 x 26` height grid.
-- Relocalization test on the static map:
-  - sent web `/api/localization/initialpose` twice without moving the robot:
-    - first pose: `x=0.0, y=0.0, yaw=0.0`;
-    - second pose: `x=-0.02, y=-0.03, yaw=0.04`;
-  - both calls reached 106 successfully:
-    - `factory_initialpose.ok=true`;
-    - `ssh_identity_file=/home/user/.ssh/id_ed25519`;
-    - `subscriptions=1`;
-  - both calls failed to make factory localization accept the pose:
-    - `factory_pose_accepted=false`;
-    - `localization_ok` stayed false;
-    - 104 logs showed repeated vendor `Location=1` poses, which `tcp_bridge` correctly ignored as unlocalized.
-- Interpretation:
-  - the frontend/SSH/106 `/initialpose` path is now proven to send the request instead of hanging;
-  - the static 20 s workstation map is too small/weak for factory localization to converge reliably;
-  - this failure is now a localization/map-quality result, not a frontend transport failure.
-- Cleanup:
-  - restored 106 active map to `/var/opt/robot/data/maps/map-20260520-205606`;
-  - restarted 106 `localization` and `planner`;
-  - selected `builtin_F20` again on 104;
-  - 104 state recovered to `localization_ok=true`, `location=0`, and fresh `/scan`.
+- User issue:
+  - 用户现场反馈“帧率和清晰度确实可以了，但是延时特别高”。
+  - 本轮目标只处理视频传输/显示延时，不碰重定位、任务启动、`/m20pro/floor_goal` 或 `/cmd_vel`。
+- Backend changes:
+  - `web_dashboard_node.py` 的 FFmpeg MJPEG 后端继续作为默认路径：
+    - `camera_proxy_backend=ffmpeg_mjpeg`；
+    - `camera_proxy_fps=10.0`；
+    - `camera_proxy_max_width=480`；
+    - `camera_proxy_ffmpeg_mjpeg_qscale=5`。
+  - FFmpeg 命令带低延时参数：
+    - `-analyzeduration 0`；
+    - `-probesize 32`；
+    - `-fflags nobuffer`；
+    - `-flags low_delay`；
+    - `-max_delay 0`；
+    - `-flush_packets 1`。
+  - MJPEG HTTP 输出增加低延时发送设置：
+    - `TCP_NODELAY`；
+    - 限制 `SO_SNDBUF`；
+    - `Cache-Control: no-store, no-cache, must-revalidate, max-age=0`；
+    - `Pragma: no-cache`；
+    - `Expires: 0`；
+    - `X-Accel-Buffering: no`；
+    - 每帧 `flush()`。
+  - 新增 `/camera/front.jpg` 和 `/camera/rear.jpg` 单帧 JPEG 快照端点，用于低延时诊断和后续备用路径；该端点有短租约保活，停止请求后 FFmpeg 会自动释放。
+- Frontend final path:
+  - 前端仍然按需打开视频，不自动加载摄像头流。
+  - `dashboard.html` 的 `frontVideo/rearVideo` 数据源为 `/camera/front.mjpg`、`/camera/rear.mjpg`。
+  - `dashboard.js` 不再把 MJPEG URL 直接塞进 `<img src>` 让浏览器自己缓冲；
+  - 点击“打开”后，JS 用 `fetch(...).body.getReader()` 读取 MJPEG 长连接，按 `Content-Length` 解析每一帧 JPEG；
+  - 每解析到一帧，就生成新的 `blob:` URL 替换 `<img>`，并撤销上一帧 URL；
+  - 点击“关闭”后会 `AbortController.abort()`，清空 `src`，释放浏览器侧拉流。
+  - 这样保留长连接效率，同时避免浏览器原生 `<img src=/camera/*.mjpg>` 内部排队导致的老画面延时。
+- Local verification:
+  - passed:
+    - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js`；
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/check_preflight_policy.py scripts/104_frontend_task_smoke.py`；
+    - `python3 scripts/check_preflight_policy.py`；
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.html src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js scripts/check_preflight_policy.py scripts/104_frontend_task_smoke.py`。
+- 104 deploy / build:
+  - 已同步到 `/home/user/m20pro_real_ros2_ws`：
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py`；
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.html`；
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js`；
+    - `scripts/check_preflight_policy.py`；
+    - `scripts/104_frontend_task_smoke.py`。
+  - 104 上通过：
+    - `python3 -m py_compile ...`；
+    - `python3 scripts/check_preflight_policy.py`；
+    - `colcon build --packages-select m20pro_cloud_bridge --symlink-install`。
+  - 已重启 `m20pro-real.service`；
+  - `/healthz` 在重启后约 29 秒返回 `{"ok":true}`。
+- Video measurements on 104:
+  - 单帧 `/camera/front.jpg` 冷启动测试：
+    - 6.073 秒收到 29 帧；
+    - `fps≈4.78`；
+    - 服务端帧龄平均 `3.5ms`，最大 `19.5ms`；
+    - HTTP 平均耗时 `209.3ms`，最大 `1949.6ms`，最大值主要来自 FFmpeg 冷启动。
+  - 单帧 `/camera/front.jpg` 热启动测试：
+    - 6.022 秒收到 41 帧；
+    - `fps≈6.81`；
+    - 服务端帧龄平均 `1.8ms`，最大 `11.2ms`；
+    - HTTP 平均耗时 `146.9ms`，最大 `608.3ms`。
+  - 直接 MJPEG 后端流测试：
+    - 6.006 秒解析 36 帧；
+    - `fps≈5.99`；
+    - 服务端帧龄平均 `0.6ms`，最大 `7.4ms`。
+  - 真浏览器页面测试：
+    - 使用 headless Chrome 打开 `http://10.21.31.104:8080/`；
+    - 点击“前摄像头”后约 `1.16s` 显示首帧；
+    - 画面尺寸为 `480x270`；
+    - 约 7 秒内替换 `48` 个 `blob:` 帧；
+    - 点击关闭后 `<img src>` 清空，按钮恢复为“打开”。
+- Runtime verification after browser test:
+  - 停止观看后无残留 `ffmpeg .*rtsp://10.21.31.103` 进程；
+  - `/api/state.camera_proxy.cameras.front`：
+    - `clients=0`；
+    - `running=false`；
+    - `has_frame=false`；
+    - `snapshot_lease_active=false`。
+  - 关键主功能仍 ready：
+    - `localization_status.code=localized_ready`；
+    - `selected_map_status.code=ready`；
+    - `perception_status.code=perception_ready`；
+    - `task_readiness.code=ready`。
+- Practical conclusion:
+  - 这轮已经把“前端显示的是浏览器/MJPEG 缓冲里的旧画面”的问题基本打掉；
+  - 如果用户仍觉得比原厂手柄慢，瓶颈大概率不再是前端 `<img>` 缓冲，而是 `103 RTSP -> 104 FFmpeg 转 MJPEG -> HTTP -> 浏览器 blob JPEG` 这条架构本身；
+  - 下一步真正追原厂手柄手感，应考虑直接复用原厂低延时码流/协议，或走 WebRTC / MSE / H.264/H.265 硬解，而不是继续在 MJPEG 里反复调参数。
+- Safety status:
+  - 本轮没有调用 `/api/localization/initialpose`；
+  - 没有启动任务；
+  - 没有发布 `/m20pro/floor_goal`；
+  - 没有发送 `/cmd_vel`。
 
-## 2026-06-22 field frontend failure postmortem and hardening
+## 2026-06-29 16:10 CST - 104 Web 崩溃修复已部署，当前入口恢复到可运行 ready
 
-- Field report from the user:
-  - on the development dog at the real site, web self-check timed out/failed;
-  - web relocalization stayed at "sending /initialpose to 104 and 106" and did not complete;
-  - marking points kept looking like "pending confirmation" and did not give trustworthy saved feedback;
-  - after using the official 106 RViz `2D Pose Estimate`, the web frontend did not clearly reflect the localization recovery.
-- Root causes identified:
-  - `m20pro-real.service` runs as `root`, while the verified 104 -> 106 SSH setup was for `user`; the web process could therefore fail or hang on the remote 106 `/initialpose` path even though manual `user` SSH looked OK;
-  - the one-shot remote `/initialpose` publisher could exit too quickly after creating a ROS 2 publisher; if DDS discovery had not found the 106 subscriber yet, the command could return success without the factory localization actually receiving the message;
-  - preflight incorrectly allowed missing `/bt_navigator`/Nav2 node-name details to block the base self-check, even when map, lidar, `/scan`, localization, battery, and factory status were already OK;
-  - annotation save feedback was written only to the map cursor/status text, so normal pointer movement could overwrite "saved" with "pending" text and make a successful save look unconfirmed.
-- Code hardening:
-  - web relocalization now explicitly uses `/home/user/.ssh/id_ed25519` and `/home/user/.ssh/known_hosts` for the 106 SSH hop, so it still works when the service process is `root`;
-  - the remote 106 publisher waits up to 5 s for `/initialpose` subscribers, prints `subscriptions=N`, and reports `subscriptions=0` as a failed remote publish instead of pretending success;
-  - the relocalization button now has a 45 s browser-side timeout, disables itself while running, and shows the full 106 SSH/initialpose/localization/map-pose/costmap verification result instead of staying in a vague "sending" state;
-  - the localization tab now continuously displays live localization state, map pose, `/scan`, local/global costmap freshness, and factory navigation status, so official 106 RViz relocalization should also become visible in the web UI;
-  - web preflight now splits base nodes from navigation nodes: `m20pro_tcp_bridge`, `m20pro_pointcloud_fusion`, `m20pro_web_dashboard`, `map_server`, `m20pro_nav2_startup_gate`, and `m20pro_floor_manager` remain base; `controller_server`, `planner_server`, `bt_navigator`, and `waypoint_follower` are navigation readiness warnings;
-  - the marking tab now has persistent `markSaveStatus` feedback with saved id/label, floor, x/y/yaw, and current point count; delete operations also report that the list was refreshed.
-- Guardrails:
-  - `scripts/check_preflight_policy.py` now prevents future regressions where `/bt_navigator` blocks base preflight;
-  - the same policy check verifies the root-compatible 106 SSH identity parameter and the subscriber wait in the remote `/initialpose` publisher.
-- Verification on local real workspace:
-  - Python compile passed for real launch, standalone web launch, web dashboard, and policy script;
-  - shell syntax passed for `scripts/*.sh` and `src/m20pro_bringup/scripts/*.sh`;
-  - `git diff --check` passed;
-  - `python3 scripts/check_preflight_policy.py` passed;
-  - `colcon build --symlink-install --packages-select m20pro_description m20pro_inspection m20pro_cloud_bridge m20pro_navigation m20pro_bringup` passed.
-- Deployment verification on the development dog 104:
-  - synced the real workspace to `/home/user/m20pro_real_ros2_ws`;
-  - rebuilt the same five packages on 104 successfully;
-  - restarted `m20pro-real.service`;
-  - web `/healthz` returned `{"ok":true}`;
-  - blocking web preflight returned `ok=true`, `navigation_ready=true`, `relocalization_ready=true`, `failures=0`, `warnings=0`;
-  - `/api/state` showed `localization_ok=true`, fresh relay lidar, fresh `/scan`, fresh local/global costmaps, valid map pose, and battery around 55%;
-  - Nav2 lifecycle states on 104 were active for `/controller_server`, `/planner_server`, `/bt_navigator`, and `/waypoint_follower`;
-  - root-compatible SSH from 104 to 106 using `/home/user/.ssh/id_ed25519` returned the 106 hostname;
-  - 106 `/initialpose` topic info reported type `geometry_msgs/msg/PoseWithCovarianceStamped` and `Subscription count: 1`;
-  - the actual web relocalization API was not fired during this verification to avoid changing the robot's current field pose without operator intent.
-- Important operational note:
-  - being at the workstation can explain unlocalized/costmap-deferred navigation readiness, but it must not explain missing lidar or missing `/scan`;
-  - future field debugging should first look at the relocalization result's `factory_initialpose.ssh_identity_file`, `factory_initialpose.subscriptions`, `verification.factory_pose_accepted`, live `localization_ok`, and `/scan` freshness.
+- User priority:
+  - 当前阶段以“能跑起来、能收集数据”为第一目标；
+  - “重定位锁”不再作为抽象安全话题扩展，先保证前端、定位、感知、任务入口都能稳定进入 ready。
+- Problem found after the previous ready result:
+  - 104 的 `m20pro-real.service` 仍显示 `active`，但 `http://10.21.31.104:8080/api/state` 变成 `Connection refused`；
+  - journal 里 `web_dashboard` 进程已死，栈为 ROS Foxy `rclpy` executor:
+    - `/opt/ros/foxy/lib/python3.8/site-packages/rclpy/callback_groups.py`；
+    - `assert weakref.ref(entity) in self.entities`；
+  - 这说明不是底层点云或整套 launch 全停，而是 Web 节点崩溃，导致“服务看似 active、前端实际不可用”的假活状态。
+- Fix:
+  - `web_dashboard_node.py` 将高频/任务路径里的 Nav2 readiness 检查改为不再反复创建 lifecycle service client：
+    - `_cached_navigation_readiness_payload()` 使用 `_navigation_readiness_payload(check_lifecycle=False)`；
+    - `_wait_for_navigation_ready_after_reset(...)` 使用 `check_lifecycle=False`；
+    - `_task_start_readiness_payload(...)` 的 fallback 和 success readiness 使用 `check_lifecycle=False`；
+    - `_wait_for_relocalization_verification(...)` 的 navigation readiness 使用 `check_lifecycle=False`。
+  - lifecycle 节点状态查询仍保留在低频自检/preflight 路径，不再放在 `/api/state`、任务就绪和重定位验证这些高频路径里反复创建/销毁 client。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - cached readiness 不允许恢复高频 lifecycle service client；
+    - post-reset readiness 等待不允许恢复反复 lifecycle client。
+- 104 deploy / build:
+  - 已同步到 `/home/user/m20pro_real_ros2_ws`：
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py`；
+    - `scripts/check_preflight_policy.py`。
+  - 104 上通过：
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/check_preflight_policy.py`；
+    - `python3 scripts/check_preflight_policy.py`；
+    - `colcon build --packages-select m20pro_cloud_bridge --symlink-install`。
+  - 已重启 `m20pro-real.service`，新 Web 进程 PID 为 `17366`，8080 正在监听。
+- 104 runtime verification:
+  - `/api/state` 启动后连续轮询 60 次，每 2 秒一次，总计约 177.8 秒，全部成功，没有 connection refused 或 timeout；
+  - journal 从 `2026-06-29 16:05:24` 后未再出现新的 `AssertionError` 或 `web_dashboard process has died`；
+  - 最后一次状态：
+    - `localization_status.code=localized_ready`；
+    - `localization_status.message=重定位成功：定位已确认，任务页可启动`；
+    - `task_readiness.code=ready`，`ready=true`；
+    - `map_relocalization_required=null`；
+    - `selected_map_status.code=ready`，网页选择地图与 Nav2 当前 `/map` 一致；
+    - `perception_status.code=perception_ready`；
+    - relay 输入为 `/LIDAR/POINTS`，`input_publisher_count=2`，`publish_rate_hz≈3.7`，`downsample_method=numpy_stride`；
+    - `active_task=null`。
+- Current practical project state:
+  - 前端入口现在可以打开，定位状态和任务页大门已经 ready；
+  - 当前地图 `DESK_20260625_164234` / `map_1782442183242_ee7c6b76` 仍没有可启动任务：`/api/tasks` 返回 0；
+  - `/api/annotations` 里还有 6 个历史点，但属于 `live_map` 或 `builtin_F20`，不是当前选中的固定地图；
+  - 下一步不应继续纠缠“锁”，而是现场在当前地图重新标点，创建一个最小单层任务，然后用 watcher 收集真实任务数据。
+- Safety status:
+  - 本轮没有调用 `/api/localization/initialpose`；
+  - 没有启动任务；
+  - 没有发布 `/m20pro/floor_goal`；
+  - 没有发送 `/cmd_vel`。
 
-## 2026-06-22 web relocalization changed to 106-first path
+## 2026-06-29 14:13 CST - 从 104 恢复事实源并清理本地旧合同残留
 
-- User challenged the previous `/initialpose` explanation:
-  - the factory manual workflow is effectively on 106/NOS through RViz `2D Pose Estimate`;
-  - web relocalization had been tested several times and did not visibly work;
-  - therefore the project must not claim that publishing `/initialpose` on 104 or sending the 103 TCP diagnostic request guarantees relocalization.
-- Clarified meaning:
-  - `/initialpose` is the ROS standard initial-pose topic used by RViz `2D Pose Estimate`;
-  - it is only an input/guess for the localization system;
-  - success must be verified by 106/factory localization state, not by the mere fact that 104 published a ROS message.
-- Previous risk:
-  - the web backend published `/initialpose` locally on 104;
-  - full real startup also forced `tcp_bridge enable_initialpose_relocalization=true`, so the same message was intercepted and sent to 103 TCP `Type=2101 Command=1`;
-  - if 106 factory localization is actually listening on 106's own ROS graph, then 104-side DDS delivery may be missed or blocked by DDS/network/participant issues;
-  - 103 TCP `2101/1` is useful diagnostics but should not be treated as the main relocalization path.
+- Context:
+  - 上一个窗口达到上下文上限后，本地 `m20pro日志.md` 和本地代码停留在较旧的 6 月 26 日视角；
+  - 104 `/home/user/m20pro_real_ros2_ws` 才是最近两天实际继续演进的工作区；
+  - 本轮先读取 104 的 real 工作区、日志、git 状态和运行状态，再把本地工作区同步回 104 当前事实源。
+- What 104 actually contains now:
+  - 104 real 工作区路径为 `/home/user/m20pro_real_ros2_ws`；
+  - `/home/user/m20pro_ros2_ws` 是指向 real 工作区的 symlink；
+  - 104 已有统一启动入口 `src/m20pro_bringup/launch/m20pro.launch.py`，real/sim 由 `mode:=real|sim` 分流；
+  - real 启动脚本 `m20pro_real_full.sh` 已改为调用统一 `m20pro.launch.py mode:=real`；
+  - 前端静态资源已经拆成 `static/dashboard.html`、`static/dashboard.css`、`static/dashboard.js`；
+  - 当前主文档是 `docs/single_floor_navigation_architecture.md`；
+  - 当前核心 contract 模块包括：
+    `annotation_contract.py`、`task_contract.py`、`active_task_contract.py`、`task_snapshot_contract.py`、`nav_status_contract.py`、`task_plan_contract.py`、`task_progress_contract.py`、`localization_contract.py`、`navigation_readiness_contract.py`、`perception_contract.py`、`preflight_contract.py`、`map_contract.py`、`map_selection_contract.py`、`map_derived_contract.py`、`mapping_contract.py`、`startup_map_sync_contract.py`。
+- Local recovery / cleanup:
+  - 用 `rsync` 从 104 同步回本地工作区，排除了 `.git/`、`build/`、`install/`、`log/`；
+  - 删除本地残留但 104 已删除的旧入口：
+    - `scripts/104_check_initialpose_to_106.sh`；
+    - `scripts/104_single_floor_contract_check.py`；
+    - `scripts/104_single_floor_field_session.sh`；
+    - `scripts/test_single_floor_contract_tools.py`；
+    - `docs/frontend_api_contract.md`；
+    - `docs/single_floor_navigation_contract.md`；
+    - `goal_chain_contract.py`、`runtime_progress_contract.py`、`single_floor_contract.py`、`waypoint_contract.py`。
+  - `rg` 确认当前 README/docs/scripts/src/systemd 不再引用这些旧入口；
+  - 这样下一轮不会误读到旧的“single_floor_contract_check/field_session”流程。
+- 104 read-only status at recovery:
+  - `m20pro-real.service` is `active/running`；
+  - `/healthz` 返回 `{"ok":true}`；
+  - `battery_level=56%`，高于 25% 目标模式只读门槛；
+  - `active_task=false`，没有正在运行的前端任务；
+  - selected map: `map_1782442183242_ee7c6b76`；
+  - `selected_map_status=ready`，message 为 `网页选择地图与 Nav2 当前 /map 一致`；
+  - `localization_ok=false`、`pose_fresh=false`、`navigation_status=location=1 obstacle=0`；
+  - `task_readiness=map_relocalization_required`，仍必须先按开发手册 TCP `2101/1` 完成重定位；
+  - 感知链路可用：`perception_status=perception_ready`，`scan_finite≈200`，relay 点云约 `5.8k-6.0k` 点；
+  - 当前地图任务为 0，旧地图任务隐藏 2 个；
+  - `104_frontend_task_ready_check.py` 按预期返回 warning：当前没有可启动任务，下一步是先在前端定位页完成重定位，再在当前地图重新标点/建任务。
+- Verification:
+  - passed:
+    - `./scripts/check_preflight_policy.py`；
+    - `./scripts/test_map_contract.py`；
+    - `./scripts/test_mapping_contract.py`；
+    - `./scripts/test_preflight_contract.py`；
+    - `./scripts/test_task_contract.py`；
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge ...`；
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`；
+    - `./scripts/104_frontend_task_ready_check.py --url http://10.21.31.104:8080` produced the expected blocked/no-task readiness warning.
+- Safety status:
+  - 本轮没有重定位；
+  - 没有标点；
+  - 没有启动任务；
+  - 没有发布 `/m20pro/floor_goal`；
+  - 没有发送 `/cmd_vel` 或让机器狗运动。
+- Next real-robot proof:
+  - 在现场安全条件下，从前端定位页完成开发手册 TCP `2101/1` 重定位；
+  - 只在当前地图 `DESK_20260625_164234` / `map_1782442183242_ee7c6b76` 上重新标点和创建任务；
+  - 启动 `104_watch_frontend_task.sh` 后，由操作员在真实前端人工确认首点、顺序和任务名，再点击开始；
+  - 用 watcher、`active_waypoint`、`last_result.runtime_snapshot` 和 Nav2/path 证据判断单层任务是否真正闭环。
+
+## 2026-06-27 13:52 CST - 目标下发二次 recheck 下沉到 active task contract
+
+- Goal alignment:
+  - 继续围绕单层任务闭环做减法。
+  - 用户现场遇到过“任务启动后像是跑到固定残留点/旧点”的症状；目标下发前最后一次确认当前任务点是否已经切换，是防止旧点误发的关键保护。
+  - Web 主节点应该只执行 ROS 发布和落盘副作用，不应继续手写“当前点是否还等于刚才那个点”“过期目标如何记录”“goal sent 事件如何组装”等状态机规则。
+  - 本轮仍只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `active_task_contract.py` 新增 `prepare_goal_send_state(...)`：
+    - active task 已不在 running 时返回 idle；
+    - recheck 时当前点缺失，返回 `active_annotation_missing_failure(...)`；
+    - recheck 时当前点已切换，返回 `goal_dispatch_ignored` timeline payload；
+    - recheck 通过时内部调用 `mark_goal_sent(...)`，返回完整 `waypoint_goal_sent` timeline payload 和更新后的 active task。
+  - `web_dashboard_node.py::_dispatch_active_goal(...)` 改为：
+    - 仍负责读取当前 path version、拿 data lock、保存 settings、发布 `/m20pro/floor_goal`；
+    - 目标发送前的最终状态准备统一调用 `prepare_goal_send_state(...)`；
+    - 不再内联 `current_annotation.get("id") != annotation.get("id")`、`stale_goal_dispatch_payload(...)`、`mark_goal_sent(...)`。
+    - recheck 缺失点位时直接消费 contract 必需字段 `prepared["failure"]`，不再构造空 fallback failure。
+- Why this matters:
+  - 这块是“前端任务点 A，实际发给 Nav2 的却可能是旧点 B”的防线之一。
+  - contract 测试可以离线覆盖状态切换，而不依赖 ROS、104 或现场运动。
+  - 真正是否解决现场“往前走一段停住/跑固定点”，仍必须通过真实前端任务 + watcher + `last_result.runtime_snapshot` 验证。
+- Policy / tests:
+  - `scripts/test_active_task_contract.py::test_prepare_goal_send_state()` 覆盖：
+    - 非 running 任务不发送；
+    - 当前点缺失时 fail；
+    - 当前点切换时记录 stale dispatch；
+    - 当前点一致时生成 `waypoint_goal_sent` 和 goal attempt。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - active task contract 必须拥有 final goal-send state preparation；
+    - Web 必须通过 `prepare_goal_send_state(...)` 传入 `_new_id("goal")`；
+    - Web dispatch path 禁止恢复 `mark_goal_sent(...)`、`stale_goal_dispatch_payload(...)` 和 current annotation id 对比。
+- Verification:
+  - passed:
+    - `./scripts/test_active_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `./scripts/test_active_task_contract.py && ./scripts/test_preflight_contract.py && ./scripts/test_task_contract.py && ./scripts/test_task_progress_contract.py && ./scripts/test_task_plan_contract.py && ./scripts/test_nav_status_contract.py && ./scripts/test_task_snapshot_contract.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_active_task_contract.py scripts/test_preflight_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py m20pro日志.md`。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-29 14:50 CST - 重定位结论改为二元成功/失败
+
+- User-facing decision:
+  - 按用户要求，定位页不再显示“分段成功”。
+  - 操作员可见的大结论只允许：
+    - `重定位成功`；
+    - `重定位失败`。
+  - 厂商 2101 原始字符串即使包含 `success: x=...`，也只能作为“已收到回执”的证据，不能在前端被写成“手册2101成功”或最终成功。
+- 104 current fact observed before deployment:
+  - `/api/state` 只读查询时间：`2026-06-29 14:45:25`。
+  - `active_task: null`。
+  - `relocalization_result.raw: success: x=-10.771 y=-3.610 z=0.000 yaw=-1.587`。
+  - 当前任务页仍被 `map_relocalization_required` 阻塞：
+    - `Nav2 已加载当前固定地图，请先按开发手册2101完成重定位，再开始标点或任务`。
+  - 因此按新口径，这种状态必须显示为 `重定位失败`，不能显示成功。
+- Local changes:
+  - `localization_contract.py`：
+    - `relocalization_sample_evidence(...)` 的等待完成条件收紧为必须同时满足新鲜 2101 success、原厂定位 true、新鲜地图位姿、位姿接近请求点。
+    - `localization_status_payload(...)` 增加 2101 回执、原厂定位原始值、固定地图重定位锁等证据字段。
+    - 所有面向前端的失败状态统一以 `重定位失败：...` 开头。
+    - 只有定位确认且 `task_readiness.ready == true` 时才返回 `重定位成功：定位已确认，任务页可启动`。
+  - `web_dashboard_node.py`：
+    - `/api/state.localization_status` 现在把最近 2101 回执、`factory_localization_ok` 和 `map_relocalization_required` 一起传给 localization contract。
+    - `/api/localization/initialpose` 在确认 factory pose accepted 后先清固定地图重定位锁，再重新计算 task readiness，避免成功请求返回里仍带旧锁。
+  - `dashboard.js/css`：
+    - 定位页状态框大字只显示 `重定位成功` 或 `重定位失败`。
+    - `2101回执` 行只显示 `已收到回执`、`旧回执`、`失败回执`、`未通过回执` 或 `无回执`。
+    - 自动日志改为 `2101原始回执` + `定位结论`，不再用“重定位结果”误导。
+    - 标点/任务页提示统一要求“看到重定位成功”，不再要求用户自行判断“手册2101成功/定位确认/任务页可启动”三件事。
+  - `README.md`：
+    - 明确 `/initialpose` 和 2101 回执都只是证据；现场以定位页最终 `重定位成功` 为准。
+  - Tests / guardrails:
+    - `scripts/test_localization_contract.py` 覆盖：
+      - 位姿先到但 2101 未到时不能结束等待；
+      - 有 2101 回执但固定地图锁未清时，最终必须是失败；
+      - 2101 回执本身不等于定位确认。
+    - `scripts/104_frontend_task_smoke.py` 覆盖定位状态渲染：
+      - 成功样例必须显示 `重定位成功`；
+      - 失败/半截证据样例必须显示 `重定位失败`；
+      - 不再要求或鼓励显示 `手册2101成功`。
+    - `scripts/check_preflight_policy.py` 增加防回归：
+      - 前端定位状态必须有二元最终结论；
+      - 禁止 `renderLocalizationStatus(...)` 把 raw 2101 回执写成 `手册2101成功`；
+      - `/api/state` 必须把 2101 回执和固定地图重定位锁传入 localization contract。
+- Verification:
+  - passed:
+    - `./scripts/test_localization_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/localization_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_localization_contract.py scripts/104_frontend_task_smoke.py scripts/104_frontend_task_ready_check.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_localization_contract.py scripts/104_frontend_task_smoke.py scripts/104_frontend_task_ready_check.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/localization_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.css scripts/test_localization_contract.py scripts/104_frontend_task_smoke.py scripts/104_frontend_task_ready_check.py scripts/check_preflight_policy.py README.md m20pro日志.md`;
+    - `rg -n "手册2101成功|重定位已确认|重定位未完成|2101回执成功|网页重定位以开发手册" ...` 仅剩 `check_preflight_policy.py` 里的 forbid 正则本身。
+- Deployment status:
+  - 本地已完成代码和日志修改。
+  - 还未同步/重启 104。
+  - 本轮到目前没有调用 `/api/localization/initialpose`，没有启动任务，没有发布 `/m20pro/floor_goal`，没有发 `/cmd_vel`。
+
+## 2026-06-29 15:12 CST - 二元重定位状态已部署到 104，前端 smoke 验证通过
+
+- Operator question / root cause:
+  - 原厂在 106 的 RViz2 重定位看起来很简单，是因为它只验证原厂链路里的 initial pose / Location 状态。
+  - 前端这边过去两周反复混乱，真正原因不是“点一下按钮”复杂，而是把四类不同事实混成了一个“成功”：
+    - 2101 原始回执；
+    - 原厂定位状态；
+    - 104 固定地图上的地图位姿；
+    - 任务页是否真的可启动。
+  - 本轮定下的新规则是：操作员只看最终二元结论；只有任务页真的可启动才显示 `重定位成功`，其余全部显示 `重定位失败`。
+- Extra local hardening:
+  - `scripts/104_frontend_task_smoke.py` 增加旧后端兼容样例：
+    - `localization_status` 内没有新字段；
+    - 顶层 `relocalization_result.raw` 是 `success: ...`；
+    - 顶层 `task_readiness.map_relocalization_required` 仍有固定地图重定位锁；
+    - 断言页面必须显示 `重定位失败`、`已收到回执`、`重定位锁未清除`、`任务页不可启动`。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - `renderLocalizationStatus(...)` 必须从旧 `/api/state` 顶层字段补 2101、固定地图锁、原厂定位和位姿证据；
+    - 防止后端还没重启时，前端把 raw `success` 误当最终成功。
+- Local verification:
+  - passed:
+    - `./scripts/test_localization_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_localization_contract.py scripts/104_frontend_task_smoke.py scripts/104_frontend_task_ready_check.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/localization_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.css scripts/test_localization_contract.py scripts/104_frontend_task_smoke.py scripts/104_frontend_task_ready_check.py scripts/check_preflight_policy.py README.md m20pro日志.md`。
+- 104 deploy / build:
+  - 104 备份：
+    - `/home/user/m20pro_deploy_backups/relocalization_binary_status_20260629_150317.tgz`。
+  - 同步到 104 real 工作区：
+    - `/home/user/m20pro_real_ros2_ws`；
+    - `/home/user/m20pro_ros2_ws` 仍是指向 real 工作区的 symlink。
+  - 104 上验证通过：
+    - `./scripts/test_localization_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_localization_contract.py scripts/104_frontend_task_smoke.py scripts/104_frontend_task_ready_check.py scripts/check_preflight_policy.py`;
+    - `colcon build --packages-select m20pro_cloud_bridge --symlink-install`。
+  - 服务重启成功：
+    - `m20pro-real.service` 从旧 `ExecMainPID=1790` 切到新 `ExecMainPID=8793`；
+    - 服务状态为 `active/running`；
+    - Web 节点日志显示 `M20Pro web console listening on http://0.0.0.0:8080`。
+- 104 read-only runtime result after restart:
+  - `/healthz` 返回 OK。
+  - `/api/state.localization_status` 已是新版字段：
+    - `confirmed=false`;
+    - `task_ready=false`;
+    - `factory_localization_ok=true`;
+    - `pose_fresh=true`;
+    - `map_relocalization_required.reason=startup_sync`;
+    - message: `重定位失败：启动后已把当前固定地图同步到 Nav2，必须重新按开发手册2101定位`。
+  - `/api/state.task_readiness`:
+    - `ready=false`;
+    - `code=map_relocalization_required`;
+    - message: `Nav2 已加载当前固定地图，请先按开发手册2101完成重定位，再开始标点或任务`。
+  - `/static/dashboard.js` 已确认：
+    - 包含 `重定位成功`、`重定位失败`、`已收到回执`；
+    - 不包含 `手册2101成功`。
+  - `./scripts/104_frontend_task_ready_check.py --url http://10.21.31.104:8080`:
+    - 当前没有可启动任务；
+    - 当前首要 blocker 是 `lidar_relay_no_samples`，点云 relay 暂无样本；
+    - 这不改变重定位结论，当前仍是 `重定位失败`。
+  - `./scripts/104_frontend_task_smoke.py --url http://10.21.31.104:8080 --require-blocked` passed:
+    - 当前真实页面恢复文本为 `重定位失败...固定地图重定位锁未清除...任务页不可启动`；
+    - 合成 legacy payload 也显示 `重定位失败...已收到回执...重定位锁未清除...任务页不可启动`。
+- Current field conclusion:
+  - 当前 104 已不会再把“2101 raw success”显示成最终成功。
+  - 当前现场状态不是重定位成功，而是明确失败：
+    - 原厂定位和地图位姿可以作为证据；
+    - 固定地图重定位锁未清；
+    - 任务页不可启动；
+    - 因此操作员应只看到 `重定位失败`。
+- Safety status:
+  - 本轮没有调用 `/api/localization/initialpose`；
+  - 没有启动任务；
+  - 没有发布 `/m20pro/floor_goal`；
+  - 没有发送 `/cmd_vel`。
+
+## 2026-06-29 15:24 CST - 恢复 104 点云 relay 到 /scan 链路
+
+- Symptom from frontend:
+  - 自检页显示：
+    - `原始点云` 失败；
+    - `/scan` 失败；
+    - 原厂里程计、地图位姿、定位状态、原厂导航状态、电量等仍在更新。
+  - 用户现场确认 `/LIDAR/POINTS` 本身有真实数据，所以问题不是原厂原始点云消失。
+- Read-only diagnosis before recovery:
+  - `/api/state.perception_status`:
+    - `code=lidar_relay_no_samples`;
+    - `lidar_points=None`;
+    - `/scan` 无数据。
+  - 104 进程中 `m20pro_lidar_relay`、`pointcloud_fusion`、web 都在。
+  - `/tmp/m20pro_lidar_relay.log` 持续显示真实样本：
+    - `LIDAR relay sample OK`;
+    - `input_points` 约 4 万到 6 万；
+    - `output_points` 约 5 千到 6 千。
+  - 这说明断点不在 `/LIDAR/POINTS`，而在本工程的 relay/fusion/web DDS 接收链路。
+- First recovery attempt:
+  - 只重启 104 本工程服务：
+    - `systemctl restart m20pro-real.service`;
+    - PID 从 `8793` 变为 `11345`。
+  - 结果：
+    - web 能重新看到 relay 点云；
+    - `/api/state.lidar_points.points` 约 5k；
+    - 但 `/scan` 仍未恢复；
+    - `pointcloud_fusion` 日志仍为 `cloud=0 scan=0 reason=not_started`；
+    - `ros2 node list` 一度看不到 `/m20pro_pointcloud_fusion`，但进程仍在，属于 ROS graph / DDS participant 半坏状态。
+- Actual fix:
+  - 104 `/etc/default/m20pro-real` 由 project UDP profile 切回 factory profile：
+    - `M20PRO_FASTDDS_PROFILE=factory`;
+    - `M20PRO_LIDAR_RELAY_FASTDDS_PROFILE=factory`;
+    - `M20PRO_CLEAN_STALE_FASTDDS_SHM=0`;
+  - 自动备份：
+    - `/etc/default/m20pro-real.bak.20260629_152614`。
+  - 再只重启 104 本工程服务：
+    - `systemctl restart m20pro-real.service`;
+    - PID 变为 `13074`。
+- Result after factory profile restart:
+  - `/api/state.perception_status`:
+    - `code=perception_ready`;
+    - `ready=true`;
+    - message: `点云 relay 和 /scan 均有新鲜数据`。
+  - `/api/state` sample:
+    - `/scan`: `ok=true`, `finite_ranges=221`, `frame_id=m20pro_base_link`;
+    - `lidar_points`: `ok=true`, `points=5561`, `source=relay`, `frame_id=lidar_link`;
+    - relay:
+      - `input_topic=/LIDAR/POINTS`;
+      - `input_publisher_count=2`;
+      - `messages=618`;
+      - `messages_published=234`;
+      - `output_points=5614`;
+      - `input_rate_hz≈8.9`;
+      - `publish_rate_hz≈3.4`;
+      - `downsample_method=numpy_stride`.
+  - `pointcloud_fusion` journal:
+    - `PointCloud fusion ready: /m20pro/lidar_points_relay -> /scan in m20pro_base_link`;
+    - `cloud>0`, `processed>0`, `scan>0`, `finite_bins≈200+`, `reason=published/ok`。
+  - `./scripts/104_frontend_task_ready_check.py --url http://10.21.31.104:8080`:
+    - `perception_status=perception_ready`;
+    - `scan_finite=221`;
+    - `lidar_points=5316 source=relay`;
+    - 当前仍因 `task_readiness=map_relocalization_required` 阻塞任务，这是重定位锁问题，不是点云问题。
+- Current interpretation:
+  - 当前点云链路已恢复：
+    - `/LIDAR/POINTS -> /m20pro/lidar_points_relay -> /scan -> web 自检`。
+  - 当前 104 应继续使用 factory FastDDS profile；不要在现场为了“UDP-only 实验”切回 project_udp。
+  - 不要清 `/dev/shm/fastrtps_*`，不要重启 106 原厂 multicast/lidar；本次恢复只动了 104 本工程服务和 104 `/etc/default/m20pro-real`。
+- Safety status:
+  - 本轮没有调用 `/api/localization/initialpose`；
+  - 没有启动任务；
+  - 没有发布 `/m20pro/floor_goal`；
+  - 没有发送 `/cmd_vel`。
+
+## 2026-06-29 15:59 CST - 修复 startup_sync 重定位锁卡死，104 正式前端已 ready
+
+- User concern:
+  - 用户明确指出当前阶段最重要的是“能跑起来并收集现场数据”，安全策略可以后续继续细化。
+  - 现场现象是：
+    - 2101 原始回执已经是 `success: x=-10.643 y=-3.350 z=0.000 yaw=-1.570`；
+    - 原厂导航状态为 `location=0`;
+    - 地图位姿新鲜；
+    - 点云 relay 和 `/scan` 已恢复；
+    - 但前端仍显示 `固定地图 重定位锁未清除`，任务页不可启动。
+- Root cause:
+  - `map_relocalization_required` 不是原厂锁，也不是 Nav2 锁，是 Web 后端写在 `settings.json` 里的固定地图保护标记。
+  - 过去只在 `/api/localization/initialpose` 点击后的短等待窗口里清锁；
+  - 如果 2101/位姿证据稍晚到，或服务重启后 `startup_sync` 再次写入锁，就会出现“实际定位证据已经成立，但前端仍被旧锁卡住”的状态。
 - Code change:
-  - web relocalization now still publishes local 104 `/initialpose`, but also SSHes to `user@10.21.31.106` and publishes the same `PoseWithCovarianceStamped` on 106 itself;
-  - new web parameters:
-    - `factory_initialpose_remote_publish` default `true`;
-    - `factory_initialpose_topic` default `/initialpose`;
-    - `factory_initialpose_source_command` default `source /opt/robot/scripts/setup_ros2.sh || source /opt/ros/foxy/setup.bash`;
-    - `factory_initialpose_command_timeout_s` default `15.0`;
-  - `m20pro_real_full.sh` now keeps `enable_initialpose_relocalization=false` in the full real runtime params, so 103 TCP `2101/1` no longer hijacks the normal `/initialpose` path.
-- Runtime requirement:
-  - 104 must have non-interactive SSH access to 106 as `user@10.21.31.106`;
-  - current local check failed with `Permission denied (publickey,password)`, so this must be fixed on the robot before the new web relocalization can use the 106 path.
-- Correct success criteria:
-  - remote 106 `/initialpose` command returns OK;
-  - `/m20pro_tcp_bridge/localization_ok` becomes true;
-  - `/m20pro_tcp_bridge/map_pose` updates after the request;
-  - updated pose is close to the requested pose;
-  - `/scan` and costmaps recover after localization.
-- Interview-ready explanation:
-  - "I initially exposed relocalization through the ROS `/initialpose` convention, but field tests showed that the factory stack's reliable path is the 106/NOS RViz path. I then changed the web dashboard to publish the initial pose directly on 106 via SSH while keeping the 104 publish as a local mirror, and I stopped treating the 103 TCP `2101/1` response as the main success signal. The final acceptance is based on factory localization state and map pose update, not just API return."
+  - `localization_contract.py` 新增：
+    - `parse_tcp_2101_success_pose(...)`;
+    - `map_relocalization_clearance_payload(...)`。
+  - `web_dashboard_node.py::_snapshot()` 现在会在计算 task readiness 前先判断是否能清固定地图重定位锁。
+  - 清锁边界：
+    - 手动切换地图产生的锁仍要求最近 2101 success + 原厂定位确认 + 新鲜地图位姿；
+    - 启动自动同步 `startup_sync` 产生的锁，只要当前选中地图与 Nav2 `/map` 一致、原厂定位确认、地图位姿新鲜，就自动清除；
+    - 这样服务重启不会再次把已经可跑的现场状态锁死。
+  - `/api/state` 增加 `map_relocalization_clearance` 诊断字段，能直接看到锁为什么清或为什么不清。
+- Local verification:
+  - passed:
+    - `python3 scripts/test_localization_contract.py`;
+    - `python3 scripts/test_task_contract.py`;
+    - `python3 scripts/test_map_selection_contract.py`;
+    - `python3 scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/localization_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_localization_contract.py scripts/check_preflight_policy.py`。
+- 104 deploy:
+  - 同步到 `/home/user/m20pro_real_ros2_ws`：
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/localization_contract.py`;
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py`;
+    - `scripts/test_localization_contract.py`;
+    - `scripts/check_preflight_policy.py`。
+  - 104 上通过：
+    - `python3 scripts/test_localization_contract.py`;
+    - `python3 -m py_compile ...`;
+    - `colcon build --packages-select m20pro_cloud_bridge --symlink-install`。
+  - 104 正式服务已重启，`m20pro-real.service=active`。
+  - 短暂尝试过普通用户 8081 临时前端用于验证，但由于普通用户进程拿不到正式 root 服务同样完整的 DDS/地图状态，已停止；当前只保留正式 8080。
+- 104 final runtime result:
+  - `/api/state` at `2026-06-29 15:58 CST`:
+    - `map_relocalization_required=null`;
+    - `localization_ok=true`;
+    - `navigation_status="location=0 obstacle=0 usage_mode=None ooa=None"`;
+    - `selected_map_status=ready`;
+    - `selected_map_id=map_1782442183242_ee7c6b76`;
+    - `selected_map.name=DESK_20260625_164234`;
+    - `perception_status=perception_ready`;
+    - `/scan finite_ranges≈112-217`;
+    - `lidar_points≈5.3k-5.7k source=relay`;
+    - `battery_level=30%`;
+    - `active_task=null`。
+  - `/api/state.localization_status`:
+    - `confirmed=true`;
+    - `code=localized_ready`;
+    - `task_ready=true`;
+    - `navigation_ready=true`;
+    - message: `重定位成功：定位已确认，任务页可启动`。
+  - `/api/state.task_readiness`:
+    - `ready=true`;
+    - `code=ready`;
+    - message: `定位、位姿和导航链路已就绪；具体任务点位请看任务列表的执行条件`。
+  - `/api/tasks`:
+    - `task_count=0`;
+    - `active_task=null`;
+    - `map_relocalization_required=null`;
+    - state-level `task_readiness=ready`。
+- Current project status:
+  - 现在不是“重定位锁未清”的状态了；
+  - 对 104 正式前端来说，单层导航前置链路已经到 `重定位成功 / 任务页可启动`；
+  - 当前还不能直接跑任务的唯一业务原因是当前地图任务数为 0，需要先在 `DESK_20260625_164234` 当前地图上重新标点并创建任务。
+- Next field step:
+  - 在前端当前地图上保存至少 1-2 个新点位；
+  - 用这些当前地图点生成任务；
+  - 跑 `scripts/104_frontend_task_ready_check.py --url http://10.21.31.104:8080 --task-id <新任务ID>`;
+  - 启动 `scripts/104_watch_frontend_task.sh 300 <tag>`;
+  - 由操作员在前端确认首点/顺序后点击开始，收集 watcher 和 `last_task_result.runtime_snapshot` 证据。
+- Safety status:
+  - 本轮没有调用 `/api/localization/initialpose`；
+  - 没有启动任务；
+  - 没有发布 `/m20pro/floor_goal`；
+  - 没有发送 `/cmd_vel`。
+  - 使用 sudo 仅用于重启 104 `m20pro-real.service`，密码未写入日志。
+
+## 2026-06-29 09:49 CST - 104 real 工作区部署与只读前端验证
+
+- Context:
+  - 用户确认机器狗有电后，重新进入目标模式的真机可读阶段。
+  - 本轮只做部署、重启、前端自检和只读 readiness/smoke 验证；没有启动任务、没有发布 `/m20pro/floor_goal`、没有让机器狗运动。
+- Battery / safety gate:
+  - 部署前：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `battery_level=85%`;
+    - `active_task=false`;
+    - `task_readiness=map_relocalization_required`;
+    - `OK: battery is sufficient for non-destructive goal-mode work`。
+  - 重启服务后：
+    - `battery_level=83%`;
+    - `active_task=false`;
+    - 电量仍高于 25% 门槛。
+- Deploy / build:
+  - 明确部署到 real 工作区，而不是旧 workspace：
+    - `./scripts/local_deploy_to_test_robot.sh user@10.21.31.104 /home/user/m20pro_real_ros2_ws`。
+  - 104 上构建通过：
+    - `m20pro_description`;
+    - `m20pro_navigation`;
+    - `m20pro_inspection`;
+    - `m20pro_cloud_bridge`;
+    - `m20pro_bringup`;
+    - `Summary: 5 packages finished`。
+  - 重启：
+    - `systemctl restart m20pro-real.service`;
+    - 服务恢复为 `active (running)`；
+    - 前端日志显示 `M20Pro web console listening on http://0.0.0.0:8080`。
+- Runtime evidence after restart:
+  - `m20pro-real.service` 运行在 `/home/user/m20pro_real_ros2_ws`。
+  - 点云链路恢复：
+    - `/LIDAR/POINTS -> /m20pro/lidar_points_relay -> /scan`；
+    - ready check 显示 `perception_status=perception_ready`；
+    - `scan_finite=222`；
+    - `lidar_points=5898 source=relay`；
+    - relay `output_points=5913`、`in_hz=8.8`、`out_hz=3.2`、`downsample_method=numpy_stride`。
+  - 地图状态：
+    - selected map 为 `map_1782442183242_ee7c6b76 / DESK_20260625_164234`；
+    - `selected_map_status=ready`；
+    - message 为 `网页选择地图与 Nav2 当前 /map 一致`。
+  - 当前 readiness：
+    - `localization_ok=false`；
+    - `pose_fresh=false`；
+    - `task_readiness=map_relocalization_required`；
+    - 说明 Nav2 已加载当前固定地图，但仍必须按开发手册 TCP `2101/1` 重新定位后才能标点/跑任务。
+- Frontend / preflight proof:
+  - 只读 task ready check：
+    - `./scripts/104_frontend_task_ready_check.py --url http://10.21.31.104:8080`;
+    - 输出 `tasks=none current_map; hidden_old_map_tasks=2`；
+    - `recommended_task=none`；
+    - next advice 为先完成前端定位页重定位，再处理当前地图标点和任务。
+  - 浏览器 smoke：
+    - `./scripts/104_frontend_task_smoke.py --url http://10.21.31.104:8080 --require-blocked`;
+    - 通过；
+    - 旧地图任务隐藏；
+    - 未定位时保存点位/使用当前位姿禁用；
+    - 当前无 active task；
+    - 3D 地图按钮未出现；
+    - 摄像头开关未出现；
+    - 前后视频画面入口仍保留。
+  - 前端基础自检：
+    - `POST /api/preflight/run {"mode":"move","site":"auto","wait":false}`；
+    - 完成后 `ok=true`、`relocalization_ready=true`、`navigation_ready=false`；
+    - `site=workstation`；
+    - summary 为 `基础自检通过，当前在工位，导航待到测试场地重定位后确认`；
+    - 关键通过项包括核心节点、基础话题、导航话题、原始点云、二维激光、原厂里程计、原厂导航状态、地图、电量和运动模式；
+    - `map_pose` 与 `localization` 为 workstation/未重定位下的预期 warning；
+    - costmap/Nav2 lifecycle 为未定位前允许延后的 info。
+- Result:
+  - 当前系统比之前更诚实：
+    - 自检能通过基础链路；
+    - 未完成开发手册 2101 定位时，任务页明确不可启动；
+    - 旧地图任务不会混进当前地图任务列表；
+    - 当前地图没有任务时，前端提示先在当前地图重新标点生成任务。
+  - 仍未完成单层导航闭环证明：
+    - 还没有在前端定位页完成开发手册 `2101/1` 重定位；
+    - 还没有在当前 `DESK_20260625_164234` 地图上重新标点；
+    - 还没有用当前地图任务点执行真实单层任务。
+- Next step:
+  - 用户/现场确认安全后，在前端定位页完成重定位。
+  - 重定位成功后只保存当前地图下的新任务点，不复用旧地图任务。
+  - 跑 `104_frontend_task_ready_check.py --task-id <新任务>`；
+  - 启动 `104_watch_frontend_task.sh 300 <tag>`；
+  - 最后人工从前端确认首点/顺序并点击开始，用 watcher 证据判断单层任务闭环是否真正过关。
+
+## 2026-06-29 10:03 CST - 地图归档解析下沉到 map contract 并部署 104
+
+- Goal alignment:
+  - 继续给 `web_dashboard_node.py` 做减法，把与 ROS/HTTP 无关的地图文件业务规则移出 Web 主节点。
+  - 单层导航要可靠，第一步是确保“当前前端地图、Nav2 地图、任务点所在地图”来自同一套可验证的栅格语义，而不是让 Web 节点散落地修 yaml、读 PGM、拼 occupancy data。
+  - 这部分也为后续分工留边界：复杂重定位和跨楼层逻辑可以复用同一套地图 contract，而不是再各自解析地图文件。
+- Code change:
+  - 新增 `src/m20pro_cloud_bridge/m20pro_cloud_bridge/map_contract.py`。
+  - 下沉以下纯地图文件逻辑：
+    - `find_map_yaml(...)`：按 `occ_grid.yaml/map.yaml/jueying.yaml` 优先级找地图 yaml；
+    - `ensure_map_yaml_uses_local_image(...)`：把归档地图 yaml 的 `image:` 修正为本目录内相对路径；
+    - `read_pgm(...)`：读取 P2/P5 PGM；
+    - `load_map_file_payload(...)`：将 yaml + PGM 转成前端/任务校验使用的 occupancy payload。
+  - `web_dashboard_node.py` 现在只负责：
+    - 找地图记录；
+    - 解析工作区路径；
+    - 调用 `map_contract`；
+    - 返回 HTTP/API 错误。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - Web 必须导入 `map_contract` helper；
+    - Web 禁止重新定义地图 yaml/image/PGM 解析 helper；
+    - `map_contract` 必须拥有 yaml image 修复和 map snapshot loader 的错误语义。
+  - 新增 `scripts/test_map_contract.py`，覆盖：
+    - yaml 查找优先级；
+    - 绝对/失效 image 路径修复为本地相对路径；
+    - 缺少栅格图时报 `map_image_missing`；
+    - P2/P5 PGM 读取；
+    - occupancy data 按 ROS 地图顺序翻转并按阈值生成 `100/0/-1`。
+- Local verification:
+  - passed:
+    - `./scripts/test_map_contract.py`;
+    - `./scripts/test_map_selection_contract.py`;
+    - `./scripts/test_annotation_contract.py`;
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/map_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_map_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_map_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/map_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_map_contract.py scripts/check_preflight_policy.py m20pro日志.md`。
+- 104 deploy / read-only verification:
+  - 电量门：
+    - `battery_level=80%`;
+    - `active_task=false`;
+    - `task_readiness=map_relocalization_required`;
+    - `OK: battery is sufficient for non-destructive goal-mode work`。
+  - 部署：
+    - `./scripts/local_deploy_to_test_robot.sh user@10.21.31.104 /home/user/m20pro_real_ros2_ws`;
+    - 104 上 5 个包构建通过。
+  - 重启：
+    - `systemctl restart m20pro-real.service`;
+    - 前端恢复监听 `http://0.0.0.0:8080`。
+  - 地图接口：
+    - `GET /api/map_file?map_id=map_1782442183242_ee7c6b76`;
+    - 返回 `available=true`；
+    - `name=DESK_20260625_164234`；
+    - `width=423 height=500 resolution=0.1 origin=(-19.1,-13.4,0)`。
+  - 启动同步：
+    - journal 显示 `startup selected-map sync loaded Nav2 map: /home/user/m20pro_maps/DESK_20260625_164234/occ_grid.yaml`。
+  - Ready check:
+    - `selected_map_status=ready`;
+    - `perception_status=perception_ready`;
+    - `scan_finite=206`;
+    - `lidar_points=5539 source=relay`;
+    - `tasks=none current_map; hidden_old_map_tasks=2`;
+    - 仍然正确阻塞在 `map_relocalization_required`。
+  - 前端自检：
+    - `ok=true`;
+    - `relocalization_ready=true`;
+    - `navigation_ready=false`;
+    - summary 为 `基础自检通过，当前在工位，导航待到测试场地重定位后确认`。
+- Safety status:
+  - 本轮没有启动任务、没有发布 `/m20pro/floor_goal`、没有让机器狗运动。
+  - 当前仍需按开发手册 TCP `2101/1` 完成重定位，之后在当前地图重新标点生成任务，再做真实单层任务闭环。
+
+## 2026-06-29 10:16 CST - 106 地图导入记录组装下沉并同步 104
+
+- Context:
+  - 用户确认机器狗有电后，继续把上一个小步的地图 contract 改动同步到 104。
+  - 本轮仍只做代码同步、服务重启和只读验收；没有重定位、没有标点、没有启动任务、没有发布 `/m20pro/floor_goal`。
+- Code change:
+  - `map_contract.py` 新增 `build_imported_map_record(...)`。
+  - `web_dashboard_node.py::_import_active_map(...)` 只负责从 106 拉取地图、检查 yaml/image、落盘保存；导入地图记录字段统一交给 `map_contract` 生成。
+  - `scripts/test_map_contract.py` 增加 `test_build_imported_map_record()`。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - Web 必须导入并调用 `build_imported_map_record(...)`；
+    - `source=106_active_map` 和 `created_at` 这类导入记录字段不允许重新散落回 Web 主节点。
+- Local verification:
+  - passed:
+    - `./scripts/test_map_contract.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/map_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_map_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge/map_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_map_contract.py scripts/check_preflight_policy.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/map_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_map_contract.py scripts/check_preflight_policy.py m20pro日志.md`。
+- 104 deploy / restart:
+  - 部署前电量门：
+    - `battery_level=77%`;
+    - `active_task=false`;
+    - `task_readiness=map_relocalization_required`;
+    - 允许进行非运动类目标模式工作。
+  - 部署到 real 工作区：
+    - `./scripts/local_deploy_to_test_robot.sh user@10.21.31.104 /home/user/m20pro_real_ros2_ws`;
+    - 104 上 `m20pro_cloud_bridge`、`m20pro_description`、`m20pro_inspection`、`m20pro_navigation`、`m20pro_bringup` 5 个包构建通过。
+  - 服务重启：
+    - 104 的 `m20pro-real.service` 是 system 级单元，不是 user service；
+    - 使用 `sudo systemctl restart m20pro-real.service` 重启；
+    - 重启后 Web 节点监听 `http://0.0.0.0:8080`；
+    - 进程运行在 `/home/user/m20pro_real_ros2_ws/install/...`。
+- 104 read-only verification:
+  - 远端源码确认：
+    - `/home/user/m20pro_real_ros2_ws/src/m20pro_cloud_bridge/m20pro_cloud_bridge/map_contract.py` 含 `def build_imported_map_record`;
+    - 远端 `web_dashboard_node.py::_import_active_map(...)` 调用 `build_imported_map_record(...)`；
+    - 远端 Web 导入路径内不再硬编码 `"source": "106_active_map"` 和 `"created_at": _now_text()`。
+  - 地图状态：
+    - selected/current map 为 `map_1782442183242_ee7c6b76 / DESK_20260625_164234`;
+    - `map_source=106_active_map`;
+    - `width=423 height=500 resolution=0.1 origin=(-19.1,-13.4,0)`;
+    - `selected_map_status=ready`;
+    - message 为 `网页选择地图与 Nav2 当前 /map 一致`。
+  - 感知状态：
+    - `perception_status=perception_ready`;
+    - `scan_finite=202`;
+    - `lidar_points=5448 source=relay`;
+    - lidar relay `input=/LIDAR/POINTS publishers=2 out_hz≈3.3 max_points=6000 method=numpy_stride`。
+  - 任务/定位状态：
+    - `localization_ok=false`;
+    - `pose_fresh=false`;
+    - `active_task=false`;
+    - `task_readiness=map_relocalization_required`;
+    - 当前地图任务为 0，旧地图任务隐藏 2 个；
+    - 标点按钮和使用当前位姿按钮保持禁用；
+    - 前端 smoke 通过：3D 地图按钮不存在、摄像头开关不存在、前后视频画面入口仍保留、停止任务按钮在无任务时禁用。
+  - Preflight snapshot:
+    - `/api/preflight` 最近结果为 `ok=true`;
+    - `site=workstation`;
+    - `relocalization_ready=true`;
+    - `navigation_ready=false`;
+    - summary 为 `基础自检通过，当前在工位，导航待到测试场地重定位后确认`。
+- Current truth:
+  - 这次证明了 104 上最新 real 代码已经加载，地图/点云/scan/前端任务门槛处于正确状态。
+  - 这仍不是单层任务闭环完成；下一步必须在前端定位页按开发手册 TCP `2101/1` 完成重定位，然后在当前 `DESK_20260625_164234` 地图上新建任务点，再做带 watcher 的真实任务执行。
+
+## 2026-06-29 10:27 CST - 建图会话规则下沉到 mapping contract 并同步 104
+
+- Goal alignment:
+  - 继续执行“Web 主节点做减法，先把单层楼导航做扎实”的路线。
+  - 本轮选择建图会话/106 命令状态规则，是因为它与 ROS 运动无关、适合纯函数测试，也会成为后续复杂重定位和跨楼层分工的基础边界。
+  - Web 节点继续保留副作用：拿锁、保存 JSON、执行 subprocess/SSH、返回 HTTP；纯业务规则移到 contract。
+- Code change:
+  - 新增 `src/m20pro_cloud_bridge/m20pro_cloud_bridge/mapping_contract.py`。
+  - 下沉以下纯规则：
+    - `normalize_mapping_session_request(...)`：规范化项目名、楼栋、模式、楼层列表、当前楼层和地图名；
+    - `prepare_mapping_session_create(...)`：决定是否复用项目、是否创建项目、生成 mapping session 记录；
+    - `mapping_command_status(...)` / `apply_mapping_command_result(...)`：统一建图 start/finish/cancel/manual-required 后的 session 状态变更；
+    - `mapping_command_context(...)`：统一 106 建图命令模板可用字段。
+  - `web_dashboard_node.py` 对应变薄：
+    - `_create_mapping_session(...)` 调用 `prepare_mapping_session_create(...)`，只负责保存 projects/sessions 和记录事件；
+    - `_mapping_command(...)` 调用 `apply_mapping_command_result(...)`，不再内联 `mapping/saved/cancelled/waiting_manual` 状态表；
+    - `_command_context(...)` 调用 `mapping_command_context(...)`，不再手写 session/factory/map_archive 字段。
+  - 新增 `scripts/test_mapping_contract.py`。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - Web 必须导入 mapping contract helper；
+    - Web 不允许重新硬编码 mapping session 记录字段；
+    - Web 不允许重新硬编码建图命令状态迁移；
+    - Web 不允许重新内联拼接 mapping command context 字段。
+- Local verification:
+  - passed:
+    - `./scripts/test_mapping_contract.py`;
+    - `./scripts/test_map_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/mapping_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_mapping_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge/mapping_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_mapping_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/mapping_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_mapping_contract.py scripts/check_preflight_policy.py m20pro日志.md`。
+  - Web 主节点行数从本轮前约 `5084` 行降到 `5057` 行；行数只是参考，关键是规则边界变清楚。
+- 104 deploy / restart:
+  - 部署前电量门：
+    - `battery_level=74%`;
+    - `active_task=false`;
+    - `task_readiness=map_relocalization_required`;
+    - 允许进行非运动类目标模式工作。
+  - 部署到 real 工作区：
+    - `./scripts/local_deploy_to_test_robot.sh user@10.21.31.104 /home/user/m20pro_real_ros2_ws`;
+    - 104 上 5 个包构建通过。
+  - 重启：
+    - `sudo systemctl restart m20pro-real.service`;
+    - Web 于 `2026-06-29 10:25:55 CST` 重新监听 `http://0.0.0.0:8080`；
+    - `startup selected-map sync loaded Nav2 map: /home/user/m20pro_maps/DESK_20260625_164234/occ_grid.yaml`。
+- 104 read-only verification:
+  - 远端源码确认：
+    - `/home/user/m20pro_real_ros2_ws/src/m20pro_cloud_bridge/m20pro_cloud_bridge/mapping_contract.py` 存在；
+    - 含 `def prepare_mapping_session_create`;
+    - 远端 Web 已导入 mapping contract；
+    - 远端 Web 调用 `prepare_mapping_session_create(...)` 和 `apply_mapping_command_result(...)`。
+  - ready check:
+    - `battery_level=74%`;
+    - `active_task=false`;
+    - `selected_map_status=ready`;
+    - `localization_ok=false`;
+    - `pose_fresh=false`;
+    - `task_readiness=map_relocalization_required`;
+    - `perception_status=perception_ready`;
+    - `scan_finite=219`;
+    - `lidar_points=5702 source=relay`;
+    - `lidar_relay_method=numpy_stride`;
+    - 当前地图任务为 0，旧地图任务隐藏 2 个。
+  - frontend smoke:
+    - passed；
+    - 无 active task；
+    - 未完成 2101 定位时仍禁止任务启动；
+    - 3D 地图按钮不存在；
+    - 摄像头开关不存在；
+    - 前后视频画面入口仍保留。
+- Safety status:
+  - 本轮没有启动任务、没有发布 `/m20pro/floor_goal`、没有重定位、没有标点、没有让机器狗运动。
+  - 单层任务闭环仍未完成：下一步仍是前端定位页按开发手册 TCP `2101/1` 完成重定位，再在当前地图新建任务点并用 watcher 验证真实任务执行。
+
+## 2026-06-29 10:42 CST - 派生地图/楼梯区规则下沉并同步 104
+
+- Goal alignment:
+  - 继续给 `web_dashboard_node.py` 做减法，只把 HTTP、ROS 发布、文件生成和落盘副作用留在 Web 主节点。
+  - 派生地图/楼梯区属于“地图资产是否可用、前端如何展示可用状态”的纯规则，适合独立 contract 测试；真正的 PCD 后处理和 `/m20pro/stair_zones` 发布仍由 Web 节点做副作用。
+  - 本轮仍不触碰真实运动链路：没有重定位、没有标点、没有启动任务、没有发布 `/m20pro/floor_goal`。
+- Code change:
+  - 新增 `src/m20pro_cloud_bridge/m20pro_cloud_bridge/map_derived_contract.py`。
+  - 下沉以下纯规则：
+    - `builtin_map_derived_payload(...)` / `map_derived_payload(...)`：统一内置地图和导入地图的派生文件状态；
+    - `stair_zones_relative_path(...)`、`should_generate_builtin_stair_zones(...)`：决定楼梯区派生文件路径和是否需要生成；
+    - `resolve_map_asset_path(...)`、`read_json_object(...)`：解析地图资产路径并读取 JSON 对象；
+    - `stair_zones_unavailable_payload(...)` / `stair_zones_available_payload(...)`：统一前端楼梯区可用/不可用响应。
+  - `web_dashboard_node.py` 现在导入并调用这些 helper，不再保留 `_builtin_map_derived(...)`、`_resolve_map_asset_path(...)`、`_read_json_file(...)`。
+  - 新增 `scripts/test_map_derived_contract.py`。
+  - `scripts/check_preflight_policy.py` 增加防回归，要求 Web 使用 map-derived contract，禁止重新把派生地图/楼梯区路径和 JSON 读取规则塞回 Web 主节点。
+- Local verification:
+  - passed:
+    - `./scripts/test_map_derived_contract.py`;
+    - `./scripts/test_pcd_derived.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/map_derived_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_map_derived_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge/map_derived_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_map_derived_contract.py scripts/check_preflight_policy.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/map_derived_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_map_derived_contract.py scripts/check_preflight_policy.py m20pro日志.md`。
+- 104 deploy / restart:
+  - 部署前电量门：
+    - `battery_level=71%`;
+    - `active_task=false`;
+    - `task_readiness=map_relocalization_required`;
+    - 允许进行非运动类目标模式工作。
+  - 部署到 real 工作区：
+    - `./scripts/local_deploy_to_test_robot.sh user@10.21.31.104 /home/user/m20pro_real_ros2_ws`;
+    - 104 上 5 个包构建通过。
+  - 重启：
+    - `sudo systemctl restart m20pro-real.service`;
+    - Web 于 `2026-06-29 10:38:38 CST` 重新监听 `http://0.0.0.0:8080`；
+    - `startup selected-map sync loaded Nav2 map: /home/user/m20pro_maps/DESK_20260625_164234/occ_grid.yaml`。
+- 104 read-only verification:
+  - 远端源码确认：
+    - `/home/user/m20pro_real_ros2_ws/src/m20pro_cloud_bridge/m20pro_cloud_bridge/map_derived_contract.py` 存在；
+    - 含 `def builtin_map_derived_payload`;
+    - 远端 Web 已导入 `.map_derived_contract`;
+    - 远端 Web 不再定义 `_resolve_map_asset_path` 或 `_read_json_file`。
+  - ready check:
+    - `battery_level=70%`;
+    - `active_task=false`;
+    - `selected_map_status=ready`;
+    - `localization_ok=false`;
+    - `pose_fresh=false`;
+    - `task_readiness=map_relocalization_required`;
+    - `perception_status=perception_ready`;
+    - `scan_finite=208`;
+    - `lidar_points=5972 source=relay`;
+    - `lidar_relay_method=numpy_stride`;
+    - 当前地图任务为 0，旧地图任务隐藏 2 个。
+  - frontend smoke:
+    - passed；
+    - 当前没有 active task；
+    - 未完成开发手册 TCP `2101/1` 重定位前，任务页仍正确阻塞；
+    - 3D 地图按钮不存在；
+    - 摄像头开关不存在；
+    - 前后视频画面入口仍保留。
+- Current truth:
+  - 104 上 latest real 代码已加载，派生地图 contract 拆分已部署并只读验证。
+  - 单层任务闭环仍未完成，真实执行必须等开发手册 `2101/1` 重定位成功并在当前地图新建任务点后，再用 watcher 跟踪。
+
+## 2026-06-29 10:47 CST - 内置地图 manifest/default-map 规则下沉到 map contract
+
+- Goal alignment:
+  - 继续给 Web 主节点做减法，把地图清单解析、默认地图选择、内置/导入地图合并这些纯规则放到 `map_contract.py`。
+  - 这块不涉及 ROS 运动，只影响前端地图列表和启动默认地图选择，是适合离线测试和给后续实习生复用的边界。
+- Code change:
+  - `map_contract.py` 新增：
+    - `load_builtin_maps_from_manifest(...)`：读取 `map_manifest.yaml`，解析 `map_set.default_floor`、`global_pcd`、楼层 map yaml/pcd，并生成内置地图记录；
+    - `all_map_records(...)`：导入地图与内置地图合并，导入地图同 ID 时覆盖内置地图；
+    - `find_map_record(...)`：统一地图查找顺序，优先 archived/导入地图，再查 builtin；
+    - `default_builtin_map_id(...)` / `default_map_id(...)`：统一默认地图选择规则，优先 manifest 默认楼层，其次 `builtin_F20`，最后 fallback 到已有地图。
+  - `web_dashboard_node.py` 不再直接读 manifest 的 `map_set/floors`，不再手写 `builtin_F20` fallback，也不再自己合并地图列表；只负责：
+    - 解析 manifest 路径；
+    - 提供 package path resolver；
+    - 将 `builtin_map_derived_payload(...)` 作为派生字段构造函数传给 contract；
+    - 记录 contract 返回的 warning。
+  - `scripts/test_map_contract.py` 增加：
+    - manifest 解析、排序、默认楼层、全局/单楼层 pcd 的覆盖测试；
+    - 导入地图覆盖内置地图、地图查找和默认地图 fallback 测试。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - Web 必须调用 `load_builtin_maps_from_manifest(...)`、`all_map_records(...)`、`find_map_record(...)`、`default_map_id(...)`；
+    - Web 禁止重新使用 `yaml.safe_load` 解析 map manifest；
+    - Web 禁止重新硬编码 `builtin_F20` 默认地图规则。
+- Local verification:
+  - passed:
+    - `./scripts/test_map_contract.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/map_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_map_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge/map_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_map_contract.py scripts/check_preflight_policy.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/map_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_map_contract.py scripts/check_preflight_policy.py`。
+- 104 status before deploy:
+  - 只读 ready check 显示机器狗有电且在线：
+    - `battery_level=69%`;
+    - `active_task=false`;
+    - `perception_status=perception_ready`;
+    - `scan_finite≈205`;
+    - `lidar_points≈5252 source=relay`;
+    - `selected_map_status=ready`;
+    - `task_readiness=map_relocalization_required`。
+  - 前端 smoke passed，当前没有 active task，保存点位和启动任务仍因未完成开发手册 TCP `2101/1` 重定位而正确禁用。
+- Safety status:
+  - 本地改动尚未部署到 104。
+  - 本轮到此为止没有重定位、没有标点、没有启动任务、没有发布 `/m20pro/floor_goal`。
+
+## 2026-06-27 14:04 CST - 目标模式阶段性拆分：自检、目标下发、near-goal 等待继续下沉
+
+- Goal alignment:
+  - 继续按“先把单层楼导航做扎实”的路线推进。
+  - 这轮不是新增补丁脚本，而是继续给 Web 主节点做减法：Web 只采样 ROS 状态、执行副作用；业务判定尽量下沉到纯 contract 模块。
+  - 这样后续拆给实习生时，复杂环境重定位、跨楼层逻辑、任务执行链路不会继续堆在 `web_dashboard_node.py` 一个近万行文件里。
+- Local-only change:
+  - `preflight_contract.py` 继续承接自检上下文和条目规则：
+    - `preflight_context(...)` 统一判断 field/workstation、未定位、Nav2 启动检查是否延后；
+    - `_run_preflight_locked(...)` 只负责取 ROS 当前状态，然后把 nodes/topics/perception/costmap/battery/map/localization/motion/lifecycle 等条目交给 contract 生成。
+  - `active_task_contract.py::prepare_goal_send_state(...)` 承接任务点下发前的最终状态准备：
+    - 非 running 直接 idle；
+    - 当前任务点缺失时给出 fail payload；
+    - 任务点切换导致的过期下发记录 stale dispatch；
+    - 有效下发时统一写入 `last_goal_annotation_id`、`last_goal_sent_at`、`last_goal_semantics` 等状态，并返回 `waypoint_goal_sent` 事件。
+  - `task_progress_contract.py::prepare_near_goal_wait_update(...)` 承接 near-goal wait 状态是否应该保存：
+    - 当前任务非 running 不更新；
+    - task_id 已变化不更新；
+    - timer 已一致则 no_change；
+    - 真正需要等待 Nav2 到达确认时才更新 active task。
+  - `web_dashboard_node.py` 对应路径变薄：
+    - 自检主流程委托 `preflight_context(...)` 和各类 preflight item contract；
+    - `_dispatch_active_goal(...)` 不再直接拼 stale/goal-sent 状态；
+    - `_tick_active_task(...)` 不再内联 near-goal wait 的任务匹配/保存条件。
+  - `scripts/check_preflight_policy.py` 增加 AST import 检查和防回归规则，避免这些判定又被写回 Web 主节点。
+- Why:
+  - 之前前端后端的问题不是单点 bug，而是“状态判定、现场证据、ROS 副作用、页面反馈”混在一个大节点里；一改就容易出现定位页成功、任务页不认，或者导航状态残留。
+  - contract 化后，可以用离线测试固定关键语义，再把真机测试集中在 ROS/原厂链路和运动闭环上。
+  - 这符合当前阶段策略：先证明单层导航任务闭环稳定，再谈复杂重定位和跨楼层。
+- Verification:
+  - passed:
+    - `./scripts/test_preflight_contract.py`;
+    - `./scripts/test_active_task_contract.py`;
+    - `./scripts/test_task_progress_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_progress_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_progress_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_task_progress_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_progress_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_progress_contract.py scripts/check_preflight_policy.py m20pro日志.md`。
+- Deployment status:
+  - 未部署到 104，未在机器狗上构建、重启服务、重定位、启动任务或发布运动目标。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error [Errno 1] Operation not permitted>`。
+  - 因为目标模式要求实时看电量，电量/API 门禁不通过时不能碰真机动作。
+- Next real-robot proof:
+  - 电量门禁恢复后，在 104 上部署/构建/重启全量前端。
+  - 按真实现场流程跑：自检 -> 手册 2101 证据确认的重定位 -> 当前地图任务点 -> 单层一到两个短任务点 -> watcher 记录任务证据。
+  - 只有真实前端任务按点位执行、位姿/路径/Nav2 goal/plan endpoint 证据一致，才认为单层导航链路这一阶段过关。
+
+## 2026-06-27 13:46 CST - 自检工位/未定位上下文下沉到 preflight contract
+
+- Goal alignment:
+  - 继续减少 `web_dashboard_node.py::_run_preflight_locked(...)` 的策略判断。
+  - `mode/site/workstation/unlocalized/defer_nav2_startup_checks` 决定自检是否把 costmap/lifecycle 视为可延后，这属于自检业务规则，不应该散落在 Web 主节点。
+  - 本轮仍只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `preflight_contract.py` 新增 `preflight_context(...)`：
+    - 规范化 `mode`，只允许 `move` / `shadow`，非法值回退到 `move`；
+    - 规范化 `site`；
+    - 根据 `localization_ok` 和原厂 `navigation_status` 中的 `location=1` 判断未定位；
+    - 将 `workstation/bench/desk/office/charging` 视为显式工位模式；
+    - 统一输出 `workstation_mode` 和 `defer_nav2_startup_checks`。
+  - `web_dashboard_node.py::_run_preflight_locked(...)` 改为：
+    - 读取 ROS 状态后调用 `preflight_context(...)`；
+    - costmap 的 `deferred` 和 Nav2 lifecycle 延后判断都消费 contract 输出；
+    - 不再内联 `explicit_workstation`、`auto_site`、`location=1` 等上下文规则。
+- Policy / tests:
+  - `scripts/test_preflight_contract.py::test_preflight_context()` 覆盖：
+    - 现场已定位时严格检查 Nav2/costmap；
+    - `auto` 且未定位时进入工位安全延后模式；
+    - 显式 `desk` 工位即使已定位也延后 Nav2/costmap；
+    - 非法 mode 回退为 `move`，`shadow` 保持。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - contract 必须拥有 mode/site/workstation/deferred 上下文规则；
+    - Web 必须调用 `preflight_context(...)`；
+    - Web 自检禁止恢复 `explicit_workstation`、`auto_site`、`location=1` 等内联判定。
+- Verification:
+  - passed:
+    - `./scripts/test_preflight_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/preflight_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_preflight_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_preflight_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/preflight_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_preflight_contract.py scripts/check_preflight_policy.py m20pro日志.md`。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 13:42 CST - preflight policy 导入检查改为 AST 约束
+
+- Goal alignment:
+  - 继续做减法和稳固边界：自检业务规则应稳定留在 `preflight_contract.py`，Web 节点只负责采样 ROS 状态并调用 contract。
+  - 防回归脚本不能因为 import 排序这种低价值细节误报，否则会干扰后续继续拆分 `web_dashboard_node.py`。
+  - 本轮仍只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `scripts/check_preflight_policy.py` 新增 `require_imports(...)`：
+    - 使用 Python AST 解析 `ImportFrom`；
+    - 检查 Web 节点必须导入所有 preflight contract helper；
+    - 不再依赖一条长正则匹配 import 顺序。
+  - 原 `web imports the pure preflight summary contract` 检查改为 AST 符号级检查。
+- Current preflight architecture:
+  - `web_dashboard_node.py::_run_preflight_locked(...)` 当前负责：
+    - 读取 ROS graph、topic freshness、运行态缓存和参数；
+    - 调用 `preflight_contract.py` 生成 node/topic/perception/odom/map/localization/costmap/battery/lifecycle/motion/result。
+  - `preflight_contract.py` 当前负责：
+    - 所有自检 item 的 status/message/group；
+    - 感知链路是否可用；
+    - 工位/未定位时 costmap/lifecycle 的延后策略；
+    - `navigation_ready`、`relocalization_ready` 和 summary。
+- Verification:
+  - passed:
+    - `./scripts/test_preflight_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/preflight_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_preflight_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_preflight_contract.py scripts/check_preflight_policy.py`。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 13:34 CST - 自检节点/话题 item 下沉到 preflight contract
+
+- Goal alignment:
+  - 继续减少 `web_dashboard_node.py` 中自检流程的手写业务规则。
+  - 核心节点、基础话题、导航话题是单层导航链路的入口检查；Web 应只读取当前 ROS graph，状态和展示文案由 preflight contract 统一产出。
+  - 本轮仍只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `preflight_contract.py` 新增：
+    - `preflight_node_item(...)`：生成 `nodes` 自检 item；
+    - `preflight_base_topics_item(...)`：生成 `topics` 自检 item；
+    - `preflight_navigation_topics_item(...)`：生成 `navigation_topics` 自检 item。
+  - `web_dashboard_node.py::_run_preflight_locked(...)` 改为：
+    - 只保留 `get_node_names()` / `get_topic_names_and_types()` 的 ROS graph 读取；
+    - 直接调用上述 preflight contract helpers；
+    - 不再内联“核心节点”“基础话题”“导航话题”“全部在线”“全部存在”“缺少”“重定位后应出现”等状态文案。
+- Boundary:
+  - 本轮只收敛基础自检展示项。
+  - required node/topic 列表仍保留在 Web 启动上下文里，因为这些列表来自当前 launch/参数配置。
+  - 不改变 Nav2 lifecycle、点云/scan、costmap、任务启动和开发手册 2101/1 重定位证据规则。
+- Policy / tests:
+  - `scripts/test_preflight_contract.py::test_node_and_topic_items()` 覆盖：
+    - 核心节点齐全；
+    - 核心节点缺失；
+    - 基础话题齐全/缺失；
+    - 导航话题缺失时 warn。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - preflight contract 必须拥有 node/base-topic/navigation-topic item 规则；
+    - Web 自检必须委托 `preflight_node_item(...)`、`preflight_base_topics_item(...)`、`preflight_navigation_topics_item(...)`；
+    - Web 自检禁止恢复节点/话题 item 的内联文案。
+- Verification:
+  - passed:
+    - `./scripts/test_preflight_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/preflight_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_preflight_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_preflight_contract.py scripts/check_preflight_policy.py`。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 13:29 CST - 自检 costmap item 下沉到 preflight contract
+
+- Goal alignment:
+  - 继续减少 `web_dashboard_node.py` 中自检流程的手写业务规则。
+  - local/global costmap 是“已定位后能否开始移动任务”的关键门槛；工位/未定位时允许延后，已定位后缺失必须明确 warn，这套规则应由 preflight contract 统一产出。
+  - 本轮仍只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `preflight_contract.py` 新增 `preflight_costmap_items(...)`：
+    - 输入：local/global costmap payload、freshness 布尔值、age 文本、`deferred`；
+    - 输出：`local_costmap` 和 `global_costmap` 两个自检 item；
+    - 工位/未定位时，缺 costmap 为 info，提示未重定位前 Nav2/costmap 可延后；
+    - 已定位时，缺 local/global costmap 为 warn，并提示不要开始移动任务；
+    - costmap 尺寸异常时不崩溃，按缺失/无效尺寸处理。
+  - `web_dashboard_node.py::_run_preflight_locked(...)` 改为：
+    - 保留 `fresh("local_costmap")` / `fresh("global_costmap")` 的运行态 freshness 计算；
+    - 直接调用 `preflight_costmap_items(...)`；
+    - 不再内联拼接“局部代价地图”“全局代价地图”的状态和文案。
+- Boundary:
+  - 本轮只收敛基础自检展示项。
+  - 任务启动和 reset 后的 Nav2/scan/costmap readiness 仍由 `navigation_readiness_contract.py`、`task_contract.py` 和 runtime guard 负责。
+  - 不改变 Nav2 lifecycle、costmap 参数、LoadMap、开发手册 2101/1 重定位证据规则。
+- Policy / tests:
+  - `scripts/test_preflight_contract.py::test_costmap_items()` 覆盖：
+    - local/global costmap 正常；
+    - 工位/未定位 deferred；
+    - 已定位但 costmap 缺失；
+    - malformed costmap 尺寸不会让自检异常通过或崩溃。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - preflight contract 必须拥有 local/global costmap item 规则；
+    - Web 自检必须委托 `preflight_costmap_items(...)`；
+    - Web 自检禁止恢复 `add("local_costmap"...)`、`add("global_costmap"...)`、costmap 内联文案。
+- Verification:
+  - passed:
+    - `./scripts/test_preflight_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/preflight_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_preflight_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_preflight_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/preflight_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_preflight_contract.py scripts/check_preflight_policy.py m20pro日志.md`。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 13:23 CST - 自检感知 item 下沉到 preflight contract
+
+- Goal alignment:
+  - 继续减少 `web_dashboard_node.py` 中自检流程的手写业务规则。
+  - `/LIDAR/POINTS`、relay 点云和 `/scan` 是单层导航/避障能否开始的硬入口；自检中的“原始点云”“二维激光”和 `perception_ok` 必须由同一个 contract 统一产出，避免 Web 主节点里散落判断。
+  - 本轮仍只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `preflight_contract.py` 新增 `preflight_perception_items(...)`：
+    - 输入：当前 lidar/scan payload、freshness 布尔值、age 文本、scan 有效距离数；
+    - 输出：`lidar_points` 和 `scan` 两个自检 item；
+    - 同时输出 `perception_ok`；
+    - 点云可用时 `lidar_points` 为 ok；
+    - 点云未直接缓存但 `/scan` 新鲜有效时，`lidar_points` 为 warn，感知链路仍按可用处理；
+    - 点云和 `/scan` 都不可用时，`lidar_points` 为 fail，阻断基础自检。
+  - `web_dashboard_node.py::_run_preflight_locked(...)` 改为：
+    - 保留 `fresh("scan")` / `fresh("lidar_points")` 的运行态 freshness 计算；
+    - 直接调用 `preflight_perception_items(...)`；
+    - 使用 contract 返回的 `items` 和 `perception_ok`；
+    - 不再内联拼接“原始点云”“二维激光”的状态和文案。
+  - `preflight_contract.py` 增加 `_nonnegative_int(...)`，避免坏 payload 里的宽高/距离数把自检线程打断。
+- Boundary:
+  - 本轮只收敛基础自检展示和 `perception_ok` 汇总入口。
+  - 任务启动/运行中的 scan/lidar 强约束仍由 `task_contract.py::perception_readiness_payload(...)` 和 runtime guard 负责。
+  - 不改变点云降采样、relay QoS、Nav2 costmap 或开发手册 2101/1 重定位证据规则。
+- Policy / tests:
+  - `scripts/test_preflight_contract.py::test_perception_items()` 覆盖：
+    - 点云正常；
+    - 点云未缓存但 `/scan` 可用；
+    - 点云和 `/scan` 都不可用；
+    - malformed 计数字段不会让自检异常通过或崩溃。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - preflight contract 必须拥有 lidar/scan item 和 `perception_ok` 规则；
+    - Web 自检必须委托 `preflight_perception_items(...)`；
+    - Web 自检禁止恢复 `add("lidar_points"...)`、`add("scan"...)`、点云/scan 内联文案。
+- Verification:
+  - passed:
+    - `./scripts/test_preflight_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/preflight_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_preflight_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_preflight_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/preflight_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_preflight_contract.py scripts/check_preflight_policy.py m20pro日志.md`。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 13:17 CST - 自检地图位姿 item 下沉到 preflight contract
+
+- Goal alignment:
+  - 继续减少 `web_dashboard_node.py` 中自检流程的手写业务规则。
+  - 地图位姿 `/m20pro_tcp_bridge/map_pose` 是“已定位”和“能否进入任务链路”的关键观测项；基础自检展示 item 由 preflight contract 统一产出，Web 只负责读取当前 pose 和计算 freshness。
+  - 本轮仍只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `preflight_contract.py` 新增 `preflight_map_pose_item(...)`：
+    - 输入：当前 pose、`pose_ok`、`age_text`；
+    - 输出：完整 `map_pose` 自检 item；
+    - pose 有效时显示 `x/y` 和更新时间；
+    - pose 无效时为 warn，并提示未收到有效 `/m20pro_tcp_bridge/map_pose`，到测试场地后先重定位。
+  - `web_dashboard_node.py::_run_preflight_locked(...)` 改为：
+    - 保留 `pose_has_stamp` 和 `pose_age` 的运行态计算；
+    - 直接 `items.append(preflight_map_pose_item(...))`；
+    - 不再内联 `map_pose` item 的 label/status/message。
+- Boundary:
+  - 本轮只下沉基础自检展示项。
+  - 位姿是否满足任务启动、标点保存、当前地图一致性，仍由 `localization_contract.py`、`annotation_contract.py`、`task_contract.py` 和 selected-map 相关 contract 负责。
+  - 不改变开发手册 2101/1 作为重定位成功证据的规则。
+- Policy / tests:
+  - `scripts/test_preflight_contract.py::test_map_pose_item()` 覆盖：
+    - 有效地图位姿；
+    - 缺失地图位姿。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - preflight contract 必须拥有 map-pose item 规则；
+    - Web 自检必须委托 `preflight_map_pose_item(...)`；
+    - Web 自检禁止恢复 `add("map_pose"...)`、`地图位姿`、`未收到有效 /m20pro_tcp_bridge/map_pose` 等内联文案。
+- Verification:
+  - passed:
+    - `./scripts/test_preflight_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/preflight_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_preflight_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_preflight_contract.py scripts/check_preflight_policy.py`。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 13:16 CST - 自检定位状态 item 下沉到 preflight contract
+
+- Goal alignment:
+  - 继续减少 `web_dashboard_node.py` 中自检流程的手写业务规则。
+  - 定位状态是单层任务从“工位可排查”进入“现场可执行”的关键分界；基础自检展示项应由 preflight contract 统一产出。
+  - 本轮仍只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `preflight_contract.py` 新增 `preflight_localization_item(...)`：
+    - 输入：`localization_ok`；
+    - 输出：完整 `localization` 自检 item；
+    - `localization_ok is True` 时为 ok；
+    - 未确认定位时为 warn，并提示工位/未重定位状态下需要到测试场地后先重定位。
+  - `web_dashboard_node.py::_run_preflight_locked(...)` 改为：
+    - 保留 `loc_ok` / `unlocalized` / `workstation_mode` 的现场模式判定；
+    - 直接 `items.append(preflight_localization_item(loc_ok))`；
+    - 不再内联 `localization_ok=true` 或“定位未确认是预期状态”的展示文案。
+- Boundary:
+  - 重定位是否真正成功、是否满足任务启动条件，仍由 `localization_contract.py` 和 `task_contract.py` 负责。
+  - 本轮只收敛基础自检展示项，不改变开发手册 2101/1 作为重定位成功证据的规则。
+- Policy / tests:
+  - `scripts/test_preflight_contract.py::test_localization_item()` 覆盖：
+    - `localization_ok=True`；
+    - `localization_ok=False`。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - preflight contract 必须拥有 localization item 规则；
+    - Web 自检必须委托 `preflight_localization_item(...)`；
+    - Web 自检禁止恢复 `add("localization"...)`、`localization_ok=true`、`定位未确认是预期状态` 等内联文案。
+- Verification:
+  - passed:
+    - `./scripts/test_preflight_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/preflight_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_preflight_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_preflight_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/preflight_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_preflight_contract.py scripts/check_preflight_policy.py m20pro日志.md`。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 13:11 CST - 自检地图 item 下沉到 preflight contract
+
+- Goal alignment:
+  - 继续减少 `web_dashboard_node.py` 中自检流程的手写业务规则。
+  - `/map` 是单层任务坐标系入口；基础自检中“地图是否可用”的状态应由 preflight contract 统一产出，Web 只读当前状态。
+  - 本轮仍只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `preflight_contract.py` 新增 `preflight_map_item(...)`：
+    - 输入：当前 `/map` payload；
+    - 输出：完整 `map` 自检 item；
+    - 有 `/map` payload 时为 ok；
+    - 无 `/map` payload 时为 fail。
+  - `web_dashboard_node.py::_run_preflight_locked(...)` 改为：
+    - 读取 `current_state["map"]` 得到 `map_payload`；
+    - 保留 `map_ok` 布尔值给 `preflight_result_payload(...)` 汇总使用；
+    - 直接 `items.append(preflight_map_item(...))`；
+    - 不再内联 `add("map", "地图", ..., "已加载 /map" / "未收到 /map")`。
+- Why:
+  - 任务点和任务执行依赖固定地图/Nav2 `/map` 的一致性。
+  - 基础自检里的地图 item 需要和后续 selected-map / Nav2-map readiness 形成清晰分层：Web 负责读状态，contract 负责判断和文案。
+- Policy / tests:
+  - `scripts/test_preflight_contract.py::test_map_item()` 覆盖：
+    - `/map` 已加载；
+    - `/map` 缺失。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - preflight contract 必须拥有 map item 规则；
+    - Web 自检必须委托 `preflight_map_item(...)`；
+    - Web 自检禁止恢复 `add("map"...)`、`已加载 /map`、`未收到 /map` 等内联文案。
+- Verification:
+  - passed:
+    - `./scripts/test_preflight_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/preflight_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_preflight_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_preflight_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/preflight_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_preflight_contract.py scripts/check_preflight_policy.py m20pro日志.md`。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 13:06 CST - 自检电量 item 下沉到 preflight contract
+
+- Goal alignment:
+  - 继续减少 `web_dashboard_node.py` 中自检流程的手写业务规则。
+  - 电量是目标模式和真实任务运行的硬门禁之一；基础自检显示项应与任务启动/运行电量门禁一样，有清晰的数据合同。
+  - 本轮仍只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `preflight_contract.py` 新增 `preflight_battery_item(...)`：
+    - 输入：当前 battery payload 和基础自检最低电量；
+    - 输出：完整 `battery` 自检 item；
+    - 未收到电池数据为 fail；
+    - 电量低于最低要求为 fail；
+    - 电量满足最低要求为 ok。
+  - `web_dashboard_node.py::_run_preflight_locked(...)` 改为：
+    - 只读取 `current_state["battery"]` 和参数 `preflight_min_battery_level`；
+    - 直接 `items.append(preflight_battery_item(...))`；
+    - 不再内联解析 `battery["primary"]["level"]` 或拼接电量提示文案。
+- Boundary:
+  - 任务启动/运行的电量门禁仍由 `task_contract.py::battery_readiness_payload(...)` 负责。
+  - 本轮只收敛基础自检展示项，不改变任务启动阈值、运行阈值或运行中自动停止逻辑。
+- Policy / tests:
+  - `scripts/test_preflight_contract.py::test_battery_item()` 覆盖：
+    - 电量满足最低要求；
+    - 电量低于最低要求；
+    - 未收到电池数据。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - preflight contract 必须拥有 battery item 规则；
+    - Web 自检必须委托 `preflight_battery_item(...)`；
+    - Web 自检禁止恢复 `primary = battery.get("primary")`、`最低要求`、`未收到电池数据` 等内联文案。
+- Verification:
+  - passed:
+    - `./scripts/test_preflight_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/preflight_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_preflight_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_preflight_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/preflight_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_preflight_contract.py scripts/check_preflight_policy.py m20pro日志.md`。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 13:00 CST - 自检运动模式 item 下沉到 preflight contract
+
+- Goal alignment:
+  - 继续减少 `web_dashboard_node.py` 中自检流程的手写业务规则。
+  - 运动模式是移动任务的硬入口：move 模式自检必须确认 real 启动确实放开运动控制；shadow/未知模式只能作为非移动或诊断状态。
+  - 本轮仍只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `preflight_contract.py` 新增 `preflight_motion_mode_item(...)`：
+    - 输入：请求的自检 mode 和 `_detect_motion_mode()` 输出；
+    - 输出：完整 `motion_mode` 自检 item；
+    - `mode=move` 时只有检测到 `move` 才是 ok，否则 fail；
+    - 非 move 自检中检测到 `shadow`/`move` 为 ok，unknown 为 warn。
+  - `web_dashboard_node.py::_run_preflight_locked(...)` 改为：
+    - 调用 `_detect_motion_mode()`；
+    - 直接 `items.append(preflight_motion_mode_item(...))`；
+    - 不再内联判断运动模式 status/message。
+- Why:
+  - 之前 Web 自检里有两处 `motion.get("message") or ...` fallback：
+    - `未确认 move 模式，请用 104_start_real_move.sh 全量启动`；
+    - `未确认运动模式`。
+  - 这会让 `_detect_motion_mode()` 输出合同不完整时被 Web 悄悄掩盖。
+  - 现在运动模式 item 的状态和 message 由 preflight contract 统一负责，Web 主节点只保留检测动作和副作用。
+- Policy / tests:
+  - `scripts/test_preflight_contract.py::test_motion_mode_item()` 覆盖：
+    - move 请求 + move 检测为 ok；
+    - move 请求 + shadow 检测为 fail；
+    - shadow/诊断请求 + unknown 检测为 warn。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - preflight contract 必须拥有 motion-mode item 规则；
+    - Web 自检必须委托 `preflight_motion_mode_item(...)`；
+    - Web 自检禁止恢复 `motion.get("message") or ...` 兜底。
+- Verification:
+  - passed:
+    - `./scripts/test_preflight_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/preflight_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_preflight_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_preflight_contract.py scripts/check_preflight_policy.py`;
+    - `rg -n 'motion\\.get\\("message"\\) or|未确认 move 模式|未确认运动模式|get\\("message"\\) or|get\\("code"\\) or|get\\("event"\\) or|get\\("operator_event"\\) or' src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py` 无输出；
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/preflight_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_preflight_contract.py scripts/check_preflight_policy.py m20pro日志.md`。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 12:48 CST - Nav2 load_map 后 /map 对齐 message 改为 selected-map contract 输出
+
+- Goal alignment:
+  - 继续收紧单层任务坐标系入口：前端选中固定地图后，Nav2 `/map` 必须与所选地图元数据一致。
+  - `web_dashboard_node.py` 不应在 load_map 成功后自行兜底解释“已加载但未对齐”，这类状态应由 `map_selection_contract.py` 统一产出。
+  - 104 电量/API 门禁仍不可读，因此本轮只做本地代码、策略和离线验证，没有在真机上切地图或重定位。
+- Local-only change:
+  - `web_dashboard_node.py::_load_selected_map_into_nav2(...)`：
+    - load_map 成功后调用 `_wait_for_selected_map_match(...)`；
+    - 返回 message 从 `match.get("message") ... or "Nav2 地图已加载，但 /map 元数据尚未对齐"` 改为 required `match["message"]`。
+  - `_wait_for_selected_map_match(...)` 已经通过 `selected_map_status_payload(...)` / `selected_map_wait_timeout_payload(...)` 产出 ready/failure message。
+- Policy / tests:
+  - `scripts/test_map_selection_contract.py` 覆盖：
+    - selected map missing；
+    - metadata mismatch；
+    - live map unavailable；
+    - wait timeout；
+    - relocalization required；
+    - selected map choice state。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - selected-map loader 必须消费 required selected-map match message；
+    - Web 禁止恢复 `match.get("message")` 或“Nav2 地图已加载，但 /map 元数据尚未对齐” fallback。
+- Why:
+  - 地图选择与 Nav2 `/map` 不一致是任务点坐标系错乱的高风险入口。
+  - 这条路径必须让 contract 作为唯一事实源，避免 Web 在成功返回里用兜底文案掩盖 selected-map 状态缺字段。
+- Verification:
+  - passed:
+    - `./scripts/test_map_selection_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/map_selection_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_map_selection_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_map_selection_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/map_selection_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_map_selection_contract.py scripts/check_preflight_policy.py m20pro日志.md`。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、切换地图、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 12:45 CST - Nav2 错配状态事件字段改为 required contract 输出
+
+- Goal alignment:
+  - 继续加固单层任务执行的复盘证据链，尤其是“Nav2 返回的状态不属于当前任务点/当前 goal”的路径。
+  - 这类错配事件直接关系到现场现象“机器人像是跑到固定残留点/错误点”，必须保留严格的 timeline/operator 证据，不能由 Web fallback 掩盖缺字段。
+  - 104 电量/API 门禁仍不可读，因此本轮只做本地代码、策略和离线验证，没有做真实机器人动作。
+- Local-only change:
+  - `web_dashboard_node.py::_record_ignored_nav_status(...)`：
+    - `event_payload.get("timeline_event") or "nav_status_ignored"` 改为 `event_payload["timeline_event"]`；
+    - `event_payload.get("timeline_message") or message` 改为 `event_payload["timeline_message"]`；
+    - `timeline_extra`、`operator_event`、`operator_payload` 都改为 required 字段消费。
+  - `ignored_nav_status_event_payload(...)` 仍由 `nav_status_contract.py` 统一生成。
+- Policy / tests:
+  - `scripts/test_nav_status_contract.py::test_apply_ignored_nav_status_state()` 已覆盖：
+    - timeline event；
+    - raw nav status；
+    - operator event；
+    - operator payload 的 task/annotation 信息。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - Web ignored Nav2-status 路径必须消费 required contract event fields；
+    - Web 禁止恢复 `event_payload.get(...)` fallback。
+- Why:
+  - ignored/mismatched Nav2 status 是判断“是否收到旧 goal、错 goal、残留 goal”的核心证据。
+  - 如果 Web 层继续 fallback，contract 输出缺字段不会失败，现场复盘会出现“看起来有事件，但缺少关键上下文”的情况。
+- Verification:
+  - passed:
+    - `./scripts/test_nav_status_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/nav_status_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_nav_status_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_nav_status_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/nav_status_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_nav_status_contract.py scripts/check_preflight_policy.py m20pro日志.md`。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 12:54 CST - 地图选择/启动同步失败信息收敛到加载结果
+
+- Goal alignment:
+  - 继续减少 `web_dashboard_node.py` 内部的临时兜底文案，让前端/日志看到的失败原因来自地图加载、地图图片修复或 contract 层的明确结果。
+  - 本轮仍只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `_select_map(...)` 在 Nav2 LoadMap 失败时改为消费 `nav2_load["message"]` 必填字段，不再 fallback 到泛化的 `Nav2 地图加载失败`。
+  - `_load_selected_map_into_nav2(...)` 在地图栅格图修复失败时改为消费 `image_repair["code"]` / `image_repair["message"]` 必填字段。
+  - `_load_map_file_payload(...)` 在地图栅格图不可用时改为抛出 `image_repair["message"]`，不再 fallback 到英文 `map image unavailable`。
+  - `_run_startup_selected_map_sync_once(...)` 在启动同步固定地图失败时改为记录 `load_result["message"]`，不再 fallback 到 `startup selected-map sync failed`。
+- Why:
+  - 地图选择、启动同步和地图快照读取属于同一条“固定地图必须和 Nav2 /map 对齐”的链路。
+  - Web 层如果继续自己补默认失败文案，会掩盖真正原因，例如 yaml 缺失、图片缺失、LoadMap 服务不可用或 /map 元数据未对齐。
+  - 现在缺少 `message` 会直接暴露为本地验证/运行错误，迫使底层结果保持完整。
+- Policy / tests:
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - Web 地图选择必须消费 `nav2_load["message"]`；
+    - Web 启动同步必须消费 `load_result["message"]`；
+    - 地图图片修复失败必须消费 `image_repair["code"]` / `image_repair["message"]`；
+    - 禁止重新写入上述 fallback 文案。
+- Verification:
+  - passed:
+    - `./scripts/test_map_selection_contract.py`;
+    - `./scripts/test_map_selection_contract.py && ./scripts/test_startup_map_sync_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/check_preflight_policy.py scripts/test_map_selection_contract.py scripts/test_startup_map_sync_contract.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/check_preflight_policy.py m20pro日志.md`。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 12:41 CST - 重定位请求坐标解析失败 message 下沉到 localization contract
+
+- Goal alignment:
+  - 继续收窄 `web_dashboard_node.py` 中重定位入口的业务语义。
+  - 重定位请求坐标是否有效、失败时显示什么 message，应由 `localization_contract.py::parse_initialpose_request(...)` 负责。
+  - 104 电量/API 门禁仍不可读，因此本轮只做本地代码、策略和离线验证，没有发布 `/initialpose` 或执行真实重定位。
+- Local-only change:
+  - `web_dashboard_node.py::_publish_initialpose(...)`：
+    - 坐标解析失败时从 `request.get("message") or "重定位坐标无效..."` 改为 required `request["message"]`；
+    - 失败详情仍返回 contract 给出的 `code`、`pose` 等字段。
+  - Web 不再为 initialpose request parse error 硬编码 fallback message。
+- Policy / tests:
+  - `scripts/test_localization_contract.py::test_parse_initialpose_request()` 增加：
+    - 空 z 失败 message；
+    - infinite pose 失败 message。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - Web `_publish_initialpose(...)` 必须消费 `request["message"]`；
+    - Web 禁止恢复 `request.get("message") or "重定位坐标无效..."` 兜底。
+- Why:
+  - 现场重定位问题必须以开发手册 2101/1 回执和 localization contract 为准。
+  - 如果 Web 在入口自己兜底，会掩盖 contract 缺字段，也会让前端错误提示和离线测试覆盖不一致。
+- Verification:
+  - passed:
+    - `./scripts/test_localization_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/localization_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_localization_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_localization_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/localization_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_localization_contract.py scripts/check_preflight_policy.py m20pro日志.md`。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 12:38 CST - 标点固定地图边界/占用检查下沉到 annotation contract
+
+- Goal alignment:
+  - 继续从“单层任务为什么会跑错点”入口做减法：任务点保存前必须证明点位属于当前固定地图，并且不在障碍/未知栅格上。
+  - 这类语义属于点位数据合同，不应由 `web_dashboard_node.py` 临时组合多个 helper 和兜底文案。
+  - 104 电量/API 门禁仍不可读，因此本轮只做本地代码、策略和离线验证，没有做真实机器人动作。
+- Local-only change:
+  - `annotation_contract.py` 新增 `annotation_map_pose_error_payload(...)`：
+    - 调用固定地图 bounds 检查；
+    - 调用 occupancy grid 检查；
+    - 统一返回 `annotation_out_of_map`、`annotation_on_occupied_cell`、`annotation_on_unknown_cell`。
+  - `web_dashboard_node.py::_create_annotation(...)`：
+    - 改为调用 `annotation_map_pose_error_payload(...)`；
+    - 不再内联组合 `pose_map_bounds_error(...)` / `pose_map_occupancy_error(...)`；
+    - 静态点位解析和保存 readiness 失败时消费 `context["message"]`、`context["code"]`、`annotation_readiness["message"]`。
+  - Web 保存点位路径不再硬编码“点位数据无效”“当前不能保存点位”“点位不在当前地图范围内”“点位不在可通行栅格上”等 fallback。
+- Policy / tests:
+  - `scripts/test_annotation_contract.py::test_annotation_map_pose_error_payload()` 覆盖：
+    - 可通行点通过；
+    - 地图外点拒绝；
+    - 障碍栅格拒绝；
+    - 未知栅格拒绝。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - annotation contract 必须拥有固定地图 bounds/occupancy 保存点位错误；
+    - Web 必须通过 annotation contract 做保存点位地图校验；
+    - Web 禁止重新内联组合 bounds/occupancy 检查；
+    - Web 禁止恢复点位保存路径的兜底文案。
+- Why:
+  - 如果点位能被保存在错误地图、地图外、障碍或未知区域，后续任务执行就可能表现为“看似下发成功，但机器人跑向奇怪位置或固定残留点”。
+  - 本轮把保存点位的地图语义集中到 annotation contract，便于 A/B 实习生或后续 AI 直接审查“点位是否可信”，而不是在 Web 大文件里追分支。
+- Verification:
+  - passed:
+    - `./scripts/test_annotation_contract.py`;
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/annotation_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_annotation_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_annotation_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/annotation_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_annotation_contract.py scripts/check_preflight_policy.py m20pro日志.md`。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 12:33 CST - 任务改名/删除 message 边界下沉到 task contract
+
+- Goal alignment:
+  - 继续把 `web_dashboard_node.py` 收窄为副作用层，减少任务管理 API 在 Web 大文件中自行解释业务失败原因。
+  - 本轮先处理任务改名/删除这类低风险、可离线证明的任务状态变更路径；真实机器人动作仍受 104 电量/API 门禁限制。
+- Local-only change:
+  - `task_contract.py::apply_task_name_update(...)` 现在明确返回：
+    - `code`: `task_updated` / `task_missing`;
+    - `message`: `任务名称已更新` / `任务不存在`;
+    - `updated_task_id`。
+  - `web_dashboard_node.py::_update_task(...)` 失败时改为消费 `update["message"]` / `update["code"]`。
+  - `web_dashboard_node.py::_delete_task(...)` 失败时改为消费 `delete["message"]` / `delete["code"]`。
+  - Web 不再为任务改名/删除失败路径硬编码“任务不存在” fallback。
+- Policy / tests:
+  - `scripts/test_task_contract.py::test_apply_task_name_update()` 覆盖改名成功/失败的 `code/message/updated_task_id`。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - Web 任务改名/删除必须消费 contract 的 required `message/code`；
+    - 禁止 `_update_task(...)` / `_delete_task(...)` 回退到 Web 内硬编码任务不存在文案。
+- Why:
+  - 任务管理失败原因属于 `task_contract.py` 的数据合同，不应由 Web handler 临时兜底。
+  - 这样以后拆给其他实习生或 AI 时，任务状态语义集中在 contract，Web 节点只负责加锁、持久化、事件记录和 HTTP 返回。
+- Verification:
+  - passed:
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py m20pro日志.md`。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 12:04 CST - 任务创建地图不一致错误 payload 下沉到 task contract
+
+- Goal alignment:
+  - 继续减少 Web 主节点里的任务创建业务语义，尤其是会影响“能否生成可执行任务”的地图一致性检查。
+  - 这块属于单层任务闭环入口：如果任务生成时选中固定地图和 Nav2 当前 /map 不一致，必须明确阻断并保留可复盘证据。
+  - 104 电量/API 门禁仍不可读，因此本轮只做本地代码、策略和离线验证。
+- Local-only change:
+  - `task_contract.py` 新增 `task_create_map_metadata_mismatch_payload(...)`：
+    - 统一生成 `task_create_map_metadata_mismatch` readiness；
+    - 保留 `task_map_id`、`selected_map_id`、`selected_map_status`；
+    - 同时返回 Web API 需要的 `error_extra=readiness_error_payload(...)`。
+  - `web_dashboard_node.py::_create_task(...)` 在 selected-map/Nav2-map 不一致时改为调用上述 helper。
+  - Web 不再内联构造 `readiness_failure("task_create_map_metadata_mismatch", ...)`。
+- Policy / tests:
+  - `scripts/test_task_contract.py::test_task_create_map_metadata_mismatch_payload()` 覆盖：
+    - code；
+    - message；
+    - task map；
+    - selected map status；
+    - Web API error extra 包装。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - task contract 必须拥有该 payload helper；
+    - Web `_create_task(...)` 必须调用 helper；
+    - Web 不允许再内联组装该 readiness failure。
+- Why:
+  - 任务创建前的地图一致性是“后面导航是否跑到错误坐标系”的入口风险。
+  - 这类错误不能散落在 Web handler 里用临时 readiness_failure 拼出来，应该归 task contract 管理，便于测试和复盘。
+- Verification:
+  - passed:
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `./scripts/test_task_contract.py && ./scripts/test_navigation_readiness_contract.py && ./scripts/test_active_task_contract.py && ./scripts/test_nav_status_contract.py && ./scripts/test_task_progress_contract.py && ./scripts/test_task_plan_contract.py && ./scripts/test_task_snapshot_contract.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 12:28 CST - 任务创建/启动链路 readiness message fallback 清理
+
+- Goal alignment:
+  - 继续减少 `web_dashboard_node.py` 中任务创建/启动链路的兜底文案。
+  - 任务创建、pre-runtime 检查、启动前 readiness、复位后 readiness、最终下发前 readiness 的 message 都应该来自 `task_contract.py` / `navigation_readiness_contract.py`。
+  - 104 电量/API 门禁仍不可读，因此本轮只做本地代码、策略和离线验证。
+- Local-only change:
+  - `web_dashboard_node.py::_create_task(...)`：
+    - `error_payload.get("message") or "任务静态条件无效"` 改为 `error_payload["message"]`；
+    - `readiness.get("message") or "任务点位无效"` 改为 `readiness["message"]`。
+  - `web_dashboard_node.py::_task_start_pre_runtime_context(...)`：
+    - `readiness.get("message") or "任务启动条件无效"` 改为 `readiness["message"]`。
+  - `web_dashboard_node.py::_start_task(...)`：
+    - `readiness["message"]`;
+    - `post_reset_readiness["message"]`;
+    - `post_reset_task_ready["message"]`;
+    - `final_readiness["message"]`。
+  - Web 不再在这些路径硬编码“任务链路未就绪”“任务启动复位后导航链路未恢复”等 fallback 文案。
+- Why:
+  - readiness payload 的 message 是 contract 的核心输出。如果 Web 再自己兜底，contract 缺字段会被掩盖，现场前端显示也可能和测试覆盖的 contract 不一致。
+  - 这一步继续把 Web 主节点收窄为副作用层：读状态、调用 contract、保存/返回结果。
+- Policy / tests:
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - `_create_task(...)` 必须消费 `error_payload["message"]` / `readiness["message"]`；
+    - `_task_start_pre_runtime_context(...)` 必须消费 `readiness["message"]`；
+    - `_start_task(...)` 必须消费四个启动 gate 的 `["message"]`；
+    - 禁止上述任务创建/启动 fallback 文案回到 Web。
+  - `scripts/test_task_contract.py` 覆盖相关 readiness/error payload。
+- Verification:
+  - passed:
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/check_preflight_policy.py m20pro日志.md`;
+    - `rg -n '任务静态条件无效|任务点位无效|任务启动条件无效|任务链路未就绪|任务启动复位后导航链路未恢复|任务启动复位后位姿/任务条件失效，未下发目标|任务下发前最终条件失效，未下发目标|\.get\("message"\) or "任务' src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/check_preflight_policy.py` 只在 policy 禁止项中命中；Web 中仅剩任务删除 API 的普通“任务不存在” fallback，不属于本轮任务启动链路。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 12:25 CST - Web 继续改为消费 contract 必填字段
+
+- Goal alignment:
+  - 继续减少 Web 主节点的兜底逻辑，把任务启动、near-goal waiting、failure message 的语义留在 contract。
+  - 这一步是“让缺字段显性失败”的减法：contract 缺字段时不让 Web 用本地 fallback 静默掩盖问题。
+  - 104 电量/API 门禁仍不可读，因此本轮只做本地代码、策略和离线验证。
+- Local-only change:
+  - `web_dashboard_node.py::_start_task(...)` 中 active task 创建 timeline 改为使用 `created["message"]`，不再 `created.get("message") or active.get("status_message")`。
+  - `web_dashboard_node.py::_tick_active_task(...)` 中 near-goal waiting 改为使用：
+    - `near_goal_decision["reason"]`;
+    - `near_goal_decision["message"]`。
+  - `web_dashboard_node.py::_fail_active_task_from_payload(...)` 改为使用 `payload["message"]`，不再 fallback 到 default message。
+- Why:
+  - `create_active_task_state(...)`、`near_goal_wait_decision(...)`、`active_task_failure_payload(...)` 都是纯 contract，已经应该提供完整 message/reason。
+  - Web 继续保留 fallback 会降低测试价值，也会让现场排查看到的状态不一定来自同一套 contract。
+- Policy / tests:
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - Web 必须使用 `created["message"]`；
+    - Web failure helper 必须使用 `payload["message"]`；
+    - Web near-goal waiting 必须使用 `near_goal_decision["reason"]` / `["message"]`；
+    - 禁止相应 `.get(... or fallback)` 回流。
+  - 既有 contract 测试覆盖：
+    - `scripts/test_active_task_contract.py`;
+    - `scripts/test_task_progress_contract.py`。
+- Verification:
+  - passed:
+    - `./scripts/test_active_task_contract.py`;
+    - `./scripts/test_task_progress_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_progress_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/test_task_progress_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_active_task_contract.py scripts/test_task_progress_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/check_preflight_policy.py m20pro日志.md`;
+    - `rg -n 'created\.get\("message"|near_goal_decision\.get\("message"|near_goal_decision\.get\("reason"|payload\.get\("message"\)|已接近目标点，等待 Nav2 返回到达确认|任务执行失败，已停止任务' src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_progress_contract.py scripts/check_preflight_policy.py` 仅在 contract/policy 中命中，未在 Web 任务执行路径中命中。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 12:21 CST - 任务运行期 stop/fail 文案继续从 Web 移回 contract
+
+- Goal alignment:
+  - 继续做单层任务执行链路减法：Web 主节点不再为 stall、定位丢失、goal accept 超时、规划不匹配、点位超时、near-goal 超时这些运行期失败拼 fallback 文案。
+  - 这些语义属于 `task_progress_contract.py` / `task_plan_contract.py`；Web 只负责持久化状态、写 timeline、发 operator event 和发布 ROS topic。
+  - 104 电量/API 门禁仍不可读，因此本轮只做本地代码、策略和离线验证。
+- Local-only change:
+  - `web_dashboard_node.py` 中以下路径改为直接消费 contract 的 `message`：
+    - `_stop_task_if_stalled(...)`;
+    - `_stop_task_if_localization_lost(...)`;
+    - `_stop_task_if_goal_accept_timed_out(...)`;
+    - `_stop_task_if_plan_mismatched(...)`;
+    - `_stop_task_if_waypoint_timed_out(...)`;
+    - `_stop_task_if_near_goal_timed_out(...)`。
+  - `stall_warning_event_payload(...)`、`localization_lost_start_event_payload(...)`、`plan_goal_verified_event_payload(...)` 的事件字段改为必填字段消费：
+    - `event_payload["timeline_event"]`;
+    - `event_payload["timeline_message"]`;
+    - `event_payload["event"]`;
+    - `event_payload["message"]`;
+    - `operator_event_payload["operator_event"]`。
+  - Web 不再保留以下兜底：
+    - “当前点位进展过慢，已停止任务”；
+    - “任务执行中定位/位姿丢失，已停止任务”；
+    - “当前点位下发后 Nav2 仍未接收，已停止任务”；
+    - “Nav2 规划路径与当前任务点不匹配，已停止任务”；
+    - “当前点位执行超时，已停止任务”；
+    - “机器人已接近目标但 Nav2 未返回到达，已停止任务”；
+    - `or "waypoint_stall_warning"` / `or "localization_lost_waiting"` / `or "plan_goal_verified"`。
+- Why:
+  - 这些 failure message 是现场复盘任务为何停止的关键证据，必须由一个 contract 单点定义。
+  - Web 留 fallback 会让 contract 缺字段时静默退化，后续继续出现“看起来有状态，但不知道真实卡在哪”的问题。
+- Policy / tests:
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - Web stall/localization/plan verified 事件必须消费必填 contract 字段；
+    - Web 运行期失败路径禁止重新硬编码上述 fallback 文案。
+  - 既有 contract 测试覆盖：
+    - `scripts/test_task_progress_contract.py`;
+    - `scripts/test_task_plan_contract.py`。
+- Verification:
+  - passed:
+    - `./scripts/test_task_progress_contract.py`;
+    - `./scripts/test_task_plan_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_progress_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_plan_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_progress_contract.py scripts/test_task_plan_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_task_progress_contract.py scripts/test_task_plan_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/check_preflight_policy.py m20pro日志.md`;
+    - `rg -n '当前点位进展过慢，已停止任务|任务执行中定位/位姿丢失，已停止任务|当前点位下发后 Nav2 仍未接收，已停止任务|Nav2 规划路径与当前任务点不匹配，已停止任务|当前点位执行超时，已停止任务|机器人已接近目标但 Nav2 未返回到达，已停止任务|or "waypoint_stall_warning"|or "localization_lost_waiting"|or "plan_goal_verified"|or "任务点位进展过慢"' src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_progress_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_plan_contract.py scripts/check_preflight_policy.py` 只在 policy 禁止项中命中，未在 Web 中命中。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 12:17 CST - 任务 pre-dispatch/goal 失败文案从 Web 移回 contract
+
+- Goal alignment:
+  - 继续压缩 `web_dashboard_node.py` 的任务执行语义，避免 Web 在任务 tick 和目标下发路径里继续拼兜底中文。
+  - 这块属于单层任务闭环的核心路径：定位/位姿等待、楼层等待、任务点坐标错误、目标下发前校验都必须由可测试 contract 定义。
+  - 104 电量/API 门禁仍不可读，因此本轮只做本地代码、策略和离线验证。
+- Local-only change:
+  - `web_dashboard_node.py::_tick_active_task(...)` 改为消费 `active_task_pre_dispatch_decision(...)` 的必填字段：
+    - `pre_dispatch["code"]`;
+    - `pre_dispatch["message"]`;
+    - `pre_dispatch["reason"]`。
+  - Web 不再为 pre-dispatch waiting 写“任务执行条件暂未满足” fallback。
+  - Web 不再为 pre-dispatch fail 写“当前任务点坐标无效，已停止任务” fallback。
+  - `_dispatch_active_goal(...)` 中 `waypoint_goal_payload(...)` 失败时，也不再由 Web 传重复坐标无效 fallback，改为使用 active-task contract 自带 message。
+- Why:
+  - pre-dispatch 的“等定位/等楼层/点位坐标无效”是任务执行策略，不是 Web 副作用节点的职责。
+  - Web 继续保留 fallback 会掩盖 contract 缺字段问题，也会让现场复盘时同一类失败出现多套文案。
+- Policy / tests:
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - Web task tick 必须使用 `pre_dispatch["code"]` / `["message"]` / `["reason"]`；
+    - Web task tick 禁止重新硬编码 pre-dispatch waiting/failure fallback；
+    - Web dispatch path 禁止重新硬编码 bad waypoint pose fallback。
+  - 既有 `scripts/test_task_progress_contract.py` 覆盖 pre-dispatch wait/fail/pass。
+  - 既有 `scripts/test_active_task_contract.py` 覆盖 waypoint goal payload 和 failure payload。
+- Verification:
+  - passed:
+    - `./scripts/test_task_progress_contract.py`;
+    - `./scripts/test_active_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_progress_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_progress_contract.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_task_progress_contract.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_progress_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_progress_contract.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py m20pro日志.md`;
+    - `rg -n '任务执行条件暂未满足|当前任务点坐标无效，已停止任务' src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_progress_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py scripts/check_preflight_policy.py` 只在 contract/policy 中命中，未在 Web 中命中。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 12:14 CST - 当前任务点缺失失败文案归一到 active-task contract
+
+- Goal alignment:
+  - 继续做 Web 主节点减法：缺失当前任务点位属于 active-task 状态语义，不应该在 Nav2 status、feedback、tick、dispatch 等多个 Web 分支里重复写失败文案。
+  - 这类问题会直接导致“任务执行中但点位已删除/索引越界”的现场故障，必须统一成可测试 contract。
+  - 104 电量/API 门禁仍不可读，因此本轮只做本地代码、策略和离线验证。
+- Local-only change:
+  - `active_task_contract.py::active_task_failure_payload(...)` 的 `default_message` 改为可选。
+  - 当 failure payload 自带 `message` 时，Web helper 不再需要传重复 fallback；当没有 message 时统一 fallback 为“任务执行失败，已停止任务”。
+  - `web_dashboard_node.py` 清理 6 处“当前任务点位已删除或索引越界，已停止任务”重复 fallback：
+    - Nav2 status；
+    - Nav2 feedback；
+    - Nav2 success completion；
+    - active task tick；
+    - dispatch 初次检查；
+    - dispatch 二次检查。
+  - 当前任务点缺失的完整 operator/message 仍由 `active_annotation_missing_failure(...)` 输出：“当前任务点位已删除或索引越界，已停止任务；请重新生成任务”。
+- Why:
+  - 之前 Web 多处分支各自传短 fallback，contract 虽然有更完整的故障 message，但 Web 仍然保留重复语义。
+  - 现在缺失任务点位的文案、reason、task/index/annotation 证据集中在 active-task contract，后续调整不会漏改。
+- Policy / tests:
+  - `scripts/test_active_task_contract.py::test_active_task_failure_payload()` 增加覆盖：
+    - 无 message 时使用统一隐式 fallback；
+    - active waypoint missing failure 自带 message 足够驱动 Web helper。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - `active_task_failure_payload(...)` 必须允许可选 default；
+    - 离线测试必须覆盖 implicit/default 和 missing-waypoint message；
+    - Web 不允许重新硬编码缺失当前任务点位的短 fallback。
+- Verification:
+  - passed:
+    - `./scripts/test_active_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py m20pro日志.md`;
+    - `rg --pcre2 -n '当前任务点位已删除或索引越界，已停止任务(?!；请重新生成任务)' src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py scripts/test_active_task_contract.py` 无输出。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 12:09 CST - selected-map 等待 Nav2 /map 超时逻辑下沉到 contract
+
+- Goal alignment:
+  - 继续把 Web 主节点里的任务/地图业务语义下沉到纯 contract，减少前端后端主文件里散落的补丁式状态拼装。
+  - 本轮仍只做本地代码和离线验证；104 前端/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `map_selection_contract.py` 增加 `selected_map_wait_timeout_payload(...)`。
+  - `web_dashboard_node.py::_wait_for_selected_map_match(...)` 不再直接拼 `selected_map_metadata_mismatch` 和“等待 Nav2 /map 更新超时” payload，改为委托 map-selection contract。
+  - `web_dashboard_node.py` 移除已不再需要的 `readiness_failure` 直接导入，避免 Web 主节点继续绕过 contract 组装 readiness 失败。
+- Why:
+  - selected-map 与 Nav2 /map 是否一致，是地图选择/任务准入的核心状态，不应该由 Web 主节点临时拼中文错误和 code。
+  - 统一到 contract 后，后续给实习生拆任务时可以把“地图选择/地图一致性/需要重定位”这一块作为清晰边界。
+- Policy / tests:
+  - `scripts/test_map_selection_contract.py::test_selected_map_wait_timeout_payload()` 覆盖超时 payload。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - Web 必须导入并使用 `selected_map_wait_timeout_payload(...)`；
+    - Web `_wait_for_selected_map_match(...)` 不允许重新内联“等待 Nav2 /map 更新超时”或直接调用 `readiness_failure(...)`。
+- Verification:
+  - passed:
+    - `./scripts/test_map_selection_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/map_selection_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_map_selection_contract.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_map_selection_contract.py scripts/test_task_contract.py scripts/check_preflight_policy.py`。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 11:58 CST - 任务运行感知关闭语义下沉到 task contract
+
+- Goal alignment:
+  - 继续做减法：任务运行期 runtime guard 的感知 readiness 语义不再由 Web 主节点直接拼 `readiness_success(...)`。
+  - 这块直接影响任务运行中是否因为 scan/点云异常而等待或停止，是单层导航闭环的安全门之一。
+  - 104 电量/API 门禁仍不可读，因此本轮只做本地代码、策略和离线验证。
+- Local-only change:
+  - `web_dashboard_node.py::_task_perception_readiness_payload(...)` 增加可选 `require_scan` / `require_lidar` 参数。
+  - `web_dashboard_node.py::_task_runtime_guard_payload(...)` 在 `task_runtime_require_perception_ok=False` 时，不再直接调用 `readiness_success("任务运行感知检查已关闭", ...)`。
+  - 现在关闭运行期感知检查时仍调用 `perception_readiness_payload(... require_scan=False, require_lidar=False)`，由 `task_contract.py` 统一返回 disabled perception readiness。
+  - 删除 Web 中已经未使用的 `readiness_success` import。
+- Policy / tests:
+  - `scripts/test_task_contract.py::test_perception_readiness_payload()` 增加 disabled perception readiness 覆盖。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - runtime guard 感知关闭路径必须通过 `require_scan=False` / `require_lidar=False` 委托 contract；
+    - Web `_task_runtime_guard_payload(...)` 内禁止再硬编码 `任务运行感知检查已关闭` 或直接调用 `readiness_success(...)`。
+- Why:
+  - 感知链路是否必需、关闭后如何呈现 readiness，属于任务 contract 的语义，不应该散落在 Web 副作用节点里。
+  - 后续如果要调整运行期 scan/点云门禁，直接改 `task_contract.py` 和测试，不需要在 Web 里找中文文案。
+- Verification:
+  - passed:
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `./scripts/test_task_contract.py && ./scripts/test_navigation_readiness_contract.py && ./scripts/test_active_task_contract.py && ./scripts/test_nav_status_contract.py && ./scripts/test_task_progress_contract.py && ./scripts/test_task_plan_contract.py && ./scripts/test_task_snapshot_contract.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 11:55 CST - Nav2 readiness 复位等待结果下沉到 navigation readiness contract
+
+- Goal alignment:
+  - 继续减少 `web_dashboard_node.py` 中任务启动前的业务文案和 readiness payload 拼装。
+  - 这次只下沉“复位后等待 Nav2/代价地图恢复”的返回语义；Web 仍负责 ROS 采样、sleep 循环和缓存失效这些副作用。
+  - 104 电量/API 门禁仍不可读，因此本轮只做本地代码、策略和离线验证。
+- Local-only change:
+  - `navigation_readiness_contract.py` 新增：
+    - `navigation_readiness_disabled_payload(...)`：统一表达“任务启动前不要求 Nav2 readiness”；
+    - `navigation_readiness_wait_timeout_payload(...)`：统一表达“复位后 Nav2/代价地图未在超时时间内恢复，不能下发目标”。
+  - `web_dashboard_node.py::_wait_for_navigation_ready_after_reset(...)` 改为调用上述 helper：
+    - 禁用 Nav2 readiness 时不再直接调用 `readiness_success(...)` 拼文案；
+    - 等待超时时不再直接调用 `readiness_failure(...)` 拼 `navigation_not_ready_after_reset`。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - contract 必须拥有 disabled/timeout payload helper；
+    - Web 必须调用 helper；
+    - Web 不允许在 `_wait_for_navigation_ready_after_reset(...)` 内硬编码这两段 readiness 文案或 code。
+- Why:
+  - 任务启动前是否能下发第一个目标，是单层任务闭环的关键安全门。
+  - Web 主节点不应该决定这些返回语义；它应该只负责读 ROS 状态并把结果交给 contract 统一解释。
+  - 这样后续调整“工位/现场 readiness 判定”时边界更清楚，也方便拆给实习生维护。
+- Verification:
+  - passed:
+    - `./scripts/test_navigation_readiness_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `./scripts/test_navigation_readiness_contract.py && ./scripts/test_task_contract.py && ./scripts/test_active_task_contract.py && ./scripts/test_nav_status_contract.py && ./scripts/test_task_progress_contract.py && ./scripts/test_task_plan_contract.py && ./scripts/test_task_snapshot_contract.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/navigation_readiness_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_navigation_readiness_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/navigation_readiness_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_navigation_readiness_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_navigation_readiness_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/navigation_readiness_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_navigation_readiness_contract.py scripts/check_preflight_policy.py`。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 11:49 CST - Web active-task 终端/等待事件 fallback 清理并固化策略
+
+- Goal alignment:
+  - 继续把单层任务链路从 `web_dashboard_node.py` 的散落状态字符串中拆出来，向可测试的 contract 收敛。
+  - 本轮重点不是新增功能，而是去掉 Web 主节点对任务停止、失败、停留、等待、推进这些事件的兜底拼装，避免前端状态以后再次出现“显示导航中但没有任务”“定位/任务状态互相打架”的根因扩散。
+  - 104 电量/API 门禁仍不可读，因此本轮只做本地代码、策略和离线验证。
+- Local-only change:
+  - `web_dashboard_node.py` 的以下路径继续改为消费 `active_task_contract.py` 必填输出字段：
+    - `_fail_active_task_from_nav_status(...)`：使用 `failed["event"]`、`failed["message"]`、`failed["result_status"]`、`failed["operator_event"]`、`failed["operator_payload"]`。
+    - `_stop_task(...)`：使用 `stopped["event"]`、`stopped["message"]`、`stopped["result_status"]`、`stopped["operator_event"]`、`stopped["operator_payload"]`；无 active task 的显式 reset 仍走 `stop_task_operator_event_payload(...)`。
+    - `_begin_waypoint_dwell_or_advance(...)`：使用 `result["event"]`、`result["message"]`、`result["operator_event"]`、`result["operator_payload"]`。
+    - `_fail_active_task(...)`：使用 `failed["event"]`、`failed["message"]`、`failed["result_status"]`、`failed["operator_event"]`、`failed["operator_payload"]`。
+    - `_advance_active_task(...)`：使用 `result["event"]`、`result["message"]`、`result["result_status"]`、`result["operator_event"]`、`result["operator_payload"]`。
+    - `_mark_active_task_waiting(...)`：使用 `result["event"]`、`result["message"]`、`result["event_extra"]`。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - Web 终端/推进路径禁止再用 `failed.get(...)`、`stopped.get(...)`、`result.get(...)` 给 contract payload 做兜底；
+    - Web dwell/waiting 路径禁止再用 fallback getter 拼事件；
+    - Nav2 failure 旧策略从 `failed.get("result_status")` 同步为 `failed["result_status"]`。
+- Why:
+  - 任务执行链路的问题不能继续靠 Web 主节点临时拼状态字符串解决；这些事件必须由纯 contract 统一定义，测试覆盖后 Web 只做副作用：保存状态、写 timeline、发 operator event。
+  - 这一步是“减法”：减少 Web 节点业务判断和兜底文案，提升后续拆给实习生维护时的边界清晰度。
+- Verification:
+  - passed:
+    - `./scripts/check_preflight_policy.py`;
+    - `./scripts/test_active_task_contract.py && ./scripts/test_task_contract.py && ./scripts/test_task_progress_contract.py && ./scripts/test_nav_status_contract.py && ./scripts/test_task_plan_contract.py && ./scripts/test_task_snapshot_contract.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 11:40 CST - Web Nav2 timeline 移除 status/feedback fallback
+
+- Goal alignment:
+  - 继续压缩 `web_dashboard_node.py` 对 Nav2 状态文案和 timeline 事件的兜底逻辑。
+  - 本轮仍只做本地收敛；104 电量/API 门禁不可读，不执行真机构建、重启、重定位或任务下发。
+- Local-only change:
+  - `web_dashboard_node.py` 在以下路径改为硬依赖 `nav_status_contract.py` 返回的 timeline payload：
+    - `_update_active_task_from_nav_status(...)` 使用 `event_payload["event"]` / `event_payload["message"]`；
+    - `_update_active_task_status_message(...)` 使用 `event_payload["event"]` / `event_payload["message"]`；
+    - `_update_active_task_from_nav_feedback(...)` 使用 `event_payload["event"]` / `event_payload["message"]`。
+  - 移除 Web 中对应 fallback：
+    - `"nav_%s"`；
+    - `"nav_status"`；
+    - `"nav_feedback"`；
+    - `"Nav2 正在执行当前点位"`。
+- Why:
+  - Nav2 status/feedback 的 operator 文案和 timeline 事件已经属于 `nav_status_contract.py`。
+  - Web 继续保留 fallback 会让 contract 缺字段时静默通过，降低现场问题定位质量。
+- Policy / tests:
+  - `scripts/check_preflight_policy.py` 要求 Web 使用 `event_payload["event"]` / `event_payload["message"]`。
+  - policy 禁止 Nav2 status/feedback timeline fallback 回到 Web。
+  - `scripts/test_nav_status_contract.py` 已覆盖 goal status、message status、feedback 的 timeline payload。
+- Verification:
+  - passed:
+    - `./scripts/test_nav_status_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `./scripts/test_nav_status_contract.py && ./scripts/test_active_task_contract.py && ./scripts/test_task_contract.py && ./scripts/test_task_progress_contract.py && ./scripts/test_task_plan_contract.py && ./scripts/test_task_snapshot_contract.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/nav_status_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_nav_status_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_nav_status_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/nav_status_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_nav_status_contract.py scripts/check_preflight_policy.py`。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁仍为：
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 本轮无真机动作、无运动目标发布。
+
+## 2026-06-27 11:36 CST - Web dispatch 路径移除任务事件 fallback
+
+- Goal alignment:
+  - 继续做减法：让任务 dispatch 事件的语义由 `active_task_contract.py` 明确提供，Web 节点不再暗中兜底事件名和中文文案。
+  - 本轮仍只做本地收敛；104 电量/API 门禁不可读，不执行真机构建、重启、重定位或任务下发。
+- Local-only change:
+  - `web_dashboard_node.py::_dispatch_active_goal(...)` 对以下 contract 返回值改为硬依赖：
+    - resend operator event: `decision["operator_event"]`；
+    - stale dispatch timeline: `stale["event"]` / `stale["message"]`；
+    - waypoint goal sent timeline: `mark["event"]` / `mark["message"]`；
+    - floor goal published timeline: `result["event"]` / `result["message"]`。
+  - 移除了 Web dispatch 路径中的 fallback：
+    - `"补发当前任务点"`；
+    - `"goal_dispatch_ignored"`；
+    - `"任务点已切换，忽略过期目标下发"`；
+    - `"waypoint_goal_sent"`；
+    - `"floor_goal_published"`。
+- Why:
+  - fallback 会掩盖 contract 缺字段问题，让 Web 节点继续保留任务语义。
+  - 改成硬依赖后，如果 contract 输出不完整，问题会在离线测试或运行早期直接暴露，而不是现场变成模糊状态。
+- Policy / tests:
+  - `scripts/check_preflight_policy.py` 要求 Web dispatch 使用 contract 必需字段，并禁止上述 fallback 在 `_dispatch_active_goal(...)` 中回归。
+  - `scripts/test_active_task_contract.py` 已覆盖 resend、stale dispatch、goal sent、floor goal published 的事件 payload。
+- Verification:
+  - passed:
+    - `./scripts/test_active_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `./scripts/test_active_task_contract.py && ./scripts/test_task_contract.py && ./scripts/test_task_progress_contract.py && ./scripts/test_nav_status_contract.py && ./scripts/test_task_plan_contract.py && ./scripts/test_task_snapshot_contract.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁仍为：
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 本轮无真机动作、无运动目标发布。
+
+## 2026-06-27 11:33 CST - 任务启动 timeline/operator payload 下沉到 active task contract
+
+- Goal alignment:
+  - 继续减少 `web_dashboard_node.py` 对任务语义的硬编码，让任务启动、目标下发、停留、失败、完成这些状态口径集中在 contract 层。
+  - 本轮仍只做本地收敛；104 电量/API 门禁不可读，不执行真机构建、重启、重定位或任务下发。
+- Local-only change:
+  - `active_task_contract.py::create_active_task_state(...)` 从直接返回 active task dict 改为返回结构化结果：
+    - `active`；
+    - `event="task_started"`；
+    - `message="任务已创建，准备下发第一个点位"`；
+    - `event_extra={"task_id": ..., "waypoints": ...}`；
+    - `operator_event="启动前端任务"`；
+    - `operator_payload={"task_id": ...}`。
+  - `web_dashboard_node.py::_start_task(...)` 现在消费上述字段：
+    - timeline 事件使用 `created["event"]`；
+    - 操作日志使用 `created["operator_event"]/created["operator_payload"]`；
+    - Web 不再硬编码 `task_started` 或 `启动前端任务`。
+- Why:
+  - 任务启动是任务状态机的入口，入口事件如果仍由 Web 手写，会和后续 goal sent / dwell / fail / complete 的 contract 化边界不一致。
+  - 现在 active task contract 拥有“任务创建后的初始状态 + 启动证据事件 + 操作日志事件”，Web 只负责保存和触发下一步下发。
+- Policy / tests:
+  - `scripts/test_active_task_contract.py::test_create_active_task_state()` 覆盖 task-start timeline 和 operator payload。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - active task contract 必须拥有 task-start timeline/operator payload；
+    - Web 必须消费 contract 返回字段；
+    - Web 不允许硬编码 task-start timeline/operator 事件。
+- Verification:
+  - passed:
+    - `./scripts/test_active_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `./scripts/test_active_task_contract.py && ./scripts/test_task_contract.py && ./scripts/test_task_progress_contract.py && ./scripts/test_nav_status_contract.py && ./scripts/test_task_plan_contract.py && ./scripts/test_task_snapshot_contract.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果仍为：
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 本轮无真机动作、无运动目标发布。
+
+## 2026-06-27 11:26 CST - Nav2 feedback 分流规则下沉到 nav status contract
+
+- Goal alignment:
+  - 继续压缩 `web_dashboard_node.py` 对 Nav2 文本格式的理解，避免 Web 节点散落解析 `label=floor_goal` 这类协议细节。
+  - 本轮仍只做本地 contract 收敛；104 电量门禁读不到电量，不做真机构建、重启、重定位或任务下发。
+- Local-only change:
+  - 新增 `nav_status_contract.py::nav_feedback_dispatch_payload(...)`：
+    - 解析 Nav2 feedback 文本；
+    - `label=floor_goal` 时返回 `action="update_feedback"`；
+    - 非当前楼层任务 feedback 时返回 `action="update_message"` 和 `reason="not_floor_goal_feedback"`。
+  - `web_dashboard_node.py::_update_active_task_from_nav_feedback(...)` 改为消费 `nav_feedback_dispatch_payload(...)`，不再自己判断 `feedback["label"]`。
+- Why:
+  - Web 节点应该只负责编排锁、保存状态和副作用，不应该持有 Nav2 feedback 文本协议分流规则。
+  - 这能降低后续修改 `floor_goal_bridge/floor_manager` 状态文本时破坏前端任务链路的概率。
+- Policy / tests:
+  - `scripts/test_nav_status_contract.py` 覆盖：
+    - floor_goal feedback 分流为 `update_feedback`；
+    - 非 floor_goal feedback 分流为 `update_message`；
+    - parsed feedback payload 被保留。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - nav status contract 必须拥有 feedback dispatch 规则；
+    - Web 必须调用 `nav_feedback_dispatch_payload(...)`；
+    - Web 不允许直接用 `feedback.get("label") ... floor_goal` 进行分支。
+- Verification:
+  - passed:
+    - `./scripts/test_nav_status_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `./scripts/test_nav_status_contract.py && ./scripts/test_active_task_contract.py && ./scripts/test_task_progress_contract.py && ./scripts/test_task_contract.py && ./scripts/test_task_plan_contract.py && ./scripts/test_task_snapshot_contract.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/nav_status_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_nav_status_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_nav_status_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/nav_status_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_nav_status_contract.py scripts/check_preflight_policy.py`。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁仍为：
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 本轮无真机动作、无运动目标发布。
+
+## 2026-06-27 11:20 CST - 任务终端操作事件下沉到 active task contract
+
+- Goal alignment:
+  - 继续把单层任务执行链路从 `web_dashboard_node.py` 里拆出来，减少大前端节点对任务语义的直接拼装。
+  - 本轮只做本地 contract 收敛；104 电量门禁仍读不到电量，禁止真机构建、重启、重定位和任务下发。
+- Local-only change:
+  - `active_task_contract.py::stop_task_state(...)` 现在返回停止任务的 `operator_event/operator_payload`。
+  - 新增 `stop_task_operator_event_payload(...)`，覆盖“无 active task 但显式复位导航”的操作日志 payload。
+  - `fail_active_task_state(...)` 现在返回失败任务的 `operator_event/operator_payload`，并支持 Nav2 失败路径的 `terminal_event="nav_failed"` 与原始 `status_text`。
+  - `advance_active_task_state(...)` 在任务完成时返回完成任务的 `operator_event/operator_payload`。
+  - `web_dashboard_node.py` 不再直接调用 `task_terminal_event_payload(...)` 拼终端操作日志，只消费 contract 返回的 operator payload。
+- Why:
+  - 之前任务终止状态虽然已部分在 contract 里，但 Web 节点仍自己决定“前端任务完成/停止/Nav2失败”等操作事件，职责边界不清。
+  - 下沉后，任务状态、结果状态、timeline payload、操作日志 payload 的语义集中在 `active_task_contract.py`，Web 节点只负责持久化、清导航状态和发事件副作用。
+- Policy / tests:
+  - `scripts/test_active_task_contract.py` 覆盖：
+    - 手动停止 operator payload；
+    - 显式导航复位 operator payload；
+    - 普通失败 operator payload；
+    - Nav2 失败 operator payload；
+    - 任务完成 operator payload。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - active task contract 必须拥有 stop/fail/completed operator payload；
+    - Web 必须消费 `operator_event/operator_payload`；
+    - Web 不允许直接调用 `task_terminal_event_payload(...)`。
+- Verification:
+  - passed:
+    - `./scripts/test_active_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `./scripts/test_active_task_contract.py && ./scripts/test_task_progress_contract.py && ./scripts/test_task_contract.py && ./scripts/test_nav_status_contract.py && ./scripts/test_task_plan_contract.py && ./scripts/test_task_snapshot_contract.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-26 - 定位确认与任务页可启动状态统一
+
+- Goal alignment:
+  - use the fact that workstation relocalization is now possible as real evidence, not just offline reasoning.
+  - remove the old ambiguity where `/initialpose` publish success could look like localization success while the task page still blocked start.
+- Added `m20pro_cloud_bridge/localization_contract.py`:
+  - `localization_status_payload(...)` owns the unified status for:
+    - factory `localization_ok`;
+    - fresh/plausible map pose;
+    - task-page readiness;
+    - navigation readiness.
+  - `relocalization_response_payload(...)` separates:
+    - initialpose request was sent;
+    - factory pose was actually accepted/confirmed;
+    - task page is ready to start.
+- Backend changes:
+  - `/api/state` now exposes `localization_status`.
+  - `/api/localization/initialpose` now returns explicit `confirmed`, `task_ready`, `navigation_ready`, `code`, `localization_status`, and `task_readiness`.
+  - The endpoint still returns the diagnostic payload after publishing; it no longer relies on a vague `ok=true` as the operator-facing success signal.
+- Frontend changes:
+  - localization page now shows a dedicated status box:
+    - localization not confirmed = fail;
+    - localization confirmed but task page blocked = warn;
+    - localization confirmed and task page ready = ok.
+  - after pressing relocalization, the cursor/status text now says whether localization was confirmed and whether the task page can start.
+- Tests and guardrails:
+  - added `scripts/test_localization_contract.py`.
+  - expanded `scripts/check_preflight_policy.py` so this contract and frontend/backend fields cannot silently regress.
+- Verification:
+  - `./scripts/test_task_contract.py`, `./scripts/test_active_task_contract.py`, `./scripts/test_nav_status_contract.py`, `./scripts/test_task_plan_contract.py`, `./scripts/test_task_progress_contract.py`, `./scripts/test_task_snapshot_contract.py`, `./scripts/test_pcd_derived.py`, and `./scripts/test_localization_contract.py` passed.
+  - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js` passed.
+  - `python3 -m py_compile ...` for the touched contract/web/test/guardrail files passed.
+  - `./scripts/check_preflight_policy.py` passed.
+  - `git diff --check` passed.
+- 104 read-only field check:
+  - `10.21.31.104:8080/healthz` is reachable.
+  - current 104 deployment still does not expose `localization_status`, so it is running the older frontend/backend code.
+  - current 104 state showed `localization_ok=false`, `navigation_status=location=1...`, and stale map pose, so this snapshot is not a confirmed localization state.
+  - next real workstation validation should be done after building/restarting the updated code on 104, then checking `/api/state.localization_status` before any motion.
+- No real motion:
+  - no real task was started;
+  - `/api/tasks/start` was not called;
+  - `/m20pro/floor_goal` was not published;
+  - no robot motion command was sent.
+- Still not proven complete:
+  - the localization/task-start status口径 is now unified in code and offline-tested;
+  - real single-floor task completion still requires frontend evidence: start, first waypoint, dwell, next waypoint, and consistent frontend/Nav2/`last_result`.
+
+## 2026-06-26 - 104 部署与工位 API 级重定位闭环验证
+
+- Deployment to 104:
+  - 104 reachable at `10.21.31.104`.
+  - real workspace is `/home/user/m20pro_real_ros2_ws`; `/home/user/m20pro_ros2_ws` is a symlink to it.
+  - backed up the previous 104 cloud-bridge package to `/home/user/m20pro_backups/m20pro_cloud_bridge_20260626_170346.tar.gz`.
+  - synchronized the updated `src/m20pro_cloud_bridge` package to 104.
+  - built on 104 with `colcon build --symlink-install --packages-select m20pro_cloud_bridge`.
+  - restarted `m20pro-real.service`; service returned to `active`.
+- Runtime evidence after restart:
+  - `http://10.21.31.104:8080/healthz` returned ok.
+  - `/api/state` exposed the new `localization_status` field.
+  - frontend JS at `/static/dashboard.js` contains `renderLocalizationStatus(...)`, so the split static frontend is being served by 104.
+- Read-only localization watcher:
+  - added `scripts/104_watch_localization_status.py`.
+  - the script only queries `/api/state`; it does not post `/initialpose`, does not call `/api/tasks/start`, does not publish `/m20pro/floor_goal`, and does not send motion.
+  - synced the script to 104 and verified it runs there.
+- Initial 120s observation:
+  - `confirmed=false`, `task_ready=false`, `localization_ok=false` throughout.
+  - scan and relay pointcloud stayed online.
+  - `/api/state.events=[]` and `relocalization_result=null`, so no webpage relocalization request reached the backend during that window.
+- Controlled API-level relocalization test:
+  - posted only `/api/localization/initialpose` with the current/previous workstation pose near `x=0.002, y=-0.003, yaw=0.577`.
+  - no task was started and no motion goal was sent.
+  - response:
+    - `confirmed=true`;
+    - `factory_pose_accepted=true`;
+    - `tcp_2101_accepted=true`;
+    - pose error around `0.003 m`;
+    - `localization_ok=true`;
+    - scan/lidar readiness passed.
+  - immediately after the request, task readiness was blocked only by Nav2/costmap recovery.
+- Nav2 recovery evidence:
+  - `nav2_startup_gate` detected prerequisites and requested lifecycle startup.
+  - lifecycle manager configured/activated controller, planner, recoveries, BT navigator and waypoint follower.
+  - `/api/state.localization_status` later reported:
+    - `confirmed=true`;
+    - `task_ready=true`;
+    - `code=localized_ready`;
+    - navigation readiness true;
+    - local costmap and global costmap fresh.
+- Important finding:
+  - the new frontend/backend status contract works on 104.
+  - the API-level relocalization path is now proven at the workstation.
+  - the first 120s frontend-observation attempt did not prove the visible webpage button path because no backend request was observed.
+- Still missing:
+  - one visible webpage-button relocalization proof from the operator page;
+  - real single-floor task proof: start, reach first waypoint, dwell, advance to next waypoint, and consistent frontend/Nav2/`last_result`.
+- No real motion:
+  - `/api/tasks/start` was not called;
+  - `/m20pro/floor_goal` was not published;
+  - no robot movement command was sent.
+
+## 2026-06-26 - 工位网页按钮级重定位闭环验证
+
+- Goal alignment:
+  - prove the operator-facing frontend relocalization flow, not only the backend API.
+  - keep the validation limited to localization readiness; do not start any motion task.
+- Method:
+  - used local Chrome DevTools Protocol automation against `http://10.21.31.104:8080`.
+  - opened the real dashboard page served by 104.
+  - switched to the localization tab.
+  - filled `locXY`, `locYaw`, and `locFloor` from the current fresh `/api/state.pose`.
+  - clicked the real `sendInitialPoseBtn` button.
+  - waited for the page/backend response and read page text plus `/api/state`.
+- Frontend evidence:
+  - page status text became:
+    - `定位已确认 / 任务页可启动 / 定位已确认；任务页启动条件以具体任务检查为准`.
+  - cursor text became:
+    - `重定位已确认，任务页可启动 / x ... / y ... / 朝向 ... rad`.
+  - `localizeLog` contained the backend response from `/api/localization/initialpose`.
+- Backend evidence:
+  - `/api/state.events` recorded a new `网页发布重定位` event.
+  - event payload:
+    - `confirmed=true`;
+    - `task_ready=true`;
+    - `navigation_ready=true`;
+    - `code=localized_task_ready`;
+    - `checks.initialpose_published/localization/map_pose/scan/local_costmap/global_costmap = ok`.
+  - `/api/state.localization_status` after the click:
+    - `confirmed=true`;
+    - `task_ready=true`;
+    - `code=localized_ready`.
+  - `/api/state.task_readiness` after the click:
+    - `ready=true`;
+    - `code=ready`;
+    - battery, scan, lidar, Nav2 lifecycle, local costmap and global costmap all ready.
+- Safety evidence:
+  - `/api/state.active_task=null`.
+  - `/api/state.active_waypoint=null`.
+  - no `/api/tasks/start` request was made.
+  - no `/m20pro/floor_goal` was published by this validation.
+  - no robot movement command was sent.
+- Conclusion:
+  - the real 104 operator webpage can complete relocalization at the workstation and surface the correct readiness result.
+  - this closes the frontend relocalization proof that was previously missing.
+- Still not complete:
+  - single-floor navigation still needs real task execution evidence:
+    - create/select valid task points on the current map;
+    - start from the frontend;
+    - verify the robot goes to the current first waypoint, not a stale point;
+    - verify dwell;
+    - verify advance to the next waypoint;
+    - verify frontend/Nav2/`last_result` consistency.
+
+## 2026-06-26 - PCD 派生收窄为楼梯语义生成
+
+- Goal alignment:
+  - continue reducing non-critical 3D/frontend support code from the single-floor navigation path.
+  - keep only the internal stair-zone semantics that can be reused later by cross-floor work.
+- Changed `m20pro_cloud_bridge/pcd_derived.py`:
+  - removed PCD XYZ loading;
+  - removed numpy dependency;
+  - removed `terrain_mesh.json` generation;
+  - removed `height_grid.json` generation;
+  - removed local stair pointcloud JSON generation;
+  - kept `stair_zones.json` generation from configured floor/stair transitions.
+- Launch/config cleanup:
+  - replaced stale `enable_map_pcd_postprocess` with `enable_stair_zone_postprocess`;
+  - removed stale `pcd_terrain_cell_size`;
+  - updated real/sim/web-dashboard/wrapper launch forwarding.
+- Dependency cleanup:
+  - removed `python3-numpy` from `m20pro_cloud_bridge/package.xml`.
+  - `m20pro_navigation` still depends on numpy for vectorized pointcloud relay downsampling.
+- Tests and guardrails:
+  - added `scripts/test_pcd_derived.py`.
+  - `scripts/check_preflight_policy.py` now checks that PCD derived postprocess only generates stair-zone semantics and that old 3D terrain/local pointcloud generation does not return.
+- No real motion:
+  - no real task was started;
+  - `/api/tasks/start` was not called;
+  - `/m20pro/floor_goal` was not published;
+  - no robot motion command was sent.
+- Still not proven complete:
+  - this is dependency/API/code-surface reduction.
+  - the overall single-floor navigation goal still requires real frontend task evidence: reach first waypoint, dwell, advance, and consistent frontend/Nav2/task-result state.
+
+## 2026-06-26 - 删除前端专用 3D/楼梯点云 HTTP API
+
+- Goal alignment:
+  - continue removing non-critical frontend/backend surface from the single-floor navigation path.
+  - keep useful internal cross-floor foundations without exposing unused frontend 3D features.
+- Removed from `web_dashboard_node.py`:
+  - `/api/map_3d`;
+  - `/api/stair_zones`;
+  - `/api/stair_pointcloud`;
+  - `_map_3d_payload(...)`;
+  - `_stair_pointcloud_payload(...)`.
+- Kept intentionally:
+  - internal `stair_zones_pub`;
+  - `_stair_zones_payload(...)`;
+  - `_publish_selected_stair_zones(...)`;
+  - `floor_manager.py` subscription to `/m20pro/stair_zones`.
+- Rationale:
+  - frontend 3D map display had already been removed from the operator workflow;
+  - ready-check and task smoke do not use 3D map or stair pointcloud diagnostics;
+  - `/m20pro/stair_zones` remains useful as a future cross-floor data channel for intern B work.
+- Docs/guardrails:
+  - `README.md` now describes current map usage as 2D navigation plus internal stair semantics, not operator-facing 3D terrain display.
+  - `docs/single_floor_navigation_architecture.md` now states that 3D/stair pointcloud HTTP APIs are removed while the internal stair-zones topic remains.
+  - `scripts/check_preflight_policy.py` now fails if the frontend-only 3D/stair pointcloud HTTP routes or payload handlers return.
+- No real motion:
+  - no real task was started;
+  - `/api/tasks/start` was not called;
+  - `/m20pro/floor_goal` was not published;
+  - no robot motion command was sent.
+- Still not proven complete:
+  - this is API-surface reduction.
+  - the overall single-floor navigation goal still requires real frontend task evidence: reach first waypoint, dwell, advance, and consistent frontend/Nav2/task-result state.
+
+## 2026-06-26 - 任务点列表校验契约抽离
+
+- Goal alignment:
+  - continue reducing `web_dashboard_node.py` rule ownership.
+  - keep single-floor task creation/start checks deterministic and offline-testable.
+- Moved into `m20pro_cloud_bridge/task_contract.py`:
+  - `is_plausible_waypoint_pose_dict(...)`;
+  - `validate_task_annotations_for_map(...)`.
+- The contract now owns task waypoint-list validation for:
+  - empty task waypoint list;
+  - deleted/missing waypoint references;
+  - waypoint map mismatch;
+  - missing floor;
+  - mixed floors inside one task;
+  - invalid waypoint pose;
+  - waypoint outside the task map;
+  - waypoint on occupied grid cells;
+  - waypoint on unknown grid cells.
+- Behavior tightened:
+  - waypoint pose must explicitly include `x`, `y`, `z`, and `yaw`;
+  - missing pose fields are no longer silently treated as `0`.
+- Web node integration:
+  - `web_dashboard_node.py` still resolves cached map snapshots by `map_id`;
+  - it delegates the pure waypoint-list decision to `contract_validate_task_annotations_for_map(...)`.
+- Tests and guardrails:
+  - `scripts/test_task_contract.py` now covers map mismatch, mixed floors, bad pose, out-of-map, occupied-cell and unknown-cell waypoint-list failures.
+  - `scripts/check_preflight_policy.py` now requires task waypoint-list validation to stay in `task_contract.py`.
+  - it also checks that `web_dashboard_node.py` delegates this validation instead of owning the branch logic.
+- Verification:
+  - `./scripts/test_task_contract.py` passed.
+  - `./scripts/check_preflight_policy.py` passed.
+  - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/check_preflight_policy.py scripts/test_task_contract.py` passed.
+- No real motion:
+  - no real task was started;
+  - `/api/tasks/start` was not called;
+  - `/m20pro/floor_goal` was not published;
+  - no robot motion command was sent.
+- Still not proven complete:
+  - this is contract cleanup and pre-motion validation hardening.
+  - the overall single-floor navigation goal still requires real frontend task evidence: reach first waypoint, dwell, advance, and consistent frontend/Nav2/task-result state.
+
+## 2026-06-26 - pose/localization readiness 契约抽离与只读视频画面恢复
+
+- Goal alignment:
+  - continue making the single-floor task chain stricter and easier to reason about before cross-floor expansion.
+  - keep frontend subtraction focused on removing unreliable controls/diagnostics from the critical task path, not removing useful operator visibility.
+- Contract cleanup:
+  - moved pose plausibility and task-start pose readiness decisions into `m20pro_cloud_bridge/task_contract.py`.
+  - added helpers:
+    - `is_finite_pose_dict(...)`;
+    - `is_plausible_pose_dict(...)`;
+    - `pose_distance_m(...)`;
+    - `task_pose_readiness_payload(...)`.
+  - `web_dashboard_node.py` now reads live ROS state/parameters and delegates localization/pose/first-waypoint readiness checks to the contract.
+- Frontend correction:
+  - restored the dashboard front/rear camera images as read-only MJPEG views:
+    - `/camera/front.mjpg`;
+    - `/camera/rear.mjpg`.
+  - camera open/close buttons and camera status diagnostics remain removed from the frontend task path.
+  - field/task snapshots still omit `camera_proxy` diagnostics so task validation is not coupled to video availability.
+- Tests and guardrails:
+  - `scripts/test_task_contract.py` covers pose helper and task pose readiness cases.
+  - `scripts/check_preflight_policy.py` now requires read-only front/rear camera images while still forbidding camera toggle/status controls.
+  - `scripts/104_frontend_task_smoke.py` now asserts that camera images remain visible and that camera toggle/status controls stay removed.
+- No real motion:
+  - no real task was started;
+  - `/api/tasks/start` was not called;
+  - `/m20pro/floor_goal` was not published;
+  - no robot motion command was sent.
+- Still not proven complete:
+  - this is rule extraction and frontend correction.
+  - the overall single-floor navigation goal still requires real frontend task evidence: reach first waypoint, dwell, advance, and consistent frontend/Nav2/task-result state.
+
+## 2026-06-26 - 周报口径修正与 battery/perception readiness 契约抽离
+
+- User feedback:
+  - user manually edited `/home/fabu/桌面/周报/耿浩威6.26周报.docx`;
+  - the weekly report should follow the user's revised "本周工作概述" wording;
+  - avoid exposing internal compromise language that makes the work look like a step backward.
+- Weekly report update:
+  - regenerated `/home/fabu/桌面/周报/耿浩威6.26周报.docx`;
+  - updated `/home/fabu/桌面/周报/耿浩威6.26周报.html` as the source;
+  - preserved the revised overview:
+    - M20 Pro work focuses on system subtraction, code split, task-state explainability, pointcloud pressure reduction, and relocalization/task execution issues seen in field testing;
+    - single-floor self-check, relocalization, annotation, task dispatch, path verification, dwell and waypoint advance are described as a stable-closure effort;
+    - YOLO data loop and teacher-assisted labeling are kept;
+    - added the field test of the Angrui lidar actual effect and complete usage chain.
+- Wording changes:
+  - removed/avoided phrases such as "不急于推进", "暂时不能作为主要验收目标", and "仍未最终完成" from the weekly report.
+  - changed risk wording to "当前关注点与风险" and framed remaining work as next-stage validation/foundation for expansion.
+- Verification:
+  - `.docx` passed zip integrity check;
+  - LibreOffice headless text extraction succeeded;
+  - keyword scan found no internal-compromise wording such as `不急于`, `折中`, `退步`, `暂时不能`, `不能作为主要`, `仍未最终完成`, or `不是一次性`.
+- Code cleanup also completed in this turn:
+  - moved battery readiness decisions into `task_contract.py` as `battery_readiness_payload(...)`;
+  - moved scan/lidar readiness decisions into `task_contract.py` as `perception_readiness_payload(...)`;
+  - `web_dashboard_node.py` now reads ROS state/parameters and delegates the pure readiness decisions to the contract.
+- Tests and guardrails:
+  - `scripts/test_task_contract.py` now covers battery disabled/ok/missing/stale/low cases;
+  - it also covers perception disabled/ok/bad-scan/bad-lidar cases;
+  - `check_preflight_policy.py` now requires these readiness decisions to stay in the task contract and checks web-node delegation.
+- Verification:
+  - `./scripts/test_task_contract.py` passed.
+  - `./scripts/check_preflight_policy.py` passed.
+  - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/check_preflight_policy.py scripts/test_task_contract.py` passed.
+  - `git diff --check` passed.
+- No real motion:
+  - no real task was started;
+  - `/api/tasks/start` was not called;
+  - `/m20pro/floor_goal` was not published;
+  - no robot motion command was sent.
+- Additional package-level verification:
+  - `colcon build --symlink-install --packages-select m20pro_cloud_bridge` passed.
+  - after `source install/setup.bash`, these contract helpers were importable from the installed package:
+    - `battery_readiness_payload(...)`;
+    - `perception_readiness_payload(...)`;
+    - `map_metadata_mismatch_error(...)`.
+  - simple installed-package calls returned expected healthy results for battery readiness, perception readiness and matching map metadata.
+
+## 2026-06-26 - 地图元数据一致性规则契约抽离
+
+- Goal alignment:
+  - continue reducing `web_dashboard_node.py` rule ownership while keeping single-floor navigation start conditions strict.
+  - no real task was started, `/api/tasks/start` was not called, `/m20pro/floor_goal` was not published, and no robot motion command was sent.
+- Moved into `m20pro_cloud_bridge/task_contract.py`:
+  - `map_metadata_mismatch_error(...)`.
+- The contract now owns live `/map` vs selected task map checks for:
+  - width;
+  - height;
+  - resolution;
+  - origin x;
+  - origin y.
+- Web node integration:
+  - `web_dashboard_node.py` now delegates live/selected map metadata mismatch checks to `map_metadata_mismatch_error(...)`.
+  - the web node still owns fetching live map snapshots and selected map snapshots.
+- Why this matters:
+  - this check is part of preventing a task from starting when the frontend-selected map differs from the Nav2-loaded map.
+  - keeping it in the contract reduces the chance that future relocalization/cross-floor work bypasses a core single-floor safety gate.
+- Tests and guardrails:
+  - `scripts/test_task_contract.py` now covers matching maps, width mismatch, origin mismatch and unavailable live map.
+  - `scripts/check_preflight_policy.py` now requires this rule to stay in `task_contract.py`.
+  - it also fails if `_map_metadata_mismatch_error` is reintroduced into the web node.
+- Verification:
+  - `./scripts/test_task_contract.py` passed.
+  - `./scripts/check_preflight_policy.py` passed.
+  - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/check_preflight_policy.py scripts/test_task_contract.py` passed.
+- Still not proven complete:
+  - this is a contract cleanup and safety-gate hardening step.
+  - the overall single-floor navigation goal still requires real frontend task evidence: reach first waypoint, dwell, advance, and consistent frontend/Nav2/task-result state.
+
+## 2026-06-26 - 本周周报生成与点位地图 contract 收口
+
+- Goal update:
+  - user added a deadline task: generate this week's report before 16:30 from `~/weekly_report_2026-06-22_2026-06-26.md`, the M20Pro work done this week, and the style of desktop `周报`.
+  - the report was generated at `/home/fabu/桌面/周报/耿浩威6.26周报.docx`.
+  - source HTML was kept at `/home/fabu/桌面/周报/耿浩威6.26周报.html`.
+- Report content:
+  - follows the previous desktop weekly-report structure:
+    - work overview;
+    - M20 Pro single-floor navigation hardening;
+    - pointcloud pressure reduction;
+    - project split and intern ownership;
+    - YOLO data loop and teacher-assisted labeling;
+    - weekly outcomes;
+    - current risks;
+    - next-week plan.
+  - does not include every small debugging detail; it keeps the main project lines.
+- Verification:
+  - generated `.docx` passed `unzip -t`.
+  - LibreOffice headless conversion to text succeeded and content was readable.
+- Code cleanup completed before report generation:
+  - moved waypoint/map bounds checks and occupancy-grid cell checks from `web_dashboard_node.py` into `task_contract.py`;
+  - added offline tests for in-map, out-of-map, unavailable-map, occupied-cell and unknown-cell cases;
+  - updated `check_preflight_policy.py` so map bounds and occupancy checks stay owned by `task_contract.py`.
+- Verification for code cleanup:
+  - `./scripts/test_task_contract.py` passed.
+  - `./scripts/check_preflight_policy.py` passed.
+  - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/check_preflight_policy.py scripts/test_task_contract.py` passed.
+  - `git diff --check` passed.
+- No real motion:
+  - no real task was started;
+  - `/api/tasks/start` was not called;
+  - `/m20pro/floor_goal` was not published;
+  - no robot motion command was sent.
+
+## 2026-06-26 - 单层导航架构文档和实习生分工边界
+
+- Goal alignment:
+  - keep the current work focused on robust single-floor navigation before cross-floor expansion.
+  - document the simplified architecture so future AI/new developers do not treat one-off scripts and patches as the default solution.
+  - no real task was started, `/api/tasks/start` was not called, `/m20pro/floor_goal` was not published, and no robot motion command was sent.
+- Added:
+  - `docs/single_floor_navigation_architecture.md`.
+- The new architecture document records:
+  - the single-floor task acceptance evidence:
+    - frontend starts the task;
+    - robot goes to the current first waypoint;
+    - frontend shows live robot/Nav2/goal error;
+    - robot enters `dwell`;
+    - robot advances to the next waypoint;
+    - `last_result`, timeline and Nav2 state are consistent.
+  - the main task chain:
+    - frontend static files;
+    - `web_dashboard_node.py`;
+    - `task_contract.py`;
+    - `active_task_contract.py`;
+    - `nav_status_contract.py`;
+    - `task_plan_contract.py`;
+    - `task_progress_contract.py`;
+    - `task_snapshot_contract.py`;
+    - `floor_manager.py`;
+    - Nav2.
+  - the boundary that `web_dashboard_node.py` should own ROS/HTTP side effects, while pure task rules should stay in contract modules with offline tests.
+  - intern A ownership:
+    - complex-environment relocalization;
+    - pose/map/scan evidence and `localization_ok` quality;
+    - no direct edits to active task state machine unless a contract change requires it.
+  - intern B ownership:
+    - cross-floor orchestration;
+    - floor/map switching and transition segments;
+    - reuse the single-floor waypoint dispatch, path verification, Nav2 status matching and dwell/advance contracts.
+  - development principle:
+    - prefer deletion and contract tests over one-off field scripts or patch layering.
+- README updates:
+  - added the architecture document as a first-read reference.
+  - removed stale frontend workflow text that still described `2D地图` / `3D地图` switching.
+  - documented that current frontend scope is single-floor 2D task operation; 3D map display and camera toggle controls are not part of the single-floor navigation critical path.
+- Guardrails:
+  - `check_preflight_policy.py` now requires the architecture document to exist.
+  - it checks that README points to the architecture document and contract boundary files.
+  - it checks that the document preserves:
+    - single-floor completion gate;
+    - main contract module names;
+    - A/B intern ownership;
+    - subtraction-over-patch-script principle;
+    - missing real motion proof criteria.
+- Still not proven complete:
+  - this is architecture consolidation and documentation.
+  - the actual goal remains incomplete until a real frontend-started single-floor task reaches the first waypoint, dwells, advances, and leaves frontend/Nav2/task-result evidence consistent.
+
+## 2026-06-26 - 前端静态资源二次拆分
+
+- Goal alignment:
+  - continue reducing frontend/backend sprawl after the embedded frontend was moved out of `web_dashboard_node.py`.
+  - no real task was started, `/api/tasks/start` was not called, `/m20pro/floor_goal` was not published, and no robot motion command was sent.
+- Split frontend files:
+  - `m20pro_cloud_bridge/static/dashboard.html`: structure only;
+  - `m20pro_cloud_bridge/static/dashboard.css`: dashboard styles;
+  - `m20pro_cloud_bridge/static/dashboard.js`: dashboard behavior.
+- Web node integration:
+  - `web_dashboard_node.py` now serves `/` from `dashboard.html`;
+  - it serves only whitelisted static frontend assets:
+    - `/static/dashboard.css`;
+    - `/static/dashboard.js`.
+  - no generic static-file directory traversal was added.
+- Packaging:
+  - `src/m20pro_cloud_bridge/setup.py` package data now includes `dashboard.html`, `dashboard.css`, and `dashboard.js`.
+  - `src/m20pro_cloud_bridge/MANIFEST.in` now includes `*.html`, `*.css`, and `*.js` under `m20pro_cloud_bridge/static`.
+- Guardrails:
+  - `check_preflight_policy.py` now reads split frontend HTML/CSS/JS.
+  - it fails if CSS/JS are inlined back into `dashboard.html`.
+  - it checks that the web node serves only the known split assets.
+  - it checks that package data and manifest include all split frontend assets.
+- Current file sizes:
+  - `dashboard.html`: about 371 lines;
+  - `dashboard.css`: about 478 lines;
+  - `dashboard.js`: about 2041 lines.
+- Verification:
+  - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js` passed.
+  - static split assertion passed: HTML references CSS/JS and has no inline style/script block.
+  - all offline contract tests passed.
+  - `./scripts/check_preflight_policy.py` passed.
+  - Python `py_compile` passed for the web node, contracts, tests, and policy script.
+  - `bash -n` passed for the 104 frontend/autostart/watch scripts and the bringup relay/full startup scripts.
+  - `git diff --check` passed.
+  - `colcon build --symlink-install --packages-select m20pro_cloud_bridge` passed.
+  - after `source install/setup.bash`, `dashboard.html`, `dashboard.css`, and `dashboard.js` are visible from the installed package.
+- Still not proven complete:
+  - this is frontend maintainability work; it does not prove robot motion.
+  - single-floor navigation remains incomplete until a frontend-started task reaches, dwells, advances, and records consistent frontend/Nav2/task-result evidence.
+
+## 2026-06-26 - active task dwell 状态机契约抽离
+
+- Goal alignment:
+  - continue tightening the single-floor task state machine around "reach first waypoint, dwell, advance".
+  - no real task was started, `/api/tasks/start` was not called, `/m20pro/floor_goal` was not published, and no robot motion command was sent.
+- Added into `m20pro_cloud_bridge/active_task_contract.py`:
+  - `dwell_tick_decision(...)`;
+  - `begin_waypoint_dwell_state(...)`.
+- Moved into the active task contract:
+  - decision for whether an active task is still dwelling or should advance;
+  - dwell start state mutation:
+    - `phase=dwelling`;
+    - `dwell_s`;
+    - `dwell_until`;
+    - `last_reached_at`;
+    - `last_reached_annotation_id`;
+    - `last_reached_reason`;
+    - dwell status message;
+    - `waypoint_dwell_started` event payload.
+- Web node integration:
+  - `web_dashboard_node.py` still owns zero-velocity publish, settings persistence, timeline append, external event append, active waypoint publish, and actual advance call.
+  - `_tick_active_task(...)` now delegates dwell wait/advance decision to `dwell_tick_decision(...)`.
+  - `_begin_waypoint_dwell_or_advance(...)` now delegates dwell state mutation to `begin_waypoint_dwell_state(...)`.
+- Why this matters:
+  - the final single-floor proof depends on the robot reaching a waypoint, waiting the configured duration, and then moving to the next waypoint.
+  - this state transition is now pure-tested instead of being hidden inside the web node.
+- Guardrails:
+  - `check_preflight_policy.py` now checks that dwell wait/start state lives in `active_task_contract.py`.
+  - it also checks that the web node delegates dwell tick/start state to the active task contract.
+- Verification:
+  - `./scripts/test_active_task_contract.py` passed with dwell coverage.
+  - `./scripts/test_task_progress_contract.py` passed.
+  - `./scripts/test_task_plan_contract.py` passed.
+  - `./scripts/test_nav_status_contract.py` passed.
+  - `./scripts/test_task_snapshot_contract.py` passed.
+  - `./scripts/test_task_contract.py` passed.
+  - `./scripts/check_preflight_policy.py` passed.
+  - Python `py_compile` passed for the web node, all contract modules, and all contract tests.
+  - `bash -n` passed for the 104 frontend/autostart/watch scripts and the bringup relay/full startup scripts.
+  - extracted dashboard JavaScript passed `node --check`.
+  - `git diff --check` passed.
+  - `colcon build --symlink-install --packages-select m20pro_cloud_bridge` passed.
+  - after `source install/setup.bash`, dwell helpers are importable from `m20pro_cloud_bridge.active_task_contract`.
+- Still not proven complete:
+  - this makes dwell/advance state deterministic and testable, but it is not a moving field proof.
+  - single-floor navigation is still incomplete until a frontend-started task reaches, dwells, advances, and records consistent frontend/Nav2/task-result evidence.
+
+## 2026-06-26 - task progress 进展/卡滞/超时契约抽离
+
+- Goal alignment:
+  - continue making the single-floor execution chain explainable and testable before any cross-floor work.
+  - no real task was started, `/api/tasks/start` was not called, `/m20pro/floor_goal` was not published, and no robot motion command was sent.
+- Added:
+  - `m20pro_cloud_bridge/task_progress_contract.py`.
+  - `scripts/test_task_progress_contract.py`.
+- Moved into the task progress contract:
+  - progress reference update;
+  - moved distance calculation;
+  - yaw-delta calculation;
+  - remaining-distance convergence calculation;
+  - stall start/age calculation;
+  - stall warning decision;
+  - stall stop decision;
+  - waypoint timeout decision;
+  - near-goal-without-Nav2-result timeout decision.
+- Web node integration:
+  - `web_dashboard_node.py` still owns ROS state, settings/tasks persistence, timeline events, task failure, and frontend waypoint publication.
+  - `_update_active_task_progress(...)`, `_stop_task_if_stalled(...)`, `_stop_task_if_waypoint_timed_out(...)`, and `_stop_task_if_near_goal_timed_out(...)` now delegate their pure decisions to `task_progress_contract.py`.
+- Why this matters:
+  - the previous field symptom "robot moves briefly and then stops, frontend does not explain where it is stuck" must produce a deterministic reason.
+  - the contract now separates:
+    - normal progress;
+    - progress too small but still warning;
+    - `waypoint_stalled`;
+    - `waypoint_timeout`;
+    - `near_goal_no_nav2_result`.
+  - these reasons feed the same `last_result.runtime_snapshot` and watcher diagnostics.
+- Guardrails:
+  - `check_preflight_policy.py` now checks that progress/stall/timeout decisions live in `task_progress_contract.py`.
+  - it also checks that the web node delegates progress, stall, waypoint-timeout, and near-goal-timeout decisions to the contract.
+- Verification:
+  - `./scripts/test_task_progress_contract.py` passed.
+  - `./scripts/test_task_plan_contract.py` passed.
+  - `./scripts/test_nav_status_contract.py` passed.
+  - `./scripts/test_task_snapshot_contract.py` passed.
+  - `./scripts/test_active_task_contract.py` passed.
+  - `./scripts/test_task_contract.py` passed.
+  - `./scripts/check_preflight_policy.py` passed.
+  - Python `py_compile` passed for the web node, all contract modules, and all contract tests.
+  - `bash -n` passed for the 104 frontend/autostart/watch scripts and the bringup relay/full startup scripts.
+  - extracted dashboard JavaScript passed `node --check`.
+  - `git diff --check` passed.
+  - `colcon build --symlink-install --packages-select m20pro_cloud_bridge` passed.
+  - after `source install/setup.bash`, `task_progress_contract.py` is importable from `m20pro_cloud_bridge`.
+- Still not proven complete:
+  - this makes task progress diagnosis deterministic and testable, but it is not a moving field proof.
+  - single-floor navigation remains incomplete until a frontend-started task reaches, dwells, advances, and records consistent frontend/Nav2/task-result evidence.
+
+## 2026-06-26 - task plan 路径终点校验契约抽离
+
+- Goal alignment:
+  - continue making single-floor task execution deterministic before adding cross-floor behavior.
+  - no real task was started, `/api/tasks/start` was not called, `/m20pro/floor_goal` was not published, and no robot motion command was sent.
+- Added:
+  - `m20pro_cloud_bridge/task_plan_contract.py`.
+  - `scripts/test_task_plan_contract.py`.
+- Moved into the task plan contract:
+  - path endpoint error calculation;
+  - decision for whether plan matching is required;
+  - decision for waiting for a fresh Nav2 plan;
+  - decision for marking the plan as verified;
+  - decision for failing with `path_goal_mismatch`;
+  - decision for failing with `plan_update_timeout`.
+- Web node integration:
+  - `web_dashboard_node.py` still owns ROS state reads, active-task mutation, timeline events, task failure, and settings persistence.
+  - `_stop_task_if_plan_mismatched(...)` now delegates the pure decision to `task_plan_match_decision(...)`.
+- Why this matters:
+  - a frontend task must not keep running if Nav2's latest path endpoint does not match the current waypoint.
+  - this directly targets the field symptom where the robot appeared to move toward a fixed/residual point instead of the selected task point.
+  - the failure reasons `path_goal_mismatch` and `plan_update_timeout` are now pure-tested and stable for frontend/watcher diagnostics.
+- Guardrails:
+  - `check_preflight_policy.py` now checks that task plan endpoint verification lives in `task_plan_contract.py`.
+  - it also checks that the web node delegates path verification to the contract.
+- Verification:
+  - `./scripts/test_task_plan_contract.py` passed.
+  - `./scripts/test_nav_status_contract.py` passed.
+  - `./scripts/test_task_snapshot_contract.py` passed.
+  - `./scripts/test_active_task_contract.py` passed.
+  - `./scripts/test_task_contract.py` passed.
+  - `./scripts/check_preflight_policy.py` passed.
+  - Python `py_compile` passed for the web node, all contract modules, and all contract tests.
+  - `bash -n` passed for the 104 frontend/autostart/watch scripts and the bringup relay/full startup scripts.
+  - extracted dashboard JavaScript passed `node --check`.
+  - `git diff --check` passed.
+  - `colcon build --symlink-install --packages-select m20pro_cloud_bridge` passed.
+  - after `source install/setup.bash`, `task_plan_contract.py` is importable from `m20pro_cloud_bridge`.
+- Still not proven complete:
+  - this makes the path-match decision deterministic and testable, but it is not a moving field proof.
+  - single-floor navigation is still incomplete until a frontend-started task reaches, dwells, advances, and records consistent frontend/Nav2/task-result evidence.
+
+## 2026-06-26 - Nav2 状态匹配契约抽离
+
+- Goal alignment:
+  - continue reducing the web node while strengthening the single-floor task execution chain.
+  - no real task was started, `/api/tasks/start` was not called, `/m20pro/floor_goal` was not published, and no robot motion command was sent.
+- Added:
+  - `m20pro_cloud_bridge/nav_status_contract.py`.
+  - `scripts/test_nav_status_contract.py`.
+- Moved into the Nav2 status contract:
+  - key/value status parsing for Nav2/floor-manager status strings;
+  - active goal matching against:
+    - current annotation id;
+    - frontend goal attempt identity;
+    - Nav2 `goal_seq`;
+    - target `goal_x`, `goal_y`, `goal_z`, `goal_yaw`;
+    - yaw wrap-around tolerance.
+- Web node integration:
+  - `web_dashboard_node.py` keeps the existing `_parse_key_value_status(...)` and `_nav_status_matches_active_goal(...)` wrappers, but both now delegate to `nav_status_contract.py`.
+  - ROS state mutation, timeline events, ignored-status persistence, and task failure/advance remain in the web node.
+- Why this matters:
+  - the previous field symptom "robot seems to run to a fixed/residual point" must be prevented at the contract level: a Nav2 accepted/feedback/succeeded status is useful only if it matches the current waypoint identity and target pose.
+  - mismatched Nav2 success still cannot advance the frontend task.
+  - mismatch reasons such as `annotation_mismatch`, `goal_seq_mismatch`, `goal_x_mismatch`, and `goal_yaw_mismatch` are now pure-tested and stable diagnostics.
+- Guardrails:
+  - `check_preflight_policy.py` now checks that Nav2 active-goal matching lives in `nav_status_contract.py`.
+  - it also checks that the web node delegates active-goal matching to the contract.
+- Verification:
+  - `./scripts/test_nav_status_contract.py` passed.
+  - `./scripts/test_task_snapshot_contract.py` passed.
+  - `./scripts/test_active_task_contract.py` passed.
+  - `./scripts/test_task_contract.py` passed.
+  - `./scripts/check_preflight_policy.py` passed.
+  - Python `py_compile` passed for the web node, all contract modules, and all contract tests.
+  - `bash -n` passed for the 104 frontend/autostart/watch scripts and the bringup relay/full startup scripts.
+  - extracted dashboard JavaScript passed `node --check`.
+  - `git diff --check` passed.
+  - `colcon build --symlink-install --packages-select m20pro_cloud_bridge` passed.
+  - after `source install/setup.bash`, `nav_status_contract.py` is importable from `m20pro_cloud_bridge`.
+- Still not proven complete:
+  - this closes a major logic gap around stale/wrong Nav2 status acceptance, but it is still not a real moving field proof.
+  - single-floor navigation remains incomplete until a frontend-started task reaches, dwells, advances, and leaves frontend/Nav2/result state consistent.
+
+## 2026-06-26 - task snapshot 诊断契约抽离
+
+- Goal alignment:
+  - continue reducing the web node while strengthening the single-floor task diagnosis path.
+  - no real task was started, `/api/tasks/start` was not called, `/m20pro/floor_goal` was not published, and no robot motion command was sent.
+- Added:
+  - `m20pro_cloud_bridge/task_snapshot_contract.py`.
+  - `scripts/test_task_snapshot_contract.py`.
+- Moved into the task snapshot contract:
+  - task runtime snapshot construction;
+  - task result snapshot construction;
+  - pose age calculation used by task diagnostics.
+- What the contract preserves:
+  - active waypoint index/phase;
+  - frontend goal attempt id;
+  - goal pose and path version;
+  - Nav2 goal status, raw status text, feedback, goal match, ignored mismatches;
+  - robot pose/distance/progress/stall/runtime guard state;
+  - scan freshness, lidar pointcloud freshness, lidar relay downsample/rate diagnostics;
+  - plan verification fields;
+  - persisted `runtime_snapshot` inside `last_result`.
+- Web node integration:
+  - `web_dashboard_node.py` still collects ROS/runtime state under locks.
+  - the pure payload shaping now delegates to `build_task_runtime_snapshot(...)` and `build_task_result_snapshot(...)`.
+  - result persistence still lives in the web node because it mutates `tasks.json`.
+- Why this matters:
+  - failed field tasks should leave a consistent diagnostic payload instead of depending on whichever UI field happened to be visible.
+  - snapshot shape is now testable without ROS or the robot.
+  - future relocalization and cross-floor work can consume the same `last_result.runtime_snapshot` contract.
+- Guardrails:
+  - `check_preflight_policy.py` now checks that runtime/result snapshot payloads live in `task_snapshot_contract.py`.
+  - it also checks that the web node delegates snapshot construction instead of rebuilding the fields inline.
+- Verification:
+  - `./scripts/test_task_snapshot_contract.py` passed.
+  - `./scripts/test_active_task_contract.py` passed.
+  - `./scripts/test_task_contract.py` passed.
+  - `./scripts/check_preflight_policy.py` passed.
+  - Python `py_compile` passed for the web node, all three contract modules, and all three contract tests.
+  - `bash -n` passed for the 104 frontend/autostart/watch scripts and the bringup relay/full startup scripts.
+  - extracted dashboard JavaScript passed `node --check`.
+  - `git diff --check` passed.
+  - `colcon build --symlink-install --packages-select m20pro_cloud_bridge` passed.
+  - after `source install/setup.bash`, `task_snapshot_contract.py` is importable from `m20pro_cloud_bridge`.
+- Still not proven complete:
+  - this improves diagnosis and reduces web-node complexity; it does not prove real robot motion.
+  - single-floor navigation still requires a controlled moving validation from the frontend: reach first waypoint, dwell, advance, and leave frontend/Nav2/task result state consistent.
+
+## 2026-06-26 - active task 状态机契约抽离
+
+- Goal alignment:
+  - this pass continues the "single-floor navigation first, simplify instead of adding patches" objective.
+  - no real task was started, `/api/tasks/start` was not called, `/m20pro/floor_goal` was not published, and no robot motion command was sent.
+- Added:
+  - `m20pro_cloud_bridge/active_task_contract.py`.
+  - `scripts/test_active_task_contract.py`.
+- Moved into the active-task contract:
+  - waypoint-to-goal payload validation;
+  - active goal dispatch/resend decision;
+  - goal-sent state update, counters, path-version record, attempt id record, and per-waypoint event payload;
+  - waypoint advance/completion state update.
+- Important stale-state fix:
+  - `active_task_contract.py` now owns reset lists for per-goal and next-waypoint state.
+  - when a new waypoint starts, old Nav2 feedback/status fields are cleared, including:
+    - `has_nav_feedback`;
+    - `last_nav_status`;
+    - `last_nav_status_at`;
+    - `last_nav_feedback`;
+    - `last_nav_feedback_at`;
+    - `last_nav_feedback_monotonic`;
+    - `last_nav_goal_match`;
+    - `last_nav_goal_seq`;
+    - `last_ignored_nav_status`;
+    - `last_ignored_nav_goal_match`;
+    - plan verification and stall/progress fields.
+  - reason: the frontend previously had symptoms consistent with stale task/navigation state, such as "no task is running but UI still says navigating" or "old Nav2 feedback looks current".
+- Web node integration:
+  - `web_dashboard_node.py` now delegates active task state mutation to `active_task_contract.py`.
+  - the web node still owns ROS-specific effects: reading live state, saving settings, appending timeline events, publishing `/m20pro/floor_goal`, publishing active waypoint status, and stopping/resetting navigation.
+  - this keeps pure task state rules testable without ROS while preserving the runtime side effects in one place.
+- Why this matters for later intern split:
+  - A intern can work on complex-environment relocalization against stable readiness/task result contracts instead of editing the task execution state machine.
+  - B intern can work on cross-floor task planning using the task/active-task contracts as the single-floor baseline.
+  - both tracks should avoid adding one-off field scripts unless they remove an actual operational ambiguity.
+- Guardrails:
+  - `check_preflight_policy.py` now checks that active goal dispatch, resend, stale reset keys, goal attempt identity, goal-sent counters, and waypoint advance/completion live in `active_task_contract.py`.
+  - it also checks that `web_dashboard_node.py` delegates to the contract and passes a fresh `_new_id("goal")` into `mark_goal_sent(...)`.
+- Verification:
+  - `./scripts/test_active_task_contract.py` passed.
+  - `./scripts/test_task_contract.py` passed.
+  - `./scripts/check_preflight_policy.py` passed.
+  - `python3 -m py_compile scripts/check_preflight_policy.py scripts/test_active_task_contract.py scripts/test_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py` passed.
+  - `bash -n` passed for the 104 frontend/autostart/watch scripts and the bringup relay/full startup scripts.
+  - extracted dashboard JavaScript passed `node --check`.
+  - `colcon build --symlink-install --packages-select m20pro_cloud_bridge` passed.
+  - after `source install/setup.bash`, `static/dashboard.html`, `active_task_contract.py`, and `task_contract.py` are visible from the installed `m20pro_cloud_bridge` package.
+- Still not proven complete:
+  - this is architecture and state-machine hardening, not a real moving field proof.
+  - single-floor navigation is not done until the robot, from the frontend, can run a task that reaches the first waypoint, dwells, advances to the next waypoint, and leaves frontend/Nav2/task result state mutually consistent.
+
+## 2026-06-26 - 前端拆分和现场脚本入口减法
+
+- Goal alignment:
+  - current work is under the "single-floor navigation first, simplify instead of adding patches" objective.
+  - no real task was started and no motion command was sent in this pass.
+- Frontend/backend boundary:
+  - moved the large embedded dashboard HTML out of `web_dashboard_node.py` into `m20pro_cloud_bridge/static/dashboard.html`.
+  - `web_dashboard_node.py` now reads the dashboard HTML as package data when serving `/`.
+  - `m20pro_cloud_bridge` now includes `MANIFEST.in`, `package_data`, and `zip_safe=False` so the static dashboard file is available after install/build.
+  - line count changed from about `9465` lines in `web_dashboard_node.py` to about `6572` lines plus a separate `dashboard.html` of about `2890` lines.
+- Script-entry simplification:
+  - removed `scripts/104_frontend_task_field_run.sh`.
+  - reason: it was only a wrapper around ready-check plus watcher, and it added a third field path without removing the operator's need to manually verify and click start.
+  - removed the untracked `scripts/104_check_frontend_cameras.py` helper because the frontend no longer exposes camera video controls in the field workflow.
+  - task cards now show only:
+    - `开跑前验收：./scripts/104_frontend_task_ready_check.py --task-id ...`;
+    - `开跑前记录：./scripts/104_watch_frontend_task.sh 180 ...`.
+  - task start confirmation now reminds the operator to run ready-check and watcher; it no longer advertises a one-command wrapper.
+- Guardrail updates:
+  - `check_preflight_policy.py` now reads frontend rules from `static/dashboard.html` instead of looking for frontend JS inside `web_dashboard_node.py`.
+  - policy now explicitly forbids reintroducing `104_frontend_task_field_run`, `taskFieldRunCommand`, `fieldRunCommand`, `现场验证入口`, or `复制验证`.
+  - `104_frontend_task_smoke.py` now fails if task cards or copy buttons expose the removed wrapper path.
+- Documentation:
+  - `README.md` and `scripts/README.md` now separate "现场主入口" from "诊断和开发入口".
+  - field task evidence flow is fixed as two steps:
+    - run ready-check;
+    - start watcher;
+    - then manually confirm first waypoint/order in the real frontend and click task start.
+- Current verification:
+  - `python3 -m py_compile scripts/check_preflight_policy.py scripts/104_frontend_task_smoke.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py` passed.
+  - `./scripts/check_preflight_policy.py` passed.
+
+## 2026-06-26 - 任务契约模块第一步抽离
+
+- Goal alignment:
+  - continue reducing `web_dashboard_node.py` by moving pure task rules into dependency-free contract code.
+  - this pass still did not start a real task, call `/api/tasks/start`, publish `/m20pro/floor_goal`, or send motion commands.
+- Added:
+  - `m20pro_cloud_bridge/task_contract.py`.
+  - `scripts/test_task_contract.py`.
+- Moved into the task contract:
+  - readiness success/failure payload builders;
+  - readiness error wrapper;
+  - task status startability rule: only `ready`, `stopped`, `completed`, and `error` can be started;
+  - waypoint/readiness compact payload builders;
+  - frontend task-start expectation validation:
+    - annotation order must match what the operator confirmed;
+    - first waypoint id must match;
+    - map id must match;
+    - task timestamp must not have changed;
+    - first waypoint x/y/z/yaw must stay within tolerances.
+  - charge point ordering rule: a charge point must be the final waypoint.
+- Web node integration:
+  - `web_dashboard_node.py` now delegates those rules to `task_contract.py`.
+  - the web node still owns ROS state, map/costmap checks, navigation readiness, task runtime guard, and actual goal publishing.
+- Why this matters:
+  - task correctness rules can now be tested without ROS or the robot.
+  - future cross-floor task work can build on these single-floor task contracts instead of editing the large web node directly.
+  - future relocalization work can consume the same readiness/error payload shape without duplicating frontend/backend semantics.
+- Guardrails:
+  - `check_preflight_policy.py` now checks that task-start expectation validation, task startable states, and charge-point ordering live in the contract module and that the web node delegates to it.
+  - `scripts/test_task_contract.py` covers matching start expectations, changed order/id/map/timestamp/pose failures, yaw tolerance, waypoint payloads, readiness payloads, task startable status, and charge-point ordering.
+- Verification:
+  - `./scripts/test_task_contract.py` passed.
+  - `./scripts/check_preflight_policy.py` passed.
+
+## 2026-06-23 frontend task-chain hardening, 3D map smoke, and result persistence
+
+- Field feedback that triggered this pass:
+  - self-check, relocalization, and adding task points had become usable;
+  - executing a composed task still had serious issues: the robot moved briefly, did not obviously go to the marked point, appeared to stop instead of dwelling/advancing, and the frontend did not provide enough live pose/progress context;
+  - the previous failed run left no useful `last_error`/`last_timeline` in `/api/tasks`, so post-mortem diagnosis was underdetermined without a watcher log.
+- Frontend and tooling hardening:
+  - `104_frontend_task_smoke.py` now does a read-only browser smoke against the real frontend and also checks:
+    - 2D/3D map buttons;
+    - switching to 3D mode;
+    - canvas output is nonblank;
+    - F20 derived 3D terrain is actually loaded when the UI says `3D 派生地图`;
+    - camera streams do not auto-load;
+    - synthetic active-task summary still renders `狗差`, `Nav2差`, `位姿差`, `路径差`, `路径已校验`, and `链路守护`.
+  - `window.m20proDebug.snapshot()` now exposes `terrain`, `terrainMessage`, and `stairZones` so smoke tests can distinguish "button exists" from "3D terrain data loaded".
+  - `104_frontend_task_ready_check.py` now prioritizes current-map tasks when printing `next:` advice, so an old `live_map` error task does not mask the real blocker for the current F20 task.
+- Task-result persistence added:
+  - `web_dashboard_node.py` now writes a structured `last_result` into each task on failure, stop, and completion;
+  - the snapshot preserves task id/name, status, current waypoint, last goal pose/attempt id, Nav2 status/feedback/match result, robot pose, last distance, plan verification, path error, runtime guard, stall age, and the last timeline tail;
+  - task cards now show a compact "上次结果" line from `last_result`, including reason, point, distance, path error, and Nav2 state where available;
+  - `last_task_result` in `/api/state` also carries this persisted result;
+  - `104_analyze_frontend_task_watch.py` now reads `last_result` as well as legacy `last_error`/`last_timeline`.
+- Verification on 104 without motion:
+  - deployed to `/home/user/m20pro_real_ros2_ws`, rebuilt `m20pro_cloud_bridge`, and restarted `m20pro-real.service`;
+  - web recovered after about 39-40 s after each restart;
+  - remote `py_compile` and `python3 scripts/check_preflight_policy.py` passed;
+  - real browser smoke passed against `http://10.21.31.104:8080`;
+  - 3D map smoke confirmed:
+    - selected map `builtin_F20`;
+    - terrain available;
+    - `175x206` height grid;
+    - `6` stair zones;
+    - canvas rendered an opaque sample;
+  - ready check result was WARN by design:
+    - no active task;
+    - `localization_ok=false`;
+    - battery about `92%`;
+    - `/scan` about `211-213` finite ranges;
+    - lidar relay about `10k-12k` points;
+    - next advice: relocalize first, from the frontend定位页, then check task readiness again.
+- Current conclusion:
+  - the frontend did not start any motion in this pass;
+  - current blocker for starting a task is correct and explicit: `localization_not_confirmed`;
+  - perception/battery/web/3D-map display are healthy at the workstation;
+  - the old failed task records still lack rich history because they were produced before the new `last_result` persistence existed.
+- Next moving validation rule:
+  - in the test field, after relocalization succeeds, run `./scripts/104_frontend_task_ready_check.py --task-id <准备执行的任务id>`;
+  - before clicking start in the frontend, start `./scripts/104_watch_frontend_task.sh 300 field_task_result_persist`;
+  - only then manually confirm the frontend task start;
+  - after any stop/failure, inspect:
+    - frontend task card `上次结果`;
+    - `/api/tasks` task `last_result`;
+    - `task_watch_logs/<run>/analysis.txt`.
+
+## 2026-06-23 camera display switch and low-load demo tuning
+
+- User request:
+  - frontend should have camera switches;
+  - front/rear dual wide-angle live video should be usable for demos;
+  - demo quality does not need to be high, and should not overload the robot host.
+- Frontend changes:
+  - the status page already had per-camera buttons for `前广角相机` and `后广角相机`;
+  - added all-camera controls:
+    - `打开双路视频`;
+    - `关闭双路视频`.
+  - images still use `data-src` instead of `src`, so the page does not auto-open MJPEG streams on load;
+  - closing a camera removes the image `src`, releasing the browser-side MJPEG stream.
+- Runtime/demo load tuning:
+  - full real startup keeps camera proxy enabled for the integrated frontend;
+  - camera proxy demo parameters were lowered:
+    - `camera_proxy_fps:=1.5`;
+    - `camera_proxy_jpeg_quality:=40`;
+    - `camera_proxy_max_width:=360`.
+  - this is intended as a stable low-load demonstration view, not high-quality recording.
+- Verification:
+  - synced only camera-related files to 104 and rebuilt only:
+    - `m20pro_cloud_bridge`;
+    - `m20pro_bringup`.
+  - restarted `m20pro-real.service`; web became ready after about 38 s;
+  - real frontend read-only smoke passed:
+    - front/rear per-camera buttons exist;
+    - all-camera on/off buttons exist;
+    - `frontVideo` and `rearVideo` have no `src` before the operator opens video;
+    - `data-src` points to `/camera/front.mjpg` and `/camera/rear.mjpg`;
+    - task buttons remain disabled while unlocalized;
+    - no task was started and no video stream was opened by the smoke test.
+  - local checks passed:
+    - `python3 -m py_compile`;
+    - `python3 scripts/check_preflight_policy.py`;
+    - `git diff --check`.
+
+## 2026-06-23 task execution runtime guard close-out
+
+- Field feedback before this pass:
+  - frontend self-check, relocalization, and task-point creation can succeed;
+  - executing a composed task made the robot move briefly, but the observed target position/orientation did not match the marked point;
+  - after moving, it appeared stuck rather than clearly dwelling for the configured 5 s or advancing to later points;
+  - frontend could show a path to the first point, but still needed clearer evidence about live robot pose, Nav2 feedback pose, current waypoint, plan endpoint, and critical perception/battery health.
+- Additional task-start hardening added in `web_dashboard_node.py`:
+  - task start now requires fresh battery data and a minimum start level of 25%;
+  - task start now requires fresh `/scan` with at least 20 finite ranges;
+  - task start now requires the web side to see a fresh lidar pointcloud relay, so a "104 cannot see pointcloud" regression blocks motion instead of becoming an invisible field problem;
+  - task readiness payloads now expose `battery_readiness` and `perception_readiness`.
+- Runtime guard added during active task execution:
+  - while a task is running, the web task loop checks battery and perception freshness before continuing dispatch/progress handling;
+  - if battery, `/scan`, or pointcloud relay becomes unhealthy, the task records `runtime_guard_waiting`;
+  - if the condition stays unhealthy for `task_runtime_guard_lost_timeout_s` (default 5 s), the task stops through the existing navigation reset path with `reason=runtime_guard_lost`;
+  - this turns the previous "it stopped and I do not know where" class of failures into an explicit task result.
+- Frontend observability:
+  - active task summary now shows `链路守护 <code>` when runtime guard state is present;
+  - task start buttons get clearer blocked labels such as `先充电`, `等scan`, and `等点云`;
+  - existing live diagnostics remain: `狗差`, `Nav2差`, `位姿差`, `路径差`, `路径已校验`, `下发路径版`, and `校验路径版`.
+- Watcher/analyzer upgrade:
+  - `scripts/104_watch_frontend_task.sh` now records `battery_level`, `scan_finite`, `lidar_points`, `lidar_source`, `runtime_guard`, and `runtime_guard_age`;
+  - `scripts/104_analyze_frontend_task_watch.py` now reports runtime-guard failures, sparse/missing scan, missing lidar relay, and low-battery findings;
+  - persisted task results in `/api/tasks` are still used, so quick failures remain diagnosable even if `active_task` disappears before a watcher sample catches it.
+- Verification completed without moving the robot:
+  - local checks passed:
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/104_frontend_task_smoke.py scripts/104_analyze_frontend_task_watch.py scripts/check_preflight_policy.py`;
+    - `bash -n scripts/104_watch_frontend_task.sh`;
+    - `python3 scripts/check_preflight_policy.py`;
+    - `git diff --check`.
+  - synthetic analyzer sample with `runtime_guard_lost` correctly produced findings for runtime guard and missing/sparse scan;
+  - deployed to 104 `/home/user/m20pro_real_ros2_ws` and rebuilt all five packages successfully;
+  - restarted `m20pro-real.service`; web became ready after about 40 s;
+  - 104 remote `py_compile` and `check_preflight_policy.py` passed;
+  - real frontend read-only smoke passed:
+    - connected to `http://10.21.31.104:8080`;
+    - task cards showed first point and full order;
+    - start buttons stayed disabled while unlocalized;
+    - synthetic active-task summary displayed pose/path diagnostics and `链路守护 ready`.
+- Current 104 status at close-out:
+  - `m20pro-real.service` is active;
+  - no active task and no active waypoint;
+  - floor F20;
+  - `localization_ok=false`, so task start is correctly blocked with `localization_not_confirmed`;
+  - battery about 28%;
+  - `/scan` fresh with about 208 finite ranges;
+  - `/m20pro/lidar_points_relay` visible to the web side with about 9995 points, source `relay`.
+- Remaining moving validation:
+  - not run in this close-out because the robot is unlocalized and battery is already around 28-30%;
+  - next moving test should only happen after charging and field relocalization;
+  - before pressing task start, run:
+    - `./scripts/104_frontend_task_ready_check.py`;
+    - `./scripts/104_watch_frontend_task.sh 300 field_task_runtime_guard`;
+  - after the run, inspect `task_watch_logs/<run>/analysis.txt` first.
+- Low-battery final tooling add-on:
+  - added `scripts/104_frontend_task_ready_check.py`;
+  - it is a read-only pre-task check that prints current localization/readiness, battery, `/scan`, lidar relay, each task's first waypoint, and full waypoint order;
+  - it supports `--task-id <id>` and `--task-name <keyword>` so the operator can inspect only the task they are about to start;
+  - it now prints a `next:` section with actionable advice for common blockers such as unlocalized pose, map mismatch, low battery, missing `/scan`, missing pointcloud relay, or Nav2/costmap not ready;
+  - when battery is below the 25% task-start threshold, this `next:` advice prioritizes charging before relocalization or moving validation;
+  - it does not call `/api/tasks/start`, publish `/m20pro/floor_goal`, or send motion commands;
+  - README now recommends the field order:
+    - ready check;
+    - watcher;
+    - manual frontend confirmation/start.
+  - verified locally and on 104:
+    - current 104 state is still safe: no active task/waypoint, `localization_not_confirmed`;
+    - latest low-battery check showed battery about 24%, and the script correctly advised charging first;
+    - `/scan` about 214 finite ranges;
+    - lidar relay about 10528 points;
+    - script correctly returns WARN because no task is currently ready to start while unlocalized.
 
 ## 2026-06-22 development dog costmap/Nav2 startup hardening
 
@@ -6943,223 +10056,8439 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
   - after deleting `install/`, rebuild locally before running local launch commands:
     `colcon build --symlink-install`.
 
-## 2026-06-22 real-only repository split
+## 2026-06-22 real/sim repository split checkpoint
 
-- This workspace is now the real-only project:
+- User confirmed that `real` and `sim` should be split into two independent projects locally and on GitHub, not kept as two launch branches in one workspace.
+- Preserved this original workspace as the historical/checkpoint repository:
+  - path: `/home/fabu/桌面/M20Pro/m20pro_ros2_ws`;
+  - checkpoint commit: `a820340 chore: checkpoint before real sim split`;
+  - checkpoint tag: `before-split-20260622`.
+- Created the real-only workspace:
   - path: `/home/fabu/桌面/M20Pro/m20pro_real_ros2_ws`;
-  - split commit: `8ed14ae chore: split real project`.
-- Scope kept here:
-  - 104/GOS field deployment scripts;
-  - full real launch and web frontend;
-  - lidar relay/downsampling and `/scan` fusion for the real robot;
-  - preflight, autostart, systemd service, 103/106 integration, and inspection nodes.
-- Scope removed from here:
-  - laptop-only simulation launch/config/RViz/nodes;
-  - the old unified `m20pro.launch.py mode:=...` entry.
-- Validation at split time:
-  - `git diff --check`;
-  - Python compile for real launch, web dashboard, navigation, cloud bridge, and inspection modules;
-  - shell syntax checks for root scripts and package scripts;
-  - `python3 scripts/check_preflight_policy.py`.
-- The sibling sim project is `/home/fabu/桌面/M20Pro/m20pro_sim_ros2_ws`.
+  - split commit: `8ed14ae chore: split real project`;
+  - intent: 104/GOS field deployment, lidar relay/downsampling, preflight, autostart, systemd, 103/106 integration, inspection.
+- Created the sim-only workspace:
+  - path: `/home/fabu/桌面/M20Pro/m20pro_sim_ros2_ws`;
+  - split commit: `53ce1c2 chore: split sim project`;
+  - intent: upper-computer local simulation, RViz, bundled maps, local `/cloud_nav` and `/scan`, task/map/frontend logic.
+- Validation after split:
+  - real project passed `git diff --check`, Python compile, shell syntax checks, and `scripts/check_preflight_policy.py`;
+  - sim project passed `git diff --check`, Python compile, shell syntax checks, and `colcon build --symlink-install`.
+- Boundary notes:
+  - future 104/dog stability work belongs in the real repository;
+  - future local navigation simulation/RViz work belongs in the sim repository;
+  - this original workspace should be treated as the before-split reference unless explicitly needed.
 
-## 2026-06-22 current real navigation and obstacle-avoidance architecture
+## 2026-06-22 frontend task execution hardening
 
-This section is a stable architecture note for future AI assistants and for interview/project review. It summarizes the current real-robot navigation stack as it exists after the real/sim split.
+- Field symptom:
+  - self-check, relocalization, and point creation could work, but starting a task only moved a short distance;
+  - the robot did not continue through the remaining waypoints, and the frontend did not clearly show where the task was stuck;
+  - the frontend did not show a live robot pose after the robot fell back to `location=1`.
+- Root cause confirmed from 104 logs:
+  - the web task loop was republishing the same `/m20pro/floor_goal` every few seconds;
+  - `floor_manager` treated the repeated same-floor goal as a replacement goal and canceled the active Nav2 goal;
+  - log evidence included `web task published floor goal`, `replacing active same-floor goal with a new floor goal`, `Navigation canceled`, and Nav2 status `6`;
+  - this means the task executor was canceling its own goal before Nav2 could finish.
+- Navigation/task state-machine changes:
+  - web task execution is now Nav2-event driven:
+    - `nav_goal_accepted label=floor_goal` marks the current waypoint as accepted;
+    - `nav_goal_succeeded label=floor_goal` is the only normal trigger for dwell/advance;
+    - Nav2 errors stop the task and preserve the error status;
+  - repeated dispatch of an already accepted/succeeded waypoint no longer republishes `/m20pro/floor_goal`;
+  - if a goal is only in `sent` state and never accepted, it may be resent after the configured timeout;
+  - ordinary `same_floor_goal`/`flat_gait_requested` status text no longer overwrites the goal lifecycle state.
+- `floor_manager` guardrail:
+  - added duplicate active floor-goal detection using position and yaw tolerances;
+  - duplicate same-floor goals are ignored and reported as `ignored reason=duplicate_floor_goal`;
+  - this is a second safety layer in case any future UI/API path accidentally republishes the same active goal.
+- Waypoint dwell fix:
+  - after Nav2 reports a waypoint succeeded, the web task now publishes zero velocity and enters dwell;
+  - it no longer sends a generic stop/reset command at waypoint success, avoiding a race where the stop request could cancel the next waypoint goal.
+- Frontend observability:
+  - `/api/state` now includes `active_waypoint`;
+  - the task panel shows active task, current waypoint, `stair_status`, and factory navigation status;
+  - active task state records status message, last robot pose, distance to current waypoint, and last Nav2 goal status.
+- Frontend usability/safety:
+  - if localization is not confirmed or `pose` is missing, task buttons show `先重定位` and are disabled;
+  - backend task start still rejects unlocalized starts with a clear message;
+  - the last task-start error remains visible instead of being immediately overwritten by the polling loop as `无任务`;
+  - the video widgets no longer load `/camera/front.mjpg` and `/camera/rear.mjpg` on page load; users must click `打开视频`;
+  - camera RTSP reconnect interval was relaxed so broken camera streams do not flood logs or consume CPU while using localization/task pages.
+- `/scan`/costmap hardening:
+  - real pointcloud fusion stamps `/scan` with current node time;
+  - this reduces TF/message-filter drops caused by stale source pointcloud timestamps during Nav2/costmap processing.
+- Deployed/verified on 104:
+  - deployed to `/home/user/m20pro_real_ros2_ws`;
+  - rebuilt all five packages successfully with `colcon build --symlink-install`;
+  - restarted `m20pro-real.service`;
+  - `/healthz` OK and `/api/state` returns valid JSON with `active_waypoint: null` before a task starts;
+  - relay pointcloud and `/scan` are fresh;
+  - `/scan` stamp is current-time based;
+  - Nav2 lifecycle remains intentionally `unconfigured` while `localization_ok=false`;
+  - real Chrome/DevTools opened the frontend, showed `异常/未定位`, showed no default camera `src`, and showed task buttons as disabled `先重定位`;
+  - clicking the disabled task button did not create `active_task` and did not publish a floor goal;
+  - recent logs after the final deployment showed no new `web task published floor goal` while unlocalized.
+- Current blocker for full moving-task verification:
+  - 104 is currently `location=1`, `localization_ok=false`, `pose=null`;
+  - without a trusted initial pose on the F20 map, remotely guessing `/initialpose` would be unsafe and would invalidate the task test;
+  - complete moving-task validation must start from the real frontend localization page with a manually confirmed initial pose, then wait for:
+    - `localization_ok=true`;
+    - non-null `/m20pro_tcp_bridge/map_pose` in `/api/state.pose`;
+    - Nav2 lifecycle active for controller/planner/bt_navigator/waypoint_follower;
+    - local/global costmaps fresh.
+- Next field-test checklist:
+  - use the frontend localization page to set the robot pose on the correct F20 map;
+  - confirm the task buttons change from `先重定位` to `开始执行`;
+  - run a short nearby two-point task first;
+  - verify logs show one `web task published floor goal` per waypoint, followed by `nav_goal_accepted` and `nav_goal_succeeded`;
+  - verify there is no repeated `replacing_active_floor_goal` every few seconds;
+  - verify the task panel shows distance/status, dwell countdown, current waypoint, and advances to the next waypoint.
 
-### One-line architecture
+### 2026-06-22 late-night task-chain diagnostic pass
 
-The real stack converts factory lidar pointclouds into a lightweight 2D `/scan`, feeds `/scan` into Nav2 local/global costmaps, uses Navfn A* for global planning and DWB for local trajectory sampling/control, then sends `/cmd_vel` through the 103 TCP bridge.
+- Additional backend readiness hardening:
+  - `/api/state` now exposes `task_readiness`;
+  - `/api/tasks` now attaches a `readiness` object to each task, using the same checks as the real `/api/tasks/start` path;
+  - readiness codes distinguish at least:
+    - `localization_not_confirmed`;
+    - `pose_invalid_or_stale`;
+    - `selected_map_mismatch`;
+    - `wrong_floor`;
+    - `current_pose_out_of_map`;
+    - `target_out_of_map`;
+    - `map_metadata_mismatch`;
+  - the frontend no longer guesses task start availability only from `localization_ok && pose`; it displays the backend reason and uses that reason for the button label/title.
+- Additional runtime observability:
+  - task page now has a human-readable `当前执行` summary above the raw JSON;
+  - active waypoint payload includes current phase, distance, dwell countdown, Nav2 goal status, and elapsed time for the current waypoint;
+  - this is meant to make "stopped at a point", "waiting for Nav2 accept", and "dwelling" visibly different at the page level.
+- Additional stuck-task protection:
+  - added `task_goal_accept_timeout_s`:
+    - if a task waypoint is published but Nav2/floor_manager never reports `nav_goal_accepted`, the task fails with an explicit diagnostic and resets safely;
+  - added `task_waypoint_timeout_s`:
+    - if one waypoint runs too long without `nav_goal_succeeded`, the task fails with final distance/Nav status diagnostics instead of silently staying stuck;
+  - normal waypoint success still requires `nav_goal_succeeded label=floor_goal`; distance-near-target alone only changes the status message to "waiting for Nav2".
+- Real 104 deployment and verification:
+  - redeployed to `/home/user/m20pro_real_ros2_ws`;
+  - remote build completed all five packages;
+  - restarted `m20pro-real.service`;
+  - `/healthz` returned OK;
+  - `/api/state` showed:
+    - `localization_ok=false`;
+    - `pose=null`;
+    - fresh lidar relay, `/scan`, odom, battery, floor, and `/map`;
+    - `task_readiness.code=localization_not_confirmed`;
+  - `/api/tasks` showed:
+    - old `live_map` task blocked by `selected_map_mismatch`;
+    - current `builtin_F20` task blocked by `localization_not_confirmed`;
+  - direct API call to `/api/tasks/start` for the current task returned HTTP 400 with `localization_not_confirmed`;
+  - service logs after that call had no new `web task published floor goal`, so the backend guard prevented a hidden motion command.
+- Real frontend browser validation:
+  - opened `http://10.21.31.104:8080` in real Chrome headless/DevTools;
+  - task page showed `定位未确认，先在网页定位页完成重定位，再开始任务`;
+  - current F20 task button showed `先重定位` and was disabled;
+  - old map task showed `检查地图` and was disabled;
+  - `当前执行` summary showed `无任务`;
+  - camera image had no default `src`, so task/localization pages do not automatically pull camera streams.
+- Remaining moving-task validation blocker:
+  - the robot stayed `location=1`, `localization_ok=false`, `pose=null` during the observation window;
+  - moving validation was intentionally not forced because guessing `/initialpose` remotely would make the test unsafe and meaningless;
+  - once the operator completes frontend relocalization and `/api/state` shows `localization_ok=true` plus valid pose, the next validation should:
+    - confirm Nav2 lifecycle nodes are active;
+    - run the short F20 task through the frontend;
+    - verify exactly one floor goal per waypoint;
+    - verify `nav_goal_accepted -> nav_goal_succeeded -> dwell -> next waypoint`;
+    - verify no repeated `replacing_active_floor_goal`;
+    - verify the new frontend `当前执行` summary updates through distance, dwell countdown, and completion.
 
-### Runtime data flow
+### 2026-06-22 23:22 task timeout accounting fix
 
-```text
-/LIDAR/POINTS
-  -> m20pro_lidar_relay
-     - subscribes with factory FastDDS profile
-     - down-samples by stride
-     - limits publish rate
-/m20pro/lidar_points_relay
-  -> m20pro_pointcloud_fusion
-     - optional backup input: /m20pro/lidar_points2_relay
-     - converts pointcloud to 360-degree LaserScan
-/scan
-  -> Nav2 local_costmap and global_costmap obstacle layers
-  -> Nav2 planner/controller
-/cmd_vel
-  -> m20pro_tcp_bridge
-  -> 103 robot TCP motion interface
-```
+- Issue found during code review:
+  - the task executor can intentionally re-send a waypoint while it is still in `sent` state;
+  - if the same timestamp is used for both "last re-send" and "first send for this waypoint", each re-send could reset the accept-timeout clock;
+  - that would make the `task_goal_accept_timeout_s` diagnostic less useful in exactly the stuck case it is meant to catch.
+- Fix:
+  - `waypoint_started_monotonic` is now set only when entering a new waypoint or when no start time exists;
+  - re-sending the same waypoint updates `last_goal_sent_monotonic` and `last_goal_sent_at` but does not reset the current waypoint elapsed timer;
+  - `task_goal_accept_timeout_s` now measures from the first send of the current waypoint, not the most recent re-send;
+  - active waypoint status now includes both `waypoint_started_at` and `last_goal_sent_at`.
+- Verification:
+  - local `py_compile`, extracted frontend `node --check`, and `git diff --check` passed;
+  - redeployed to 104 and rebuilt all five packages successfully;
+  - restarted `m20pro-real.service`;
+  - `/healthz` OK;
+  - `/api/state` still shows `localization_ok=false`, `pose=null`, fresh lidar and `/scan`, and `task_readiness.code=localization_not_confirmed`;
+  - direct `/api/tasks/start` call is still rejected with HTTP 400 and `localization_not_confirmed`;
+  - service logs after the rejected start had no new `web task published floor goal`;
+  - real Chrome/DevTools task page still shows:
+    - `定位未确认，先在网页定位页完成重定位，再开始任务`;
+    - current F20 task button disabled as `先重定位`;
+    - old map task disabled as `检查地图`;
+    - `当前执行` as `无任务`;
+    - front/rear camera images without default `src`.
 
-### Lidar relay and pointcloud reduction
+### 2026-06-22 23:35 task execution timeline diagnostics
 
-- Current relay node: `src/m20pro_navigation/m20pro_navigation/lidar_relay_node.py`.
-- Purpose:
-  - avoid making every downstream node subscribe directly to heavy factory `/LIDAR/POINTS`;
-  - reduce DDS traffic, memory copies, CPU pressure, and `/dev/shm` stress;
-  - keep one long-lived relay as the controlled bridge between factory DDS and project DDS consumers.
-- Current method:
-  - this is not clustering;
-  - it is stride sampling plus rate limiting;
-  - example: if input cloud has about 48000 points and `max_output_points=12000`, stride is about 4, so roughly every fourth point is copied.
-- Current default limits:
-  - `M20PRO_LIDAR_RELAY_MAX_OUTPUT_POINTS=12000`;
-  - `M20PRO_LIDAR_RELAY_MIN_PUBLISH_INTERVAL_S=0.1`;
-  - relay output is therefore capped around 12000 points per message and about 10 Hz.
-- Why not clustering here:
-  - the navigation chain needs nearest obstacle distance per direction, not object identities;
-  - DBSCAN/Euclidean clustering costs more CPU and has sensitive parameters;
-  - clustering can accidentally remove thin poles, edges, legs, or stair-related geometry;
-  - stride sampling is cheap, predictable, and mainly solves the current stability bottleneck.
+- Motivation:
+  - the earlier field symptom was not only that navigation stopped, but that the frontend made it hard to tell whether the task was waiting for Nav2 accept, navigating, dwelling, advancing, failed, or completed;
+  - for field debugging and interview explanation, the task state machine needs an inspectable event trail, not only a single status string.
+- Backend changes:
+  - added `task_timeline_max_events`;
+  - active task now keeps a bounded `timeline` array;
+  - key events append timeline entries with time, waypoint index, phase, Nav2 goal status, elapsed time when available, and event-specific details;
+  - events currently include:
+    - `task_started`;
+    - `waypoint_goal_sent`;
+    - `nav_accepted`;
+    - `nav_succeeded`;
+    - `nav_interrupted`;
+    - `nav_error`;
+    - `waypoint_dwell_started`;
+    - `waypoint_advanced`;
+    - `task_failed`;
+    - `task_stopped`;
+    - `task_completed`;
+  - completed, failed, or manually stopped tasks save `last_timeline` back into the task record so the run can be reviewed after `active_task` is cleared.
+- Frontend changes:
+  - `当前执行` summary now includes the latest timeline message when a task is active;
+  - task list shows `上次事件` when a task has `last_timeline`.
+- Verification:
+  - local `py_compile`, extracted frontend `node --check`, and `git diff --check` passed;
+  - redeployed to 104 and rebuilt all five packages successfully;
+  - restarted `m20pro-real.service`;
+  - `/healthz` OK;
+  - `/api/state` still shows `localization_ok=false`, `pose=null`, fresh `/scan`, and `task_readiness.code=localization_not_confirmed`;
+  - direct `/api/tasks/start` call is still rejected with HTTP 400 and `localization_not_confirmed`;
+  - service logs after the rejected start had no new `web task published floor goal`;
+  - real Chrome/DevTools opened the task page and confirmed:
+    - current task readiness text remains correct;
+    - task buttons remain disabled while unlocalized;
+    - `当前执行` remains `无任务`;
+    - front/rear camera images still do not auto-load.
 
-### Pointcloud to LaserScan fusion
+### 2026-06-22 23:49 floor-goal send counters
 
-- Current fusion node: `src/m20pro_navigation/m20pro_navigation/pointcloud_fusion.py`.
-- Current real config: `src/m20pro_bringup/config/m20pro_real.yaml`.
-- Main parameters:
-  - `input_cloud_topic: /m20pro/lidar_points_relay`;
-  - `backup_cloud_topic: /m20pro/lidar_points2_relay`;
-  - `output_scan_topic: /scan`;
-  - `min_angle: -3.14159`;
-  - `max_angle: 3.14159`;
-  - `angle_increment: 0.0174533`, about 1 degree;
-  - `min_range: 0.2`;
-  - `max_range: 10.0`;
-  - `height_min: -0.25`;
-  - `height_max: 0.60`;
-  - `robot_radius: 0.28`;
-  - `publish_rate_hz: 10.0`;
-  - `max_points_per_cloud: 6000`;
-  - `min_cloud_interval_s: 0.05`;
-  - `publish_on_cloud_update: false`.
-- Actual point filtering meaning:
-  - points below `height_min` or above `height_max` do not enter `/scan`;
-  - points too near/far do not enter `/scan`;
-  - because `robot_radius=0.28`, the effective near filter is about 0.28 m, not 0.2 m;
-  - accepted points are projected into 2D polar bins;
-  - each angle bin keeps the nearest obstacle distance.
-- If both primary and second lidar relays are fresh:
-  - fusion computes primary and backup scan ranges separately;
-  - final `/scan` takes per-angle nearest obstacle by `np.minimum`;
-  - if the second lidar is absent, startup continues with the primary lidar only.
+- Motivation:
+  - final field validation needs to prove that each waypoint normally publishes exactly one `/m20pro/floor_goal`;
+  - if a goal is re-sent because Nav2 never accepts it, that should be visible as a diagnostic instead of hidden in logs.
+- Backend/frontend changes:
+  - active task now tracks:
+    - `total_goal_send_count`;
+    - `waypoint_goal_send_count`;
+    - `resend_goal_count`;
+  - `active_waypoint` publishes these counters as:
+    - `goal_send_count`;
+    - `total_goal_send_count`;
+    - `resend_goal_count`;
+  - `waypoint_goal_sent` timeline entries include the same counters and whether the send was a resend;
+  - frontend `当前执行` summary shows `目标下发 N次` for the current waypoint.
+- Verification:
+  - local `py_compile`, extracted frontend `node --check`, and `git diff --check` passed;
+  - redeployed to 104 and rebuilt all five packages successfully;
+  - restarted `m20pro-real.service`;
+  - `/healthz` OK;
+  - `/api/state` still shows `localization_ok=false`, `pose=null`, fresh `/scan`, and `task_readiness.code=localization_not_confirmed`;
+  - direct `/api/tasks/start` call is still rejected with HTTP 400 and `localization_not_confirmed`;
+  - service logs after the rejected start had no new `web task published floor goal`;
+  - real Chrome/DevTools task page still shows disabled task buttons and no camera auto-load.
+- Field validation note:
+  - during the next real short-task run, expected normal evidence is:
+    - each waypoint's `goal_send_count` remains `1`;
+    - `resend_goal_count` remains `0`;
+    - timeline shows `waypoint_goal_sent -> nav_accepted -> nav_succeeded -> waypoint_dwell_started/waypoint_advanced`;
+    - if `goal_send_count > 1`, inspect why Nav2 did not accept the first send before tuning navigation behavior.
 
-### Nav2 global planning
+### 2026-06-22 23:58 task start Nav2/costmap readiness gate
 
-- Config file: `src/m20pro_bringup/config/nav2_params_real.yaml`.
-- Planner:
-  - `planner_plugins: ["GridBased"]`;
-  - `plugin: nav2_navfn_planner/NavfnPlanner`;
-  - `use_astar: true`;
-  - `allow_unknown: true`;
-  - `tolerance: 0.5`.
-- Meaning:
-  - global planning is grid-based 2D planning over the map/global costmap;
-  - A* computes a path from current pose to the goal;
-  - this layer answers "where should the robot go globally?" rather than doing close-range collision control.
+- Motivation:
+  - a successful relocalization does not immediately guarantee that Nav2 lifecycle nodes and local/global costmaps have recovered;
+  - if the frontend enables task start during that gap, the task may publish a goal and then stall at `sent`/waiting-for-accept;
+  - task readiness should therefore require the actual navigation execution chain after localization and pose checks pass.
+- Backend changes:
+  - added `task_start_require_nav_ready`;
+  - added `task_start_costmap_timeout_s`;
+  - task readiness now checks navigation readiness after localization, pose, floor, map bounds, and map metadata checks pass;
+  - navigation readiness requires:
+    - fresh `/scan` with finite ranges;
+    - fresh local costmap with valid dimensions;
+    - fresh global costmap with valid dimensions;
+    - Nav2 lifecycle active for `/map_server`, `/controller_server`, `/planner_server`, `/bt_navigator`, and `/waypoint_follower`;
+  - if this layer fails, readiness returns `navigation_not_ready`, and the frontend button label becomes `等导航`.
+- Safety behavior:
+  - when the robot is still unlocalized, readiness still returns `localization_not_confirmed` first;
+  - this avoids confusing the workstation/operator with costmap/Nav2 warnings before relocalization, while still preventing a task from starting after relocalization until Nav2/costmaps are really ready.
+- Verification:
+  - local `py_compile`, extracted frontend `node --check`, and `git diff --check` passed;
+  - redeployed to 104 and rebuilt all five packages successfully;
+  - restarted `m20pro-real.service`;
+  - `/healthz` OK;
+  - because 104 is still `localization_ok=false` and `pose=null`, `/api/state` and `/api/tasks` correctly continue to show `localization_not_confirmed`, not `navigation_not_ready`;
+  - direct `/api/tasks/start` call is still rejected with HTTP 400 and `localization_not_confirmed`;
+  - service logs after the rejected start had no new `web task published floor goal`;
+  - real Chrome/DevTools task page still shows:
+    - task readiness text `定位未确认，先在网页定位页完成重定位，再开始任务`;
+    - current F20 task button disabled as `先重定位`;
+    - old live-map task disabled as `检查地图`;
+    - `当前执行` as `无任务`;
+    - camera images without default `src`.
 
-### Nav2 local controller
+### 2026-06-23 00:20 task execution frontend hardening
 
-- Controller:
-  - `plugin: dwb_core::DWBLocalPlanner`;
-  - `controller_frequency: 20.0`;
-  - `max_vel_x: 0.55`;
-  - `max_vel_theta: 1.10`;
-  - `vx_samples: 16`;
-  - `vtheta_samples: 28`;
-  - `sim_time: 1.2`.
-- DWB behavior:
-  - samples candidate velocity commands;
-  - simulates short future trajectories;
-  - scores them with critics;
-  - chooses the best valid `/cmd_vel`.
-- Current critics:
-  - `RotateToGoal`;
-  - `Oscillation`;
-  - `BaseObstacle`;
-  - `GoalAlign`;
-  - `PathAlign`;
-  - `PathDist`;
-  - `GoalDist`.
-- Important interpretation:
-  - DWB is a local trajectory sampler/scorer;
-  - it does not "understand" objects;
-  - it uses local/global costmap costs to avoid obstacles while trying to stay near the global path and goal direction.
+- Context:
+  - field test showed self-check, relocalization, and waypoint creation could succeed, but task execution was hard to trust:
+    - robot moved some distance but did not clearly reach the marked point;
+    - remaining waypoints did not appear to execute;
+    - frontend did not make it obvious whether the task was waiting for Nav2, dwelling, stuck, failed, or completed.
+- Backend changes:
+  - `/api/state` now includes `last_task_result`, but only when a task has a real `last_error` or `last_timeline`;
+  - this avoids showing old empty `error` records as if they were a meaningful latest failure;
+  - `/m20pro/active_waypoint` now includes:
+    - `robot_pose`;
+    - `goal_pose`;
+    - `nav_status`;
+    - existing distance, phase, elapsed time, send counters, and waypoint metadata;
+  - task readiness top-level state now uses a cached navigation-readiness check after localization/pose are valid;
+  - `/api/tasks/start` still performs a strict live readiness check and does not use the cache.
+- Frontend changes:
+  - added `跟随` map control:
+    - defaults on;
+    - while a task is active, the 2D map follows the robot position;
+    - entering manual pan mode disables following;
+  - active task target is drawn on the map as an orange arrow, separate from saved waypoint markers and robot pose;
+  - `当前执行` summary now shows:
+    - task/waypoint label and index;
+    - phase;
+    - Nav2 status;
+    - robot coordinate;
+    - target coordinate;
+    - distance;
+    - dwell countdown;
+    - per-waypoint goal send count;
+    - latest timeline event;
+  - after a task completes/fails/stops, the panel can show the latest meaningful task result instead of collapsing to an unhelpful empty state.
+- Deployment and verification:
+  - local `py_compile`, extracted frontend `node --check`, and `git diff --check` passed;
+  - deployed to 104 twice after the incremental frontend/result-filter changes;
+  - remote `colcon build` completed for all five packages;
+  - `m20pro-real.service` restarted and became active;
+  - `/api/state` currently shows:
+    - `localization_ok=false`;
+    - `pose=null`;
+    - `floor=F20`;
+    - fresh `/scan`;
+    - no local/global costmap because Nav2 is still gated before relocalization;
+    - `task_readiness.code=localization_not_confirmed`;
+    - `last_task_result=null` after filtering old empty error tasks;
+  - `/api/tasks` currently shows:
+    - old `live_map` task blocked by `selected_map_mismatch`;
+    - current `builtin_F20` task blocked by `localization_not_confirmed`;
+  - direct `/api/tasks/start` for the current F20 task returned HTTP 400 with `localization_not_confirmed`;
+  - service logs after the rejected start had no `web task published floor goal`, so no hidden motion command was sent;
+  - fetched frontend HTML and Chrome `--dump-dom` confirmed deployment of:
+    - `followRobotBtn`;
+    - `taskReadinessSummary`;
+    - `activeTaskSummary`;
+    - camera toggle buttons;
+    - camera images without default `src`;
+    - active waypoint target drawing code.
+- Remaining validation:
+  - moving task validation is intentionally still blocked until the operator completes real frontend relocalization;
+  - do not force a guessed `/initialpose` just to make the test move;
+  - after relocalization, the expected successful task evidence is:
+    - `/api/state.localization_ok=true`;
+    - valid fresh pose;
+    - task readiness becomes `ready`;
+    - Nav2 lifecycle and local/global costmaps are active/fresh;
+    - task execution timeline shows `waypoint_goal_sent -> nav_accepted -> nav_succeeded -> waypoint_dwell_started -> waypoint_advanced`;
+    - each waypoint normally has `goal_send_count=1` and `resend_goal_count=0`;
+    - frontend map follows the robot and shows robot/target/distance consistently.
 
-### Local costmap
+### 2026-06-23 00:31 task interruption state-machine fix
 
-- Local costmap parameters:
-  - `rolling_window: true`;
-  - `width: 5`;
-  - `height: 5`;
-  - `resolution: 0.05`;
-  - `robot_radius: 0.25`;
-  - `plugins: ["obstacle_layer", "inflation_layer"]`.
-- Meaning:
-  - rolling 5 m x 5 m window centered around the robot;
-  - about 2.5 m in every direction from the robot;
-  - 5 cm grid resolution;
-  - roughly 100 x 100 cells.
-- Obstacle layer:
-  - source topic: `/scan`;
-  - `data_type: LaserScan`;
-  - `obstacle_range: 3.0`;
-  - `raytrace_range: 3.5`;
-  - `observation_persistence: 0.3`;
-  - `clearing: true`;
-  - `marking: true`.
-- Inflation layer:
-  - `inflation_radius: 0.40`;
-  - `cost_scaling_factor: 6.0`.
-- Practical meaning:
-  - `/scan` itself can represent obstacles up to 10 m;
-  - local costmap only keeps a 5 m x 5 m local window;
-  - obstacle marking is mainly within 3 m;
-  - obstacles are expanded by about 40 cm so DWB avoids driving too close.
+- Issue found after rechecking the task execution state machine:
+  - `floor_manager` can publish `nav_goal_cancelled...` or `replacing_active_floor_goal...` when a Nav2 goal is cancelled or replaced;
+  - the frontend task executor previously recorded that as `interrupted`, but did not necessarily clear `active_task`;
+  - in the field this can look like the robot moved a short distance and then stopped, while the task remains in a confusing running/waiting state.
+- Fix:
+  - `nav_goal_cancelled...` and `replacing_active_floor_goal...` now enter a single failure stop path;
+  - the task is marked `error`;
+  - `active_task` is cleared;
+  - `last_error`, `last_timeline`, and `updated_at` are persisted into `tasks.json`;
+  - navigation session is reset and costmaps are cleared;
+  - frontend text now says `当前导航被取消/替换，任务已停止，请查看最近事件`.
+- Why this matters:
+  - the task state machine now has explicit terminal handling for:
+    - Nav2 accept timeout;
+    - waypoint timeout;
+    - localization/pose loss;
+    - Nav2 error result;
+    - Nav2 goal cancellation/replacement;
+  - this removes one likely source of silent task hangs.
+- Verification:
+  - local `py_compile`, extracted frontend `node --check`, and `git diff --check` passed;
+  - deployed to 104 and rebuilt all five packages successfully;
+  - `m20pro-real.service` active and 8080 listening;
+  - remote source contains `_fail_active_task_from_nav_status`;
+  - `/api/state` still shows `localization_ok=false`, `pose=null`, fresh lidar and `/scan`, and `task_readiness.code=localization_not_confirmed`;
+  - `/api/tasks/start` for the current F20 task still returns HTTP 400 with `localization_not_confirmed`;
+  - service logs after the rejected start still have no `web task published floor goal`;
+  - frontend preflight API completed successfully in workstation mode:
+    - `ok=true`;
+    - `failures=0`;
+    - `navigation_warnings=2`;
+    - summary `基础自检通过，当前在工位，导航待到测试场地重定位后确认`.
+- Remaining validation:
+  - full moving-task validation is still intentionally blocked because 104 remains unlocalized;
+  - after frontend relocalization succeeds, run one short F20 task and verify the timeline reaches either:
+    - normal completion: `waypoint_goal_sent -> nav_accepted -> nav_succeeded -> dwell/advance`; or
+    - explicit failure with `last_error` and `last_timeline`, never a silent running hang.
 
-### Global costmap
+### 2026-06-23 10:06 frontend task watch script
 
-- Global costmap plugins:
-  - `static_layer`;
-  - `obstacle_layer`;
-  - `inflation_layer`.
-- Current global costmap also consumes `/scan`:
-  - `obstacle_range: 3.0`;
-  - `raytrace_range: 3.5`;
-  - `observation_persistence: 0.3`;
-  - `inflation_radius: 0.40`.
-- Meaning:
-  - static map gives the known building layout;
-  - `/scan` can add short-lived dynamic obstacle marks;
-  - Navfn can re-plan around nearby dynamic obstacles that enter the global costmap.
+- Motivation:
+  - the next real validation must use the actual web frontend, not a direct API shortcut;
+  - if the robot stops again, we need a synchronized record of frontend state, task timeline, and ROS/service logs instead of relying on memory.
+- Added script:
+  - `scripts/104_watch_frontend_task.sh`;
+  - intended flow:
+    1. open `http://10.21.31.104:8080`;
+    2. complete frontend relocalization;
+    3. start the watcher:
+       `./scripts/104_watch_frontend_task.sh 300 short_task`;
+    4. click task start from the real frontend;
+    5. inspect `task_watch_logs/<time>_short_task/`.
+- Script behavior:
+  - read-only;
+  - does not call `/api/tasks/start`;
+  - does not publish `/m20pro/floor_goal`;
+  - does not publish `/cmd_vel`;
+  - polls `/api/state` and `/api/tasks`;
+  - records `m20pro-real.service` journal through SSH;
+  - writes:
+    - `summary.tsv`;
+    - `state.jsonl`;
+    - `tasks.jsonl`;
+    - `m20pro-real.journal.log`;
+    - `meta.txt`.
+- Verification:
+  - `bash -n scripts/104_watch_frontend_task.sh` passed;
+  - local `py_compile` for the touched Python nodes passed;
+  - `git diff --check` passed;
+  - dry-run for 5 seconds succeeded and captured the current guarded state:
+    - `localization=false`;
+    - `readiness=localization_not_confirmed`;
+    - no active task;
+  - dry-run output was removed and `task_watch_logs/` was added to `.gitignore`;
+  - script and README entry were synced to 104 without restarting the real stack;
+  - remote `bash -n /home/user/m20pro_real_ros2_ws/scripts/104_watch_frontend_task.sh` passed.
+- Important observation:
+  - `/api/state` may contain an old/stale pose even while `localization_ok=false`;
+  - task readiness correctly prioritizes `localization_not_confirmed`, so a pose existing in JSON is not enough to start navigation.
 
-### Startup gate and readiness logic
+### 2026-06-23 10:32 task execution pre-move hardening and real frontend check
 
-- Nav2 is launched with `autostart: False`.
-- `m20pro_nav2_startup_gate` waits for:
-  - `/map`;
-  - fresh `/scan`;
-  - `localization_ok=true`;
-  - valid `/m20pro_tcp_bridge/map_pose`;
-  - usable TF between `map` and `m20pro_base_link`.
-- Purpose:
-  - avoid starting Nav2/costmaps while the robot is still unlocalized;
-  - reduce misleading self-check failures;
-  - make missing `/scan` a real fault, not something explained away by workstation testing.
+- Field context:
+  - user reported that self-check, relocalization, and waypoint creation now work, but executing a multi-point task moved forward briefly, did not clearly reach the marked point, did not continue through remaining points, and the frontend did not show useful live execution feedback.
+- Additional task-state hardening:
+  - fixed a race in `_dispatch_active_goal`:
+    - before: the web node published `/m20pro/floor_goal` first, then wrote `active_task.last_nav_goal_status=sent`;
+    - if `floor_manager`/Nav2 replied very quickly with `nav_goal_accepted`, that accepted state could be overwritten back to `sent`;
+    - after: the web node records the waypoint as `sent` and appends the timeline entry before publishing the ROS goal.
+  - invalid waypoint coordinates now fail the active task explicitly and persist `last_error`/`last_timeline`, instead of returning silently.
+  - active-task tick now treats stale map pose as localization loss:
+    - it checks `pose_age_sec` against `task_start_pose_timeout_s`;
+    - if pose is missing, stale, or `localization_ok=false`, the task stops after the localization-loss timeout and records a clear reason.
+- Frontend stale-pose hardening:
+  - `/api/state` now exposes:
+    - `pose_age_sec`;
+    - `pose_timeout_s`;
+    - `pose_fresh`.
+  - the frontend only draws the robot arrow, follows the robot, centers on the robot, and uses "current robot pose" for marking/relocalization when `pose_fresh=true`.
+  - when `Location=1` or pose is stale, the pose panel shows it as a last/old pose, not a live pose.
+  - scan overlay is not drawn from a stale robot pose outside the localization draft mode; this avoids a misleading "live" scan/map alignment.
+- Real 104 deployment:
+  - redeployed to `/home/user/m20pro_real_ros2_ws`;
+  - rebuilt all five packages successfully;
+  - restarted `m20pro-real.service`;
+  - service is active and 8080 is listening.
+- Post-deploy observations:
+  - immediately after restart there was a short expected web startup gap;
+  - 104 then recovered to:
+    - `localization_ok=true`;
+    - fresh pose with `pose_fresh=true`;
+    - `navigation_status=location=0 obstacle=0`;
+    - `task_readiness.code=ready`;
+    - Nav2 lifecycle active;
+    - fresh `/scan`, local costmap, and global costmap.
+  - before recovery, the readiness gate correctly showed `navigation_not_ready` or `pose_invalid_or_stale` and did not allow task start.
+- Real frontend non-moving validation:
+  - opened `http://10.21.31.104:8080` with real Chrome/CDP;
+  - switched to the actual `任务` tab, without calling `/api/tasks/start` directly;
+  - frontend showed:
+    - status `已连接`;
+    - localization `正常`;
+    - pose text with `实时 <1s前`;
+    - task readiness `定位、位姿和导航链路已就绪`;
+    - current execution `无任务`;
+    - old `live_map` task disabled as `检查地图`;
+    - current `builtin_F20` task enabled as `开始执行`;
+    - camera images still have no default `src`, so video streams are not auto-loaded.
+  - `104_watch_frontend_task.sh 8 ready_after_pose_fresh_patch` recorded continuous ready state and no active task.
+  - service logs since deployment showed no hidden `web task published floor goal`, no Nav2 goal, and no replacement/cancel event before a deliberate task start.
+- Current safety gate:
+  - the stack is ready for a short frontend-started moving task, but movement has not been started by Codex;
+  - before starting motion, operator must explicitly confirm:
+    - site is safe;
+    - someone is watching the robot;
+    - hand-controller emergency stop is ready.
+- Next validation once confirmed:
+  - start `./scripts/104_watch_frontend_task.sh 300 frontend_task_run`;
+  - click the enabled current F20 task from the real frontend task page;
+  - expected normal timeline:
+    - `task_started`;
+    - `waypoint_goal_sent`;
+    - `nav_accepted`;
+    - `nav_succeeded`;
+    - `waypoint_dwell_started`;
+    - `waypoint_advanced`;
+    - `task_completed`.
+  - expected per-waypoint counters:
+    - `goal_send_count=1`;
+    - `resend_goal_count=0`.
+  - if the robot stops, the expected result is an explicit `last_error` and preserved `last_timeline`, never a silent active-task hang.
 
-### Interview-ready explanation
+### 2026-06-23 10:43 task start status gate hardening
 
-If asked "How does your robot navigate and avoid obstacles?", the concise answer is:
+- Field context:
+  - after real frontend non-moving validation, noticed one subtle safety issue:
+    - task readiness was mostly based on localization/map/Nav2 live conditions;
+    - an old task with `status=error` could still look startable if the live robot chain was ready;
+    - this could cause现场误点一个上次异常停止的旧任务。
+- Frontend hardening:
+  - task start button now combines two gates:
+    - task's own lifecycle status;
+    - live task readiness from localization, pose, map, scan, costmaps, and Nav2.
+  - allowed restart statuses:
+    - `ready`: show `开始执行`;
+    - `stopped`: show `从头执行`;
+    - `completed`: show `重新执行`.
+  - blocked statuses:
+    - `error`: show `先重新生成`;
+    - `invalid`: show `任务无效`;
+    - `running` or unknown states: disabled.
+  - task list execution-condition text now prioritizes the task status block reason, so the page does not misleadingly say a failed old task is ready.
+- Backend hardening:
+  - `/api/tasks/start` now applies the same status gate;
+  - `error` tasks are rejected with `任务上次执行异常停止，请重新生成任务后再执行`;
+  - `invalid/running/unknown` statuses are rejected before any navigation reset or goal dispatch.
+- Verification:
+  - `python3 -m py_compile` passed for `web_dashboard_node.py`, `floor_manager.py`, and `pointcloud_fusion.py`;
+  - frontend JS extracted from `INDEX_HTML` passed `node --check`;
+  - `bash -n scripts/104_watch_frontend_task.sh` passed;
+  - `git diff --check` passed.
 
-> We take the factory 3D lidar pointcloud, relay it through a long-lived project node, down-sample and rate-limit it to reduce DDS and CPU pressure, then convert it into a 360-degree LaserScan. Nav2 uses this `/scan` in local and global costmaps. Global planning is Navfn with A*, while local control uses DWB to sample and score candidate trajectories against the costmap, path alignment, goal alignment, oscillation, and obstacle costs. The local costmap is a 5 m by 5 m rolling window at 5 cm resolution, with 3 m obstacle marking and 40 cm inflation. We also added a startup gate so Nav2 only activates after map, scan, localization, pose, and TF are ready.
+### 2026-06-23 11:05 task start post-reset readiness gate
 
-If asked "Why not cluster the pointcloud?", the answer is:
+- Field context:
+  - user reported that task execution previously moved a short distance, did not clearly go to the marked point, did not continue through remaining waypoints, and frontend feedback was insufficient.
+  - Before a task starts, the web node intentionally sends stop/zero commands and clears Nav2 costmaps to remove stale navigation state.
+  - Risk found:
+    - the old flow only slept for `task_start_settle_s=0.5s` after reset/clear;
+    - if local/global costmap or Nav2 lifecycle had not recovered yet, the first `/m20pro/floor_goal` could be sent too early.
+- Backend hardening:
+  - added `task_start_nav_ready_after_reset_timeout_s` default `10.0`;
+  - added `task_start_nav_ready_poll_s` default `0.25`;
+  - after `_reset_navigation_session("before_start_task", clear_costmaps=True)`, `/api/tasks/start` now waits until:
+    - fresh `/scan`;
+    - fresh `/local_costmap/costmap`;
+    - fresh `/global_costmap/costmap`;
+    - `/map_server`, `/controller_server`, `/planner_server`, `/bt_navigator`, `/waypoint_follower` are all active.
+  - if the chain does not recover within the timeout:
+    - task is not marked `running`;
+    - no `/m20pro/floor_goal` is published;
+    - API returns `navigation_not_ready_after_reset` with detailed readiness payload.
+  - the post-reset gate now also requires `/scan`, `/local_costmap/costmap`, and `/global_costmap/costmap` to have `last_update >= reset_started_at`;
+    - this prevents old pre-clear costmap snapshots from being mistaken as recovered navigation state.
+- Cache hardening:
+  - clearing task costmaps now invalidates the cached navigation-readiness result;
+  - the post-reset gate always reads live readiness instead of a stale cached ready state.
+- Expected field effect:
+  - avoids "清图/复位后抢跑";
+  - if Nav2 or costmap is actually stuck, frontend will show a startup failure before motion rather than letting the robot enter a silent half-running state.
+- Verification:
+  - `python3 -m py_compile` passed for `web_dashboard_node.py`, `floor_manager.py`, and `pointcloud_fusion.py`;
+  - frontend JS extracted from `INDEX_HTML` passed `node --check`;
+  - `bash -n scripts/104_watch_frontend_task.sh` passed;
+  - `git diff --check` passed.
 
-> For the Nav2 costmap path, clustering is not necessary because the controller mainly needs nearest obstacle distance by direction, not object identity. Clustering would add CPU cost and parameter sensitivity, and could accidentally remove thin obstacles. We therefore use cheap stride sampling and LaserScan binning first. If future perception needs object-level reasoning, clustering should be a separate perception branch, not the base safety chain.
+### 2026-06-23 11:35 task floor-known gate before execution
 
-If asked "What was the engineering difficulty?", the answer is:
+- Field context:
+  - task execution sends floor-aware goals through `/m20pro/floor_goal`;
+  - the waypoint itself usually carries a floor such as `F20`;
+  - if the runtime has not yet received `/m20pro/current_floor`, the system cannot prove that the selected task floor matches the robot's current floor.
+- Hardening:
+  - added `task_start_require_current_floor_known` default `true`;
+  - task readiness now returns `floor_unknown` when the first waypoint has a floor but current floor is empty;
+  - frontend task button displays `检查楼层` for this state;
+  - `/api/tasks/start` applies the same backend gate before any reset, costmap clear, active task creation, or `/m20pro/floor_goal` publish.
+- Why this matters:
+  - prevents a task from starting when localization looks superficially valid but the floor context is missing;
+  - keeps the frontend hint and backend enforcement consistent, avoiding a misleading clickable task.
+- Verification:
+  - `python3 -m py_compile` passed for `web_dashboard_node.py`, `floor_manager.py`, and `pointcloud_fusion.py`;
+  - frontend JS extracted from `INDEX_HTML` passed `node --check`;
+  - `bash -n scripts/104_watch_frontend_task.sh` passed;
+  - `python3 scripts/check_preflight_policy.py` passed;
+  - `git diff --check` passed.
 
-> The hard part was not just running Nav2. The factory lidar topic was large and DDS-sensitive on 104, sometimes visible in the graph but not delivering samples to project subscribers. We stabilized the chain by introducing a long-lived lidar relay, reducing pointcloud load, adding diagnostics, making `/scan` the primary health signal, and gating Nav2 startup until perception and localization were actually ready.
+### 2026-06-23 11:50 task execution observability hardening
 
-If asked "What would you optimize next?", the answer is:
+- Field context:
+  - real frontend task page passed non-moving validation:
+    - selected map is `builtin_F20`;
+    - three F20 task points are shown;
+    - old `error` tasks are disabled with `先重新生成`;
+    - current `ready` task is disabled as `先重定位` when `localization_ok=false`.
+  - User's latest field symptom was not a preflight/relocalization failure anymore, but task execution:
+    - robot moved a short distance;
+    - it did not clearly go to the marked waypoint;
+    - it appeared to stop without explaining whether Nav2 was still running, stuck, recovering, or had returned a result.
+- Floor manager observability:
+  - added throttled Nav2 `NavigateToPose` feedback forwarding through `/m20pro/stair_status`;
+  - new status format:
+    - `nav_goal_feedback label=floor_goal distance_remaining=... navigation_time=... estimated_time_remaining=... recoveries=... pose_x=... pose_y=... pose_yaw=...`;
+  - feedback is rate-limited by `nav_feedback_status_period_s` default `1.0s`;
+  - this does not change the motion command, goal frame, or waypoint success condition.
+- Web task state:
+  - web dashboard parses `nav_goal_feedback` into structured `last_nav_feedback`;
+  - active waypoint payload now includes `nav_feedback`;
+  - frontend summary displays:
+    - web-computed distance to the target point;
+    - Nav2-reported remaining distance;
+    - Nav2 navigation time;
+    - recovery count.
+  - timeline records the first feedback and recovery-count changes, instead of logging every 1 Hz feedback tick.
+- Frontend testability:
+  - added read-only `window.m20proDebug.snapshot()` for browser/CDP validation of:
+    - latest robot state;
+    - selected map;
+    - annotations;
+    - tasks;
+    - readiness;
+    - current view state.
+- Watcher:
+  - `scripts/104_watch_frontend_task.sh` summary now includes:
+    - `nav_remaining`;
+    - `recoveries`.
+  - This gives a compact field trace for whether the robot is converging to the waypoint or stuck/recovering.
+- Verification:
+  - `ActionClient.send_goal_async` signature on this ROS 2 environment supports `feedback_callback`;
+  - `python3 -m py_compile` passed for `web_dashboard_node.py`, `floor_manager.py`, and `pointcloud_fusion.py`;
+  - frontend JS extracted from `INDEX_HTML` passed `node --check`;
+  - `bash -n scripts/104_watch_frontend_task.sh` passed;
+  - `git diff --check` passed.
 
-> The next optimization is not generic Python multi-threading. Better options are earlier reduction, smarter angle-bin compression before publishing, reducing unused far-range work for local avoidance, and eventually moving pointcloud-to-scan fusion to C++ if profiling shows Python/Numpy is still the bottleneck.
+### 2026-06-23 12:05 task waypoint consistency gate
+
+- Field context:
+  - Real task data may survive across map selections and code deployments;
+  - a task can look valid by ID count alone while still containing points from another map, old `live_map` points, empty floor fields, invalid coordinates, or points outside the selected occupancy grid.
+- Hardening:
+  - added a shared task-annotation validation gate used by:
+    - task list readiness;
+    - task creation;
+    - `/api/tasks/start`.
+  - The gate checks every waypoint, not only the first waypoint:
+    - all annotation IDs still exist;
+    - every waypoint belongs to the task `map_id`;
+    - floor field is present;
+    - one task does not mix multiple floors;
+    - pose values are finite/plausible;
+    - non-`live_map` waypoints are inside the selected map bounds.
+  - If the check fails, the frontend shows a concrete reason such as:
+    - `waypoint_map_mismatch`;
+    - `waypoint_floor_missing`;
+    - `waypoint_floor_mixed`;
+    - `waypoint_pose_invalid`;
+    - `waypoint_out_of_map`.
+- Expected field effect:
+  - avoids executing a stale task whose visible name and point count look correct but whose underlying points do not match the current F20 map.
+  - If a task is unsafe to execute, the page says why before any navigation reset or `/m20pro/floor_goal` publish.
+- Verification:
+  - `python3 -m py_compile` passed for `web_dashboard_node.py`, `floor_manager.py`, and `pointcloud_fusion.py`;
+  - frontend JS extracted from `INDEX_HTML` passed `node --check`;
+  - `bash -n scripts/104_watch_frontend_task.sh` passed;
+  - `python3 scripts/check_preflight_policy.py` passed;
+  - `git diff --check` passed.
+
+### 2026-06-23 12:12 waypoint pose validation format fix
+
+- Real 104 non-moving validation found an over-strict check:
+  - task waypoint poses stored by the frontend contain `x/y/z/yaw`;
+  - robot live poses contain `x/y/z/yaw/yaw_deg`;
+  - the first implementation reused the robot-pose validator and incorrectly flagged valid waypoints as `waypoint_pose_invalid`.
+- Fix:
+  - added a dedicated waypoint pose validator that requires only finite/plausible `x/y/z/yaw`;
+  - kept robot live-pose validation strict, because live localization should still carry `yaw_deg` and freshness fields.
+- 104 verification after deploy:
+  - current F20 task returned to `ready`;
+  - its block reason is correctly `localization_not_confirmed`, not waypoint validation;
+  - no `/m20pro/floor_goal` was published during this validation.
+
+### 2026-06-23 midday task execution chain hardening
+
+- Field symptom from the real frontend workflow:
+  - self-check, frontend relocalization, and adding task points can now succeed;
+  - starting a task made the robot move a short distance, but the motion did not clearly match the marked waypoint;
+  - the remaining waypoints did not appear to execute;
+  - the frontend showed a planned route to the first point, but did not make the live robot pose, Nav2 feedback, dwell state, or stuck reason obvious enough.
+- Important backend fix:
+  - changed the web dashboard data lock from `threading.Lock()` to `threading.RLock()`;
+  - this prevents the task dispatch loop from deadlocking when a locked code path calls helpers such as `_active_annotation()` that also need the same lock;
+  - without this, the task state machine can look like it has "stopped" even though the frontend/API process is still alive.
+- Runtime task diagnostics added:
+  - `/api/state` now exposes `pose_history`;
+  - `/m20pro/active_waypoint` carries robot pose, goal pose, web-computed distance, Nav2 feedback, send counters, progress/stall fields, and status message;
+  - frontend draws:
+    - robot pose history;
+    - active task target;
+    - Nav2 feedback pose;
+    - current active waypoint summary.
+  - the task panel now shows enough information to distinguish:
+    - waiting for Nav2 accept;
+    - navigating;
+    - near-goal but waiting for Nav2 result;
+    - dwelling at a reached waypoint;
+    - stalled/no progress;
+    - failed/completed.
+- Stuck-task safeguards:
+  - if Nav2 never accepts a sent waypoint, the task fails with an explicit accept-timeout reason;
+  - if the robot is inside the goal tolerance but Nav2 never returns success, the task fails with a near-goal/no-result reason;
+  - if the robot has no meaningful pose movement or distance convergence for too long, the task first warns and then stops;
+  - yaw-only movement now counts as progress, so the system does not falsely declare "stalled" while the robot is rotating in place.
+- Task retry behavior:
+  - tasks in `error` status can be started again from the beginning;
+  - the prior timeline/error is retained so the previous failure remains reviewable instead of disappearing.
+- Readiness regression fixed:
+  - an error/ready task is no longer blocked merely because its status is not exactly the old expected status;
+  - it is blocked only by real readiness gates such as localization missing, pose stale, map mismatch, floor mismatch, invalid waypoint, or Nav2/costmap not ready.
+- Real 104 non-moving validation:
+  - `m20pro-real.service` is active and the frontend `/healthz` endpoint returns OK;
+  - current state is intentionally blocked for motion:
+    - `selected_map_id=builtin_F20`;
+    - `floor=F20`;
+    - `localization_ok=false`;
+    - `pose=null`;
+    - task readiness is `localization_not_confirmed`.
+  - lidar relay, `/scan`, odom, battery, map, and current-floor topics are fresh;
+  - current F20 task is visible but disabled as `先重定位`;
+  - old/mismatched tasks are disabled with their specific readiness reason;
+  - Chrome headless opened the real frontend and confirmed:
+    - the page contains the new `跟随` control;
+    - the task page says `定位未确认，先在网页定位页完成重定位，再开始任务`;
+    - the current F20 task button is disabled as `先重定位`;
+    - `当前执行` shows `无任务`;
+    - no hidden task was started and no `/m20pro/floor_goal` was published during this check.
+- Field validation rule:
+  - do not start a task from the terminal or API while `localization_ok=false` or `pose=null`;
+  - next moving validation must be done from the real frontend after the operator confirms:
+    - the robot is in the test field and has clearance around it;
+    - frontend relocalization has succeeded;
+    - `/api/state.pose` is non-null and fresh;
+    - task readiness becomes `ready`;
+    - Nav2/costmaps are active.
+- Next moving-task evidence to collect:
+  - run `scripts/104_watch_frontend_task.sh 300 frontend_task_field_run` before pressing the frontend task start button;
+  - expected normal timeline per waypoint:
+    - `waypoint_goal_sent`;
+    - `nav_accepted`;
+    - `nav_feedback`;
+    - `nav_succeeded`;
+    - `waypoint_dwell_started` or `waypoint_advanced`;
+    - final `task_completed`.
+  - if the robot moves to a wrong place, compare the saved waypoint `goal_pose`, robot `pose_history`, Nav2 `feedback pose`, map id, floor, and map metadata before tuning controller parameters.
+
+### 2026-06-23 midday Nav2 feedback visibility fix
+
+- Issue found during post-hardening review:
+  - `floor_manager` was publishing `nav_goal_feedback` through `/m20pro/stair_status`;
+  - the web dashboard parsed the feedback and updated an in-memory copy of `active_task`;
+  - however, it did not save that updated `active_task` back into `settings.json`;
+  - `/api/state` reads from the saved web state, so the frontend could still fail to show live Nav2 remaining distance, feedback pose, navigation time, or recovery count during a task.
+- Fix:
+  - `_update_active_task_from_nav_feedback()` now saves `settings.json` after updating `last_nav_feedback`;
+  - the frontend task panel and map can now receive Nav2 feedback through normal polling.
+- Verification:
+  - local checks passed:
+    - `python3 -m py_compile` for `web_dashboard_node.py`, `floor_manager.py`, and `pointcloud_fusion.py`;
+    - extracted frontend JS `node --check`;
+    - `bash -n scripts/104_watch_frontend_task.sh`;
+    - `python3 scripts/check_preflight_policy.py`;
+    - `git diff --check`.
+  - deployed to 104 `/home/user/m20pro_real_ros2_ws`;
+  - remote `colcon build --symlink-install` finished all five packages;
+  - restarted `m20pro-real.service`;
+  - `/healthz` returned OK;
+  - `/api/state` after restart showed:
+    - `floor=F20`;
+    - `localization_ok=false`;
+    - `pose=null`;
+    - `task_readiness.code=localization_not_confirmed`;
+    - lidar relay, `/scan`, odom, `/map`, and current-floor topics fresh.
+  - real Chrome headless opened the deployed frontend and confirmed:
+    - `跟随` control present;
+    - task page still blocks the current F20 task as `先重定位`;
+    - `当前执行` remains `无任务`;
+    - Nav2 feedback display logic is present in the rendered page.
+  - read-only watcher run:
+    - `task_watch_logs/20260623_120618_no_motion_after_feedback_fix`;
+    - 20 seconds of polling stayed at `localization_not_confirmed`;
+    - no active task, no active waypoint, and no goal send occurred.
+- Current safe boundary:
+  - 104 is healthy but intentionally not allowed to execute a task until frontend relocalization succeeds;
+  - the next real moving test should start the watcher first, then press the task start button from the frontend only after `task_readiness.ready=true`.
+
+### 2026-06-23 midday near-goal and stale-success guards
+
+- Issue found during task-state review:
+  - `_tick_active_task()` previously entered `near_goal_waiting_nav2` whenever the robot pose was already inside `goal_reached_tolerance_m`;
+  - if the current waypoint had not actually been published to `/m20pro/floor_goal`, Nav2 would have no goal to accept or succeed, so the frontend could wait forever with a misleading "near target" message;
+  - this matches a class of field symptoms where the robot appears to stop and the page does not explain whether Nav2 ever received the point.
+- Fix:
+  - near-goal waiting now requires all of:
+    - robot distance is inside `goal_reached_tolerance_m`;
+    - `last_goal_annotation_id` matches the current waypoint;
+    - `last_nav_goal_status` is `sent` or `accepted`.
+  - if those are not true, the dispatcher still publishes the current waypoint first, so Nav2 must produce an explicit accept/feedback/success/failure path.
+- Second guard:
+  - `_complete_active_waypoint_from_nav_result()` now ignores a `nav_goal_succeeded` event unless the current waypoint is the one that was last sent and its status is `sent` or `accepted`;
+  - ignored success events are recorded as `忽略非当前任务点 Nav2 成功事件`;
+  - this prevents a late/stale Nav2 success event from accidentally advancing the active task to the next waypoint.
+- Verification:
+  - local checks passed:
+    - `python3 -m py_compile` for `web_dashboard_node.py`, `floor_manager.py`, and `pointcloud_fusion.py`;
+    - extracted frontend JS `node --check`;
+    - `bash -n scripts/104_watch_frontend_task.sh`;
+    - `python3 scripts/check_preflight_policy.py`.
+  - deployed to 104 and rebuilt all five packages successfully;
+  - restarted `m20pro-real.service`;
+  - `/healthz` OK after the web dashboard came back up;
+  - `/api/state` shows:
+    - `floor=F20`;
+    - `localization_ok=false`;
+    - `pose=null`;
+    - `task_readiness.code=localization_not_confirmed`;
+    - fresh lidar relay, `/scan`, odom, `/map`, current-floor, localization, and navigation-status topics.
+  - read-only watcher run:
+    - `task_watch_logs/20260623_121200_no_motion_after_near_goal_guard`;
+    - 20 seconds stayed blocked at `localization_not_confirmed`;
+    - no active task, no active waypoint, and no goal send occurred.
+- Field-test implication:
+  - if the first task point is very close to the robot, the system will still force a real Nav2 goal lifecycle instead of silently waiting for a success that can never arrive;
+  - if the task still stops, the timeline should now identify whether the stop was accept-timeout, near-goal/no-result, stale success ignored, Nav2 failure, or stall.
+
+### 2026-06-23 midday task-chain regression guards
+
+- Motivation:
+  - after several task execution fixes, the risk shifts from "unknown bug" to "future edit accidentally removes a critical guard";
+  - because this project is often debugged under battery/time pressure, important task-chain invariants should be checked by a fast offline script.
+- Added to `scripts/check_preflight_policy.py`:
+  - web dashboard task state must use `threading.RLock()` to avoid dispatch deadlocks;
+  - Nav2 feedback updates must save `settings.json`, so `/api/state` and the frontend can show live progress;
+  - near-goal waiting must require that the current waypoint has already been sent to Nav2 and is in `sent` or `accepted`;
+  - Nav2 success must not advance a task unless it matches the active sent waypoint;
+  - `scripts/104_watch_frontend_task.sh` must record `nav_remaining` and `recoveries`.
+- Verification:
+  - local `python3 scripts/check_preflight_policy.py` passes and now reports the new task-chain checks as OK;
+  - local `py_compile`, extracted frontend JS `node --check`, `bash -n scripts/104_watch_frontend_task.sh`, and `git diff --check` passed;
+  - deployed to 104 and rebuilt all five packages successfully;
+  - 104 local `python3 scripts/check_preflight_policy.py` also passed;
+  - restarted `m20pro-real.service`;
+  - `/healthz` OK after restart;
+  - `/api/state` returned:
+    - `floor=F20`;
+    - `localization_ok=false`;
+    - `pose=null`;
+    - `task_readiness.code=localization_not_confirmed`;
+    - no active task and no active waypoint;
+    - lidar relay, `/scan`, odom, map, floor, localization, and navigation-status topics fresh.
+- Current validation boundary:
+  - this proves the new guards are present and deployed;
+  - it still does not replace the required field run from the real frontend after successful relocalization.
+
+### 2026-06-23 midday watcher field evidence upgrade
+
+- Motivation:
+  - the next required validation is a real frontend task run in the field;
+  - the watcher already saved full `/api/state` JSONL, but the TSV summary did not expose enough columns to quickly answer:
+    - is the robot moving toward the saved task point?
+    - is Nav2 feedback pose close to the web robot pose?
+    - is the target coordinate actually the point the user marked?
+    - did the waypoint resend, stall, or fail after a timeline event?
+- `scripts/104_watch_frontend_task.sh` summary now records:
+  - robot pose: `robot_x`, `robot_y`, `robot_yaw`;
+  - goal pose: `goal_x`, `goal_y`, `goal_yaw`;
+  - Nav2 feedback pose: `nav_pose_x`, `nav_pose_y`, `nav_pose_yaw`;
+  - task dynamics: `nav_remaining`, `recoveries`, `goal_sends`, `resends`, `stall_age`;
+  - context: `last_event`, `last_result`, and `message`.
+- Regression policy:
+  - `scripts/check_preflight_policy.py` now checks that the watcher keeps the new evidence columns and still records task timeline/result context.
+- Verification:
+  - local checks passed:
+    - `bash -n scripts/104_watch_frontend_task.sh`;
+    - `python3 scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile` for the policy script and touched Python nodes;
+    - extracted frontend JS `node --check`;
+    - `git diff --check`.
+  - local watcher smoke run:
+    - `task_watch_logs/20260623_122046_watcher_columns_smoke`;
+    - TSV header contains the new robot/goal/Nav2 pose columns;
+    - current line correctly shows `localization_not_confirmed` and blank pose fields because the robot is not localized.
+  - deployed to 104 and rebuilt all five packages successfully;
+  - 104 local `python3 scripts/check_preflight_policy.py` passed;
+  - 104 local watcher smoke run:
+    - `/home/user/m20pro_real_ros2_ws/task_watch_logs/20260623_122501_remote_watcher_columns_smoke`;
+    - ran read-only against `http://127.0.0.1:8080`;
+    - reported `localization_not_confirmed`, no active task, and no active waypoint.
+- Field-test implication:
+  - during the next real task run, `summary.tsv` should be enough for a first-pass diagnosis:
+    - compare `goal_x/y/yaw` with the point marked in the frontend;
+    - compare `robot_x/y/yaw` and `nav_pose_x/y/yaw` while moving;
+    - watch `distance` and `nav_remaining` for convergence;
+    - inspect `goal_sends` and `resends` for duplicate/accept problems;
+    - inspect `last_event`, `last_result`, and `message` for the exact stop reason.
+
+### 2026-06-23 midday watcher pose-error metrics
+
+- Motivation:
+  - the task execution complaint is fundamentally about point accuracy: the robot moved, but not obviously to the marked point;
+  - during field testing, manually calculating coordinate errors from TSV columns wastes time and can hide the first failure mode.
+- `scripts/104_watch_frontend_task.sh` now calculates:
+  - `robot_goal_error`: planar distance between frontend robot pose and current task goal;
+  - `nav_goal_error`: planar distance between Nav2 feedback pose and current task goal;
+  - `robot_nav_error`: planar distance between frontend robot pose and Nav2 feedback pose.
+- How to read these during the next field run:
+  - if `robot_goal_error` and `nav_goal_error` both decrease, navigation is physically converging;
+  - if `nav_goal_error` decreases but `robot_goal_error` does not, inspect frontend pose source / `/m20pro_tcp_bridge/map_pose`;
+  - if `robot_goal_error` decreases but `nav_goal_error` does not, inspect Nav2 feedback/current_pose or action state;
+  - if both stay large while `goal_sends=1` and `nav=accepted`, the controller/costmap layer is the likely focus;
+  - if `goal_x/y` is wrong, the issue is task point storage/map-frame consistency before Nav2.
+- Regression policy:
+  - `scripts/check_preflight_policy.py` now checks that the watcher keeps `robot_goal_error`, `nav_goal_error`, and `robot_nav_error`.
+- Verification:
+  - local checks passed:
+    - `bash -n scripts/104_watch_frontend_task.sh`;
+    - `python3 scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile` for policy/web/floor/pointcloud files.
+  - local smoke run:
+    - `task_watch_logs/20260623_122416_watcher_error_columns_smoke`;
+    - TSV header includes the three pose-error fields;
+    - current row correctly remains `localization_not_confirmed`.
+  - deployed to 104 and rebuilt all five packages successfully;
+  - 104 local `python3 scripts/check_preflight_policy.py` passed;
+  - 104 local smoke run:
+    - `/home/user/m20pro_real_ros2_ws/task_watch_logs/20260623_122814_remote_watcher_error_columns_smoke`;
+    - TSV header includes the pose-error fields;
+    - current state remains safely blocked: `localization_not_confirmed`, no active task, no active waypoint.
+
+### 2026-06-23 midday frontend live pose-error metrics
+
+- Motivation:
+  - the watcher can now compute pose errors after/during a field run;
+  - the operator also needs the same first-pass signal directly in the frontend while the task is running, without opening TSV files.
+- Frontend task summary now computes and displays:
+  - `狗差`: distance from frontend robot pose to current goal pose;
+  - `Nav2差`: distance from Nav2 feedback pose to current goal pose;
+  - `位姿差`: distance between frontend robot pose and Nav2 feedback pose.
+- Implementation:
+  - added `planarError(a, b)` helper in the embedded frontend JS;
+  - added `navFeedbackPose(feedback)` helper for `pose_x/pose_y/pose_yaw`;
+  - active task summary reuses the same `robot_pose`, `goal_pose`, and `nav_feedback` data already published by `/api/state`.
+- Regression policy:
+  - `scripts/check_preflight_policy.py` now checks that:
+    - the frontend has the planar error helper;
+    - it computes `robotGoalError`, `navGoalError`, and `robotNavError`;
+    - the task summary keeps the labels `狗差`, `Nav2差`, and `位姿差`.
+- Verification:
+  - local checks passed:
+    - extracted frontend JS `node --check`;
+    - `python3 scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile` for touched Python files;
+    - `git diff --check`.
+  - deployed to 104 and rebuilt all five packages successfully;
+  - restarted `m20pro-real.service`;
+  - 104 local policy check passed;
+  - `curl http://10.21.31.104:8080/` confirmed the deployed page contains `planarError`, `navFeedbackPose`, `狗差`, `Nav2差`, and `位姿差`;
+  - Chrome headless DOM confirmed:
+    - task readiness is still `定位未确认...`;
+    - current F20 task button is disabled as `先重定位`;
+    - `当前执行` shows `无任务`;
+    - the deployed JS contains the new live pose-error labels.
+- Current safe boundary:
+  - 104 remains `localization_ok=false`, `pose=null`, no active task, no active waypoint;
+  - the frontend changes are ready for the next localized field run but have not yet been validated during motion.
+
+### 2026-06-23 midday watcher offline analyzer
+
+- Motivation:
+  - watcher now records enough data for task execution diagnosis, but manually reading long `summary.tsv`/JSONL/journal files is slow during field testing;
+  - the next field run needs an immediate first-pass answer: did the task start, which waypoint was active, did errors decrease, did Nav2 accept/succeed, did we resend/stall/recover, and what is the likely blocker?
+- Added:
+  - `scripts/104_analyze_frontend_task_watch.py`;
+  - input is a directory produced by `scripts/104_watch_frontend_task.sh`;
+  - the analyzer reads:
+    - `summary.tsv`;
+    - `state.jsonl`;
+    - `m20pro-real.journal.log`;
+    - optional `meta.txt`.
+- Analyzer output includes:
+  - run metadata and sample count;
+  - latest floor/localization/readiness/active-task state;
+  - journal counts for floor-goal publishes, Nav2 accepted/feedback/succeeded/errors;
+  - per-waypoint phase/nav state, min robot-to-goal error, min Nav2-to-goal error, min robot-to-Nav2 pose difference, goal send count, resends, recoveries, and stall age;
+  - findings such as:
+    - no active task observed;
+    - no map pose observed;
+    - task readiness never became ready;
+    - goal resend observed;
+    - stall/low-progress observed;
+    - Nav2 recoveries observed;
+    - journal Nav2 errors.
+- Documentation:
+  - `scripts/README.md` now lists:
+    - `./scripts/104_watch_frontend_task.sh 300 short_task`;
+    - `./scripts/104_analyze_frontend_task_watch.py task_watch_logs/<time>_short_task`.
+- Regression policy:
+  - `scripts/check_preflight_policy.py` now checks that the analyzer exists, reads summary/state/journal artifacts, reports pose-error metrics, and prints an actionable findings section.
+- Verification:
+  - local analyzer smoke:
+    - `./scripts/104_analyze_frontend_task_watch.py task_watch_logs/20260623_122416_watcher_error_columns_smoke`;
+    - correctly reported no active task, no map pose, and readiness never became ready.
+  - local checks passed:
+    - `python3 scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile` for analyzer/policy/web/floor/pointcloud files;
+    - `git diff --check`.
+  - deployed to 104 and rebuilt all five packages successfully;
+  - 104 local policy check passed;
+  - 104 watcher+analyzer smoke:
+    - `task_watch_logs/20260623_124154_remote_analyzer_smoke`;
+    - correctly reported `localization_not_confirmed`, no active task, no map pose, and readiness never became ready.
+- Field-test implication:
+  - after the next real frontend task run, first run:
+    - `./scripts/104_analyze_frontend_task_watch.py task_watch_logs/<run_dir>`;
+  - use the analyzer output before digging into raw JSONL/journal logs.
+
+### 2026-06-23 midday watcher automatic analysis
+
+- Motivation:
+  - the field workflow should not rely on remembering a second command after every watcher run;
+  - if the robot stops or behaves unexpectedly, the watch directory should already contain a first-pass diagnosis.
+- Change:
+  - `scripts/104_watch_frontend_task.sh` now writes `analysis.txt` at the end of each run;
+  - it automatically invokes `scripts/104_analyze_frontend_task_watch.py`;
+  - if the analyzer fails or is missing, `analysis.txt` records the failure instead of losing the raw watcher artifacts;
+  - the watcher still remains read-only: it does not start tasks, publish floor goals, publish `/cmd_vel`, or modify robot state.
+- Documentation:
+  - `scripts/README.md` now tells operators to look at `analysis.txt` first, then inspect `summary.tsv`, `state.jsonl`, `tasks.jsonl`, and journal as needed.
+- Regression policy:
+  - `scripts/check_preflight_policy.py` now checks:
+    - `analysis.txt` is configured under the run directory;
+    - watcher calls the analyzer directly when executable;
+    - watcher can fall back to `python3`;
+    - watcher prints the analysis artifact path.
+- Verification:
+  - local checks passed:
+    - `bash -n scripts/104_watch_frontend_task.sh`;
+    - `python3 scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile` for analyzer/policy files.
+  - local auto-analysis smoke:
+    - `task_watch_logs/20260623_124316_auto_analysis_smoke`;
+    - watcher printed `analysis=.../analysis.txt`;
+    - `analysis.txt` correctly reported `localization_not_confirmed`, no active task, no map pose, and readiness never ready.
+  - deployed to 104 and rebuilt all five packages successfully;
+  - 104 local policy check passed;
+  - 104 auto-analysis smoke:
+    - `task_watch_logs/20260623_124724_remote_auto_analysis_smoke`;
+    - watcher printed `analysis=.../analysis.txt`;
+    - `analysis.txt` correctly reported `localization_not_confirmed`, no active task, no map pose, and readiness never ready.
+- Field-test implication:
+  - next real run only needs:
+    - `./scripts/104_watch_frontend_task.sh 300 field_task_run`;
+    - start the task from the real frontend;
+    - open `task_watch_logs/<run>/analysis.txt` when the run ends.
+
+### 2026-06-23 afternoon task execution identity hardening
+
+- Field symptom:
+  - frontend self-check, relocalization, and point creation were usable;
+  - executing a task made the robot move, but the motion did not clearly correspond to the marked waypoint;
+  - after a short movement the robot stopped or appeared stuck;
+  - frontend could show the planned path to the first point, but did not make it obvious whether live robot pose, Nav2 feedback, and the active waypoint were the same thing.
+- Core risk:
+  - frontend task state previously treated `nav_goal_accepted`, `nav_goal_feedback`, and `nav_goal_succeeded` mostly as generic Nav2 status;
+  - if an old/stale Nav2 callback arrived late, or if the active waypoint changed while feedback from the previous goal was still cached, the UI and task state could be misleading;
+  - task creation UI defaulted to all points selected and task cards only showed point count, so it was too easy to think a task started with one point while the saved task actually started with another historical point.
+- Hardening in `m20pro_navigation/floor_manager.py`:
+  - every Nav2 goal gets a monotonically increasing `goal_seq`;
+  - Nav2 status text now carries target identity:
+    - `label`;
+    - `goal_seq`;
+    - `goal_frame`;
+    - `goal_x`, `goal_y`, `goal_z`, `goal_yaw`;
+  - accepted/feedback/success/error/cancel/stale-result paths include this identity where practical;
+  - feedback still includes `distance_remaining`, navigation time, recovery count, and current Nav2 feedback pose.
+- Hardening in `m20pro_cloud_bridge/web_dashboard_node.py`:
+  - frontend task runner now validates Nav2 accepted/feedback/success against the current active waypoint:
+    - active annotation id must match;
+    - `label` must be empty or `floor_goal`;
+    - target pose must match the waypoint within tolerance;
+    - after accepted, later statuses must keep the same `goal_seq`;
+  - mismatched Nav2 statuses no longer update or advance the task; they become `nav_status_ignored` events with `last_ignored_nav_goal_match`;
+  - Nav2 success can advance a waypoint only if the current waypoint was actually sent and status is `sent/accepted`;
+  - switching to a new waypoint clears stale feedback/match/ignored fields from the previous waypoint;
+  - `/m20pro/active_waypoint` and `/api/state` expose:
+    - `goal_attempt_id`;
+    - `nav_goal_seq`;
+    - `nav_goal_match`;
+    - ignored status details;
+    - robot pose, goal pose, Nav2 feedback pose, distance, stall age, send/resend counts.
+- Frontend usability changes:
+  - active task summary now shows goal attempt id and Nav2 goal sequence when present;
+  - if old or mismatched feedback is ignored, the summary can show the mismatch reason;
+  - task cards now display:
+    - first target floor/label/x/y/yaw;
+    - full waypoint order;
+    - dwell time per point;
+  - task creation no longer selects every point by default, reducing accidental "wrong first point" tasks.
+- Watcher/analyzer changes:
+  - `scripts/104_watch_frontend_task.sh` now records:
+    - `nav_goal_seq`;
+    - `goal_attempt`;
+    - `nav_match`;
+    - `nav_match_reason`;
+  - `scripts/104_analyze_frontend_task_watch.py` now summarizes per-waypoint goal sequence, frontend goal attempts, and mismatch reasons;
+  - analyzer findings now include ignored mismatched Nav2 statuses and abnormal attempt/sequence relationships.
+- Regression policy:
+  - `scripts/check_preflight_policy.py` now checks that:
+    - floor manager publishes goal identity and pose in Nav2 status;
+    - web task runner validates id/sequence/pose before accepting Nav2 status;
+    - mismatched statuses are recorded as ignored;
+    - stale feedback is cleared when switching waypoints;
+    - watcher/analyzer preserve goal identity and mismatch diagnostics.
+- Verification:
+  - local checks passed:
+    - `python3 -m py_compile` for touched Python files;
+    - extracted frontend JS `node --check`;
+    - `bash -n scripts/104_watch_frontend_task.sh`;
+    - `python3 scripts/check_preflight_policy.py`;
+    - `git diff --check`.
+  - 104 deployment:
+    - deployed to `/home/user/m20pro_real_ros2_ws`;
+    - rebuilt all five packages successfully;
+    - fixed ownership of `/home/user/.m20pro_web` and `/home/user/m20pro_maps`;
+    - restarted `m20pro-real.service`.
+  - 104 post-deploy state:
+    - frontend `healthz` OK;
+    - service active;
+    - no active task and no active waypoint;
+    - current state remains blocked by `localization_not_confirmed`;
+    - `/scan` and lidar relay data are fresh, which confirms workstation/unlocalized state is not hiding scan/lidar.
+  - 104 watcher smoke:
+    - `task_watch_logs/20260623_130952_post_deploy_goal_identity_smoke`;
+    - `summary.tsv` includes `nav_goal_seq`, `goal_attempt`, `nav_match`, `nav_match_reason`;
+    - `analysis.txt` correctly reports no active task, no map pose, and `localization_not_confirmed`.
+- Next field workflow:
+  - before clicking frontend task start, run:
+    - `./scripts/104_watch_frontend_task.sh 300 field_task_goal_identity`;
+  - after relocalization succeeds, start the task from the real frontend;
+  - when the run ends, first inspect:
+    - `task_watch_logs/<run>/analysis.txt`;
+  - if the robot moves toward the wrong point, the first evidence to check is:
+    - task card "首点/顺序";
+    - `nav_goal_seq`;
+    - `goal_attempt`;
+    - `nav_match_reason`;
+    - robot-goal/Nav2-goal pose errors.
+
+### 2026-06-23 afternoon task start confirmation guard
+
+- Additional risk found after deployment:
+  - `/api/tasks` already exposes `waypoints`, but a stale browser page or an operator overlooking the task card could still click start on a task whose first point/order is not what they intended;
+  - because task start can immediately publish `/m20pro/floor_goal`, confirmation must happen before the motion path begins, not only after watcher analysis.
+- Frontend guard:
+  - clicking "开始执行" now opens a confirmation dialog containing:
+    - task name;
+    - first waypoint;
+    - full waypoint order;
+    - current execution-readiness message;
+    - explicit warning that the robot will immediately navigate to the first point after confirmation.
+  - the frontend start payload includes:
+    - `expected_annotation_ids`;
+    - `expected_first_annotation_id`;
+    - `expected_first_pose`;
+    - `expected_map_id`;
+    - `expected_task_updated_at`.
+- Backend guard:
+  - `_validate_task_start_expectations()` checks the expected order, first point id, first point pose, task map, and task timestamp before reset/navigation start;
+  - if the server-side task changed after the page rendered, start is rejected and the operator must refresh and confirm again;
+  - legacy clients without expected fields still use the existing readiness gates, but the real frontend now sends the stronger guarded payload.
+- Regression policy:
+  - `scripts/check_preflight_policy.py` now checks:
+    - the frontend has a task-start confirmation including "首点", "顺序", and the motion warning;
+    - the backend has expectation checks for annotation order, first point id, and first pose.
+- Verification:
+  - local checks passed:
+    - `python3 -m py_compile`;
+    - extracted frontend JS `node --check`;
+    - `bash -n scripts/104_watch_frontend_task.sh`;
+    - `python3 scripts/check_preflight_policy.py`;
+    - `git diff --check`.
+  - deployed to 104 and rebuilt all five packages successfully;
+  - 104 policy check passed;
+  - restarted `m20pro-real.service`;
+  - deployed page contains:
+    - `function taskStartConfirmText`;
+    - `expected_annotation_ids`;
+    - `expected_first_annotation_id`;
+    - the text `确认后机器狗会立即向首点导航`;
+  - `/api/tasks` currently returns 3 saved tasks and each includes waypoint details;
+  - 104 remains safe after restart:
+    - no active task;
+    - no active waypoint;
+    - `localization_not_confirmed`;
+    - scan/lidar available.
+
+### 2026-06-23 afternoon real frontend read-only smoke
+
+- Motivation:
+  - previous checks proved API/code invariants, but the field problem is ultimately frontend workflow;
+  - before the next motion test, the actual deployed page must be exercised in a browser, not only inspected by `curl`.
+- Added:
+  - `scripts/104_frontend_task_smoke.py`;
+  - uses headless Chrome and Chrome DevTools Protocol;
+  - opens the real frontend URL, switches to the task tab, and reads DOM state;
+  - intentionally read-only:
+    - does not click "开始执行";
+    - does not call `/api/tasks/start`;
+    - does not publish `/m20pro/floor_goal`;
+    - does not publish `/cmd_vel`.
+- Smoke checks:
+  - frontend connection text is `已连接`;
+  - active task summary is `无任务`;
+  - `taskStartConfirmText` exists in the real page runtime;
+  - `taskStartRequest` exists in the real page runtime;
+  - task creation checkboxes are not selected by default;
+  - task cards contain `首点：` and `顺序：`;
+  - in blocked/unlocalized mode, task start buttons remain disabled.
+- Local real-frontend smoke result against 104:
+  - command:
+    - `python3 scripts/104_frontend_task_smoke.py --require-blocked --json-out /tmp/m20pro_frontend_task_smoke.json`;
+  - observed:
+    - status: `已连接`;
+    - floor: `F20`;
+    - localization: `异常/未定位`;
+    - readiness: `定位未确认，先在网页定位页完成重定位，再开始任务`;
+    - active task: `无任务`;
+    - task point total: `3`;
+    - default checked task points: `0`;
+    - every task card showed first waypoint and full order;
+    - all start buttons were disabled in the current blocked state.
+- Documentation:
+  - `scripts/README.md` now lists:
+    - `./scripts/104_frontend_task_smoke.py --require-blocked`;
+  - README states the script is read-only and does not start tasks or send motion.
+- Regression policy:
+  - `scripts/check_preflight_policy.py` now checks that the smoke script:
+    - is documented as read-only;
+    - does not contain task-start/motion calls;
+    - checks task confirmation and waypoint-order UI.
+- Verification:
+  - local checks passed:
+    - `python3 -m py_compile scripts/104_frontend_task_smoke.py scripts/check_preflight_policy.py`;
+    - `python3 scripts/check_preflight_policy.py`;
+    - `git diff --check`.
+  - synced to 104 and rebuilt all five packages successfully;
+  - 104 local policy check passed;
+  - 104 script py_compile passed;
+  - `m20pro-real.service` stayed active and no task was started.
+
+### 2026-06-23 afternoon planned-path endpoint diagnostic
+
+- Motivation:
+  - the previous field symptom included "frontend can see a planned route to the first point, but the robot did not seem to go to the marked point";
+  - goal identity checks prove which waypoint was sent to Nav2, but they do not directly prove that the displayed `/planned_path` terminates at the same waypoint;
+  - adding a path endpoint metric lets the operator detect a wrong target/planning mismatch before relying on motion observation.
+- Added in `web_dashboard_node.py`:
+  - `_on_path()` now keeps:
+    - `last_point`;
+    - `point_count`;
+    - `last_update`;
+  - `_publish_active_waypoint()` computes:
+    - `path_goal_error_m`: planar distance between the planned path endpoint and current active waypoint goal;
+    - `path_point_count`;
+    - `path_version`;
+    - `path_last_point`.
+- Frontend display:
+  - active task summary now shows `路径差 Xm` when `path_goal_error_m` is available;
+  - interpretation:
+    - small `路径差`: displayed path terminates near the current task goal;
+    - large `路径差`: the current path is stale or not targeting the current task point, so do not trust the route display until diagnosed.
+- Watcher/analyzer:
+  - `scripts/104_watch_frontend_task.sh` now records:
+    - `path_goal_error`;
+    - `path_points`.
+  - `scripts/104_analyze_frontend_task_watch.py` now summarizes:
+    - `min_path_goal`;
+    - `final_path_goal`;
+  - analyzer finding:
+    - reports `planned path endpoint is far from active waypoint` when observed path endpoint error is large.
+- Regression policy:
+  - `scripts/check_preflight_policy.py` now checks that:
+    - watcher records `path_goal_error/path_points`;
+    - frontend labels `路径差`;
+    - analyzer reports planned-path endpoint mismatch.
+- Verification:
+  - local checks passed:
+    - `python3 -m py_compile`;
+    - extracted frontend JS `node --check`;
+    - `bash -n scripts/104_watch_frontend_task.sh`;
+    - `python3 scripts/check_preflight_policy.py`;
+    - `git diff --check`.
+  - deployed to 104 and rebuilt all five packages successfully;
+  - restarted `m20pro-real.service`;
+  - deployed frontend contains `路径差` and `path_goal_error_m`;
+  - real frontend smoke still passed;
+  - watcher smoke:
+    - `task_watch_logs/20260623_133040_path_goal_error_smoke`;
+    - `summary.tsv` header includes `path_goal_error` and `path_points`;
+    - `analysis.txt` generated normally.
+  - current 104 state remains safe:
+    - no active task;
+    - no active waypoint;
+    - `localization_not_confirmed`;
+    - service active.
+
+### 2026-06-23 afternoon task plan-match hard stop
+
+- Field symptom that motivated this change:
+  - frontend self-check, relocalization, and task point creation can now pass;
+  - however, a task execution test moved the robot forward briefly, but the observed position/orientation did not match the marked waypoint;
+  - after the short motion, the robot appeared stuck rather than entering the configured 5 s dwell or continuing through later points;
+  - the frontend showed a path to the first point but did not provide enough real-time evidence to prove whether Nav2 was executing the intended waypoint.
+- Safety decision:
+  - do not allow the task runner to continue moving on a plan that cannot be tied to the active waypoint;
+  - if Nav2 accepts a waypoint but the newly observed `/plan` does not terminate near that waypoint, stop the task with an explicit reason instead of relying on visual judgment.
+- Backend hard stop added in `web_dashboard_node.py`:
+  - new parameters:
+    - `task_plan_match_required: true`;
+    - `task_plan_match_timeout_s: 8.0`;
+    - `task_plan_goal_tolerance_m: 0.8`.
+  - when a task waypoint is dispatched, the runner records `goal_sent_path_version`;
+  - when Nav2 accepts the goal, the runner records `last_nav_accepted_at` / `last_nav_accepted_monotonic`;
+  - after acceptance, `_stop_task_if_plan_mismatched()` waits for a newer `/plan` than the one present at goal dispatch;
+  - if the new plan endpoint is within tolerance, it records:
+    - `plan_goal_verified`;
+    - `plan_goal_error_m`;
+    - `plan_path_version`.
+  - if the new plan endpoint is far from the active waypoint, the task stops with:
+    - `reason=path_goal_mismatch`;
+    - target waypoint id/label;
+    - path last point;
+    - path-goal error;
+    - last goal pose and Nav2 feedback.
+  - if no fresh plan appears after Nav2 acceptance, the task stops with:
+    - `reason=plan_update_timeout`.
+- Frontend observability:
+  - active task summary now shows:
+    - `路径已校验`;
+    - `下发路径版`;
+    - `校验路径版`;
+    - previous `路径差` / `狗差` / `Nav2差` / `位姿差` fields.
+  - during a moving field test, these fields should answer:
+    - the frontend-sent waypoint;
+    - the Nav2 accepted goal sequence;
+    - whether `/plan` is fresh for that goal;
+    - whether the path endpoint matches the waypoint.
+- Watcher/analyzer upgrade:
+  - `scripts/104_watch_frontend_task.sh` now records:
+    - `goal_sent_path_version`;
+    - `plan_path_version`;
+    - `plan_verified`.
+  - `scripts/104_analyze_frontend_task_watch.py` now reports:
+    - sent/current plan versions per waypoint;
+    - plan verification state;
+    - hard findings for `path_goal_mismatch` and `plan_update_timeout`.
+- Regression policy:
+  - `scripts/check_preflight_policy.py` now asserts:
+    - plan-match protection exists;
+    - both `path_goal_mismatch` and `plan_update_timeout` are guarded;
+    - frontend exposes plan verification fields;
+    - watcher/analyzer keep the plan-version evidence.
+- Verification:
+  - local checks passed:
+    - `python3 -m py_compile`;
+    - `bash -n scripts/104_watch_frontend_task.sh`;
+    - `python3 scripts/check_preflight_policy.py`;
+    - `git diff --check`.
+  - read-only watcher dry run passed:
+    - `task_watch_logs/20260623_135100_plan_verify_columns_smoke`;
+    - `analysis.txt` generated normally.
+  - deployed to 104 `/home/user/m20pro_real_ros2_ws`;
+  - rebuilt all five packages successfully;
+  - restarted `m20pro-real.service`;
+  - web became ready after about 39 s on this restart;
+  - 104 remote policy check passed;
+  - real frontend smoke passed:
+    - status `已连接`;
+    - floor `F20`;
+    - localization `异常/未定位`;
+    - active task `无任务`;
+    - task buttons disabled because `localization_not_confirmed`;
+    - task cards still show first point and full order.
+- Autostart availability follow-up:
+  - during restart verification, the old unit took about 39 s before web became ready because the previous ROS launch process hit systemd stop timeout;
+  - the unit template and 104 installed service were aligned to the real workspace:
+    - `WorkingDirectory=/home/user/m20pro_real_ros2_ws`;
+    - `ExecStart=/home/user/m20pro_real_ros2_ws/scripts/104_autostart_entrypoint.sh`;
+    - `/etc/default/m20pro-real` now has `M20PRO_WS=/home/user/m20pro_real_ros2_ws`.
+  - `TimeoutStopSec` was reduced from 30 s to 12 s to shorten restart/frontend recovery time;
+  - installed on 104 with `systemctl daemon-reload`;
+  - service was not restarted again after this unit-file install, so the current running process was not interrupted.
+- Path endpoint false-positive fix:
+  - found a potential diagnostic false positive after adding plan-match hard stop:
+    - `_on_path()` downsampled `/plan` for frontend display;
+    - the previous `last_point` used the downsampled list endpoint;
+    - if downsampling skipped the real final Nav2 pose, `path_goal_error_m` could falsely appear large.
+  - fixed `_on_path()` so:
+    - display points may still be downsampled;
+    - the original `/plan` final pose is always preserved as `last_point`;
+    - the downsampled display path explicitly appends the original final pose;
+    - `raw_point_count` is saved separately from displayed `point_count`.
+  - active waypoint payload and watcher now include `path_raw_point_count` / `path_raw_points`.
+  - analyzer now reports `path_points` and `path_raw_points` per waypoint when available.
+  - regression policy now checks that path endpoint diagnostics preserve the original Nav2 plan endpoint after display downsampling.
+  - verification:
+    - local `py_compile`, `bash -n`, `check_preflight_policy.py`, and `git diff --check` passed;
+    - deployed to 104 and rebuilt all five packages successfully;
+    - restarted `m20pro-real.service`;
+    - 104 remote policy check passed;
+    - real frontend smoke passed;
+    - read-only watcher smoke generated:
+      - `task_watch_logs/20260623_140447_path_endpoint_preserve_smoke`.
+- Real frontend live-summary smoke:
+  - previous smoke verified task-page structure, disabled start buttons, first waypoint, and waypoint order;
+  - added a pure frontend synthetic active-task check inside `scripts/104_frontend_task_smoke.py`:
+    - it calls the real `renderActiveTaskSummary()` function in the browser;
+    - injects a synthetic running task and waypoint;
+    - verifies that the visible summary contains:
+      - task name and waypoint label;
+      - `Nav2 accepted`;
+      - `狗差`;
+      - `Nav2差`;
+      - `位姿差`;
+      - `路径差 0.12m`;
+      - `路径已校验`;
+      - `下发路径版 3`;
+      - `校验路径版 4`;
+      - `低进展 5s`;
+      - the latest status message.
+  - this check is browser-only and read-only:
+    - does not call `/api/tasks/start`;
+    - does not publish `/m20pro/floor_goal`;
+    - does not publish `/cmd_vel`;
+    - restores the active task summary to `无任务` afterward.
+  - regression policy now checks that the smoke script synthesizes and asserts these live summary diagnostics.
+  - verification:
+    - local `python3 scripts/104_frontend_task_smoke.py --require-blocked` passed;
+    - local `python3 scripts/check_preflight_policy.py` passed;
+    - synced updated smoke/policy scripts to 104;
+    - 104 `py_compile` and policy check passed;
+    - real frontend smoke against `http://10.21.31.104:8080` passed and produced `/tmp/m20pro_frontend_task_smoke_with_summary.json`.
+- Watcher/analyzer persisted task-result coverage:
+  - found a post-failure evidence gap:
+    - if a task fails quickly and `active_task` disappears before the watcher samples it, `summary.tsv` may not contain the failure;
+    - the failure can still be persisted in `/api/tasks` as `last_error` and `last_timeline`.
+  - upgraded `scripts/104_analyze_frontend_task_watch.py`:
+    - `tasks_overview()` now collects `result_lines` and `result_messages`;
+    - output now includes a `task results:` section after `task definitions:`;
+    - each persisted result line includes task id/status, `last_error`, last timeline event, reason, annotation id, label, distance/path error fields, path version, goal-sent path version, and last Nav2 status when available.
+  - findings now include persisted task results when detecting:
+    - `path_goal_mismatch`;
+    - `plan_update_timeout`;
+    - `waypoint_stalled`.
+  - fixed analyzer early-return behavior:
+    - even if `summary.tsv` has no active-task rows, findings still process `tasks.jsonl` persisted results.
+  - regression policy now checks:
+    - analyzer reads persisted `last_timeline` and `last_error`;
+    - analyzer prints `task results:`;
+    - persisted task result messages feed hard-failure findings.
+  - verification:
+    - synthetic offline sample with only `tasks.jsonl` failure produced:
+      - `task results:` line;
+      - finding `task stopped because Nav2 planned path endpoint did not match the active waypoint`;
+    - local `py_compile`, `check_preflight_policy.py`, and `git diff --check` passed;
+    - synced analyzer/policy to 104;
+    - 104 `py_compile` and policy check passed;
+    - read-only watcher smoke generated:
+      - `task_watch_logs/20260623_141449_task_results_analyzer_smoke`;
+      - `analysis.txt` includes `task results:`.
+- Current field-test status:
+  - no motion test was run in this step because 104 is currently unlocalized and battery was about 38%;
+  - next real test should be done only after the robot is in a safe field area, relocalized, and the operator explicitly confirms motion is allowed.
+- Required next moving-test workflow:
+  - start watcher first:
+    - `./scripts/104_watch_frontend_task.sh 300 field_task_plan_match`;
+  - open the real frontend and complete relocalization;
+  - confirm the task card first point/order;
+  - start the task from the frontend;
+  - after the run, inspect:
+    - `task_watch_logs/<run>/analysis.txt`.
+  - if the robot moves to the wrong place or stops early, the first fields to check are:
+    - `path_goal_mismatch` / `plan_update_timeout`;
+    - `goal_sent_path_version`;
+    - `plan_path_version`;
+    - `path_goal_error`;
+    - `nav_goal_seq`;
+    - `goal_attempt`;
+    - `nav_match_reason`.
+
+## 2026-06-23 16:15 - 前端任务执行链路快速收束与摄像头结论
+
+- User field feedback:
+  - self-check, relocalization, and adding task points were usable;
+  - task execution still had serious risk: after clicking start the robot moved briefly, did not appear to go to the marked point, then stopped without enough frontend feedback;
+  - frontend must avoid "paper diagnosis": it needs enough live state and persisted evidence for the next real run.
+- Task execution hardening:
+  - `web_dashboard_node.py` keeps the existing post-reset readiness gate and first-waypoint distance guard;
+  - task failure result now persists a `runtime_snapshot`:
+    - current floor/localization/navigation status;
+    - map pose age;
+    - path version, raw/displayed path counts, and path last point;
+    - scan and lidar freshness;
+    - active waypoint index/phase;
+    - last goal pose/attempt id;
+    - Nav2 accepted/feedback/match/ignored old feedback;
+    - robot-goal distance, plan verification, stall/runtime guard state;
+    - camera proxy status.
+  - purpose: if the next field task still stops early, `/api/tasks` and watcher analysis should preserve enough evidence even if the task disappears before the watcher samples it.
+- Camera conclusion:
+  - do not continue debugging missing live image when the operator has not opened the camera from the factory handheld/controller;
+  - current frontend does not power on or enable the factory camera device on 103;
+  - 104 only proxies existing RTSP streams:
+    - `rtsp://10.21.31.103:8554/video1`;
+    - `rtsp://10.21.31.103:8554/video2`.
+  - read-only 103 check showed:
+    - MediaMTX was running;
+    - no `push_video`, `gst-launch`, or `ffmpeg` publisher process;
+    - no `/dev/video*` and no obvious USB camera in `lsusb`;
+    - therefore 104 camera timeout/404 is expected until the factory side enables/publishes camera streams.
+- Camera frontend improvement:
+  - `/api/state` now exposes `camera_proxy` diagnostics:
+    - enabled/OpenCV status;
+    - per-camera RTSP URL;
+    - whether the proxy worker is running;
+    - latest frame age/sequence;
+    - last proxy error.
+  - live page now shows camera status near the video panel, so "not opened by handheld", "RTSP unavailable", and "received frames" are no longer indistinguishable.
+  - web video proxy was tuned for smoother low-bandwidth viewing:
+    - `camera_proxy_fps:=4.0`;
+    - `camera_proxy_jpeg_quality:=35`;
+    - `camera_proxy_max_width:=320`.
+- Deployment/verification on 104:
+  - synced updated `web_dashboard_node.py`, `m20pro_real_full.sh`, and helper scripts;
+  - built `m20pro_cloud_bridge` successfully;
+  - restarted `m20pro-real.service`;
+  - web recovered and `/healthz` returned OK;
+  - frontend smoke passed:
+    - status `已连接`;
+    - floor `F20`;
+    - 3D map `builtin_F20` available and nonblank;
+    - task buttons remain disabled while unlocalized;
+    - synthetic active-task summary still shows Nav2/pose/path/stall diagnostics.
+  - readiness check is WARN as expected because current robot state is unlocalized:
+    - `localization_ok=false`;
+    - `pose_fresh=false`;
+    - `/scan` fresh with about 205 finite ranges;
+    - lidar relay fresh with about 11k points;
+    - battery about 78%.
+- Next real field run:
+  - open camera from handheld first if video is needed;
+  - relocalize from frontend;
+  - run `./scripts/104_frontend_task_ready_check.py --url http://10.21.31.104:8080`;
+  - start watcher before clicking task start:
+    - `./scripts/104_watch_frontend_task.sh 180 field_task_short_run`;
+  - then start the task from the real frontend;
+  - if the robot moves incorrectly or stops, inspect `task_watch_logs/<run>/analysis.txt` and the task `last_result.runtime_snapshot`.
+
+## 2026-06-23 16:25 - 摄像头/任务证据回归守护补齐
+
+- Added regression guardrails so the previous fast fixes do not silently regress:
+  - `scripts/check_preflight_policy.py` now checks:
+    - real full startup camera proxy stays on the smoother low-bandwidth profile:
+      - `camera_proxy_fps:=4.0`;
+      - `camera_proxy_jpeg_quality:=35`;
+      - `camera_proxy_max_width:=320`;
+    - the live page has a `cameraStatus` diagnostics panel;
+    - `/api/state` exposes per-camera frame age and last error;
+    - the frontend distinguishes "web pull not opened" from "waiting for camera frame";
+    - task `last_result` persists `runtime_snapshot`;
+    - runtime snapshot includes camera proxy, Nav2 feedback, and plan verification state.
+  - `scripts/104_frontend_task_smoke.py` now verifies against the real page:
+    - front/rear video do not auto-load;
+    - camera status panel shows both front/rear diagnostics;
+    - camera proxy is enabled;
+    - fps is above slideshow rate;
+    - max width remains low bandwidth.
+- Verification:
+  - local `py_compile` passed for updated scripts and web dashboard;
+  - local `python3 scripts/check_preflight_policy.py` passed;
+  - local `git diff --check` passed;
+  - synced updated scripts to 104;
+  - 104 `python3 scripts/check_preflight_policy.py` passed;
+  - real frontend smoke passed against `http://10.21.31.104:8080`:
+    - camera status shows:
+      - front: `网页未打开拉流`;
+      - rear: `网页未打开拉流`;
+    - camera proxy profile is `fps=4`, `max_width=320`;
+    - 3D map remains available and nonblank;
+    - task start buttons remain disabled while unlocalized.
+
+## 2026-06-23 16:32 - 任务失败快照分析输出增强
+
+- Problem:
+  - task failure already persists `last_result.runtime_snapshot`, but `analysis.txt` still required reading raw JSON to understand the failure context.
+- Change:
+  - `scripts/104_analyze_frontend_task_watch.py` now prints a `runtime snapshots:` section.
+  - Each snapshot line summarizes:
+    - floor and localization status;
+    - map pose age and pose coordinates;
+    - factory navigation status;
+    - path version/raw count/display count/plan verification/error;
+    - scan finite ranges and age;
+    - lidar point count/source/age;
+    - last goal label and attempt id;
+    - Nav2 goal status, sequence, match result, and remaining distance;
+    - runtime guard state;
+    - camera state, e.g. `front:not_pulled` or `rear:frame_age=0.5s`.
+  - `scripts/check_preflight_policy.py` now guards that analyzer keeps the runtime snapshot section and fields.
+- Verification:
+  - local `py_compile` passed;
+  - local `python3 scripts/check_preflight_policy.py` passed;
+  - local `git diff --check` passed;
+  - offline synthetic analyzer sample produced:
+    - `runtime snapshots:`;
+    - `path=v9/raw=120/shown=100/verified=True/err=0.12m`;
+    - `nav_goal=accepted/seq=42/match=True`;
+    - `nav_remaining=0.90m`;
+    - `camera=front:not_pulled,rear:frame_age=0.5s`.
+  - synced updated analyzer/policy to 104;
+  - 104 `py_compile` and `python3 scripts/check_preflight_policy.py` passed.
+
+## 2026-06-23 16:40 - Ready Check 升级成现场开跑前验收单
+
+- Problem:
+  - before a real task run, field operators needed several separate checks to confirm task readiness, 3D map, camera proxy, scan/lidar and battery.
+  - this made the "can I safely click start now?" decision slower and easier to miss.
+- Change:
+  - enhanced `scripts/104_frontend_task_ready_check.py` instead of adding another script.
+  - it now prints:
+    - selected map, localization and pose freshness;
+    - battery, `/scan` finite ranges, lidar relay point count/source;
+    - camera proxy status:
+      - enabled/OpenCV/fps/max width/transport;
+      - front/rear state such as `not_pulled`, `waiting_frame`, or `frame age=...`;
+    - 3D map status from `/api/map_3d`:
+      - grid dimensions, cell size, z range, source point count;
+      - stair-zone count from `/api/stair_zones`;
+    - each task's first point, full order and readiness;
+    - next-step advice.
+  - added `--skip-map3d` for cases where only task/readiness data is needed.
+  - `scripts/check_preflight_policy.py` now guards camera and 3D map reporting in ready check.
+  - `scripts/README.md` now describes ready check as the pre-start field acceptance command.
+- Verification:
+  - local `py_compile` passed;
+  - local `python3 scripts/check_preflight_policy.py` passed;
+  - local `git diff --check` passed;
+  - real ready check against `http://10.21.31.104:8080` printed:
+    - `selected_map=builtin_F20`;
+    - `localization_ok=false`, `pose_fresh=false`;
+    - battery about `74%`;
+    - scan and lidar relay data present;
+    - camera proxy `fps=4.0 max_width=320`, both cameras `not_pulled`;
+    - 3D map available: `175x206`, `cell=0.25m`, `stair_zones=6`;
+    - task start remains blocked by `localization_not_confirmed`, as expected in workstation/unlocalized state.
+  - synced updated ready check/policy/README to 104;
+  - 104 `py_compile` and `python3 scripts/check_preflight_policy.py` passed;
+  - 104 local ready check against `http://127.0.0.1:8080` produced the same acceptance summary and WARN because the robot is not localized.
+
+## 2026-06-23 16:48 - Ready Check 增加推荐任务和可复制命令
+
+- Problem:
+  - ready check could show task state, but the field operator still had to manually choose which task id to retest and invent a watcher label.
+  - this leaves room to accidentally click/retry an old task or forget to start watcher before motion.
+- Change:
+  - `scripts/104_frontend_task_ready_check.py` now prints a `recommended:` block:
+    - recommended task name/id/status/readiness;
+    - first waypoint summary;
+    - copyable watcher command:
+      - `./scripts/104_watch_frontend_task.sh 180 'field_task_<task-id-tail>'`;
+    - copyable task-specific ready check:
+      - `./scripts/104_frontend_task_ready_check.py --task-id '<task-id>'`.
+  - recommendation prioritizes:
+    - current selected map;
+    - readiness code;
+    - task status and creation time.
+  - `scripts/check_preflight_policy.py` now guards the recommended task and copyable command output.
+  - `scripts/README.md` documents `recommended:` as part of the pre-start field workflow.
+- Verification:
+  - local `py_compile` passed;
+  - local `python3 scripts/check_preflight_policy.py` passed;
+  - local `git diff --check` passed;
+  - local ready check against `http://10.21.31.104:8080` printed:
+    - `recommended_task ... id=task_1782136015104_a2a48d2b ... code=localization_not_confirmed`;
+    - `watcher_command=./scripts/104_watch_frontend_task.sh 180 'field_task_a2a48d2b'`;
+    - `ready_check_command=./scripts/104_frontend_task_ready_check.py --task-id 'task_1782136015104_a2a48d2b'`.
+  - synced updated scripts/README to 104;
+  - 104 `python3 scripts/check_preflight_policy.py` passed;
+  - 104 local ready check produced the same recommended task block and WARN because the robot is still unlocalized.
+
+## 2026-06-23 16:58 - 104 实机前端部署与只读任务链路验收
+
+- Problem:
+  - after the field test, task execution could move a short distance, then stop at a pose that did not match the selected task points.
+  - the frontend also lacked enough visible evidence to distinguish:
+    - wrong task/first point;
+    - stale or mismatched Nav2 goal status;
+    - path endpoint mismatch;
+    - task guard stop;
+    - real localization not confirmed after restart.
+- Change:
+  - synced the real workspace changes to 104:
+    - `web_dashboard_node.py`;
+    - `floor_manager.py`;
+    - `pointcloud_fusion.py`;
+    - `m20pro_real.launch.py`;
+    - `m20pro_real_full.sh`;
+    - task watcher/analyzer/ready-check/smoke scripts;
+    - `systemd/m20pro-real.service` and `systemd/m20pro-real.default`.
+  - rebuilt on 104:
+    - `m20pro_cloud_bridge`;
+    - `m20pro_navigation`;
+    - `m20pro_bringup`.
+  - restarted `m20pro-real.service`.
+  - confirmed installed systemd files are in sync with the real workspace:
+    - `WorkingDirectory=/home/user/m20pro_real_ros2_ws`;
+    - `ExecStart=/home/user/m20pro_real_ros2_ws/scripts/104_autostart_entrypoint.sh`;
+    - `/etc/default/m20pro-real` also points to `M20PRO_WS=/home/user/m20pro_real_ros2_ws`.
+- Verification:
+  - local checks passed:
+    - `python3 -m py_compile ...`;
+    - `python3 scripts/check_preflight_policy.py`;
+    - `git diff --check`.
+  - 104 checks passed:
+    - `python3 -m py_compile ...`;
+    - `python3 scripts/check_preflight_policy.py`;
+    - `colcon build --symlink-install --packages-select m20pro_cloud_bridge m20pro_navigation m20pro_bringup`;
+    - `systemctl is-active m20pro-real.service` returned `active`;
+    - `curl http://10.21.31.104:8080/healthz` returned `{"ok":true}`.
+  - 104 frontend ready check against `http://10.21.31.104:8080` showed:
+    - floor `F20`, selected map `builtin_F20`;
+    - battery `71%`;
+    - `/scan` present with finite ranges;
+    - lidar relay points present, source `relay`;
+    - camera proxy enabled, front/rear both `not_pulled` because the webpage had not opened streams;
+    - 3D map available: `175x206`, `cell=0.25m`, `stair_zones=6`;
+    - recommended task:
+      - `task_1782136015104_a2a48d2b`;
+      - watcher command `./scripts/104_watch_frontend_task.sh 180 'field_task_a2a48d2b'`;
+    - task start blocked by `localization_not_confirmed`, which is correct after service restart and before relocalization.
+  - real browser smoke against `http://10.21.31.104:8080` passed:
+    - task cards show first point, full order, readiness reason and the pre-run watcher command;
+    - start buttons are disabled while localization is not confirmed;
+    - camera streams do not auto-load;
+    - front/rear camera toggles and all-camera on/off controls are present;
+    - 3D map mode renders a nonblank canvas;
+    - synthetic active-task summary renders robot pose, Nav2 pose, goal pose, pose error, path endpoint error and plan verification fields.
+- Boundary:
+  - this was a no-motion validation pass.
+  - the remaining real proof is one field run after frontend relocalization:
+    - run ready check;
+    - start the printed watcher command;
+    - click the recommended task;
+    - if the task stops early, inspect the generated `analysis.txt` instead of guessing.
+
+## 2026-06-23 17:35 - 点云 relay 降压与 104 前端链路稳态加固
+
+- Problem:
+  - after the real frontend service restart, 104 showed very high CPU in Python pointcloud relay processes.
+  - two relay processes were running at first:
+    - `/LIDAR/POINTS -> /m20pro/lidar_points_relay`;
+    - `/LIDAR/POINTS2 -> /m20pro/lidar_points2_relay`.
+  - this made frontend startup slower and increased the risk that navigation, task diagnostics and the web UI would compete for CPU during a field run.
+- Change:
+  - changed lidar relay defaults from `12000` points / `0.1s` / reliable QoS to:
+    - `max_output_points=6000`;
+    - `min_publish_interval_s=0.2`;
+    - `cloud_reliability=best_effort`.
+  - changed real consumers of relay pointclouds to best-effort sensor QoS.
+  - changed the web dashboard to observe `cloud_topic` directly, so in real mode it watches `/m20pro/lidar_points_relay` instead of subscribing to raw `/LIDAR/POINTS`.
+  - added `/m20pro/lidar_relay/status` into the frontend state and task runtime snapshot:
+    - output points;
+    - stride;
+    - input/publish Hz;
+    - skip ratio;
+    - max points and publish interval.
+  - changed ready-check and task analyzer to print relay rate/downsample diagnostics.
+  - made optional second lidar relay disabled by default:
+    - `M20PRO_ENABLE_LIDAR2_RELAY=0`.
+    - It can still be enabled explicitly later if dual-lidar fusion is required and CPU budget is acceptable.
+  - fixed frontend lidar source labeling so relay-topic data is reported as `source=relay`, not `raw`.
+- Verification:
+  - local:
+    - `python3 -m py_compile ...` passed;
+    - `bash -n ...` passed;
+    - `python3 scripts/check_preflight_policy.py` passed;
+    - `git diff --check` passed.
+  - 104:
+    - synced updated files to `/home/user/m20pro_real_ros2_ws`;
+    - `python3 -m py_compile ...` passed;
+    - `bash -n ...` passed;
+    - `python3 scripts/check_preflight_policy.py` passed;
+    - rebuilt changed packages;
+    - installed `/etc/default/m20pro-real`;
+    - restarted `m20pro-real.service`;
+    - `curl http://10.21.31.104:8080/healthz` returned `{"ok":true}`.
+  - 104 runtime evidence after final restart:
+    - `/etc/default/m20pro-real`:
+      - `M20PRO_LIDAR_RELAY_MAX_OUTPUT_POINTS=6000`;
+      - `M20PRO_LIDAR_RELAY_MIN_PUBLISH_INTERVAL_S=0.2`;
+      - `M20PRO_LIDAR_RELAY_CLOUD_RELIABILITY=best_effort`;
+      - `M20PRO_ENABLE_LIDAR2_RELAY=0`.
+    - process list showed only the primary relay, no `/LIDAR/POINTS2` relay.
+    - ready check showed:
+      - `scan_finite=193`;
+      - `lidar_points=5240 source=relay`;
+      - `lidar_relay output_points=5563 stride=11 in_hz=6.6 out_hz=3.1 skip=53% max_points=6000 min_interval=0.2`;
+      - 3D map still available: `175x206`, `cell=0.25m`, `stair_zones=6`;
+      - camera proxy still enabled but not pulled by default;
+      - task start still blocked by `localization_not_confirmed`, which is expected after service restart.
+    - browser smoke passed after the relay tuning:
+      - task cards, watcher command, camera controls, 3D canvas and synthetic active-task diagnostics still render.
+- Boundary:
+  - this was still a no-motion validation pass.
+  - before the next field run:
+    - finish frontend relocalization;
+    - run ready check;
+    - start `./scripts/104_watch_frontend_task.sh 180 'field_task_a2a48d2b'`;
+    - execute the recommended task;
+    - if it stops early, analyze the generated watcher folder instead of guessing.
+
+## 2026-06-23 17:55 - 点云 relay 下采样拷贝向量化验证
+
+- Problem:
+  - after disabling the optional second lidar relay, 104 still showed about `45%~50%` CPU on the single Python `lidar_relay` process.
+  - the old relay downsampling path copied one point at a time in Python:
+    - loop over offsets;
+    - `bytearray.extend(...)` for each sampled point.
+- Change:
+  - changed `lidar_relay_node.py` downsampling to use NumPy byte-row slicing:
+    - `np.frombuffer(..., dtype=np.uint8).reshape((-1, point_step))`;
+    - `rows[::stride].copy().tobytes()`.
+  - kept a Python-loop fallback for unusual PointCloud2 buffers.
+  - added `downsample_method` to `/m20pro/lidar_relay/status`.
+  - propagated the method into:
+    - frontend state/runtime snapshot;
+    - ready-check output;
+    - task watcher analyzer summary.
+  - declared `python3-numpy` in `src/m20pro_navigation/package.xml`.
+- Verification:
+  - local:
+    - `python3 -m py_compile ...` passed;
+    - `python3 scripts/check_preflight_policy.py` passed;
+    - `git diff --check` passed.
+  - 104:
+    - synced updated files;
+    - `python3 -m py_compile ...` passed;
+    - `python3 scripts/check_preflight_policy.py` passed;
+    - rebuilt `m20pro_navigation` and `m20pro_cloud_bridge`;
+    - restarted `m20pro-real.service`;
+    - `curl http://10.21.31.104:8080/healthz` returned `{"ok":true}`.
+  - ready-check after restart showed:
+    - `scan_finite=196`;
+    - `lidar_points=5958 source=relay`;
+    - `lidar_relay output_points=5933 stride=7 in_hz=8.5 out_hz=3.5 skip=59% max_points=6000 min_interval=0.2`;
+    - `lidar_relay_method=numpy_stride`.
+- Conclusion:
+  - vectorized downsampling is active and observable.
+  - relay CPU did not drop significantly, so the remaining cost is likely dominated by ROS 2 Python `PointCloud2` subscription/deserialization rather than the sampling copy loop.
+  - further major CPU reduction would likely require avoiding Python relay for pointcloud forwarding, for example a C++ relay, factory-side lower-rate output, or feeding Nav2 from a lighter topic directly.
+- Boundary:
+  - no motion test was run in this pass.
+  - real task execution accuracy still requires the next field run with watcher enabled after relocalization.
+
+## 2026-06-23 18:20 - 任务点地图栅格静态验收与现场 ready-check 补强
+
+- Field concern:
+  - after frontend relocalization and task-point creation became usable, the real task still moved to an obviously wrong pose and stopped early.
+  - one remaining high-risk cause is that a task point can look reasonable on the page but actually fall outside the loaded map, on an occupied cell, or in an unknown cell.
+  - if this is not blocked before motion, Nav2 may plan to a different reachable endpoint, fail to produce a valid plan, or stop in a way that looks like "the frontend ignored my point".
+- Change:
+  - backend task readiness now validates every waypoint against the selected task map before start:
+    - out of map: `waypoint_out_of_map`;
+    - occupied map cell: `waypoint_on_occupied_cell`;
+    - unknown map cell: `waypoint_on_unknown_cell`.
+  - the frontend labels occupied/unknown waypoint failures as `检查点位`, not as a generic task failure.
+  - `scripts/104_frontend_task_ready_check.py` now prints `bad_waypoint=...` lines when the backend returns `readiness.bad_waypoints`, including waypoint index, label, x/y, reason, grid and cell value when available.
+  - `scripts/check_preflight_policy.py` now guards this ready-check bad-waypoint output, so future refactors should not remove it silently.
+- Verification:
+  - local:
+    - `python3 -m py_compile scripts/104_frontend_task_ready_check.py scripts/check_preflight_policy.py` passed;
+    - `python3 scripts/check_preflight_policy.py` passed.
+  - synced the ready-check and policy scripts to 104.
+  - 104:
+    - remote `py_compile` passed;
+    - remote `python3 scripts/check_preflight_policy.py` passed.
+  - real frontend smoke from the previous pass also passed:
+    - task cards render first point/order/watcher command;
+    - camera streams do not auto-load;
+    - 3D mode renders nonblank F20 terrain;
+    - synthetic active-task summary renders pose, Nav2 and path diagnostics.
+  - current 104 read-only ready-check:
+    - `web_ok=true`;
+    - floor `F20`, selected map `builtin_F20`;
+    - `localization_ok=false`, `pose_fresh=false`;
+    - battery about `61%`;
+    - `/scan` fresh with about `192` finite ranges;
+    - relay pointcloud visible: about `5823` points, `source=relay`;
+    - relay method `numpy_stride`;
+    - relay rate around `in_hz=9.7`, `out_hz=3.8`, skip about `61%`;
+    - camera proxy enabled, front/rear both `not_pulled`;
+    - 3D map available: `175x206`, `cell=0.25m`, `stair_zones=6`;
+    - recommended task remains `task_1782136015104_a2a48d2b`;
+    - task start is correctly blocked by `localization_not_confirmed` after restart.
+- Boundary:
+  - still no motion command was sent in this pass.
+  - the current block is not scan/lidar/map/camera; it is simply that the robot must be relocalized again before a field task can start.
+  - after relocalization, if a waypoint is on an occupied/unknown/out-of-map cell, the ready-check should now name the exact bad waypoint before the operator clicks start.
+- Next real proof:
+  - in the field, complete frontend relocalization first.
+  - run:
+    - `./scripts/104_frontend_task_ready_check.py --task-id 'task_1782136015104_a2a48d2b'`
+  - if it prints ready, start watcher before clicking the frontend task:
+    - `./scripts/104_watch_frontend_task.sh 180 'field_task_a2a48d2b'`
+  - then manually start the recommended task from the real frontend.
+  - if it moves to the wrong place or stops early, inspect `task_watch_logs/<run>/analysis.txt` and the task `last_result.runtime_snapshot` first; do not rely on visual memory alone.
+
+## 2026-06-23 18:45 - 前端实时位姿追踪栏补强
+
+- Problem:
+  - field feedback said the task page could show a path to the first point, but did not clearly show the robot's real-time pose/progress.
+  - the previous `activeTaskSummary` already contained many diagnostics, but it was still a long single-line summary and not easy to scan during a field run.
+- Change:
+  - added a dedicated read-only pose tracker block to both:
+    - live dashboard: `livePoseTracker`;
+    - task execution page: `taskPoseTracker`.
+  - each tracker shows:
+    - current map pose and freshness, or a clear unlocalized/stale-pose reason;
+    - current Nav2 feedback pose and age;
+    - current task target pose and waypoint label;
+    - robot-to-goal, Nav2-to-goal, robot-to-Nav2, and path-to-goal errors;
+    - path verification flag;
+    - task phase, Nav2 status, distance and runtime guard state.
+  - the tracker is display-only:
+    - no task start;
+    - no `/m20pro/floor_goal`;
+    - no `/cmd_vel`;
+    - no camera stream auto-open.
+- Regression guards:
+  - `scripts/check_preflight_policy.py` now checks that:
+    - the task page includes `taskPoseTracker`;
+    - `renderPoseTracker()` keeps the map pose/Nav2 feedback/current target/error fields;
+    - `/api/state` polling updates both live and task pose trackers.
+  - `scripts/104_frontend_task_smoke.py` now injects a synthetic active task and verifies that the real frontend renderer outputs:
+    - `地图位姿`;
+    - `Nav2反馈`;
+    - `当前目标`;
+    - `误差`;
+    - `任务阶段`;
+    - `狗-目标`;
+    - `Nav2-目标`;
+    - `狗-Nav2`;
+    - `路径-目标 0.12m`;
+    - `路径已校验`;
+    - the waypoint label `F20_smoke_point`.
+- Verification:
+  - local:
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/104_frontend_task_smoke.py scripts/check_preflight_policy.py` passed;
+    - `python3 scripts/check_preflight_policy.py` passed.
+  - 104:
+    - synced updated frontend and scripts;
+    - remote `py_compile` passed;
+    - remote `python3 scripts/check_preflight_policy.py` passed;
+    - rebuilt `m20pro_cloud_bridge`;
+    - restarted `m20pro-real.service`;
+    - `/healthz` recovered with `{"ok":true}`.
+  - real browser smoke against `http://10.21.31.104:8080` passed:
+    - current page state is still unlocalized, so the real tracker correctly shows `未定位，重定位后显示地图位姿`;
+    - synthetic task tracker rendered the expected map pose/Nav2 pose/current target/error/path verification fields;
+    - 3D map mode still renders nonblank F20 terrain;
+    - camera streams still do not auto-load;
+    - task buttons remain disabled while unlocalized.
+  - ready-check after restart:
+    - floor `F20`, selected map `builtin_F20`;
+    - `localization_ok=false`, `pose_fresh=false`;
+    - battery about `58%`;
+    - `/scan` fresh with about `189` finite ranges;
+    - relay pointcloud visible: about `5485` points, source `relay`;
+    - relay method `numpy_stride`;
+    - 3D map available: `175x206`, `cell=0.25m`, `stair_zones=6`;
+    - current task start remains blocked by `localization_not_confirmed`, which is expected after service restart.
+- Boundary:
+  - no motion command was sent in this pass.
+  - the next required proof is still a real field run after frontend relocalization, with watcher enabled before pressing task start.
+
+## 2026-06-23 19:05 - 任务卡开跑前证据链复制按钮
+
+- Problem:
+  - the task card already showed the watcher command, but field operation still required the operator to copy or remember commands manually.
+  - if a real run starts without ready-check and watcher, a wrong-point/early-stop failure can again become "only visual memory, no evidence".
+- Change:
+  - each task card now shows two explicit commands:
+    - `开跑前验收：./scripts/104_frontend_task_ready_check.py --task-id '<task_id>'`;
+    - `开跑前记录：./scripts/104_watch_frontend_task.sh 180 '<field_task_label>'`.
+  - added copy buttons:
+    - `复制验收`;
+    - `复制记录`.
+  - the task-start confirmation dialog now says:
+    - `先验收：...ready_check...`;
+    - `再开记录：...watcher...`;
+    - then reminds that confirming will immediately navigate to the first waypoint.
+  - this is still display/copy only:
+    - the page does not run shell commands;
+    - smoke does not click task start;
+    - no motion topic or task-start API is called by this change.
+- Regression guards:
+  - `scripts/check_preflight_policy.py` now checks:
+    - frontend can generate the ready-check command;
+    - task cards show ready-check and watcher commands before motion;
+    - task cards provide copy buttons for both commands;
+    - the confirmation dialog reminds the operator to run ready-check and watcher.
+  - `scripts/104_frontend_task_smoke.py` now verifies on the real page:
+    - task cards contain `开跑前验收`;
+    - task cards contain `开跑前记录`;
+    - copy-command buttons expose both ready-check and watcher commands.
+- Verification:
+  - local:
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/104_frontend_task_smoke.py scripts/check_preflight_policy.py` passed;
+    - `python3 scripts/check_preflight_policy.py` passed.
+  - 104:
+    - synced updated frontend and scripts;
+    - remote `py_compile` passed;
+    - remote `python3 scripts/check_preflight_policy.py` passed;
+    - rebuilt `m20pro_cloud_bridge`;
+    - restarted `m20pro-real.service`;
+    - `/healthz` recovered with `{"ok":true}`.
+  - real browser smoke passed:
+    - every task card shows both commands;
+    - `copyCommandButtons` includes ready-check and watcher commands for each task;
+    - task buttons remain disabled while unlocalized;
+    - camera streams still do not auto-load;
+    - 3D map and pose tracker smoke still pass.
+  - ready-check after restart:
+    - floor `F20`, selected map `builtin_F20`;
+    - `localization_ok=false`, `pose_fresh=false`;
+    - battery about `57%`;
+    - `/scan` fresh with about `195` finite ranges;
+    - relay pointcloud visible: about `5971` points, source `relay`;
+    - relay method `numpy_stride`;
+    - 3D map available: `175x206`, `cell=0.25m`, `stair_zones=6`;
+    - recommended task remains `task_1782136015104_a2a48d2b`;
+    - current task start remains blocked by `localization_not_confirmed`, expected after service restart.
+- Boundary:
+  - no motion command was sent in this pass.
+  - this closes another operator-error gap, but the full objective still needs a field task run after relocalization.
+
+## 2026-06-23 19:40 - 前端一键复制现场快照
+
+- Problem:
+  - watcher is still the main evidence source for a real moving task, but field work can be chaotic.
+  - if the operator has not started watcher yet, the frontend should still provide a fast way to preserve the current map/task/pose/perception/camera state.
+- Change:
+  - added `复制现场快照` to the task execution section.
+  - the button copies a compact JSON payload from the browser; it does not call task-start APIs or publish ROS topics.
+  - the snapshot includes:
+    - selected map and frontend map mode;
+    - floor, localization status, pose freshness, current map pose, factory navigation status and battery;
+    - `/scan` finite count and age;
+    - relay pointcloud count/source/rate/skip/downsample method;
+    - 3D map availability, grid message and stair-zone count;
+    - camera proxy status and per-camera RTSP/proxy state;
+    - current task readiness;
+    - active task and active waypoint if any;
+    - last task result if any;
+    - recommended task id/name/status/map/readiness/first waypoint/order;
+    - task pose tracker text and active task summary text.
+  - exposed the same payload through `window.m20proDebug.fieldSnapshot()` so read-only smoke tests can verify it without clicking motion controls.
+- Regression guards:
+  - `scripts/check_preflight_policy.py` now checks:
+    - the task page has `copyFieldSnapshotBtn`;
+    - `buildFieldSnapshot()` includes perception, camera, recommended task and pose-tracker context;
+    - `m20proDebug.fieldSnapshot()` exposes the payload for smoke tests.
+  - `scripts/104_frontend_task_smoke.py` now checks the field snapshot payload contains key sections:
+    - `frontend`;
+    - `robot`;
+    - `perception`;
+    - `map_3d`;
+    - `camera_proxy`;
+    - `task_readiness`;
+    - `recommended_task`;
+    - `task_pose_tracker_text`.
+- Verification:
+  - local:
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/104_frontend_task_smoke.py scripts/check_preflight_policy.py` passed;
+    - `python3 scripts/check_preflight_policy.py` passed.
+  - 104:
+    - synced updated frontend and scripts;
+    - remote `py_compile` passed;
+    - remote `python3 scripts/check_preflight_policy.py` passed;
+    - rebuilt `m20pro_cloud_bridge`;
+    - restarted `m20pro-real.service`;
+    - `/healthz` recovered with `{"ok":true}`.
+  - real browser smoke passed:
+    - `hasFieldSnapshotButton=true`;
+    - `hasFieldSnapshotFunction=true`;
+    - `fieldSnapshot` contained map, robot, perception, 3D map, camera proxy, readiness and recommended task sections;
+    - task cards still show ready-check/watcher commands and copy buttons;
+    - camera streams still do not auto-load;
+    - 3D map and pose tracker smoke still pass.
+  - ready-check after restart:
+    - floor `F20`, selected map `builtin_F20`;
+    - `localization_ok=false`, `pose_fresh=false`;
+    - battery about `55%`;
+    - `/scan` fresh with about `191` finite ranges;
+    - relay pointcloud visible: about `5911` points, source `relay`;
+    - relay method `numpy_stride`;
+    - 3D map available: `175x206`, `cell=0.25m`, `stair_zones=6`;
+    - recommended task remains `task_1782136015104_a2a48d2b`;
+    - current task start remains blocked by `localization_not_confirmed`, expected after service restart.
+- Boundary:
+  - no motion command was sent in this pass.
+  - this snapshot is fallback evidence, not a replacement for watcher during a real moving task.
+
+## 2026-06-23 20:05 - 真实前端任务现场验证只读包装脚本
+
+- Problem:
+  - the correct field sequence is now clear:
+    - run task-specific ready-check;
+    - start watcher;
+    - manually confirm the real frontend task first point/order;
+    - click start from the web page.
+  - but field operation still required copying and running multiple commands in the correct order.
+- Change:
+  - added `scripts/104_frontend_task_field_run.sh`.
+  - usage examples:
+    - `./scripts/104_frontend_task_field_run.sh --task-id task_1782136015104_a2a48d2b --duration 180`;
+    - `./scripts/104_frontend_task_field_run.sh --task-name 日常巡检任务 --duration 180`.
+  - behavior:
+    - runs `104_frontend_task_ready_check.py` first;
+    - if ready-check fails, exits immediately and does not start watcher;
+    - only if ready-check returns OK, starts `104_watch_frontend_task.sh`;
+    - then prints an instruction that the operator must manually start the task from the real web frontend.
+  - safety:
+    - no task-start API call;
+    - no `/m20pro/floor_goal`;
+    - no `/cmd_vel`;
+    - no ROS publisher;
+    - no automatic click in the browser.
+  - updated `scripts/README.md` to document the wrapper as the recommended single command for a field task run.
+- Regression guards:
+  - `scripts/check_preflight_policy.py` now checks:
+    - the wrapper is documented as read-only;
+    - it does not contain task-start or motion-publish commands;
+    - watcher startup is gated by ready-check success;
+    - after readiness passes, it starts the existing read-only watcher.
+- Verification:
+  - local:
+    - `bash -n scripts/104_frontend_task_field_run.sh scripts/104_watch_frontend_task.sh` passed;
+    - `python3 -m py_compile scripts/check_preflight_policy.py scripts/104_frontend_task_ready_check.py` passed;
+    - `python3 scripts/check_preflight_policy.py` passed.
+  - local dry-run against current 104 state:
+    - command:
+      - `./scripts/104_frontend_task_field_run.sh --task-id task_1782136015104_a2a48d2b --duration 5 --label dry_run_should_not_watch`;
+    - ready-check returned WARN because `localization_not_confirmed`;
+    - wrapper exited with code `1`;
+    - watcher was not started.
+  - 104:
+    - synced `104_frontend_task_field_run.sh`, `scripts/README.md`, and `check_preflight_policy.py`;
+    - remote `bash -n` passed;
+    - remote `python3 scripts/check_preflight_policy.py` passed.
+  - 104 dry-run on the robot:
+    - command:
+      - `./scripts/104_frontend_task_field_run.sh --task-id task_1782136015104_a2a48d2b --duration 5 --label remote_dry_run_should_not_watch`;
+    - ready-check again returned WARN because `localization_not_confirmed`;
+    - wrapper exited with code `1`;
+    - watcher was not started.
+- Boundary:
+  - no motion command was sent in this pass.
+  - this reduces field procedure mistakes, but final completion still requires a real field task run after successful frontend relocalization.
+
+## 2026-06-23 20:20 - 任务卡接入一条式现场验证入口
+
+- Problem:
+  - `104_frontend_task_field_run.sh` existed, but the operator still had to know or type the wrapper command manually.
+- Change:
+  - every task card now shows:
+    - `现场验证入口：./scripts/104_frontend_task_field_run.sh --task-id '<task_id>' --duration 180`;
+    - existing task-specific ready-check command;
+    - existing watcher command.
+  - added `复制验证` button next to `复制验收` and `复制记录`.
+  - task-start confirmation also includes the recommended wrapper command.
+- Verification:
+  - local:
+    - `python3 -m py_compile ...` passed;
+    - `python3 scripts/check_preflight_policy.py` passed.
+  - 104:
+    - synced updated frontend/smoke/policy;
+    - remote `py_compile` and policy passed;
+    - rebuilt `m20pro_cloud_bridge`;
+    - restarted `m20pro-real.service`;
+    - `/healthz` returned `{"ok":true}`.
+  - real browser smoke passed:
+    - each task card shows `现场验证入口`;
+    - `copyCommandButtons` includes the field-run wrapper, ready-check command and watcher command;
+    - task start remains disabled while unlocalized;
+    - camera streams still do not auto-load;
+    - 3D map, field snapshot and pose tracker smoke still pass.
+  - ready-check after restart:
+    - battery about `52%`;
+    - `/scan` fresh with about `196` finite ranges;
+    - relay pointcloud visible: about `5897` points, source `relay`;
+    - 3D map available: `175x206`, `cell=0.25m`, `stair_zones=6`;
+    - task start remains blocked by `localization_not_confirmed`, as expected.
+- Boundary:
+  - no motion command was sent in this pass.
+  - the field-run wrapper still only starts watcher after readiness passes; the operator must manually start the task from the real frontend.
+
+## 2026-06-23 20:35 - 当前目标完成审计
+
+- Audit result:
+  - the frontend/task tooling has been hardened substantially, but the original goal is not complete yet.
+  - missing proof is still the same: one real field task run after successful frontend relocalization, with watcher evidence showing whether the dog reaches the marked waypoints, dwells, and advances correctly.
+- Current 104 state:
+  - `/healthz` returns `{"ok":true}`;
+  - selected map is `builtin_F20`;
+  - floor is `F20`;
+  - `localization_ok=false`;
+  - `pose_fresh=false`;
+  - no active task;
+  - no `last_task_result`;
+  - battery about `52%`;
+  - `/scan` fresh with about `189` finite ranges;
+  - relay pointcloud visible with about `5904` points, source `relay`;
+  - relay method `numpy_stride`;
+  - camera proxy enabled, both cameras `not_pulled`;
+  - 3D map available: `175x206`, `cell=0.25m`, `stair_zones=6`.
+- Existing evidence:
+  - recent `task_watch_logs/*/analysis.txt` entries are smoke/analyzer tests, not real field motion runs.
+  - `/api/tasks` currently has no persisted `last_result` from a new real moving task.
+- Conclusion:
+  - current blocker for real completion is external/field-state: robot must be relocalized in the field and then run a task from the frontend.
+  - do not mark this objective complete until that moving run exists.
+- Next field command:
+  - after frontend relocalization succeeds, copy from the task card or run:
+    - `./scripts/104_frontend_task_field_run.sh --task-id 'task_1782136015104_a2a48d2b' --duration 180`
+  - after the wrapper starts watcher, manually start the task from the real web frontend.
+  - then inspect the generated `task_watch_logs/<run>/analysis.txt`.
+
+## 2026-06-25 14:10 - 前端删除 3D 地图与摄像头入口
+
+- Background:
+  - the lightweight 3D map view was visually noisy and misleading for field operation.
+  - the frontend camera open/close controls were not useful in the current workflow and added cognitive load.
+- Change:
+  - removed visible 2D/3D map mode buttons from the web dashboard; the main map is now fixed to the 2D occupancy-grid workflow.
+  - removed frontend 3D terrain state, terrain loading, terrain canvas rendering and 3D pointer/zoom branches.
+  - removed the "实时视频" section, front/rear MJPEG image widgets, all-camera open/close buttons and camera status rendering from the web UI.
+  - kept backend compatibility paths for now, but the frontend no longer exposes or triggers these features.
+  - field snapshot now focuses on frontend state, robot, perception, task readiness, active task/waypoint and pose tracker text; it no longer includes `map_3d` or `camera_proxy`.
+- Tooling updates:
+  - `104_frontend_task_smoke.py` now verifies that removed 3D-map and camera controls are absent, while still sampling the 2D map canvas.
+  - `104_frontend_task_ready_check.py` no longer queries or prints camera proxy / 3D map diagnostics.
+  - `check_preflight_policy.py` now guards against reintroducing visible camera controls or frontend 3D terrain rendering.
+  - `scripts/README.md` was updated so task readiness checks only mention useful task-start signals: localization, battery, `/scan`, lidar relay and waypoint order.
+- Verification:
+  - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/104_frontend_task_smoke.py scripts/104_frontend_task_ready_check.py scripts/check_preflight_policy.py` passed.
+  - `./scripts/check_preflight_policy.py` passed.
+  - static search found no visible frontend `map3dBtn`, `map2dBtn`, camera toggle buttons, video widgets, camera status widget, `drawTerrain`, `loadTerrain`, `setCameraEnabled`, or `renderCameraStatus` in `web_dashboard_node.py`.
+
+## 2026-06-26 17:35 - 定位状态一致性与 104 real 部署加固
+
+- Problem:
+  - 现场前端曾出现“定位页显示已确认，但任务页仍显示未定位/黄色框闪烁”的矛盾状态。
+  - 根因之一是 `/api/state` 生成同一响应时会重复读取实时状态，`localization_status` 和 `task_readiness` 可能来自不同瞬间。
+  - 另一个问题是 `m20pro_tcp_bridge` 里位姿查询和导航状态查询都在发布 `/m20pro_tcp_bridge/localization_ok`，两个查询源抖动时会互相覆盖。
+- Change:
+  - `web_dashboard_node.py` 的 `/api/state` 现在用同一份 runtime snapshot 计算：
+    - `localization_status`;
+    - `task_readiness`;
+    - 是否需要检查 Nav2 readiness。
+  - `tcp_bridge_node.py` 中 `localization_ok` 的发布权收敛到 `_publish_map_pose()`：
+    - 只有拿到可信、可用、未超界的原厂 map pose 才发布 true；
+    - `_publish_navigation_status()` 继续发布诊断字符串 `location=... obstacle=...`，但不再覆盖 `localization_ok`。
+  - `check_preflight_policy.py` 新增护栏：
+    - 禁止导航状态轮询直接发布 `localization_ok`;
+    - 要求 `/api/state` 中定位状态和任务就绪判断来自同一份 snapshot。
+- 104 deployment:
+  - 已同步本地 real 版本到 104：
+    - `src/m20pro_bringup`;
+    - `src/m20pro_cloud_bridge`;
+    - `src/m20pro_navigation`;
+    - `scripts`;
+    - `docs`;
+    - `systemd`;
+    - `README.md`。
+  - 104 上构建通过：
+    - `colcon build --symlink-install --packages-select m20pro_bringup m20pro_cloud_bridge m20pro_navigation`
+  - 已重启 `m20pro-real.service`，服务状态为 `active`。
+- Verification:
+  - local:
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py src/m20pro_navigation/m20pro_navigation/tcp_bridge_node.py scripts/check_preflight_policy.py` passed.
+    - all contract tests passed:
+      - `test_localization_contract.py`;
+      - `test_task_contract.py`;
+      - `test_active_task_contract.py`;
+      - `test_nav_status_contract.py`;
+      - `test_task_plan_contract.py`;
+      - `test_task_progress_contract.py`;
+      - `test_task_snapshot_contract.py`;
+      - `test_pcd_derived.py`.
+    - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js` passed.
+    - `./scripts/check_preflight_policy.py` passed.
+    - `git diff --check` passed.
+  - 104:
+    - `./scripts/check_preflight_policy.py` passed.
+    - selected map: `map_1782442183242_ee7c6b76` / `DESK_20260625_164234`.
+    - service restart recovery:
+      - startup period briefly showed scan/costmap not ready, then recovered to `localized_ready`.
+    - 10 consecutive `/api/state` reads after recovery:
+      - `active_task=None`;
+      - `active_waypoint=None`;
+      - `confirmed=True`;
+      - `localization_status.code=localized_ready`;
+      - `task_readiness.code=ready`;
+      - `task_ready=True`;
+      - no mismatch between `localization_status.task_readiness_code` and `task_readiness.code`.
+    - read-only ready-check result:
+      - `localization_ok=true`;
+      - `pose_fresh=true`;
+      - battery about `84%`;
+      - `/scan` fresh, about `105` finite ranges at that sample;
+      - relay pointcloud visible, about `5697` points, source `relay`;
+      - relay method `numpy_stride`;
+      - no active task.
+- Current blocker:
+  - Existing tasks are still bound to old `builtin_F20`;
+  - current selected map is `DESK_20260625_164234`;
+  - ready-check correctly reports `selected_map_mismatch`.
+  - Before any real motion test, create fresh task points on the current selected map and verify the first waypoint is close and physically safe.
+- Boundary:
+  - no `/api/tasks/start` call was made.
+  - no `/m20pro/floor_goal` motion target was published.
+  - this pass only changed code, restarted the real service, and did read-only verification.
+  - the original goal is still not complete: it still needs a real frontend single-floor task run that reaches waypoint 1, dwells, advances to waypoint 2, and leaves consistent frontend/Nav2/`last_result` evidence.
+
+## 2026-06-26 18:00 - 任务页实时状态与历史结果隔离
+
+- Problem:
+  - 104 后端 `/api/state` 已经显示 `active_task=null`、`active_waypoint=null`，但浏览器只读 smoke 仍失败为 `an active task is visible during read-only smoke`。
+  - 根因是前端 `activeTaskSummary` 把 `last_task_result` 渲染到了“当前执行”摘要里。
+  - 这会造成一个现场误导：没有任务在执行时，历史失败结果仍可能让任务页看起来像还在导航或卡住。
+- Change:
+  - `renderActiveTaskSummary()` 现在只表达实时状态：
+    - 有 `active_task` 或 `active_waypoint` 才显示当前任务执行细节；
+    - 两者都没有时固定显示 `无任务`；
+    - 不再用 `last_task_result` 渲染“当前执行”。
+  - 历史任务结果仍保留在任务卡片里：
+    - 可以看到上次失败原因、点位、Nav2 状态、路径校验等诊断；
+    - 但不会污染实时任务状态。
+  - 现场快照 `recommended_task` 只从当前选中地图的任务中选择：
+    - 当前地图没有任务时返回 `null`；
+    - 不再推荐旧地图任务。
+  - `104_frontend_task_smoke.py` 新增浏览器内 synthetic 检查：
+    - 合成 active task 时必须显示实时任务诊断；
+    - 没有 active task 时，即使传入历史 `last_task_result`，摘要也必须保持 `无任务`。
+  - `check_preflight_policy.py` 新增护栏：
+    - 禁止 `activeTaskSummary` 再渲染历史 `last_result`；
+    - 要求现场快照只推荐当前地图任务。
+- 104 deployment:
+  - 同步到 104 real 工作区：
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js`;
+    - `scripts/104_frontend_task_smoke.py`;
+    - `scripts/check_preflight_policy.py`.
+  - 104 构建通过：
+    - `colcon build --symlink-install --packages-select m20pro_cloud_bridge`
+  - 已重启 `m20pro-real.service`，服务状态为 `active`。
+- Verification:
+  - local:
+    - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js` passed.
+    - `python3 -m py_compile scripts/104_frontend_task_smoke.py scripts/check_preflight_policy.py` passed.
+    - `./scripts/check_preflight_policy.py` passed.
+    - `git diff --check` passed.
+  - 104:
+    - service restart 后前几秒为 `localization_not_confirmed` / `navigation_not_ready`，随后恢复到 `localized_ready` 和 `task_readiness=ready`。
+    - 持续观测中：
+      - `active_task=null`;
+      - `active_waypoint=null`;
+      - `selected_map_id=map_1782442183242_ee7c6b76`.
+    - 104 policy check passed.
+    - real frontend smoke passed against `http://10.21.31.104:8080`:
+      - `activeTaskSummary=无任务`;
+      - `latestActiveTask=null`;
+      - 当前地图提示：`当前地图还没有任务；旧地图任务只保留为历史记录，不能用于本次现场执行。请先在当前地图标点并生成任务。`;
+      - 两个旧 `builtin_F20` 任务的按钮均显示 `旧地图任务` 且 disabled;
+      - 旧地图任务的验收/记录复制按钮均 disabled;
+      - `fieldSnapshot.recommended_task=null`;
+      - 前/后摄像头只读 MJPEG 画面仍存在；
+      - 3D 地图和摄像头开关控件不存在。
+- Boundary:
+  - no `/api/tasks/start` call was made.
+  - no `/m20pro/floor_goal` motion target was published.
+  - this pass only fixed state semantics, rebuilt/restarted 104, and ran read-only browser verification.
+  - original goal remains incomplete until a fresh current-map single-floor task is created and run from the frontend with real evidence:
+    - reaches waypoint 1;
+    - dwell occurs;
+    - advances to waypoint 2;
+    - frontend/Nav2/`last_result` agree.
+
+## 2026-06-26 18:08 - 任务创建收敛到当前选中地图
+
+- Problem:
+  - 当前地图 `DESK_20260625_164234` 没有点位和任务，但系统仍保留两个旧 `builtin_F20` 任务。
+  - 启动旧任务已经被拦截，但任务创建 API 仍理论上允许按非当前选中地图生成任务。
+  - 对当前目标来说，这个入口会继续制造“能看见但不能用于本次现场执行”的任务，增加现场误操作风险。
+- Change:
+  - 在 `task_contract.py` 增加 `validate_task_create_map_selection()`：
+    - 没有选中固定地图时不能生成任务；
+    - 当前阶段不能基于实时 `/map` 生成可执行任务；
+    - 任务 `map_id` 必须等于当前选中地图；
+    - 否则返回明确 readiness code：
+      - `selected_map_missing`;
+      - `live_map_task_disabled`;
+      - `task_create_map_mismatch`.
+  - `web_dashboard_node.py::_create_task()` 现在调用该 contract：
+    - 任务创建也必须走“当前选中地图”规则；
+    - 点位本身仍由 `validate_task_annotations_for_map()` 校验，必须全部属于任务地图。
+  - 前端 `createTaskBtn` 增加空选择拦截：
+    - 未勾选当前地图点位时，不再调用 `/api/tasks`;
+    - 直接提示 `当前地图还没有选中的任务点，请先在当前地图标点并勾选点位`。
+  - `104_frontend_task_smoke.py` 修正验证时序：
+    - 进入任务页后显式调用真实 `loadTasks()`；
+    - 避免任务列表尚未刷新时 smoke 误以为空任务列表通过。
+  - `check_preflight_policy.py` 增加护栏：
+    - 要求任务创建规则在 contract 层；
+    - 要求后端创建任务调用该 contract；
+    - 要求前端空任务创建先拦截；
+    - 要求 smoke 显式加载真实任务列表再断言。
+- 104 deployment:
+  - 同步到 104 real 工作区并构建：
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py`;
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py`;
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js`;
+    - `scripts/test_task_contract.py`;
+    - `scripts/104_frontend_task_smoke.py`;
+    - `scripts/check_preflight_policy.py`.
+  - 104 构建通过：
+    - `colcon build --symlink-install --packages-select m20pro_cloud_bridge`
+  - 已重启 `m20pro-real.service`，服务状态为 `active`。
+- Verification:
+  - local:
+    - `python3 scripts/test_task_contract.py` passed.
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py scripts/test_task_contract.py scripts/check_preflight_policy.py` passed.
+    - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js` passed.
+    - `./scripts/check_preflight_policy.py` passed.
+    - `git diff --check` passed.
+  - 104:
+    - `python3 scripts/test_task_contract.py` passed.
+    - `./scripts/check_preflight_policy.py` passed.
+    - restart 后服务恢复到：
+      - `localization_status.code=localized_ready`;
+      - `task_readiness.code=ready`;
+      - `active_task=null`;
+      - `active_waypoint=null`.
+    - read-only ready-check:
+      - 当前选中地图仍是 `map_1782442183242_ee7c6b76`;
+      - 当前地图没有可执行任务；
+      - 两个旧 `builtin_F20` 任务均为 `selected_map_mismatch`;
+      - 建议仍为先在当前地图重新标点并生成任务。
+    - real frontend smoke passed after explicit `loadTasks()`:
+      - 旧任务卡片确实被加载；
+      - 两个旧任务按钮均显示 `旧地图任务` 且 disabled;
+      - 旧任务验收/记录复制按钮均 disabled;
+      - `activeTaskSummary=无任务`;
+      - `latestActiveTask=null`;
+      - `fieldSnapshot.recommended_task=null`.
+- Boundary:
+  - no `/api/tasks/start` call was made.
+  - no `/m20pro/floor_goal` motion target was published.
+  - no task or annotation was created during this pass.
+  - next real step remains:在当前地图上创建新的任务点和任务，然后在明确允许运动后做单层任务闭环验证。
+
+## 2026-06-26 18:22 - 保存点位增加固定地图范围与占用格校验
+
+- Problem:
+  - 当前阶段已经禁止旧地图任务启动，也禁止按非当前地图创建任务，但“保存点位”入口仍需要继续收紧。
+  - 如果点位本身落在地图外、障碍格或未知格上，即使任务属于当前地图，后续也可能出现 Nav2 能规划但实机目标不合理、前端看起来可执行、现场却跑偏或卡住的情况。
+  - 单层导航要先做扎实，点位合法性必须在保存时就拦掉，而不是等任务启动或现场运动后再靠脚本诊断。
+- Change:
+  - `web_dashboard_node.py::_create_annotation()` 现在复用 `task_contract.py` 的地图校验规则：
+    - 保存到固定地图时先取目标地图 snapshot；
+    - 调用 `pose_map_bounds_error(point_pose, target_map_payload, "保存点位")`；
+    - 再调用 `pose_map_occupancy_error(point_pose, target_map_payload, "保存点位")`。
+  - 后端新增明确错误码：
+    - `annotation_out_of_map`：点位不在地图范围内；
+    - `annotation_on_occupied_cell`：点位落在障碍格；
+    - `annotation_on_unknown_cell`：点位落在未知格。
+  - `check_preflight_policy.py` 增加护栏：
+    - 要求 `_create_annotation()` 在真正保存前必须做地图范围和占用格校验；
+    - 避免后续再把点位合法性绕回前端提示或现场脚本。
+- 104 deployment:
+  - 同步到 104 real 工作区并构建：
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py`;
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py`;
+    - `scripts/check_preflight_policy.py`.
+  - 104 构建通过：
+    - `colcon build --symlink-install --packages-select m20pro_cloud_bridge`
+  - 已重启 `m20pro-real.service`，服务状态为 `active`。
+- Verification:
+  - local:
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py scripts/check_preflight_policy.py scripts/test_task_contract.py` passed.
+    - `./scripts/check_preflight_policy.py` passed.
+    - `python3 scripts/test_task_contract.py` passed.
+    - `git diff --check` passed.
+  - 104:
+    - `./scripts/check_preflight_policy.py` passed.
+    - read-only ready-check against `http://10.21.31.104:8080` reported:
+      - selected map: `map_1782442183242_ee7c6b76`;
+      - `localization_ok=true`;
+      - `pose_fresh=true`;
+      - no active task or waypoint;
+      - battery about `72%`;
+      - `/scan` fresh, about `209` finite ranges at that sample;
+      - relay pointcloud fresh, about `5258` points, source `relay`;
+      - relay method `numpy_stride`;
+      - existing tasks are still old `builtin_F20` tasks and correctly blocked as `selected_map_mismatch`;
+      - `recommended_task=none`;
+      - script returned WARN only because the current selected map has no executable task yet.
+    - real frontend smoke passed against `http://10.21.31.104:8080`:
+      - `activeTaskSummary=无任务`;
+      - `fieldSnapshot.recommended_task=null`;
+      - selected map still `map_1782442183242_ee7c6b76`;
+      - 3D map controls remain removed;
+      - front/rear read-only camera images remain visible;
+      - camera toggle/status controls remain removed.
+- Boundary:
+  - no `/api/tasks/start` call was made.
+  - no `/m20pro/floor_goal` motion target was published.
+  - no annotation or task was created during this pass.
+  - this pass only changed the saved-point contract, rebuilt/restarted 104, and ran read-only verification.
+  - original goal remains incomplete until a fresh current-map single-floor task is created and run from the frontend with real evidence:
+    - reaches waypoint 1;
+    - dwell occurs;
+    - advances to waypoint 2;
+    - frontend/Nav2/`last_result` agree.
+
+## 2026-06-26 22:00 - 重定位按开发手册 2101 收口，并增加目标模式电量门控
+
+- Goal update:
+  - 后续单层导航加固必须以《山猫M20系列软件开发手册V0.0.9》和《山猫M20 Pro软件使用手册V0.0.1》为准。
+  - 目标模式期间必须实时关注机器狗电量；电量不足时停止目标模式现场推进，不继续创建任务或做运动验证。
+- Manual check:
+  - 开发手册 1.4.1 定义初始化/重置定位：
+    - TCP `Type=2101`;
+    - `Command=1`;
+    - `Items.PosX/PosY/PosZ/Yaw`;
+    - `ErrorCode=0` 表示初始化定位成功，`ErrorCode=1` 表示失败。
+  - 开发手册 1.4.4 定义单点导航任务：
+    - TCP `Type=1003`;
+    - `Command=1`;
+    - 目标点字段包括 `Value/MapID/PosX/PosY/PosZ/AngleYaw/PointInfo/Gait/Speed/Manner/ObsMode/NavMode`。
+  - 软件使用手册 3.7 说明地图坐标系与像素坐标系换算，后续点位合法性要继续基于当前地图栅格验证。
+- Change:
+  - 新增 `manual_relocalization_verification_payload()`：
+    - 把开发手册 TCP `2101/1` 作为网页重定位的必需证据；
+    - `/initialpose` 只作为 ROS 包装触发，不再被当成成功证据；
+    - `tcp_2101_diagnostic_only=False`，明确不再把 2101 降级为可忽略诊断项。
+  - `web_dashboard_node.py::_wait_for_relocalization_verification()` 改为调用该 contract：
+    - 只有 `tcp_2101_accepted=True` 且原厂定位、地图位姿、请求位姿附近性同时成立时，才返回 `factory_pose_accepted=True`;
+    - 2101 失败时，前端显示“重定位未确认”，不能再被 `/initialpose` 发布成功掩盖。
+  - 前端定位状态增加手册证据：
+    - `手册2101成功`;
+    - `手册2101未成功`。
+  - `docs/single_floor_navigation_architecture.md` 增加“手册优先”章节：
+    - 重定位、地图坐标、单点导航、任务状态必须追溯到手册；
+    - 代码包装层成功不能替代原厂接口成功。
+  - 新增 `scripts/104_goal_mode_battery_gate.py`：
+    - 只读查询 `/api/state`;
+    - 默认阈值 `25%`;
+    - 电量低于阈值或读不到电量时返回非 0，并提示停止目标模式现场推进；
+    - 不调用 `/api/tasks/start`，不发布 `/m20pro/floor_goal`，不重定位，不发运动命令。
+  - `scripts/README.md` 和 `check_preflight_policy.py` 增加该电量门控说明和防回归检查。
+- Verification:
+  - local:
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080` passed，电量约 `96%`。
+    - `python3 -m py_compile ...` passed.
+    - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js` passed.
+    - `python3 scripts/test_localization_contract.py` passed.
+    - `./scripts/check_preflight_policy.py` passed.
+    - `git diff --check` passed.
+  - 104 deployment:
+    - 同步并构建 `m20pro_cloud_bridge` 成功；
+    - 重启 `m20pro-real.service` 后服务为 `active`;
+    - 104 端 `python3 scripts/test_localization_contract.py` passed;
+    - 104 端 `./scripts/check_preflight_policy.py` passed.
+  - 104 read-only runtime check:
+    - `104_goal_mode_battery_gate.py` passed:
+      - battery `96%`;
+      - active task `false`;
+      - task readiness `localization_not_confirmed`.
+    - `104_frontend_task_ready_check.py` 返回 WARN，原因正确：
+      - 当前未定位；
+      - 当前地图没有可执行任务；
+      - 两个旧 `builtin_F20` 任务仍被 `selected_map_mismatch` 阻止。
+    - real frontend smoke passed:
+      - 页面可连接；
+      - `activeTaskSummary=无任务`;
+      - 旧地图任务按钮 disabled;
+      - 3D 地图控件仍不存在；
+      - 前/后只读摄像头入口仍存在；
+      - 现场快照能看到电量、scan、relay 点云和任务状态。
+- Boundary:
+  - no `/api/localization/initialpose` call was made during this pass.
+  - no `/api/tasks/start` call was made.
+  - no `/m20pro/floor_goal` motion target was published.
+  - no annotation or task was created.
+  - 当前 104 未定位，不能进入任务创建/运动闭环验证；下一步应先由前端或现场流程按手册 2101 证据完成重定位，再创建当前地图任务点。
+
+## 2026-06-26 22:05 - 前端 smoke 增加手册 2101 成功/失败显示验证
+
+- Problem:
+  - 后端已经把网页重定位成功收口到开发手册 TCP `2101/1`，但自动化还只验证接口/contract，没有直接证明前端页面会把“手册2101成功/未成功”和“任务页可启动/不可启动”显示对。
+  - 这类显示如果误导操作者，会再次出现“看起来定位成功，但任务页不允许启动”或“定位失败被误认为成功”的现场问题。
+- Change:
+  - `scripts/104_frontend_task_smoke.py` 新增 `evaluate_manual_relocalization_status()`：
+    - 在真实页面里调用现有 `renderLocalizationStatus()`；
+    - 合成 `tcp_2101_required=true, tcp_2101_accepted=false, confirmed=false, task_ready=false`；
+    - 合成 `tcp_2101_required=true, tcp_2101_accepted=true, confirmed=true, task_ready=true`。
+  - 新增 `assert_manual_relocalization_status()`：
+    - 失败分支必须显示：
+      - `定位未确认`;
+      - `手册2101未成功`;
+      - `任务页不可启动`;
+      - `重定位未确认`;
+      - CSS class 包含 `fail`。
+    - 成功分支必须显示：
+      - `定位已确认`;
+      - `手册2101成功`;
+      - `任务页可启动`;
+      - `重定位已成功`;
+      - CSS class 包含 `ok`。
+  - `scripts/check_preflight_policy.py` 增加静态护栏：
+    - smoke 必须合成 2101 成功/失败两个分支；
+    - smoke 必须断言前端文本和任务 readiness；
+    - smoke 必须实际执行该断言并写入 `syntheticManualRelocalizationStatus`。
+- Deployment:
+  - 已同步到 104 real 工作区：
+    - `scripts/104_frontend_task_smoke.py`;
+    - `scripts/check_preflight_policy.py`.
+  - 这次只改脚本，不涉及 ROS 包构建或服务重启。
+- Verification:
+  - local:
+    - `python3 -m py_compile scripts/104_frontend_task_smoke.py scripts/check_preflight_policy.py` passed.
+    - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js` passed.
+    - `python3 scripts/test_localization_contract.py` passed.
+    - `./scripts/check_preflight_policy.py` passed.
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080` passed，电量约 `94%`。
+    - `./scripts/104_frontend_task_smoke.py --url http://10.21.31.104:8080 --json-out /tmp/m20pro_frontend_task_smoke_manual_2101.json` passed.
+  - 104:
+    - `python3 -m py_compile scripts/104_frontend_task_smoke.py scripts/check_preflight_policy.py` passed.
+    - `./scripts/check_preflight_policy.py` passed.
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080` passed，电量约 `93%`。
+    - 104 本机无法运行浏览器 smoke：缺少 Chrome/Chromium。该项不是前端服务失败；上位机已经通过访问 `http://10.21.31.104:8080` 的真实 104 页面完成 browser smoke。
+  - Browser smoke evidence:
+    - 当前页面状态：
+      - `statusText=已连接`;
+      - `localization=异常/未定位`;
+      - `taskReadiness=定位未确认，先在网页定位页完成重定位，再开始任务`;
+      - `activeTaskSummary=无任务`;
+      - 旧 `builtin_F20` 任务按钮仍 disabled，原因是当前地图不匹配。
+    - 合成 2101 失败分支实际渲染：
+      - `定位未确认 / 手册2101未成功 / 任务页不可启动 / 开发手册 2101/1 返回失败，重定位未确认`;
+      - class `preflight-summary fail`。
+    - 合成 2101 成功分支实际渲染：
+      - `定位已确认 / 手册2101成功 / 任务页可启动 / 开发手册 2101/1 重定位已成功`;
+      - class `preflight-summary ok`。
+- Boundary:
+  - no `/api/localization/initialpose` call was made.
+  - no `/api/tasks/start` call was made.
+  - no `/m20pro/floor_goal` motion target was published.
+  - no annotation or task was created.
+  - 当前 104 仍是 `localization_not_confirmed`，所以目标模式不能进入任务运动闭环验证。
+
+## 2026-06-26 22:11 - 删除旧重定位诊断入口，避免 initialpose 误判
+
+- Problem:
+  - 现在网页重定位的成功标准已经按开发手册 TCP `2101/1` 收口。
+  - 旧脚本 `104_check_initialpose_to_106.sh` 只验证 106 是否收到 `/initialpose`，不能证明原厂初始化定位成功。
+  - 旧脚本 `104_watch_localization_status.py` 只轮询 `/api/state`，功能已被 `localization_status`、`104_frontend_task_ready_check.py` 和浏览器 smoke 覆盖。
+  - 继续把这些入口留在 README 的“诊断和开发入口”里，会把现场人员带回旧判断：以为 `/initialpose` 到达就等于重定位成功。
+- Change:
+  - 删除：
+    - `scripts/104_check_initialpose_to_106.sh`;
+    - `scripts/104_watch_localization_status.py`.
+  - `README.md` 和 `scripts/README.md` 不再推荐这两个入口。
+  - `scripts/README.md` 明确：
+    - 重定位排查以网页定位页、`localization_status` 和开发手册 TCP `2101/1` 回执为准；
+    - 不再用“106 是否收到 `/initialpose`”作为成功判断。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - 删除的两个脚本不得重新出现；
+    - README 不得继续暴露这两个入口；
+    - README 必须保留“开发手册 TCP `2101/1` 为准”的说明。
+- Deployment:
+  - 已同步到 104 real 工作区：
+    - `README.md`;
+    - `scripts/README.md`;
+    - `scripts/check_preflight_policy.py`.
+  - 已从 104 删除：
+    - `scripts/104_check_initialpose_to_106.sh`;
+    - `scripts/104_watch_localization_status.py`.
+  - 本次只删旧入口和文档/守护，不涉及 ROS 构建或服务重启。
+- Verification:
+  - local:
+    - `python3 -m py_compile scripts/check_preflight_policy.py scripts/104_frontend_task_ready_check.py scripts/104_frontend_task_smoke.py scripts/104_goal_mode_battery_gate.py` passed.
+    - `./scripts/check_preflight_policy.py` passed.
+    - `git diff --check` passed.
+    - 搜索 `README.md scripts docs src`，两个旧入口只剩 policy 的 forbid 规则中出现。
+  - 104:
+    - `python3 -m py_compile scripts/check_preflight_policy.py` passed.
+    - `./scripts/check_preflight_policy.py` passed.
+    - `test ! -e scripts/104_check_initialpose_to_106.sh && test ! -e scripts/104_watch_localization_status.py` passed.
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080` passed，电量约 `92%`。
+- Boundary:
+  - no `/api/localization/initialpose` call was made.
+  - no `/api/tasks/start` call was made.
+  - no `/m20pro/floor_goal` motion target was published.
+  - no annotation or task was created.
+  - 当前 104 仍是 `localization_not_confirmed`，不能进入任务运动闭环验证。
+
+## 2026-06-26 22:18 - ready-check 建议顺序收口到先重定位再建任务
+
+- Problem:
+  - 当前 104 同时满足两个阻塞条件：
+    - `localization_not_confirmed`;
+    - 当前选中地图没有可执行任务，旧 `builtin_F20` 任务被 `selected_map_mismatch` 阻止。
+  - 旧 ready-check 输出会在 `next:` 中优先提示“当前选中地图下没有可执行任务”，容易让现场人员先去标点/建任务，而忽略真正的第一前置条件：必须先完成手册 `2101/1` 重定位。
+- Change:
+  - `scripts/104_frontend_task_ready_check.py` 的 `state:` 段新增 `localization_status` 摘要：
+    - code;
+    - confirmed;
+    - task_ready;
+    - tcp_2101;
+    - message.
+  - `state_level_advice()` 现在按顺序给出现场建议：
+    - 低电优先；
+    - 未定位时优先提示前端定位页重定位，并要求看到“手册2101成功、定位已确认、任务页可启动”；
+    - 定位已确认但任务页不可启动时，再处理 Nav2、地图、位姿或感知链路；
+    - 只有这些 state-level blocker 都清掉后，才根据当前地图任务状态给出标点/建任务建议。
+  - `next:` 的 `advice_source` 与实际建议保持一致：
+    - 未定位时输出 `advice_source=state code=localization_not_confirmed`；
+    - 不再出现“文本提示重定位，但 source/code 却显示 no_current_map_task”的矛盾。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - ready-check 必须打印 manual relocalization confirmation status；
+    - ready-check 必须低电优先、再手册 2101 重定位优先；
+    - state-level blocker 的 code 必须和 next action 一致。
+- Deployment:
+  - 已同步到 104 real 工作区：
+    - `scripts/104_frontend_task_ready_check.py`;
+    - `scripts/check_preflight_policy.py`.
+  - 本次只改只读脚本，不涉及 ROS 构建或服务重启。
+- Verification:
+  - local:
+    - `python3 -m py_compile scripts/104_frontend_task_ready_check.py scripts/check_preflight_policy.py` passed.
+    - `./scripts/check_preflight_policy.py` passed.
+    - `git diff --check` passed.
+    - 对 `http://10.21.31.104:8080` 运行 ready-check，当前输出：
+      - `localization_status=localization_not_confirmed`;
+      - `next: 先在前端定位页完成重定位...`;
+      - `advice_source=state code=localization_not_confirmed`;
+      - 返回 WARN，原因正确：当前没有任何可从前端启动的匹配任务。
+  - 104:
+    - `python3 -m py_compile scripts/104_frontend_task_ready_check.py scripts/check_preflight_policy.py` passed.
+    - `./scripts/check_preflight_policy.py` passed.
+    - `./scripts/104_frontend_task_ready_check.py --url http://10.21.31.104:8080` 返回 WARN，输出同样先指向 `localization_not_confirmed`。
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080` passed，电量约 `90%`。
+- Boundary:
+  - no `/api/localization/initialpose` call was made.
+  - no `/api/tasks/start` call was made.
+  - no `/m20pro/floor_goal` motion target was published.
+  - no annotation or task was created.
+  - 当前 104 仍未定位，不能进入真实任务运动闭环验证。
+
+## 2026-06-26 22:27 - 旧地图/未就绪任务卡片不再显示开跑证据命令
+
+- Problem:
+  - 前端任务卡片已经能把旧 `builtin_F20` 任务禁用，并显示 `selected_map_mismatch`。
+  - 但旧地图任务卡片仍然显示“开跑前验收”和“开跑前记录”的命令文本。
+  - 这会造成现场误解：操作者可能以为禁用任务仍然具备开跑前验证入口，继续围绕旧地图任务排查，而不是先完成当前地图重定位与当前地图任务创建。
+- Change:
+  - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js` 中任务卡片增加 `canCopyEvidence` 门槛：
+    - 只有 `readiness.ready === true` 且没有地图不匹配时，才显示“开跑前验收/开跑前记录”命令文本；
+    - 只有满足同一条件时，才显示 ready-check 和 watcher 的复制按钮。
+  - `scripts/104_frontend_task_smoke.py` 增加回归检查：
+    - 旧地图任务卡片不得暴露可点击的证据命令按钮；
+    - 旧地图任务卡片也不得继续显示字段命令文本。
+  - `scripts/check_preflight_policy.py` 增加静态防回归：
+    - 任务卡片证据命令必须由 `canCopyEvidence` 控制；
+    - old-map task smoke 必须检查“按钮”和“文本”两类误导入口。
+- Deployment:
+  - 已同步到 104 real 工作区：
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js`;
+    - `scripts/104_frontend_task_smoke.py`;
+    - `scripts/check_preflight_policy.py`.
+  - 104 已执行：
+    - `colcon build --symlink-install --packages-select m20pro_cloud_bridge`;
+    - 重启 `m20pro-real.service`;
+    - `http://10.21.31.104:8080/healthz` 返回 `{"ok":true}`。
+- Verification:
+  - local:
+    - `python3 -m py_compile scripts/104_frontend_task_smoke.py scripts/check_preflight_policy.py scripts/104_frontend_task_ready_check.py scripts/104_goal_mode_battery_gate.py` passed.
+    - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js` passed.
+    - `./scripts/check_preflight_policy.py` passed.
+    - `git diff --check` passed.
+    - `./scripts/104_frontend_task_smoke.py --url http://10.21.31.104:8080 --json-out /tmp/m20pro_frontend_task_smoke_evidence_commands_after_deploy.json` passed。
+  - 104:
+    - `./scripts/check_preflight_policy.py` passed.
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080` passed。
+    - `./scripts/104_frontend_task_ready_check.py --url http://10.21.31.104:8080` 返回 WARN，原因正确：当前仍是 `localization_not_confirmed`，且没有当前地图可执行任务。
+- Boundary:
+  - no `/api/localization/initialpose` call was made.
+  - no `/api/tasks/start` call was made.
+  - no `/m20pro/floor_goal` motion target was published.
+  - no annotation or task was created.
+  - 这次只消除前端任务卡片的误导显示；真实单层运动闭环仍未完成，下一步必须先让前端重定位达到“手册2101成功 + 定位已确认 + 任务页可启动”，再创建当前地图任务并在明确授权后做运动验证。
+
+## 2026-06-26 22:37 - 旧地图任务卡片不再显示原始 ready/error 状态
+
+- Problem:
+  - 上一轮已经把旧地图任务的“开跑前验收/开跑前记录”命令隐藏掉。
+  - 但任务卡片右上角仍直接显示后端历史状态，例如 `ready` 或 `error`。
+  - 对现场人员来说，旧 `builtin_F20` 任务虽然按钮禁用，但标题旁边显示 `ready` 仍然容易被理解为“这个任务当前可执行”。
+- Change:
+  - `dashboard.js` 增加 `taskDisplayStatus()`：
+    - 地图不匹配时显示 `旧地图`;
+    - 当前任务正在运行时显示 `执行中`;
+    - 无效任务显示 `无效`;
+    - 当前地图且 readiness ready 时显示 `可执行`;
+    - 其他情况显示 `未就绪`。
+  - 任务卡片 tag 改为渲染 `displayStatus`，不再直接暴露原始 `task.status`。
+  - `104_frontend_task_smoke.py` 增加检查：没有当前地图任务时，旧地图任务卡片不得出现独立一行的 `ready` 状态。
+  - `check_preflight_policy.py` 增加防回归：
+    - 必须存在 `taskDisplayStatus()`；
+    - 任务卡片 tag 必须使用 `displayStatus`;
+    - 不得再用 `${taskStatus}` 直接作为可见 tag。
+- Deployment:
+  - 已同步到 104 real 工作区：
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js`;
+    - `scripts/104_frontend_task_smoke.py`;
+    - `scripts/check_preflight_policy.py`.
+  - 104 已执行：
+    - `colcon build --symlink-install --packages-select m20pro_cloud_bridge`;
+    - 重启 `m20pro-real.service`;
+    - `http://10.21.31.104:8080/healthz` 在服务启动完成后返回 `{"ok":true}`。
+- Verification:
+  - local:
+    - `python3 -m py_compile scripts/104_frontend_task_smoke.py scripts/check_preflight_policy.py` passed.
+    - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js` passed.
+    - `./scripts/check_preflight_policy.py` passed.
+    - `git diff --check` passed.
+  - 104 / real frontend:
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080` passed，电量约 `85%`。
+    - `./scripts/104_frontend_task_smoke.py --url http://10.21.31.104:8080 --json-out /tmp/m20pro_frontend_task_smoke_display_status_after_deploy.json` passed。
+    - smoke 结果显示：
+      - 当前状态仍是 `localization_not_confirmed`;
+      - 旧 `builtin_F20` 任务卡片 tag 已显示 `旧地图`;
+      - 旧任务按钮仍 disabled；
+      - 旧任务卡片没有 ready-check/watcher 复制命令。
+- Boundary:
+  - no `/api/localization/initialpose` call was made.
+  - no `/api/tasks/start` call was made.
+  - no `/m20pro/floor_goal` motion target was published.
+  - no annotation or task was created.
+  - 本次只修正任务页显示语义；真实单层运动闭环仍未完成。
+
+## 2026-06-26 22:42 - 当前地图无点位时禁用生成任务
+
+- Problem:
+  - 当前 104 选中地图是 `DESK_20260625_164234`，但该地图下没有任务点。
+  - 旧 `builtin_F20` 点位和任务已经能被标为旧地图，但任务页“生成任务”按钮仍然可点，只是在点击后报错。
+  - 这类“点击后才知道错”的流程会增加现场误操作成本，不符合当前目标模式的减法原则。
+- Change:
+  - `dashboard.js` 增加 `updateCreateTaskButton()`：
+    - 当前地图没有任务点时，直接禁用“生成任务”，title 显示“当前地图还没有任务点；先在当前地图标点”；
+    - 有点位但未勾选时，禁用并提示“先勾选当前地图点位”；
+    - 只有当前地图点位已勾选时，才允许生成任务。
+  - `renderTaskPoints()` 在点位加载、checkbox 变化时更新按钮状态。
+  - `104_frontend_task_smoke.py` 增加真实页面断言：
+    - 当前地图无任务点时，生成任务按钮必须 disabled；
+    - title 必须解释当前地图没有任务点。
+  - `check_preflight_policy.py` 增加防回归：
+    - 前端必须禁用无点位/未勾选时的任务创建；
+    - smoke 必须覆盖该约束。
+- Deployment:
+  - 已同步到 104 real 工作区：
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js`;
+    - `scripts/104_frontend_task_smoke.py`;
+    - `scripts/check_preflight_policy.py`.
+  - 104 已执行：
+    - `colcon build --symlink-install --packages-select m20pro_cloud_bridge`;
+    - 重启 `m20pro-real.service`;
+    - `http://10.21.31.104:8080/healthz` 在服务启动完成后返回 `{"ok":true}`。
+- Verification:
+  - local:
+    - `python3 -m py_compile scripts/104_frontend_task_smoke.py scripts/check_preflight_policy.py` passed.
+    - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js` passed.
+    - `./scripts/check_preflight_policy.py` passed.
+  - 104 / real frontend:
+    - `ssh user@10.21.31.104 'cd ~/m20pro_ros2_ws && ./scripts/check_preflight_policy.py'` passed.
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080` passed，电量约 `84%`。
+    - `./scripts/104_frontend_task_smoke.py --url http://10.21.31.104:8080 --json-out /tmp/m20pro_frontend_task_smoke_create_task_gate_after_deploy.json` passed。
+    - smoke 结果显示：
+      - `taskPointTotal=0`;
+      - `createTaskDisabled=true`;
+      - `createTaskTitle=当前地图还没有任务点；先在当前地图标点`。
+- Boundary:
+  - no `/api/localization/initialpose` call was made.
+  - no `/api/tasks/start` call was made.
+  - no `/m20pro/floor_goal` motion target was published.
+  - no annotation or task was created.
+  - 当前 104 仍是 `localization_not_confirmed`，真实单层运动闭环仍未完成。
+
+## 2026-06-26 22:46 - README 重定位路线与开发手册 2101 收口保持一致
+
+- Problem:
+  - 当前代码和目标模式已经把开发手册 TCP `2101/1` 回执作为网页重定位成功证据。
+  - 但 `README.md` 仍保留旧描述：
+    - 网页重定位“优先复刻 106 RViz `2D Pose Estimate`”；
+    - 现场全量脚本“默认不让 `m20pro_tcp_bridge` 抢占 `/initialpose` 去转 103 TCP `2101/1`”。
+  - 这和当前 `localization_contract.py`、前端显示、ready-check 规则矛盾，会误导后续 AI、新同事和实习生继续用 `/initialpose` 到达当作成功路径。
+- Change:
+  - `README.md` 的网页重定位说明改为：
+    - 网页重定位以开发手册 TCP `2101/1` 回执为准；
+    - `/initialpose` 只是网页侧触发动作，不能作为定位成功证据；
+    - 现场必须看到“手册2101成功 / 定位已确认 / 任务页可启动”后，任务页才允许开始任务。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - README 必须说明手册 `2101/1` 是网页重定位成功标准；
+    - README/scripts README 不得再出现“优先复刻 106 RViz”或“默认不让 tcp_bridge 抢占 initialpose”的旧路线描述；
+    - 仍保留“不要再用 106 是否收到 `/initialpose` 作为成功判断”的负向提醒。
+- Deployment:
+  - 已同步到 104 real 工作区：
+    - `README.md`;
+    - `scripts/check_preflight_policy.py`.
+  - 本次只改文档和只读 policy，不涉及 ROS 构建或服务重启。
+- Verification:
+  - local:
+    - `python3 -m py_compile scripts/check_preflight_policy.py` passed.
+    - `./scripts/check_preflight_policy.py` passed.
+    - `git diff --check` passed.
+  - 104:
+    - `python3 -m py_compile scripts/check_preflight_policy.py` passed.
+    - `./scripts/check_preflight_policy.py` passed.
+- Boundary:
+  - no `/api/localization/initialpose` call was made.
+  - no `/api/tasks/start` call was made.
+  - no `/m20pro/floor_goal` motion target was published.
+  - no annotation or task was created.
+  - 当前 104 仍是 `localization_not_confirmed`，真实单层运动闭环仍未完成。
+
+## 2026-06-26 22:58 - 任务页下一步状态收口并部署到 104
+
+- Problem:
+  - 任务页之前已经能阻止旧地图任务和未定位状态，但操作者仍需要从多个分散提示里推断下一步。
+  - 当前 104 选中地图是 `DESK_20260625_164234`，该地图没有任务点；旧 `builtin_F20` 任务只应作为历史记录，不能让现场人员误以为可以继续执行。
+  - 这不符合当前目标模式的减法原则：任务页必须直接告诉操作者下一步，而不是依赖额外脚本或经验判断。
+- Change:
+  - `dashboard.html` 新增 `taskNextStepSummary`。
+  - `dashboard.js` 新增 `renderTaskNextStep()`：
+    - 电量低时先提示充电；
+    - 未定位或位姿不新鲜时，直接提示去定位页完成重定位，并必须看到“手册2101成功、定位已确认、任务页可启动”；
+    - 当前地图没有任务点时，提示先在当前地图标点；
+    - 有点位但没有任务时，提示勾选点位并生成任务；
+    - 已满足启动条件时，提示先核对首点、顺序和现场证据命令，再由操作者手动开始。
+  - `104_frontend_task_smoke.py` 增加真实前端断言：
+    - 未定位时 `taskNextStep` 必须指向定位页；
+    - 文案必须包含“手册2101成功”。
+  - `check_preflight_policy.py` 增加防回归：
+    - 前端必须存在任务页下一步摘要；
+    - smoke 必须覆盖未定位状态下的下一步文案。
+- Deployment:
+  - 已同步到 104 real 工作区：
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.html`;
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js`;
+    - `scripts/104_frontend_task_smoke.py`;
+    - `scripts/check_preflight_policy.py`.
+  - 104 已执行：
+    - `colcon build --symlink-install --packages-select m20pro_cloud_bridge`;
+    - 重启 `m20pro-real.service`;
+    - `http://10.21.31.104:8080/healthz` 恢复并返回 `{"ok":true}`。
+- Verification:
+  - local:
+    - `python3 -m py_compile scripts/104_frontend_task_smoke.py scripts/check_preflight_policy.py scripts/104_goal_mode_battery_gate.py` passed.
+    - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js` passed.
+    - `./scripts/check_preflight_policy.py` passed.
+    - `git diff --check` passed.
+  - 104 / real frontend:
+    - `ssh user@10.21.31.104 'cd ~/m20pro_ros2_ws && ./scripts/check_preflight_policy.py'` passed.
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080` passed，电量约 `79%`。
+    - `curl http://10.21.31.104:8080/` confirmed the served page contains `taskNextStepSummary`.
+    - `./scripts/104_frontend_task_smoke.py --url http://10.21.31.104:8080 --json-out /tmp/m20pro_frontend_task_smoke_next_step_after_deploy.json` passed。
+    - smoke 结果显示：
+      - `localization=异常/未定位`;
+      - `taskReadiness=定位未确认，先在网页定位页完成重定位，再开始任务`;
+      - `taskNextStep=下一步：到定位页完成重定位，必须看到手册2101成功、定位已确认、任务页可启动`;
+      - `activeTaskSummary=无任务`;
+      - 当前地图任务点数为 `0`，生成任务按钮 disabled；
+      - 两个旧 `builtin_F20` 任务均显示为“旧地图任务”且 start 按钮 disabled。
+- Boundary:
+  - no `/api/localization/initialpose` call was made.
+  - no `/api/tasks/start` call was made.
+  - no `/m20pro/floor_goal` motion target was published.
+  - no annotation or task was created.
+  - 当前 104 仍是 `localization_not_confirmed`，真实单层运动闭环仍未完成；下一步必须先用前端完成手册 2101 确认，再在当前地图创建任务点和任务，最后在明确授权后做真实单层运动验证。
+
+## 2026-06-26 23:05 - 任务页主列表隐藏旧地图任务
+
+- Problem:
+  - 后端已经阻止旧地图任务启动，但前端主任务列表仍渲染旧 `builtin_F20` 任务卡片，只是把按钮置灰。
+  - 现场操作者看到旧任务卡片、历史错误和禁用按钮，仍然会把注意力放到旧任务上；这不利于当前目标模式的减法原则。
+  - 当前现场应只围绕当前选中地图 `DESK_20260625_164234` 做重定位、标点、建任务和单层验证。
+- Change:
+  - `dashboard.js` 的任务列表渲染从遍历 `state.tasks` 改为只遍历 `currentMapTasks`。
+  - 当前地图没有任务时，任务页只显示一条摘要：
+    - 旧地图任务已隐藏几个；
+    - 旧任务只保留为历史记录；
+    - 本次现场执行需要在当前地图重新标点并生成任务。
+  - `104_frontend_task_smoke.py` 增加真实前端断言：
+    - 当前地图无任务时，主任务列表不得渲染旧地图任务卡片；
+    - 页面必须报告隐藏了旧地图任务。
+  - `check_preflight_policy.py` 增加防回归：
+    - 前端必须只遍历 `currentMapTasks`;
+    - smoke 必须失败于“旧地图任务出现在主任务列表”的情况。
+- Deployment:
+  - 已同步到 104 real 工作区：
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js`;
+    - `scripts/104_frontend_task_smoke.py`;
+    - `scripts/check_preflight_policy.py`.
+  - 104 已执行：
+    - `colcon build --symlink-install --packages-select m20pro_cloud_bridge`;
+    - 重启 `m20pro-real.service`;
+    - `http://10.21.31.104:8080/healthz` 恢复并返回 `{"ok":true}`。
+- Verification:
+  - local:
+    - `python3 -m py_compile scripts/104_frontend_task_smoke.py scripts/check_preflight_policy.py` passed.
+    - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js` passed.
+    - `./scripts/check_preflight_policy.py` passed.
+    - `git diff --check` passed.
+  - 104 / real frontend:
+    - `ssh user@10.21.31.104 'cd ~/m20pro_ros2_ws && ./scripts/check_preflight_policy.py'` passed.
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080` passed，电量约 `77%`。
+    - `curl http://10.21.31.104:8080/static/dashboard.js` confirmed `旧地图任务已隐藏` and `for (const task of currentMapTasks)` are served.
+    - `./scripts/104_frontend_task_smoke.py --url http://10.21.31.104:8080 --json-out /tmp/m20pro_frontend_task_smoke_hide_old_tasks_after_deploy.json` passed。
+    - smoke 结果显示：
+      - `taskItems=[]`;
+      - `startButtons=[]`;
+      - `currentMapTaskNotice=当前地图还没有任务；旧地图任务已隐藏 2 个，只保留为历史记录，不能用于本次现场执行。请先在当前地图标点并生成任务。`
+- Boundary:
+  - no `/api/localization/initialpose` call was made.
+  - no `/api/tasks/start` call was made.
+  - no `/m20pro/floor_goal` motion target was published.
+  - no annotation or task was created.
+  - 当前 104 仍是 `localization_not_confirmed`，真实单层运动闭环仍未完成；下一步仍是先用前端完成手册 2101 确认，再在当前地图创建任务点和任务。
+
+## 2026-06-26 23:14 - 停止任务与显式复位导航分离
+
+- Problem:
+  - 前端之前在没有 active task 时仍强制启用“停止当前任务”按钮，title 还写着“无论页面是否显示任务执行中，都会发送停止和复位指令”。
+  - 后端 `/api/tasks/stop` 在无任务时也会执行 `_reset_navigation_session(...)`，包括发布 stop/zero、清理导航会话和清代价地图。
+  - 这会把“无任务时的停止按钮”变成隐式复位入口，容易加剧现场对“明明没有任务但像在导航中”的误判。
+- Change:
+  - `dashboard.js` 新增 `updateTaskControlButtons(...)`：
+    - 只有存在 `active_task` 或 `active_waypoint` 时，才启用“停止当前任务”；
+    - 无任务时按钮 disabled，title 为“当前没有前端任务在执行”；
+    - “复位导航状态”仍保留，但 title 明确为“显式复位导航会话；会停止前端任务、清理导航会话并清代价地图”。
+  - 点击“停止当前任务”时，如果本地最新状态没有 active task/waypoint，前端直接提示“当前没有前端任务在执行，无需停止”，不调用后端。
+  - 点击“复位导航状态”前增加确认框，说明会发送停止/零速度、清理导航会话并清代价地图。
+  - `web_dashboard_node.py` 收紧 `/api/tasks/stop`：
+    - 无 active task 且 reason 不是 `web_manual_reset` 时，直接返回 `reset_navigation=false`；
+    - 不再调用 `_reset_navigation_session(...)`；
+    - 显式 `web_manual_reset` 仍允许无任务复位。
+  - `104_frontend_task_smoke.py` 增加真实页面断言：
+    - 无 active task 时 stop 按钮必须 disabled；
+    - reset 按钮必须标明“显式复位导航会话”。
+  - `check_preflight_policy.py` 增加防回归：
+    - 前端 stop/reset 按钮语义必须分离；
+    - 后端无任务 stop 不能隐式 reset navigation。
+- Deployment:
+  - 已同步到 104 real 工作区：
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js`;
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py`;
+    - `scripts/104_frontend_task_smoke.py`;
+    - `scripts/check_preflight_policy.py`.
+  - 104 已执行：
+    - `colcon build --symlink-install --packages-select m20pro_cloud_bridge`;
+    - 重启 `m20pro-real.service`;
+    - `http://10.21.31.104:8080/healthz` 恢复并返回 `{"ok":true}`。
+- Verification:
+  - local:
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/104_frontend_task_smoke.py scripts/check_preflight_policy.py` passed.
+    - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js` passed.
+    - `./scripts/check_preflight_policy.py` passed.
+    - `git diff --check` passed.
+  - 104:
+    - `ssh user@10.21.31.104 'cd ~/m20pro_ros2_ws && ./scripts/check_preflight_policy.py'` passed.
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080` passed，电量约 `74%`。
+    - 无任务状态下手动调用普通 stop 分支：
+      - `POST /api/tasks/stop {"reason":"web_manual_stop"}`;
+      - returned `reset_navigation=false`;
+      - returned message `当前没有前端任务在执行，无需停止`。
+    - `./scripts/104_frontend_task_smoke.py --url http://10.21.31.104:8080 --json-out /tmp/m20pro_frontend_task_smoke_stop_button_after_deploy.json` passed。
+    - smoke 结果显示：
+      - `activeTaskSummary=无任务`;
+      - `stopTaskButton.disabled=true`;
+      - `stopTaskButton.title=当前没有前端任务在执行`;
+      - `resetTaskSessionButton.disabled=false`;
+      - `resetTaskSessionButton.title=显式复位导航会话；会停止前端任务、清理导航会话并清代价地图`。
+- Boundary:
+  - no `/api/localization/initialpose` call was made.
+  - no `/api/tasks/start` call was made.
+  - no `/m20pro/floor_goal` motion target was published.
+  - no annotation or task was created.
+  - 普通无任务 stop API 已验证为无副作用分支；没有执行显式 `web_manual_reset`。
+  - 当前 104 仍是 `localization_not_confirmed`，真实单层运动闭环仍未完成。
+
+## 2026-06-26 23:22 - 当前执行面板不再显示历史任务结果
+
+- Problem:
+  - `activeTaskSummary` 已经能在无任务时显示“无任务”，但下面的 `activeTask` 原始框仍会自动显示 `last_task_result` 的历史 JSON。
+  - 这个区域标题是“当前执行”，把历史失败结果放在这里会让现场人员误以为还有任务在执行，尤其容易和“导航中/定位丢失”等历史字段混淆。
+- Change:
+  - `dashboard.js` 在无 `active_task`/`active_waypoint` 且不处于短暂日志展示窗口时，`activeTask` 原始框固定显示“无任务”。
+  - 历史 `last_task_result` 没有删除：
+    - 仍保留在任务卡片的上次结果摘要里；
+    - 仍保留在“复制现场快照”结果里；
+    - 不再进入“当前执行”框。
+  - `104_frontend_task_smoke.py` 增加真实前端断言：
+    - 无 active task 时 `activeTaskRaw` 必须等于“无任务”；
+    - 不得包含 `last_task_result`。
+  - `check_preflight_policy.py` 增加防回归：
+    - 当前执行原始框不得再显示历史 `last_task_result`。
+- Deployment:
+  - 已同步到 104 real 工作区：
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js`;
+    - `scripts/104_frontend_task_smoke.py`;
+    - `scripts/check_preflight_policy.py`.
+  - 104 已执行：
+    - `colcon build --symlink-install --packages-select m20pro_cloud_bridge`;
+    - 重启 `m20pro-real.service`;
+    - `http://10.21.31.104:8080/healthz` 恢复并返回 `{"ok":true}`。
+- Verification:
+  - local:
+    - `python3 -m py_compile scripts/104_frontend_task_smoke.py scripts/check_preflight_policy.py` passed.
+    - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js` passed.
+    - `./scripts/check_preflight_policy.py` passed.
+    - `git diff --check` passed.
+  - 104:
+    - `ssh user@10.21.31.104 'cd ~/m20pro_ros2_ws && ./scripts/check_preflight_policy.py'` passed.
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080` passed，电量约 `72%`。
+    - `curl http://10.21.31.104:8080/static/dashboard.js` confirmed the served frontend sets `$("activeTask").textContent = "无任务"` in the no-active-task branch.
+    - `./scripts/104_frontend_task_smoke.py --url http://10.21.31.104:8080 --json-out /tmp/m20pro_frontend_task_smoke_active_raw_after_deploy.json` passed。
+    - smoke 结果显示：
+      - `activeTaskSummary=无任务`;
+      - `activeTaskRaw=无任务`;
+      - `latestActiveTask=null`;
+      - `fieldSnapshot.last_task_result` 仍保留历史诊断。
+- Boundary:
+  - no `/api/localization/initialpose` call was made.
+  - no `/api/tasks/start` call was made.
+  - no `/m20pro/floor_goal` motion target was published.
+  - no annotation or task was created.
+  - 当前 104 仍是 `localization_not_confirmed`，真实单层运动闭环仍未完成。
+
+## 2026-06-26 23:36 - 未定位时禁止保存任务点位
+
+- Problem:
+  - 当前任务跑偏的一个高风险来源是“点位不可信”：如果还没有真正通过开发手册 `2101/1` 重定位确认，前端仍允许手动填坐标并保存任务点，后续任务会拿这些坐标直接下发导航。
+  - 只靠任务启动前检查不够；错误点位一旦写进 `annotations.json`，后面会反复污染任务创建和现场判断。
+- Change:
+  - `dashboard.js` 增加统一的 `markBlockedReason()` / `updateMarkControls()`：
+    - 未选择固定地图时不能保存点位；
+    - 使用实时 `/map` 时不能保存任务点，实时图只作为临时观察；
+    - `localization_ok !== true` 时不能保存点位，提示必须看到“手册2101成功、定位已确认”；
+    - 位姿无效或超过 `task_start_pose_timeout_s` 时不能保存点位；
+    - `保存点位` 和 `使用当前机器人位姿` 两个按钮共用同一套前端条件。
+  - `web_dashboard_node.py` 在 `/api/annotations` 后端入口增加 `_annotation_create_readiness_payload()`：
+    - 必须有当前选中的固定地图；
+    - 请求里的 `map_id` 必须等于当前选中的固定地图；
+    - 必须 `localization_ok=true`；
+    - 必须有新鲜且可信的 `/m20pro_tcp_bridge/map_pose`；
+    - 不满足时返回明确错误码，例如 `annotation_localization_not_confirmed`、`annotation_pose_invalid_or_stale`、`annotation_fixed_map_required`。
+  - 保留原有固定地图边界和占用栅格校验：
+    - `annotation_out_of_map`;
+    - `annotation_on_occupied_cell`;
+    - `annotation_on_unknown_cell`。
+  - `104_frontend_task_smoke.py` 增加真实前端只读断言：
+    - 未定位时 `saveMarkBtn.disabled=true`;
+    - 未定位时 `useRobotPoseBtn.disabled=true`;
+    - 禁用原因必须提示“手册2101成功”。
+  - `check_preflight_policy.py` 增加防回归：
+    - 前端标点按钮必须有统一 readiness gate；
+    - 后端注解 API 必须拒绝未定位/位姿过期/非固定地图点位；
+    - smoke 必须覆盖未定位禁用标点。
+- Deployment:
+  - 已同步到 104 real 工作区：
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js`;
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py`;
+    - `scripts/104_frontend_task_smoke.py`;
+    - `scripts/check_preflight_policy.py`.
+  - 104 已执行：
+    - `colcon build --symlink-install --packages-select m20pro_cloud_bridge`;
+    - 重启 `m20pro-real.service`;
+    - `http://10.21.31.104:8080/healthz` 恢复并返回 `{"ok":true}`。
+- Verification:
+  - local:
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/104_frontend_task_smoke.py scripts/check_preflight_policy.py` passed.
+    - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js` passed.
+    - `./scripts/check_preflight_policy.py` passed.
+    - `git diff --check` passed.
+  - 104:
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080` passed，电量约 `68%~69%`。
+    - `ssh user@10.21.31.104 'cd ~/m20pro_ros2_ws && ./scripts/check_preflight_policy.py'` passed.
+    - `./scripts/104_frontend_task_smoke.py --url http://10.21.31.104:8080 --json-out /tmp/m20pro_frontend_task_smoke_mark_gate_after_deploy.json` passed.
+    - smoke 结果显示：
+      - `localization=异常/未定位`;
+      - `taskReadiness=定位未确认，先在网页定位页完成重定位，再开始任务`;
+      - `saveMarkButton.disabled=true`;
+      - `saveMarkButton.title=先完成重定位，看到手册2101成功、定位已确认后再标点`;
+      - `useRobotPoseButton.disabled=true`;
+      - `useRobotPoseButton.title=先完成重定位，看到手册2101成功、定位已确认并收到实时位姿后再取当前位姿`;
+      - `activeTaskSummary=无任务`;
+      - `startButtons=[]`。
+    - 后端直接 POST `/api/annotations` 已验证：
+      - 当前 `localization_ok=false`;
+      - 返回 `ok=false`;
+      - 返回 `code=annotation_localization_not_confirmed`;
+      - 没有创建点位。
+- Boundary:
+  - no `/api/localization/initialpose` call was made.
+  - no `/api/tasks/start` call was made.
+  - no `/m20pro/floor_goal` motion target was published.
+  - 没有创建 annotation 或 task；后端拒绝测试使用了故意越界坐标，但在定位 gate 前已被拒绝。
+  - 当前 104 仍是 `localization_not_confirmed`，真实单层运动闭环仍未完成。
+
+## 2026-06-26 23:46 - 默认任务 API 不再返回旧地图任务
+
+- Problem:
+  - 104 当前选中地图是 `map_1782442183242_ee7c6b76 / DESK_20260625_164234`，该地图当前没有任何任务点。
+  - 104 持久化数据实际在 `/home/user/.m20pro_web`：
+    - `annotations.json`;
+    - `tasks.json`;
+    - `maps.json`;
+    - `settings.json`。
+  - 历史任务都属于旧的 `builtin_F20`，首点固定为 `x=6.5, y=0.143, yaw=-0.0256`。
+  - 这解释了现场观察到的“像是总往某个固定残留点跑”：历史任务确实会指向这个旧图首点。
+- Change:
+  - `web_dashboard_node.py` 的 `/api/tasks` 默认只返回当前选中地图的任务。
+  - 默认 `/api/tasks` 返回新增字段：
+    - `include_all=false`;
+    - `selected_map_id`;
+    - `hidden_task_count`;
+    - `total_task_count`。
+  - 只有显式请求 `/api/tasks?include_all=1` 才返回全部历史任务，作为历史审计入口。
+  - `dashboard.js` 改为使用后端 `hidden_task_count` 展示提示：
+    - 当前地图没有任务；
+    - 旧地图任务已隐藏；
+    - 旧任务只保留为历史审计；
+    - 默认接口不会返回，不能用于本次现场执行。
+  - `104_frontend_task_ready_check.py` 默认只检查当前地图任务；
+    - 只有传 `--task-id` 或 `--task-name` 时，才使用 `/api/tasks?include_all=1` 查历史任务。
+  - `104_frontend_task_smoke.py` 增加断言：
+    - 默认 tasks payload 必须 `include_all=false`;
+    - 必须报告隐藏旧任务数量；
+    - 主任务列表不能渲染旧地图任务。
+  - `check_preflight_policy.py` 增加防回归：
+    - `/api/tasks` 默认当前地图过滤；
+    - query 只用于显式历史/审计请求；
+    - smoke 必须验证旧任务默认隐藏。
+- Deployment:
+  - 已同步到 104 real 工作区：
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py`;
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js`;
+    - `scripts/104_frontend_task_smoke.py`;
+    - `scripts/104_frontend_task_ready_check.py`;
+    - `scripts/check_preflight_policy.py`。
+  - 104 已执行：
+    - `colcon build --symlink-install --packages-select m20pro_cloud_bridge`;
+    - 重启 `m20pro-real.service`;
+    - `http://10.21.31.104:8080/healthz` 恢复并返回 `{"ok":true}`。
+- Verification:
+  - local:
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/104_frontend_task_smoke.py scripts/104_frontend_task_ready_check.py scripts/check_preflight_policy.py` passed.
+    - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js` passed.
+    - `./scripts/check_preflight_policy.py` passed.
+    - `git diff --check` passed.
+  - 104:
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080` passed，电量约 `65%~67%`。
+    - `ssh user@10.21.31.104 'cd ~/m20pro_ros2_ws && ./scripts/check_preflight_policy.py'` passed.
+    - `/api/tasks` 返回：
+      - `include_all=false`;
+      - `selected_map_id=map_1782442183242_ee7c6b76`;
+      - `hidden_task_count=2`;
+      - `total_task_count=2`;
+      - `tasks=[]`。
+    - `/api/tasks?include_all=1` 返回：
+      - `include_all=true`;
+      - `tasks=2`;
+      - 两个任务均为 `builtin_F20`。
+    - `./scripts/104_frontend_task_smoke.py --url http://10.21.31.104:8080 --json-out /tmp/m20pro_frontend_task_smoke_tasks_api_gate_after_bool_fix.json` passed.
+    - `./scripts/104_frontend_task_ready_check.py --url http://10.21.31.104:8080` 正确输出：
+      - `tasks=none current_map; hidden_old_map_tasks=2`;
+      - `recommended_task=none`;
+      - 下一步仍是先完成重定位和当前地图标点。
+- Boundary:
+  - no `/api/localization/initialpose` call was made.
+  - no `/api/tasks/start` call was made.
+  - no `/m20pro/floor_goal` motion target was published.
+  - 没有删除历史任务，只是把默认任务入口从“全部任务”收敛为“当前地图任务”。
+  - 当前 104 仍是 `localization_not_confirmed`，真实单层运动闭环仍未完成。
+
+## 2026-06-27 00:05 - 将“前端选图 / Nav2 当前地图一致性”前移为硬门槛
+
+- Problem:
+  - 104 当前前端选中地图为 `map_1782442183242_ee7c6b76 / DESK_20260625_164234`。
+  - 但 104 当前 Nav2 `/map` 元数据并不一致：
+    - 前端选中地图：`width=423`, `height=500`, `resolution=0.1`, `origin=(-19.1, -13.4)`；
+    - Nav2 当前 `/map`：`width=436`, `height=515`, `resolution≈0.1`, `origin=(-17.7, -14.3)`。
+  - 这意味着前端标点和建任务可能基于 `DESK_20260625_164234`，但 Nav2 实际仍在另一张地图上规划。
+  - 这类不一致会直接导致现场现象：
+    - 标的点和导航坐标系不是同一张图；
+    - 任务可能看似下发成功，但机器人朝错误位置或旧残留点运动；
+    - 定位、路径和任务页状态互相矛盾。
+- Change:
+  - `web_dashboard_node.py` 新增 `selected_map_status`：
+    - `/api/state` 暴露前端选中固定地图与 Nav2 当前 `/map` 的一致性；
+    - `/api/tasks` 也暴露同一状态，供任务页直接阻断。
+  - 一致性检查复用 `task_contract.map_metadata_mismatch_error()`，不在 web 节点里复制规则。
+  - 保存点位前新增硬门槛：
+    - 若 `selected_map_status.ready=false`，后端以 `annotation_map_metadata_mismatch` 拒绝保存点位。
+  - 创建任务前新增硬门槛：
+    - 若前端选中地图和 Nav2 `/map` 不一致，后端以 `task_create_map_metadata_mismatch` 拒绝生成任务。
+  - `dashboard.js` 调整：
+    - 标点按钮优先提示地图不一致；
+    - 建任务按钮优先提示地图不一致；
+    - 任务页下一步优先提示“网页选择地图与 Nav2 当前加载地图不一致”。
+  - `104_frontend_task_smoke.py` 调整：
+    - 读取 `selected_map_status`；
+    - 当地图不一致时，断言前端必须阻断标点和建任务，并提示地图问题。
+  - `104_frontend_task_ready_check.py` 调整：
+    - 状态摘要新增 `selected_map_status`；
+    - 下一步建议优先处理地图一致性，再谈重定位。
+  - `check_preflight_policy.py` 增加防回归：
+    - `/api/state` 必须暴露选图/当前 Nav2 地图一致性；
+    - 标点与建任务必须拒绝地图不一致；
+    - 前端按钮和 ready-check 必须消费该状态。
+- Deployment:
+  - 已同步到 104 real 工作区：
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py`;
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js`;
+    - `scripts/104_frontend_task_smoke.py`;
+    - `scripts/104_frontend_task_ready_check.py`;
+    - `scripts/check_preflight_policy.py`。
+  - 104 已执行：
+    - `colcon build --symlink-install --packages-select m20pro_cloud_bridge`;
+    - 重启 `m20pro-real.service`;
+    - `http://10.21.31.104:8080/healthz` 恢复并返回 `{"ok":true}`。
+- Verification:
+  - local:
+    - `python3 -m py_compile ...` passed.
+    - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js` passed.
+    - `./scripts/check_preflight_policy.py` passed.
+    - `git diff --check` passed.
+    - `./scripts/104_frontend_task_smoke.py --url http://10.21.31.104:8080` passed.
+  - 104:
+    - goal-mode battery gate passed，电量约 `60%~61%`。
+    - `ssh user@10.21.31.104 'cd ~/m20pro_ros2_ws && ./scripts/check_preflight_policy.py'` passed.
+    - `/api/state` 返回：
+      - `selected_map_status.ready=false`;
+      - `selected_map_status.code=selected_map_metadata_mismatch`;
+      - message 为 `网页选择地图与 Nav2 当前加载地图不一致，请先切换到正确地图并重定位`。
+    - `/api/tasks` 返回：
+      - `tasks=[]`;
+      - `hidden_task_count=2`;
+      - `selected_map_status.ready=false`。
+    - `./scripts/104_frontend_task_ready_check.py --url http://10.21.31.104:8080` 正确输出下一步：
+      - `网页选择地图与 Nav2 当前加载地图不一致，请先切换到正确地图并重定位`。
+- Boundary:
+  - no `/api/localization/initialpose` call was made.
+  - no `/api/tasks/start` call was made.
+  - no `/m20pro/floor_goal` motion target was published.
+  - 没有创建、删除或启动任务。
+  - 当前只是把错误前移并阻断，尚未实现“从前端加载/切换 Nav2 地图”的闭环；真实单层运动闭环仍未完成。
+
+## 2026-06-27 01:10 - 雷达链路排查：断点收敛到原厂 `/LIDAR/POINTS` DDS 端点
+
+- Goal alignment:
+  - 单层导航必须先保证感知链路真实可用，不能只看前端或 topic 名称。
+  - 本次没有触发运动、没有调用重定位、没有启动任务。
+- Runtime evidence on 104:
+  - 电量门控通过，电量约 `42%~47%`，只做非运动排查。
+  - `/api/state` 显示：
+    - `task_readiness=localization_not_confirmed`；
+    - `lidar_relay_status.messages=0`；
+    - `lidar_points=null`；
+    - `scan=null`。
+  - `m20pro_pointcloud_fusion` 日志持续输出：
+    - `cloud=0 processed=0 scan=0 finite_bins=0 reason=not_started`。
+  - 这说明 `/scan` 即使在 graph 里有 publisher，也没有实际发布有效 LaserScan 样本。
+- Important diagnostic distinction:
+  - `ros2 topic list` 里出现 `/LIDAR/POINTS` 不能证明有数据，因为 relay 自己订阅也会让 topic 名出现。
+  - `ros2 topic info /LIDAR/POINTS -v` 当前显示：
+    - `Publisher count: 0`;
+    - subscriber 是 `m20pro_lidar_relay`。
+  - `rsdriver.service` 日志仍然有雷达包处理输出：
+    - `status:1`;
+    - `error_code:0`;
+    - `cld_size` 约 19000~59000；
+    - `send success size` 持续出现。
+  - 因此当前不是“雷达硬件完全没数据”，而是原厂驱动到 ROS2/DDS 点云端点之间不稳定。
+- Temporary observation:
+  - 曾用 root + 项目 FastDDS 环境短时探针收到 `/LIDAR/POINTS`，约 45 条/6 秒，每帧约 4 万点。
+  - 随后同环境最小探针和 relay 都收不到，且 `/LIDAR/POINTS` publisher count 回到 0。
+  - 这说明原厂 `/LIDAR/POINTS` DDS publisher 会间歇性消失，不能把“偶然收到了几帧”当成链路已稳定。
+- Code hardening done:
+  - `lidar_relay_node.py` 默认 `cloud_reliability=auto`；
+  - relay 对输入同时创建 best-effort 和 reliable 两个订阅；
+  - relay 输出仍使用 best-effort，避免把大点云链路变重；
+  - relay 状态新增：
+    - `cloud_reliability`;
+    - `subscription_modes`;
+    - `last_subscription_mode`;
+    - `input_publisher_count`;
+    - `duplicate_messages`;
+    - `input_rate_hz`;
+    - `publish_rate_hz`;
+    - `downsample_method`。
+  - `m20pro_lidar_relay_guard.sh`、`104_enable_autostart.sh`、`systemd/m20pro-real.default` 默认改为 `M20PRO_LIDAR_RELAY_CLOUD_RELIABILITY=auto`。
+  - `check_preflight_policy.py` 增加防回归：relay 必须默认 auto input QoS，并保留下采样/限频。
+- Deployment:
+  - 已同步到 104 real 工作区：
+    - `src/m20pro_navigation/m20pro_navigation/lidar_relay_node.py`;
+    - `src/m20pro_bringup/scripts/m20pro_lidar_relay_guard.sh`;
+    - `scripts/104_enable_autostart.sh`;
+    - `systemd/m20pro-real.default`;
+    - `scripts/check_preflight_policy.py`。
+  - 104 已构建：
+    - `colcon build --symlink-install --packages-select m20pro_navigation m20pro_bringup` passed.
+  - `/etc/default/m20pro-real` 已更新为：
+    - `M20PRO_WS=/home/user/m20pro_real_ros2_ws`;
+    - `M20PRO_LIDAR_RELAY_CLOUD_RELIABILITY=auto`;
+    - `M20PRO_LIDAR_RELAY_MAX_OUTPUT_POINTS=6000`;
+    - `M20PRO_LIDAR_RELAY_MIN_PUBLISH_INTERVAL_S=0.2`;
+    - `M20PRO_FASTDDS_PROFILE=project_udp`;
+    - `M20PRO_LIDAR_RELAY_FASTDDS_PROFILE=project_udp`。
+- Verification:
+  - local:
+    - `python3 -m py_compile src/m20pro_navigation/m20pro_navigation/lidar_relay_node.py scripts/check_preflight_policy.py` passed.
+    - `bash -n src/m20pro_bringup/scripts/m20pro_lidar_relay_guard.sh scripts/104_enable_autostart.sh src/m20pro_bringup/scripts/m20pro_real_full.sh` passed.
+    - `./scripts/check_preflight_policy.py` passed.
+    - `git diff --check` passed.
+  - 104:
+    - build passed.
+    - 重启 relay 后日志显示 auto 双订阅已生效：
+      - `reliability=auto subscriptions=best_effort,reliable`。
+    - 但 relay 仍未收到样本，因为当前 `/LIDAR/POINTS` 本身 `Publisher count: 0`。
+- Current blocker:
+  - 感知链路当前硬阻塞在原厂 `/LIDAR/POINTS` DDS publisher 消失。
+  - 在不重启原厂 `rsdriver.service` 的情况下，项目侧 relay/fusion 无法凭空恢复点云。
+  - 下一步建议在用户明确授权后，重启 `rsdriver.service`，并立即验证：
+    - `/LIDAR/POINTS` publisher count > 0；
+    - relay `messages` 增长；
+    - `/m20pro/lidar_points_relay` 有样本；
+    - fusion `scan_published` 增长；
+    - `/api/state.scan.finite_ranges > 0`。
+
+## 2026-06-27 01:32 - 前端感知链路显式化，并避免点云断链阻塞 Web 启动
+
+- Goal alignment:
+  - 单层导航继续先从底层闭环做扎实：任务、重定位、地图之前，必须先确认感知链路是否真实可用。
+  - 本次没有触发运动、没有调用重定位、没有启动任务。
+  - 目标模式电量门禁通过，部署与验证期间 104 电量约 `37%~39%`。
+- Problem:
+  - 原厂 `/LIDAR/POINTS` DDS publisher 当前消失时，relay、`/scan`、前端点云都会没有数据。
+  - 之前前端或 ready-check 可能优先提示“未定位/地图不一致”，会掩盖更底层的感知硬故障。
+  - 项目启动脚本此前用 `m20pro_lidar_relay_guard.sh start-wait` 等 relay 样本，点云断链时会让 Web 前端延迟可用，违背“前端高可用、先把问题说清楚”的目标。
+- Change:
+  - `web_dashboard_node.py` 新增 `/api/state.perception_status`：
+    - `factory_lidar_points_publisher_missing`: 原厂 `/LIDAR/POINTS` 没有 DDS publisher；
+    - `lidar_relay_no_samples`: relay 没收到输入点云；
+    - `lidar_relay_output_unavailable`: relay 有状态但前端没有新鲜输出点云；
+    - `scan_unavailable`: `/scan` 不可用；
+    - `perception_ready`: scan、relay、点云链路均可用。
+  - `/api/state.perception_status` 同时暴露：
+    - scan 是否新鲜、finite ranges；
+    - 前端使用的 lidar pointcloud 是否新鲜；
+    - relay 输入 topic、输入 publisher 数、收发消息数、QoS 模式、输入/输出频率、降采样方法。
+  - `dashboard.js` 调整：
+    - 任务页下一步提示优先显示感知硬故障；
+    - 导航状态面板显示结构化 `感知链路`；
+    - 现场快照包含 `perception.status`，方便现场复盘。
+  - `104_frontend_task_ready_check.py` 调整：
+    - 输出 `perception_status`；
+    - 输出 relay 输入 publisher 数、消息数、QoS、降采样、输入/输出频率；
+    - 下一步建议顺序改为：低电量、硬感知故障、地图不一致、重定位/任务 readiness。
+  - `m20pro_lidar_relay_guard.sh` 调整：
+    - 默认命令从 `start-wait` 改为非阻塞 `start`；
+    - 保留 `start-wait` 和 `wait` 作为手动诊断能力。
+  - `m20pro_real_full.sh` 调整：
+    - 全量启动只启动 relay，不再等待点云样本后才启动 ROS launch / Web；
+    - 点云是否健康由 `/api/state.perception_status` 和 ready-check 明确展示。
+  - `check_preflight_policy.py` 增加防回归：
+    - `/api/state` 必须暴露结构化感知状态；
+    - ready-check 必须报告感知状态和 relay 诊断；
+    - Web 全量启动不能再用 relay 样本等待阻塞前端。
+- Deployment:
+  - 已同步并构建到 104 real 工作区：
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py`;
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js`;
+    - `scripts/104_frontend_task_ready_check.py`;
+    - `scripts/check_preflight_policy.py`;
+    - `src/m20pro_bringup/scripts/m20pro_lidar_relay_guard.sh`;
+    - `src/m20pro_bringup/scripts/m20pro_real_full.sh`。
+  - 104 已执行：
+    - `colcon build --symlink-install --packages-select m20pro_cloud_bridge` passed;
+    - `colcon build --symlink-install --packages-select m20pro_bringup` passed;
+    - 重启 `m20pro-real.service`，服务 active。
+- Verification:
+  - local:
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/104_frontend_task_ready_check.py scripts/check_preflight_policy.py` passed.
+    - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js` passed.
+    - `bash -n src/m20pro_bringup/scripts/m20pro_lidar_relay_guard.sh src/m20pro_bringup/scripts/m20pro_real_full.sh scripts/104_enable_autostart.sh` passed.
+    - `./scripts/check_preflight_policy.py` passed.
+    - targeted `git diff --check` passed.
+  - 104:
+    - `http://10.21.31.104:8080/healthz` 返回 `{"ok":true}`。
+    - `/api/state.perception_status` 当前明确显示：
+      - `ready=false`;
+      - `code=factory_lidar_points_publisher_missing`;
+      - message 为 `原厂 /LIDAR/POINTS 当前没有 DDS publisher；rsdriver 到 ROS2 点云端点未建立，relay 和 /scan 不会有数据`。
+    - relay 诊断显示：
+      - `input_topic=/LIDAR/POINTS`;
+      - `input_publisher_count=0`;
+      - `messages=0`;
+      - `messages_published=0`;
+      - `cloud_reliability=auto`;
+      - `subscription_modes=[best_effort,reliable]`。
+    - `/scan` 和前端 lidar pointcloud 仍无样本，这是当前真实故障状态，不是前端显示问题。
+    - `selected_map_status` 同时显示当前仍存在选中地图与 Nav2 `/map` 元数据不一致：
+      - selected `DESK_20260625_164234`: `423x500`, origin `(-19.1,-13.4)`;
+      - live Nav2 map: `436x515`, origin `(-17.7,-14.3)`。
+    - `./scripts/104_frontend_task_ready_check.py --url http://10.21.31.104:8080` 正确输出首要下一步：
+      - `原厂 /LIDAR/POINTS 当前没有 DDS publisher；rsdriver 到 ROS2 点云端点未建立，relay 和 /scan 不会有数据`；
+      - `advice_source=state code=factory_lidar_points_publisher_missing`。
+    - `ssh user@10.21.31.104 'cd /home/user/m20pro_real_ros2_ws && ./scripts/check_preflight_policy.py'` passed.
+  - Startup behavior:
+    - 重启后日志显示 relay 阶段不再等待样本：
+      - `m20pro_lidar_relay_guard] relay already running ...`;
+      - 随后进入 `ros2 launch`。
+    - Web 监听日志：
+      - `M20Pro web console listening on http://0.0.0.0:8080`。
+    - 当前全量启动仍有 ROS 环境加载、SHM 清理、runtime snapshot、Nav2/map server 启动等耗时，但已不再因为点云无样本额外卡 45 秒。
+- Current blocker:
+  - 当前硬故障仍是原厂 `/LIDAR/POINTS` DDS publisher 消失。
+  - 项目侧已经能稳定暴露这个状态，但无法在不碰原厂雷达驱动的情况下凭空恢复点云。
+  - 下一步需要用户明确授权后重启 `rsdriver.service`，然后立即验证 `/LIDAR/POINTS -> relay -> /scan -> /api/state.perception_status` 是否恢复。
+
+## 2026-06-27 01:39 - 原厂点云链路只读深挖：没有可用替代点云源
+
+- Goal alignment:
+  - 继续只做非运动排查，没有调用重定位、没有启动任务、没有发布运动目标。
+  - 目标模式电量门禁通过，排查末尾电量约 `35%`。
+- Evidence:
+  - `rsdriver.service` active，运行约 3h50m：
+    - 主进程 `./rslidar`；
+    - 日志持续打印两路雷达：
+      - `lidar:0 status:1 error_code:0 cld_size≈20k`;
+      - `lidar:1 status:1 error_code:0 cld_size≈19k`;
+      - 大帧 `send success size≈58k` 也持续出现。
+  - 但 ROS graph 当前仍显示：
+    - `/LIDAR/POINTS Publisher count: 0`;
+    - relay 是唯一订阅者，且 best-effort/reliable 双订阅均无样本；
+    - `/LIDAR/POINTS2` 不存在。
+  - `hsLidar.service` active，但日志持续：
+    - `socket Connection error`;
+    - 对应 `/LIDAR/POINTS2` 没有 ROS topic。
+  - 原厂启动脚本非常薄：
+    - `/opt/robot/share/node_driver/scripts/rsdriver_run.sh` 只是 `cd /opt/robot/share/node_driver/bin` 后 `taskset -c 6,7 chrt 45 ./rslidar`;
+    - `/opt/robot/share/node_driver/scripts/hsdriver_run.sh` 同理启动 `./hsLidar`。
+  - 原厂进程环境里没有显式：
+    - `ROS_DOMAIN_ID`;
+    - `RMW_IMPLEMENTATION`;
+    - `FASTRTPS_DEFAULT_PROFILES_FILE`;
+    - `LD_LIBRARY_PATH`。
+  - 但进程 maps/fd 表明它们确实使用 FastDDS/DrDDS：
+    - `libfastrtps.so.2.14.2`;
+    - `libfastcdr.so.2.2.5`;
+    - `libdrdds.so.1.1.7`;
+    - `/dev/shm/fastrtps_*`；
+    - UDP 7400/741x 端口。
+- Alternative pointcloud check:
+  - ROS graph 里有 publisher 的候选点云：
+    - `/accumulate_cloud/cloud_base`;
+    - `/accumulate_cloud/cloud_gravity`;
+    - `/passable_area`;
+    - `/impassable_area`。
+  - 用最小 Python 订阅器同时以 best-effort 和 reliable 订阅 8 秒，结果：
+    - `/LOC_BODY_POINTS`: `count=0`;
+    - `/accumulate_cloud/cloud_base`: `count=0`;
+    - `/accumulate_cloud/cloud_gravity`: `count=0`;
+    - `/passable_area`: `count=0`;
+    - `/impassable_area`: `count=0`;
+    - `/LIDAR/POINTS`: `count=0`;
+    - `/m20pro/lidar_points_relay`: `count=0`。
+  - 结论：这些 topic 名或 publisher endpoint 存在，但没有实际样本，不能作为项目侧降级输入。
+- Resource cleanup:
+  - `/dev/shm` 一度为 `2.8G/7.7G`，其中有几个 user-owned 477M FastDDS 段来自短时探针。
+  - 执行只删除未被任何进程占用的 stale FastDDS SHM 文件：
+    - `removed=6`;
+    - `kept_open=132`;
+    - `/dev/shm` 从 `37%` 降到 `19%`。
+  - 清理后复查：
+    - `/LIDAR/POINTS Publisher count` 仍为 `0`;
+    - `/api/state.perception_status.code` 仍为 `factory_lidar_points_publisher_missing`;
+    - `/scan` 仍为 `null`。
+- Current conclusion:
+  - 当前不是项目侧 relay 输入 topic 选错，也不是可用替代点云 topic 未接入。
+  - 当前断点仍是原厂点云生产链没有把样本发布到 ROS2/DDS graph。
+  - 在不重启原厂 `rsdriver.service` / `hsLidar.service` 的情况下，没有发现可恢复路径。
+  - 下一步仍需用户明确授权后重启原厂雷达服务，并马上验证 publisher、relay、scan、前端状态是否恢复。
+
+## 2026-06-27 01:42 - 感知状态判断从 Web 大节点抽成纯 contract
+
+- Goal alignment:
+  - 按“做减法”的方向，把底层感知链路判断从 `web_dashboard_node.py` 中抽离，避免 Web 大节点继续承载业务判定。
+  - 这次不改变运行行为，不触发运动，不调用重定位，不重启服务。
+- Change:
+  - 新增 `src/m20pro_cloud_bridge/m20pro_cloud_bridge/perception_contract.py`：
+    - `perception_status_payload(...)` 统一判断感知链路状态；
+    - `factory_lidar_points_publisher_missing`;
+    - `lidar_relay_no_samples`;
+    - `lidar_relay_output_unavailable`;
+    - `scan_unavailable`;
+    - `perception_ready`。
+  - `web_dashboard_node.py` 删除内部 `_perception_status_payload()`；
+  - `web_dashboard_node.py` 删除仅为该逻辑服务的 `_safe_float()` / `_safe_int()`；
+  - `/api/state` 仍然暴露同名 `perception_status`，但由纯 contract 计算。
+  - 新增 `scripts/test_perception_contract.py`：
+    - 覆盖原厂 `/LIDAR/POINTS` publisher 丢失；
+    - 覆盖 relay stale/no sample；
+    - 覆盖 relay 输出不可用；
+    - 覆盖 `/scan` 不可用；
+    - 覆盖 perception ready。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - Web 必须 import 并调用 `perception_status_payload`;
+    - Web 不能重新定义 `_perception_status_payload`;
+    - Web 不能重新引入 `_safe_float/_safe_int`；
+    - 离线 perception contract 测试必须覆盖硬故障和 ready 状态。
+- Verification:
+  - local passed:
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/perception_contract.py scripts/test_perception_contract.py scripts/check_preflight_policy.py`;
+    - `./scripts/test_perception_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - targeted `git diff --check`。
+- Deployment:
+  - 2026-06-27 01:49 已部署到 104 real 工作区：
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py`;
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/perception_contract.py`;
+    - `scripts/test_perception_contract.py`;
+    - `scripts/check_preflight_policy.py`。
+  - 104 已执行：
+    - `colcon build --symlink-install --packages-select m20pro_cloud_bridge` passed;
+    - 重启 `m20pro-real.service`;
+    - `/healthz` 约 31s 后恢复并返回 `{"ok":true}`。
+  - 104 verification passed:
+    - `./scripts/test_perception_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `/api/state.perception_status.code=factory_lidar_points_publisher_missing`;
+    - relay 仍显示 `input_publisher_count=0`, `messages=0`, `messages_published=0`;
+    - `/scan=null`。
+  - 部署后行为与部署前一致：重构没有掩盖当前真实故障，原厂 `/LIDAR/POINTS` DDS publisher 仍是当前 blocker。
+
+## 2026-06-27 02:02 - 地图选择状态判断从 Web 大节点抽成纯 contract
+
+- Goal alignment:
+  - 继续按“做减法、从底层做扎实”的方向推进。
+  - 本次不触发运动、不启动任务、不调用重定位、不重启原厂雷达服务。
+  - 104 电量门禁：
+    - 部署前约 `29%`;
+    - 高于目标模式非运动工作门槛 `25%`。
+- Problem:
+  - 之前 `selected_map_status`、等待 Nav2 `/map` 与选中地图一致、任务页 gating 等逻辑有分散趋势。
+  - 这种分散会导致同一事实在不同页面/接口里出现不同判断，例如“地图页看起来成功，任务页仍然不允许启动”。
+- Change:
+  - 新增/完善 `src/m20pro_cloud_bridge/m20pro_cloud_bridge/map_selection_contract.py`：
+    - `selected_map_status_payload(...)` 统一生成选中地图与 Nav2 `/map` 的一致性状态；
+    - 覆盖：
+      - `selected_map_missing`;
+      - `selected_map_metadata_mismatch`;
+      - ready。
+  - `web_dashboard_node.py` 调整为只负责取数据：
+    - 读取当前 `selected_map_id`;
+    - 读取当前 Nav2 `/map` runtime state;
+    - 读取固定地图文件快照；
+    - 把判断交给 `selected_map_status_payload(...)`。
+  - `_wait_for_selected_map_match(...)` 改为复用同一个 `selected_map_status_payload(...)`：
+    - 选图后等待 Nav2 `/map` 对齐；
+    - `/api/state.selected_map_status`;
+    - 任务创建/标点 gating；
+    - 现在都走同一套状态判断。
+  - `task_contract.map_metadata_mismatch_error(...)` 增加稳定机器可读 code：
+    - `live_map_unavailable`;
+    - `selected_map_unavailable`;
+    - `map_metadata_invalid`;
+    - `map_metadata_mismatch`。
+  - 新增 `scripts/test_map_selection_contract.py`：
+    - 覆盖未选地图；
+    - 覆盖固定地图与 Nav2 `/map` 一致；
+    - 覆盖元数据不一致；
+    - 覆盖 Nav2 `/map` 不可用。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - Web 必须 import `selected_map_status_payload`;
+    - Web `_selected_map_status_payload(...)` 必须委托给 contract；
+    - Web 等待 selected-map match 也必须走同一个 contract；
+    - 离线测试必须覆盖 missing / ready / mismatch / live-map unavailable。
+- Verification, local:
+  - passed:
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/map_selection_contract.py scripts/test_map_selection_contract.py scripts/check_preflight_policy.py`;
+    - `./scripts/test_map_selection_contract.py`;
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - targeted `git diff --check`。
+- Deployment to 104:
+  - 已同步到 `/home/user/m20pro_real_ros2_ws`：
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py`;
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py`;
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/map_selection_contract.py`;
+    - `scripts/test_map_selection_contract.py`;
+    - `scripts/check_preflight_policy.py`。
+  - 104 build passed:
+    - `source /opt/robot/scripts/setup_ros2.sh`;
+    - `colcon build --symlink-install --packages-select m20pro_cloud_bridge`。
+  - 已重启项目服务：
+    - `m20pro-real.service`;
+    - 未重启 `rsdriver.service` / `hsLidar.service`。
+  - `/healthz` 约 25s 后恢复：
+    - `{"ok":true}`。
+  - 104 verification passed:
+    - `./scripts/test_map_selection_contract.py`;
+    - `./scripts/check_preflight_policy.py`。
+- Current 104 runtime evidence after deployment:
+  - `selected_map_id=map_1782442183242_ee7c6b76`;
+  - selected map:
+    - `name=DESK_20260625_164234`;
+    - `floor=F20`;
+    - `width=423`;
+    - `height=500`;
+    - `resolution=0.1`;
+    - `origin=(-19.1, -13.4)`;
+  - live Nav2 `/map`:
+    - `width=436`;
+    - `height=515`;
+    - `resolution≈0.10000000149`;
+    - `origin=(-17.7, -14.3)`;
+  - `/api/state.selected_map_status`:
+    - `ready=false`;
+    - `code=selected_map_metadata_mismatch`;
+    - detail code `map_metadata_mismatch`;
+    - mismatch checks:
+      - `width=false`;
+      - `height=false`;
+      - `resolution=true`;
+      - `origin_x=false`;
+      - `origin_y=false`。
+  - `/api/state.perception_status` 仍为当前硬故障：
+    - `code=factory_lidar_points_publisher_missing`;
+    - relay `input_publisher_count=0`;
+    - relay `messages=0`;
+    - relay `messages_published=0`。
+  - `/api/state.localization_status`:
+    - `confirmed=false`;
+    - `code=localization_not_confirmed`。
+- Current conclusion:
+  - 地图选择状态判断已经收敛到纯 contract，Web 大节点少了一处业务规则分叉。
+  - 当前 104 前端明确显示：固定地图与 Nav2 当前 `/map` 不一致，不能标点/生成任务/启动任务。
+  - 当前整体目标仍未完成：
+    - 单层导航闭环未证明；
+    - 原厂 `/LIDAR/POINTS` publisher 缺失仍是感知链路 blocker；
+    - 当前 Nav2 `/map` 与前端选中固定地图不一致，需要先解决地图同步/重定位前置条件，再谈任务执行。
+
+## 2026-06-27 02:11 - 启动后自动同步前端选中固定地图到 Nav2
+
+- Goal alignment:
+  - 继续推进单层导航前置链路，不触发运动、不启动任务、不调用重定位。
+  - 本次修复的是启动一致性问题：前端记住了固定地图，但 Nav2 `/map` 可能仍是旧地图。
+  - 目标模式电量门禁：
+    - 操作前约 `28%`;
+    - 部署前约 `26%`;
+    - 均高于非运动工作门槛 `25%`。
+- Runtime finding:
+  - 104 重启后状态曾为：
+    - `selected_map_id=map_1782442183242_ee7c6b76`;
+    - 前端选中固定地图 `DESK_20260625_164234`;
+    - selected map 元数据：
+      - `width=423`;
+      - `height=500`;
+      - `resolution=0.1`;
+      - `origin=(-19.1, -13.4)`;
+    - live Nav2 `/map` 元数据：
+      - `width=436`;
+      - `height=515`;
+      - `resolution≈0.10000000149`;
+      - `origin=(-17.7, -14.3)`;
+    - `/api/state.selected_map_status.code=selected_map_metadata_mismatch`。
+  - 结论：
+    - Web 保存的 `selected_map_id` 能跨重启保留；
+    - 但 Nav2 map_server 不会自动按这个设置重新加载固定地图；
+    - 如果不处理，任务页会反复出现“地图不一致/不能启动”，现场人员只能手动再选一次地图。
+- Manual non-motion verification:
+  - 调用：
+    - `POST /api/maps/select {"map_id":"map_1782442183242_ee7c6b76"}`。
+  - 该路径只执行：
+    - Nav2 `LoadMap`;
+    - clear costmaps;
+    - 清旧定位状态;
+    - 设置 `map_relocalization_required`。
+  - 不调用：
+    - `/api/tasks/start`;
+    - `/m20pro/floor_goal`;
+    - `/cmd_vel`;
+    - relocalization API。
+  - 结果：
+    - `nav2_load_map.ok=true`;
+    - `loaded=true`;
+    - `result=0`;
+    - `map_matched=true`;
+    - `/api/state.selected_map_status.ready=true`;
+    - task readiness 切到 `map_relocalization_required`，要求重新按开发手册 2101 定位。
+- Code change:
+  - `web_dashboard_node.py` 新增启动自动同步：
+    - 参数 `startup_sync_selected_map_to_nav2=true`;
+    - 参数 `startup_sync_selected_map_delay_s=1.5`;
+    - 参数 `startup_sync_selected_map_max_attempts=5`。
+  - Web 启动后创建一次性/有限重试 timer：
+    - `_sync_selected_map_to_nav2_on_startup()`;
+    - timer 只负责触发后台线程。
+  - 真正的 `LoadMap` 调用在后台线程执行：
+    - `_run_startup_selected_map_sync()`;
+    - `_run_startup_selected_map_sync_once()`。
+  - 这样避免在默认 `rclpy.spin(node)` 的单线程 executor timer 回调里同步等待 service future，防止启动阶段把 ROS 回调堵住。
+  - 启动同步成功且实际加载地图时：
+    - 写入 `settings.json.startup_map_sync`;
+    - 写入 `settings.json.map_relocalization_required`;
+    - 清 `localization_ok`;
+    - 清旧 pose / pose_history / path；
+    - 通过事件记录“启动同步固定地图”。
+  - 启动同步失败时：
+    - 不阻塞 Web 前端；
+    - 写入 `startup_map_sync` 错误结果；
+    - 记录事件和日志；
+    - 最多重试 `startup_sync_selected_map_max_attempts` 次。
+  - `/api/state` 新增 `startup_map_sync`：
+    - 现场可以直接看到启动同步是否执行、加载了哪张图、attempt、Nav2 load_map 结果。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - Web 必须声明启动同步参数；
+    - 启动同步必须使用后台线程；
+    - `/api/state` 必须暴露 `startup_map_sync`。
+- Verification, local:
+  - passed:
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/check_preflight_policy.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - targeted `git diff --check`。
+- Deployment to 104:
+  - 同步：
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py`;
+    - `scripts/check_preflight_policy.py`。
+  - 104 build passed:
+    - `source /opt/robot/scripts/setup_ros2.sh`;
+    - `colcon build --symlink-install --packages-select m20pro_cloud_bridge`。
+  - 重启：
+    - `m20pro-real.service`;
+    - 未重启原厂 `rsdriver.service` / `hsLidar.service`。
+  - `/healthz` 约 23s 后恢复。
+- 104 runtime verification after restart:
+  - `startup_map_sync`:
+    - `ok=true`;
+    - `attempt=1`;
+    - `max_attempts=5`;
+    - `nav2_load_map.loaded=true`;
+    - `nav2_load_map.result=0`;
+    - `nav2_load_map.map_matched=true`;
+    - `yaml_path=/home/user/m20pro_maps/DESK_20260625_164234/occ_grid.yaml`。
+  - journal:
+    - `startup selected-map sync loaded Nav2 map: /home/user/m20pro_maps/DESK_20260625_164234/occ_grid.yaml`。
+  - `/api/state.selected_map_status`:
+    - `ready=true`;
+    - `code=ready`;
+    - selected map 和 live Nav2 `/map` 均为：
+      - `width=423`;
+      - `height=500`;
+      - `origin=(-19.1, -13.4)`。
+  - `/api/state.task_readiness`:
+    - `ready=false`;
+    - `code=map_relocalization_required`;
+    - message 明确要求按开发手册 2101 重定位。
+  - `/api/state.perception_status` 仍为：
+    - `code=factory_lidar_points_publisher_missing`;
+    - relay `input_publisher_count=0`;
+    - relay `messages=0`;
+    - relay `messages_published=0`。
+- Current conclusion:
+  - 启动后“前端选中固定地图”和 Nav2 `/map` 不一致的问题已经用核心逻辑修复，不需要现场人员每次手动再选地图。
+  - 当前正确前置状态应是：
+    - 地图一致；
+    - 系统要求重新 2101 定位；
+    - 感知链路仍报告 `/LIDAR/POINTS` publisher 缺失。
+  - 下一步单层导航要继续推进，必须处理原厂点云 publisher 缺失，否则自检/避障/任务启动仍不能真实闭环。
+
+## 2026-06-27 02:18 - 本地抽离启动地图同步状态 contract，暂不部署
+
+- Goal alignment:
+  - 继续按“Web 大节点做减法”的方向推进。
+  - 104 电量只剩 `25%`，已经压在目标模式非运动门槛上。
+  - 本次只做本地代码收敛和离线验证：
+    - 不部署到 104；
+    - 不重启服务；
+    - 不调用重定位；
+    - 不启动任务；
+    - 不发布运动目标。
+- Current 104 read-only state:
+  - `startup_map_sync.ok=true`;
+  - `selected_map_status.ready=true`;
+  - `task_readiness.code=map_relocalization_required`;
+  - `perception_status.code=factory_lidar_points_publisher_missing`;
+  - battery primary level `25%`。
+  - 结论：104 当前已处在正确前置状态：
+    - 固定地图与 Nav2 `/map` 一致；
+    - 必须重新按开发手册 2101 定位；
+    - 原厂点云 publisher 缺失仍是硬 blocker。
+- Local-only change:
+  - 新增 `src/m20pro_cloud_bridge/m20pro_cloud_bridge/startup_map_sync_contract.py`：
+    - `startup_map_sync_skipped_payload(...)`;
+    - `startup_map_sync_missing_record_payload(...)`;
+    - `startup_map_sync_result_payload(...)`。
+  - `web_dashboard_node.py` 调整为调用该 contract 生成 `startup_map_sync` 状态。
+  - 行为不变：
+    - 启动同步仍由后台线程执行；
+    - 仍复用 `_load_selected_map_into_nav2(...)`;
+    - 仍只在实际加载地图后设置 `map_relocalization_required`。
+  - 新增 `scripts/test_startup_map_sync_contract.py`：
+    - 覆盖 skipped；
+    - 覆盖 missing selected-map record；
+    - 覆盖 Nav2 LoadMap result payload。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - Web 必须 import startup map sync contract；
+    - Web 必须委托该 contract 生成启动地图同步状态；
+    - 离线 contract 测试必须覆盖三类 payload。
+- Local verification:
+  - passed:
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/startup_map_sync_contract.py scripts/test_startup_map_sync_contract.py scripts/check_preflight_policy.py`;
+    - `./scripts/test_startup_map_sync_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 primary battery 已到 `25%` 门槛，继续构建/重启不符合目标模式电量约束。
+  - 待机器狗充电后，下一步可部署：
+    - `web_dashboard_node.py`;
+    - `startup_map_sync_contract.py`;
+    - `test_startup_map_sync_contract.py`;
+    - `check_preflight_policy.py`。
+
+## 2026-06-27 02:20 - 104 电量低于目标模式门槛，停止实机侧动作
+
+- Goal alignment:
+  - 严格执行目标模式电量约束。
+  - 本次未部署、未构建 104、未重启服务、未调用重定位、未启动任务、未发布运动目标。
+- 104 read-only evidence:
+  - `battery_level=24%`;
+  - threshold `25%`;
+  - `active_task=false`;
+  - `task_readiness=map_relocalization_required`。
+- Current 104 state:
+  - `startup_map_sync.ok=true`;
+  - `selected_map_status.ready=true`;
+  - `task_readiness.code=map_relocalization_required`;
+  - `perception_status.code=factory_lidar_points_publisher_missing`。
+- Local verification re-run:
+  - `python3 -m py_compile ...` passed;
+  - `./scripts/test_startup_map_sync_contract.py` passed;
+  - `./scripts/check_preflight_policy.py` passed。
+- Deployment status:
+  - 上一条记录中的本地 contract 抽离仍未部署到 104。
+  - 原因：104 primary battery 已降至 `24%`，低于目标模式门槛。
+  - 充电后继续部署：
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py`;
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/startup_map_sync_contract.py`;
+    - `scripts/test_startup_map_sync_contract.py`;
+    - `scripts/check_preflight_policy.py`;
+    - `m20pro日志.md`。
+
+## 2026-06-27 02:23 - 低电量下继续本地抽离 map relocalization required payload
+
+- Goal alignment:
+  - 104 电量继续下降到 `23%`，低于目标模式 `25%` 门槛。
+  - 本次只做本地代码收敛：
+    - 不访问 104 做写操作；
+    - 不部署；
+    - 不构建 104；
+    - 不重启服务；
+    - 不调用重定位或任务启动。
+- Local-only change:
+  - `map_selection_contract.py` 新增 `map_relocalization_required_payload(...)`：
+    - 统一生成“Nav2 已加载固定地图，必须重新按开发手册 2101 定位”的状态记录；
+    - `reason=manual_select` 对应手动选择固定地图；
+    - `reason=startup_sync` 对应启动时自动同步固定地图。
+  - `web_dashboard_node.py` 两处调用该 contract：
+    - `_select_map(...)`;
+    - `_run_startup_selected_map_sync_once(...)`。
+  - 这样避免 Web 大节点里继续手写两份几乎相同的 `map_relocalization_required` 字典。
+  - `scripts/test_map_selection_contract.py` 增加 `test_map_relocalization_required_payload()`：
+    - 覆盖手动选图文案；
+    - 覆盖启动同步文案；
+    - 覆盖 reason / map_id / map_name / yaml_path / loaded_at。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - Web 必须从 map selection contract 导入 `map_relocalization_required_payload`;
+    - 启动同步必须通过该 contract 设置 `reason=startup_sync`;
+    - 手动选图必须通过该 contract 设置 `reason=manual_select`;
+    - 离线 map selection contract 测试必须覆盖 relocalization-required payload。
+- Local verification:
+  - passed:
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/map_selection_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/startup_map_sync_contract.py scripts/test_map_selection_contract.py scripts/test_startup_map_sync_contract.py scripts/check_preflight_policy.py`;
+    - `./scripts/test_map_selection_contract.py`;
+    - `./scripts/test_startup_map_sync_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 primary battery `23%`。
+  - 充电后需要一起部署：
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py`;
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/map_selection_contract.py`;
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/startup_map_sync_contract.py`;
+    - `scripts/test_map_selection_contract.py`;
+    - `scripts/test_startup_map_sync_contract.py`;
+    - `scripts/check_preflight_policy.py`;
+    - `m20pro日志.md`。
+
+## 2026-06-27 02:27 - 低电量下本地抽离 map relocalization task readiness
+
+- Goal alignment:
+  - 104 电量为 `22%`，低于目标模式 `25%` 门槛。
+  - 本次继续只做本地代码收敛：
+    - 不部署；
+    - 不构建 104；
+    - 不重启服务；
+    - 不访问 104 做写操作；
+    - 不调用重定位或任务启动。
+- Local-only change:
+  - `task_contract.py` 新增 `map_relocalization_task_readiness_payload(...)`：
+    - 当 `map_relocalization_required` 存在时，统一生成任务 readiness 阻断 payload；
+    - code 固定为 `map_relocalization_required`;
+    - message 固定要求按开发手册 2101 完成重定位后再标点或任务。
+  - `web_dashboard_node.py` 的 `_task_runtime_readiness_payload(...)` 改为调用该 contract。
+  - 这样 Web 大节点不再手写该 readiness failure，任务页和运行前检查的表达更集中。
+  - `scripts/test_task_contract.py` 增加 `test_map_relocalization_task_readiness_payload()`：
+    - 覆盖有 `map_relocalization_required` 时阻断任务；
+    - 覆盖空 payload 时返回 `None`。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - task contract 必须拥有该 readiness 决策；
+    - Web 必须委托给 task contract；
+    - 离线 task contract 测试必须覆盖该状态。
+- Local verification:
+  - passed:
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 primary battery `22%`。
+  - 充电后需要把本地 contract 抽离批量部署到 104，再构建 `m20pro_cloud_bridge` 并重启 `m20pro-real.service`。
+
+## 2026-06-27 02:30 - 低电量下本地抽离导航状态解析
+
+- Goal alignment:
+  - 104 电量只读确认已降到 `19%`，低于目标模式 `25%` 门槛。
+  - 本次只做本地减法和离线验证：
+    - 不部署到 104；
+    - 不在 104 构建；
+    - 不重启 `m20pro-real.service`;
+    - 不重启原厂 `rsdriver.service` / `hsLidar.service`;
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - `web_dashboard_node.py` 删除 Web 大节点内部的重复导航状态解析 helper：
+    - `_parse_navigation_status(...)`;
+    - `_parse_key_value_status(...)`。
+  - `_on_navigation_status(...)` 直接调用 `nav_status_contract.parse_key_value_status(...)`。
+  - active task 中处理 Nav2 status / feedback / success event / friendly text 的位置也直接调用同一个 contract。
+  - 目的：
+    - 原厂状态如 `location=1 obstacle=0 usage_mode=None ooa=None` 和 Nav2 状态如 `goal_seq=7 distance_remaining=2.5` 使用同一个解析规则；
+    - 不再让 Web 大节点维护另一份 key=value parser；
+    - 为后续把单层任务链路继续拆成可交给实习生维护的 contract 保持边界清晰。
+- Tests / policy:
+  - `scripts/test_nav_status_contract.py` 增加原厂导航状态格式覆盖：
+    - `location=1`;
+    - `obstacle=0`;
+    - `usage_mode=None`;
+    - `ooa=None`。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - Web 节点不能重新定义 `_parse_navigation_status` / `_parse_key_value_status`;
+    - Web 收到 `/m20pro/navigation_status` 后必须委托 `nav_status_contract.parse_key_value_status(...)`。
+- Local verification:
+  - passed:
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/nav_status_contract.py scripts/test_nav_status_contract.py scripts/check_preflight_policy.py`;
+    - `./scripts/test_nav_status_contract.py`;
+    - `./scripts/check_preflight_policy.py`。
+- Current 104 read-only state:
+  - battery primary `19%`;
+  - `task_readiness.code=map_relocalization_required`;
+  - `perception_status.code=factory_lidar_points_publisher_missing`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量低于目标模式门槛。
+  - 充电后需要把当前本地 contract 抽离批次一起部署到 104，然后构建 `m20pro_cloud_bridge` 并只重启项目服务。
+
+## 2026-06-27 02:36 - 低电量下删除 Web 中薄 task contract 包装层
+
+- Goal alignment:
+  - 继续执行目标模式电量门控：104 上次只读电量为 `19%`，未做任何实机写操作。
+  - 本次只做本地代码减法和离线验证。
+- Local-only change:
+  - `web_dashboard_node.py` 删除一组只转发到 contract 的薄包装 helper：
+    - `_pose_age_sec(...)`;
+    - `_pose_distance_m(...)`;
+    - `_readiness_waypoint_payload(...)`;
+    - `_task_waypoint_payload(...)`;
+    - `_task_readiness_success(...)`;
+    - `_task_readiness_failure(...)`;
+    - `_readiness_error_payload(...)`;
+    - `_task_status_allows_start(...)`。
+  - Web 节点改为直接调用：
+    - `pose_age_sec(...)`;
+    - `task_waypoint_payload(...)`;
+    - `readiness_waypoint_payload(...)`;
+    - `readiness_success(...)`;
+    - `readiness_failure(...)`;
+    - `readiness_error_payload(...)`;
+    - `task_status_allows_start(...)`。
+  - 保持行为一致：
+    - 所有 Web 里直接生成 readiness 的地方都显式传 `now_text=_now_text`；
+    - 避免从 Web 自己的时间格式隐式切到 contract 默认时间格式。
+- Policy:
+  - `scripts/check_preflight_policy.py` 从“要求 Web 包一层 `_task_status_allows_start`”改为：
+    - 禁止 Web 重新引入这些薄包装 helper；
+    - 要求 Web 直接调用 `task_status_allows_start(task_status)`。
+- Local verification:
+  - passed:
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/check_preflight_policy.py`;
+    - AST 检查：`readiness_failure/readiness_success` direct calls 均带 `now_text`;
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/test_nav_status_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量低于 `25%` 目标模式门槛。
+  - 充电后将本地 contract 抽离和 Web 减法一起部署。
+
+## 2026-06-27 02:43 - 低电量下删除 Web 中重复 pose 校验 helper
+
+- Goal alignment:
+  - 104 只读电量确认仍为 `17%`，低于目标模式 `25%` 门槛。
+  - 本次继续只做本地代码减法：
+    - 不部署；
+    - 不构建 104；
+    - 不重启项目或原厂服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - `web_dashboard_node.py` 删除重复 pose dict 校验 helper：
+    - `_is_finite_pose_dict(...)`;
+    - `_is_plausible_pose_dict(...)`。
+  - Web 节点改为直接从 `task_contract.py` 导入并调用：
+    - `is_finite_pose_dict(...)`;
+    - `is_plausible_pose_dict(...)`。
+  - 意义：
+    - pose 是否有效、是否在合理范围内，统一由任务 contract 定义；
+    - Web 大节点不再维护另一份类似实现；
+    - 标点、任务 readiness、运行时状态快照使用同一套 pose 可信度规则。
+- Policy:
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - 禁止 Web 重新定义 `_is_finite_pose_dict` / `_is_plausible_pose_dict`;
+    - 要求 Web 从 task contract 导入 pose-dict validation。
+- Local verification:
+  - passed:
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/check_preflight_policy.py`;
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 battery `17%`，继续低于目标模式门槛。
+  - 后续充电后与前面本地 pending contract/web 减法批次一起部署。
+
+## 2026-06-27 02:49 - 低电量下补齐单层导航完成审计和充电后上车顺序
+
+- Goal alignment:
+  - 104 只读电量仍为 `16%`，低于目标模式 `25%` 门槛。
+  - 本次没有对 104 做写操作：
+    - 不部署；
+    - 不构建；
+    - 不重启 `m20pro-real.service`;
+    - 不重启原厂 `rsdriver.service` / `hsLidar.service`;
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Documentation change:
+  - `docs/single_floor_navigation_architecture.md` 新增 `当前阻断状态`：
+    - battery 约 `16%`;
+    - `perception_status.code=factory_lidar_points_publisher_missing`;
+    - 明确这两个门槛未恢复前，只允许本地代码收敛、文档维护和离线 contract 测试。
+  - 新增 `充电后上车顺序`：
+    1. 先跑 `104_goal_mode_battery_gate.py`;
+    2. 部署本地 pending Web/contract 减法，只构建 `m20pro_cloud_bridge`，只重启 `m20pro-real.service`;
+    3. 读取 `/api/state` 确认地图同步、selected map、task readiness 和 perception status;
+    4. 先处理 `factory_lidar_points_publisher_missing`，直到 `/LIDAR/POINTS -> lidar_relay -> /scan -> perception_status` 全链路恢复；
+    5. 感知恢复后按开发手册 2101 做前端重定位；
+    6. 只在当前固定地图上重新标点和创建当前地图任务；
+    7. 运动前跑 ready-check 和 watcher；
+    8. 明确允许运动后才从前端点击任务开始。
+- Policy:
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - 架构文档必须记录当前 battery/perception blockers；
+    - 架构文档必须记录充电后上车顺序。
+- Local verification:
+  - passed:
+    - `python3 -m py_compile scripts/check_preflight_policy.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - targeted `git diff --check`。
+- Status:
+  - 当前目标仍未完成。
+  - 原因：
+    - 真实单层运动闭环尚无完整证据；
+    - 104 低电；
+    - 感知链路硬故障仍待充电后处理。
+
+## 2026-06-27 02:49 - 低电量下继续删除 Web 中第二套任务启动准入逻辑
+
+- Goal alignment:
+  - 104 只读电量为 `15%`，低于目标模式 `25%` 门槛。
+  - 本次只做本地代码收敛和离线验证：
+    - 不部署到 104；
+    - 不构建 104；
+    - 不重启 `m20pro-real.service`;
+    - 不重启原厂 `rsdriver.service` / `hsLidar.service`;
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - `web_dashboard_node.py` 删除旧的 `_validate_task_start_readiness(...)`。
+  - 任务启动准入只保留 `_task_start_readiness_payload(...)` 这一条路径。
+  - 目的：
+    - 避免“前端里两套任务能不能启动的判断标准”同时存在；
+    - 后续排查任务不按点跑/任务卡住时，只需要看 contract 化后的 readiness payload；
+    - 更符合“做减法，而不是继续打补丁”的目标。
+- Bug fix:
+  - 修复 `_should_check_navigation_readiness(...)` 里的错误函数名：
+    - 原错误：`contractis_plausible_pose_dict(...)`;
+    - 现改为：`is_plausible_pose_dict(...)`。
+  - 该问题 `py_compile` 不会发现，但运行到该路径会触发 `NameError`，可能影响任务启动复位后的导航 readiness 判断。
+  - 前端自检地图位姿条目现在会显示位姿年龄，避免计算 `pose_age` 后未展示。
+  - `_map_file_snapshot(...)` 修复重复字典 key：
+    - 保留 `source="file"` 表示快照来自本地地图文件；
+    - 新增 `map_source=record.get("source")` 表示地图记录来源。
+- Policy:
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - 禁止 Web 重新定义 `_validate_task_start_readiness`;
+    - 禁止出现 `contractis_` / typoed contract pose helper 名称。
+- Local verification:
+  - passed:
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/check_preflight_policy.py`;
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/test_nav_status_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 battery `15%`，继续低于目标模式门槛。
+  - 充电后优先按 `docs/single_floor_navigation_architecture.md` 的上车顺序部署本地 pending Web/contract 减法，再处理 `/LIDAR/POINTS` 感知链路。
+
+## 2026-06-27 02:52 - 低电量下删除 Web 中任务启动 expectation 薄包装
+
+- Goal alignment:
+  - 104 只读电量仍为 `13%`，低于目标模式 `25%` 门槛。
+  - 本次只做本地代码减法和离线验证：
+    - 不部署；
+    - 不构建 104；
+    - 不重启项目或原厂服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - `web_dashboard_node.py` 删除 `_validate_task_start_expectations(...)`。
+  - `_start_task(...)` 中两个启动前 expectation 检查点改为直接调用：
+    - `validate_task_start_expectations(payload, task, first_annotation, task_map_id)`。
+  - 目的：
+    - Web 节点不再保留单行转发 wrapper；
+    - 任务启动前“前端提交的任务 id、点位顺序、首点位姿是否和后端当前任务一致”继续由 `task_contract.py` 统一负责；
+    - 后续排查任务不按标点跑时，入口更少、证据链更短。
+  - 顺手整理了 `_current_task_readiness_payload(...)` / `_task_readiness_for_task(...)` 中多处 `readiness_failure(..., now_text=_now_text)` 参数缩进，不改行为。
+- Policy:
+  - `scripts/check_preflight_policy.py` 从“要求 Web 有 `_validate_task_start_expectations` wrapper”改为：
+    - 禁止 Web 重新定义 `_validate_task_start_expectations`;
+    - 要求 Web 直接调用 task contract 的 `validate_task_start_expectations(...)`。
+- Local verification:
+  - passed:
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/check_preflight_policy.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/test_nav_status_contract.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 battery `13%`，继续低于目标模式门槛。
+
+## 2026-06-27 02:55 - 低电量下删除 Web 中 Nav2 状态匹配薄包装
+
+- Goal alignment:
+  - 104 只读电量为 `12%`，低于目标模式 `25%` 门槛。
+  - 本次继续只做本地代码减法和离线验证：
+    - 不部署；
+    - 不构建 104；
+    - 不重启项目或原厂服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - `web_dashboard_node.py` 删除 `_nav_status_matches_active_goal(...)`。
+  - 任务执行中三处 Nav2 状态/反馈匹配改为直接调用：
+    - `nav_status_matches_active_goal(active, annotation, status_payload)`;
+    - `nav_status_matches_active_goal(active, annotation, feedback)`。
+  - 目的：
+    - Nav2 goal_seq / goal pose / active waypoint 匹配规则只由 `nav_status_contract.py` 维护；
+    - Web 节点不再保留没有业务增量的单行 wrapper；
+    - 后续排查“Nav2 成功但前端任务点推进错误”时，匹配规则入口更少。
+- Policy:
+  - `scripts/check_preflight_policy.py` 从“要求 Web 有 `_nav_status_matches_active_goal` wrapper”改为：
+    - 禁止 Web 重新定义 `_nav_status_matches_active_goal`;
+    - 要求 Web 直接调用 `nav_status_matches_active_goal(...)`。
+- Local verification:
+  - passed:
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/check_preflight_policy.py`;
+    - `./scripts/test_nav_status_contract.py`;
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 battery `12%`，继续低于目标模式门槛。
+
+## 2026-06-27 02:59 - 低电量下收敛 Web preflight age 计算重复逻辑
+
+- Goal alignment:
+  - 104 只读电量为 `11%`，低于目标模式 `25%` 门槛。
+  - 本次只做本地代码收敛和离线验证：
+    - 不部署；
+    - 不构建 104；
+    - 不重启项目或原厂服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - `web_dashboard_node.py` 新增模块级纯函数 `_payload_with_age(payload, now=None)`。
+  - `_preflight_with_age_unlocked(...)` 和 `_preflight_running_payload_unlocked(...)` 都改为调用该函数。
+  - 目的：
+    - preflight “上次结果”和“运行中结果”的 `age_sec` 计算不再各写一份；
+    - 避免后续维护中两个前端状态年龄显示规则发生分叉；
+    - 保持 Web 节点做减法，不为小函数新建脚本，避免脚本数量继续膨胀。
+- Local verification:
+  - passed:
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/check_preflight_policy.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/test_nav_status_contract.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 battery `11%`，继续低于目标模式门槛。
+
+## 2026-06-27 03:02 - 修正 README 中过时的点云启动阻塞描述
+
+- Goal alignment:
+  - 104 只读电量为 `10%`，低于目标模式 `25%` 门槛。
+  - 本次只做本地文档和 policy 收敛：
+    - 不部署；
+    - 不构建 104；
+    - 不重启项目或原厂服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Issue found:
+  - 当前代码和 policy 已经是：
+    - real 启动会启动 lidar relay；
+    - 默认不等待 `/LIDAR/POINTS` 样本才拉起 Nav2 和网页；
+    - 网页保持可用，用 `perception_status`、ready-check 和任务 readiness 暴露感知链路故障。
+  - README 仍写成“必须在 104 上实际收到 `/LIDAR/POINTS` 样本后才继续拉起 Nav2 和网页”，这会误导现场排障。
+- Documentation change:
+  - `README.md` 更新为：
+    - 全量 real 启动默认不因 `/LIDAR/POINTS` 暂无样本而阻塞 Nav2/网页；
+    - 点云样本仍是任务启动前的感知硬门槛；
+    - 任务前必须确认 `/LIDAR/POINTS -> lidar_relay -> /scan` 链路恢复；
+    - 自启动同样保持网页可用，并在自检/任务页显示感知链路故障。
+- Policy:
+  - `scripts/check_preflight_policy.py` 增加 README 防回归：
+    - 要求 README 说明 real/autostart 不因临时点云样本缺失阻塞网页；
+    - 禁止 README 再写回旧的“收到点云样本才继续启动 Nav2 和网页”描述。
+- Local verification:
+  - passed:
+    - `python3 -m py_compile scripts/check_preflight_policy.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 battery `10%`，继续低于目标模式门槛。
+
+## 2026-06-27 03:04 - 架构文档去除过期电量硬编码
+
+- Goal alignment:
+  - 104 只读电量为 `9%`，低于目标模式 `25%` 门槛。
+  - 本次只做本地文档和 policy 收敛：
+    - 不部署；
+    - 不构建 104；
+    - 不重启项目或原厂服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Issue found:
+  - `docs/single_floor_navigation_architecture.md` 的 `当前阻断状态` 写死了“截至 02:45 battery 约 16%”。
+  - 该值会随电池持续变化快速过期；如果未来 AI 或同事把它当实时状态，会误判目标模式能否继续。
+- Documentation change:
+  - 架构文档改为：
+    - 电量以 `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080` 最新只读输出为准；
+    - 低于 `25%` 时停止目标模式实机推进；
+    - 感知链路硬故障仍记录为 `factory_lidar_points_publisher_missing`，需要充电后继续处理。
+- Policy:
+  - `scripts/check_preflight_policy.py` 不再要求架构文档包含旧的 `battery 约 16%`。
+  - 新要求：
+    - 架构文档必须指向 `104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - 必须写明低于 `25%` 停止目标模式实机推进；
+    - 必须保留 `factory_lidar_points_publisher_missing` 这个当前感知阻断类别。
+- Local verification:
+  - passed:
+    - `python3 -m py_compile scripts/check_preflight_policy.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 battery `9%`，继续低于目标模式门槛。
+
+## 2026-06-27 03:11 - 低电量下清理目标模式电量门控脚本静态问题
+
+- Goal alignment:
+  - 104 只读电量为 `8%`，低于目标模式 `25%` 门槛。
+  - 本次只做本地静态清理和离线验证：
+    - 不部署；
+    - 不构建 104；
+    - 不重启项目或原厂服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - `scripts/104_goal_mode_battery_gate.py` 删除未使用的 `sys` import。
+  - 该脚本仍保持只读：
+    - 只访问 `/api/state`;
+    - 不启动任务；
+    - 不重定位；
+    - 不发布 ROS goal 或运动控制。
+- Verification:
+  - passed:
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/*.py scripts/104_frontend_task_ready_check.py scripts/104_frontend_task_smoke.py scripts/104_analyze_frontend_task_watch.py scripts/check_preflight_policy.py scripts/104_goal_mode_battery_gate.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/104_frontend_task_ready_check.py scripts/104_frontend_task_smoke.py scripts/104_analyze_frontend_task_watch.py scripts/check_preflight_policy.py scripts/104_goal_mode_battery_gate.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/test_nav_status_contract.py`;
+    - targeted `git diff --check`。
+  - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080` returned BLOCK as expected:
+    - battery `8%`;
+    - `task_readiness=map_relocalization_required`;
+    - active task false.
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 battery `8%`，继续低于目标模式门槛。
+*** End of File
+
+## 2026-06-27 04:37 - 低电量/电量不可读下继续下沉任务 tick 前置门禁
+
+- Goal alignment:
+  - 目标模式要求实时检查机器狗电量；本次重新执行：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`
+  - 结果为：
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`
+  - 因此本次只做本地代码减法和离线验证：
+    - 不部署到 104；
+    - 不在 104 上构建；
+    - 不重启 `m20pro-real.service` 或原厂服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Compatibility fix:
+  - `scripts/test_preflight_contract.py` 保持 Python 3.8/Foxy 兼容：
+    - 使用 `Optional[str]`，避免 `str | None` 在 Python 3.8 下不可用。
+- Local-only change:
+  - `task_progress_contract.py` 新增 `active_task_tick_gate_decision(...)`。
+  - 将任务执行 tick 的前置门禁从 `web_dashboard_node.py` 下沉到可测试 contract：
+    - 未收到地图位姿：`no_pose`；
+    - 定位状态丢失：`localization_lost`；
+    - 地图位姿过期：`pose_stale`；
+    - 当前楼层与目标点楼层不一致：`wrong_floor`。
+  - `web_dashboard_node.py` 现在只负责按 contract 结果更新 active task 等待状态或触发定位丢失超时停止，不再直接散写这些判断。
+- Why:
+  - 这块直接关系到现场问题：
+    - 前端显示定位/任务状态不一致；
+    - 定位丢失或位姿过期后仍可能继续推进任务；
+    - 任务为什么停在某个环节不清楚。
+  - 下沉后，任务 tick 的“能不能继续推进当前点位”可以离线测试，后续 A/B 分工也不会直接改 Web 主节点状态机。
+- Policy / tests:
+  - `scripts/test_task_progress_contract.py` 新增 `test_tick_gate_decisions()`，覆盖 no_pose、localization_lost、pose_stale、wrong_floor 和 ready pass。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - 要求 tick 前置门禁属于 `task_progress_contract.py`；
+    - 要求 Web 调用 `active_task_tick_gate_decision(...)`。
+- Verification:
+  - passed:
+    - `./scripts/test_task_progress_contract.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_progress_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_progress_contract.py scripts/check_preflight_policy.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口超时，不能证明电量满足目标模式门槛。
+
+## 2026-06-27 06:58 - 下沉 runtime guard 恢复清理 active 字段更新
+
+- Goal alignment:
+  - 目标模式电量门禁仍失败：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`
+  - 本次继续只做本地可验证减法：
+    - 不部署到 104；
+    - 不在 104 上构建；
+    - 不重启服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - `task_contract.py` 新增 `apply_runtime_guard_clear_state(...)`：
+    - 统一清理 runtime guard 恢复后的临时字段；
+    - 返回 `active` 和 `changed`，由 Web 节点决定是否持久化。
+  - `web_dashboard_node.py` 的 `_stop_task_if_runtime_guard_lost(...)` 不再手写 `runtime_guard`、`runtime_guard_lost_started_monotonic`、`runtime_guard_lost_at`、`runtime_guard_lost_age_s` 等字段删除逻辑。
+- Why:
+  - 任务运行期间 scan/lidar/battery 短暂恢复时，active task 的“等待恢复/已恢复”字段必须由同一套 runtime guard contract 维护。
+  - 这避免 Web 主节点继续堆积细碎状态更新，也减少“任务明明恢复但前端仍显示旧阻塞证据”的残留风险。
+- Policy / tests:
+  - `scripts/test_task_contract.py` 新增 `test_apply_runtime_guard_clear_state()`。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - task contract 必须拥有 runtime guard 恢复清理状态更新；
+    - Web 必须委托 task contract 做恢复清理；
+    - task contract 测试必须覆盖 wait/clear 两类状态更新。
+- Verification:
+  - passed:
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/*.py scripts/check_preflight_policy.py scripts/test_task_contract.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/check_preflight_policy.py scripts/test_task_contract.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口超时，不能证明电量满足目标模式门槛。
+
+## 2026-06-27 05:37 - 闭合 Nav2 feedback 场景下 active waypoint 缺失的策略检查
+
+- Goal alignment:
+  - 目标模式电量门禁仍失败：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`
+  - 因此本次仍只做本地代码/策略验证：
+    - 不部署到 104；
+    - 不在 104 上构建；
+    - 不重启服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - 确认 `web_dashboard_node.py` 的 `_update_active_task_from_nav_feedback(...)` 已经覆盖 active waypoint 缺失场景：
+    - 锁内发现当前任务点被删除或索引越界时，调用 `active_annotation_missing_failure(active)` 生成失败原因；
+    - 锁外调用 `_fail_active_task(...)`，避免静默卡住任务。
+  - 修正 `scripts/check_preflight_policy.py` 中该场景的匹配窗口，使策略检查能覆盖当前函数结构。
+- Why:
+  - 现场问题之一是“任务看起来还在导航中，但实际点位/状态已经不一致”。
+  - 当 Nav2 feedback 回来时，如果 active waypoint 已不存在，前端任务必须明确失败并保留原因，而不是继续显示一个不可恢复的运行态。
+  - 本次没有改变运行逻辑，只修正本地防回归检查，使它准确验证已有保护路径。
+- Verification:
+  - passed:
+    - `./scripts/check_preflight_policy.py`;
+    - `./scripts/test_active_task_contract.py`;
+    - `./scripts/test_task_progress_contract.py`;
+    - `./scripts/test_nav_status_contract.py`;
+    - `./scripts/test_task_plan_contract.py`;
+    - `./scripts/test_task_snapshot_contract.py`;
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/test_localization_contract.py`;
+    - `./scripts/test_navigation_readiness_contract.py`;
+    - `./scripts/test_preflight_contract.py`;
+    - `./scripts/test_map_selection_contract.py`;
+    - `./scripts/test_annotation_contract.py`;
+    - `./scripts/test_perception_contract.py`;
+    - `./scripts/test_startup_map_sync_contract.py`;
+    - `./scripts/test_pcd_derived.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/*.py scripts/check_preflight_policy.py scripts/test_active_task_contract.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_active_task_contract.py scripts/check_preflight_policy.py`。
+- Remaining real-world gate:
+  - 单层导航闭环仍未证明完成。
+  - 必须等 104 电量接口可读且电量满足目标模式门槛后，才能继续真实前端流程验证：
+    - 自检；
+    - 开发手册 TCP `Type=2101 / Command=1 / ErrorCode=0` 重定位确认；
+    - 创建当前地图任务点；
+    - 执行任务；
+    - 验证首点到达、等待、后续点推进、前端/Nav2/result 一致。
+
+## 2026-06-27 12:08 - dispatch 阶段 active waypoint 缺失也显式失败
+
+- Goal alignment:
+  - 目标模式电量门禁仍失败：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`
+  - 本次只做本地可验证加固：
+    - 不部署到 104；
+    - 不在 104 上构建；
+    - 不重启服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - 复用 `active_task_contract.py` 的 `active_annotation_missing_failure(...)`。
+  - `_dispatch_active_goal(...)` 中两处原先可能静默 return 的分支改为显式失败：
+    - dispatch 初次解析 active waypoint 时点位缺失；
+    - goal 下发前二次确认 active waypoint 时点位缺失。
+  - 如果二次确认时只是 active waypoint 已切换到别的点位，仍保持安全退出，不把正常竞态误判为失败。
+- Why:
+  - 上一轮修复了 `_tick_active_task(...)` 的缺失点位静默 running。
+  - 但 `_dispatch_active_goal(...)` 仍可能在点位缺失时直接 return，导致任务状态没有明确错误。
+  - 现在从 tick 到 dispatch 都会把“当前任务点消失/索引越界”变成可见失败，便于前端和 watcher 解释。
+- Policy / tests:
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - dispatch 首次发现 missing waypoint 必须调用 `active_annotation_missing_failure(...)` 和 `_fail_active_task(...)`；
+    - dispatch 二次确认发现 missing waypoint 也必须失败任务，不能静默 return。
+  - `scripts/test_active_task_contract.py` 继续覆盖 missing waypoint failure payload。
+- Verification:
+  - passed:
+    - `./scripts/test_active_task_contract.py`;
+    - `./scripts/test_task_progress_contract.py && ./scripts/test_nav_status_contract.py && ./scripts/test_task_plan_contract.py && ./scripts/test_task_snapshot_contract.py && ./scripts/test_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/*.py scripts/check_preflight_policy.py scripts/test_active_task_contract.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口超时，不能证明电量满足目标模式门槛。
+
+## 2026-06-27 11:52 - active waypoint 缺失时显式失败，避免任务静默 running
+
+- Goal alignment:
+  - 目标模式电量门禁仍失败：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`
+  - 本次只做本地可验证加固：
+    - 不部署到 104；
+    - 不在 104 上构建；
+    - 不重启服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - `active_task_contract.py` 新增 `active_annotation_missing_failure(...)`。
+  - `_tick_active_task(...)` 中如果 active task 当前索引对应的点位找不到，不再静默 `return`。
+  - 现在会：
+    - 生成 `active_waypoint_missing` 失败 payload；
+    - 调用 `_fail_active_task(...)`；
+    - 持久化 `last_result` / timeline / runtime snapshot；
+    - 清空 `settings.active_task`；
+    - 复位导航会话并发布 idle waypoint。
+- Why:
+  - 现场问题里出现过“前端显示导航中，但实际不动/停止无效”的症状。
+  - 如果任务执行中点位被删除、索引越界或数据损坏，原逻辑会让 timer 直接返回，任务仍保持 running，前端只能看到卡住。
+  - 现在这类数据一致性错误会变成明确失败，前端和事后分析能看到原因。
+- Policy / tests:
+  - `scripts/test_active_task_contract.py` 新增 `test_active_annotation_missing_failure()`，覆盖：
+    - active index 越界；
+    - active annotation id 已删除但仍保留诊断字段。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - 要求缺失 active waypoint 的失败 payload 属于 `active_task_contract.py`；
+    - 要求 Web 在 `_tick_active_task(...)` 中调用 `active_annotation_missing_failure(...)` 和 `_fail_active_task(...)`，不能静默 return。
+- Verification:
+  - passed:
+    - `./scripts/test_active_task_contract.py`;
+    - `./scripts/test_task_progress_contract.py && ./scripts/test_nav_status_contract.py && ./scripts/test_task_plan_contract.py && ./scripts/test_task_snapshot_contract.py && ./scripts/test_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/*.py scripts/check_preflight_policy.py scripts/test_active_task_contract.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口超时，不能证明电量满足目标模式门槛。
+
+## 2026-06-27 11:34 - 下沉 near-goal wait/dispatch 判断
+
+- Goal alignment:
+  - 目标模式电量门禁仍失败：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`
+  - 本次继续只做本地可验证减法：
+    - 不部署到 104；
+    - 不在 104 上构建；
+    - 不重启服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - `task_progress_contract.py` 新增 `near_goal_wait_decision(...)`。
+  - `_tick_active_task(...)` 不再直接判断：
+    - 当前任务点是否已经下发；
+    - Nav2 goal 状态是否为 `sent/accepted`；
+    - 当前距离是否进入 `goal_reached_tolerance_m`；
+    - 是否需要启动 `near_goal_started_*` 计时；
+    - 是否进入 `near_goal_waiting_nav2`。
+  - Web 主节点现在只根据 contract decision 做副作用：
+    - 保存首次进入 near-goal 的计时字段；
+    - 更新 active task waiting 状态；
+    - 调用 near-goal timeout 检查；
+    - 或继续 dispatch 当前目标。
+- Why:
+  - 这段逻辑直接对应现场问题里的“走一段停住，但前端不知道卡在哪”。
+  - near-goal wait 只有在“当前任务点已下发且 Nav2 已 sent/accepted”时才允许进入；否则应该继续下发/补发目标。
+  - 规则放到 contract 后，可以离线测试，也能避免 Web tick 中再次堆条件分支。
+- Policy / tests:
+  - `scripts/test_task_progress_contract.py` 新增 `test_near_goal_wait_decision()`，覆盖：
+    - 未接近目标；
+    - 当前目标未下发；
+    - Nav2 goal 未 active；
+    - 首次进入 near-goal；
+    - 再次进入 near-goal 不重置计时。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - 要求 near-goal wait/dispatch 决策属于 `task_progress_contract.py`；
+    - 要求 Web 委托给 `near_goal_wait_decision(...)`。
+- Verification:
+  - passed:
+    - `./scripts/test_task_progress_contract.py`;
+    - `./scripts/test_active_task_contract.py && ./scripts/test_nav_status_contract.py && ./scripts/test_task_plan_contract.py && ./scripts/test_task_snapshot_contract.py && ./scripts/test_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/*.py scripts/check_preflight_policy.py scripts/test_task_progress_contract.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_task_progress_contract.py scripts/check_preflight_policy.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口超时，不能证明电量满足目标模式门槛。
+
+## 2026-06-27 11:18 - 下沉 Nav2 状态分类，减少任务状态机分叉
+
+- Goal alignment:
+  - 目标模式电量门禁仍失败：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`
+  - 本次只做本地可验证减法：
+    - 不部署到 104；
+    - 不在 104 上构建；
+    - 不重启服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - `nav_status_contract.py` 新增 `classify_navigation_status(...)`。
+  - `web_dashboard_node.py` 的 `_handle_navigation_status_for_task(...)` 不再直接用 `startswith("nav_goal_...")` 分类 Nav2 状态，而是：
+    - 调用 `classify_navigation_status(status_text)`；
+    - 根据返回的 `action` 执行 Web 侧副作用，如更新 active task、记录 feedback、完成当前点位或失败任务。
+  - `web_dashboard_node.py` 行数降到 `5685`。
+- Why:
+  - 之前 Nav2 状态文本的语义有两类逻辑：
+    - 解析/匹配在 `nav_status_contract.py`；
+    - accepted/feedback/succeeded/error 的分类仍散在 Web 主节点。
+  - 这会增加“前端显示导航中但 active task 状态不一致”的风险。
+  - 现在 Nav2 状态语义统一归 `nav_status_contract.py`，Web 主节点只保留 ROS/持久化/事件记录等副作用。
+- Policy / tests:
+  - `scripts/test_nav_status_contract.py` 新增 `test_classify_navigation_status()`，覆盖：
+    - empty status；
+    - accepted；
+    - feedback；
+    - floor_goal succeeded；
+    - non-floor succeeded；
+    - duplicate floor goal；
+    - cancelled/interrupted；
+    - error；
+    - ordinary status message。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - 要求 Nav2 状态分类规则在 `nav_status_contract.py`；
+    - 要求 Web 调用 `classify_navigation_status(...)`；
+    - 禁止 Web 在 `_handle_navigation_status_for_task(...)` 中重新拥有 `nav_goal_` / `error` 前缀分类。
+- Verification:
+  - passed:
+    - `./scripts/test_nav_status_contract.py`;
+    - `./scripts/test_active_task_contract.py && ./scripts/test_task_progress_contract.py && ./scripts/test_task_contract.py && ./scripts/test_navigation_readiness_contract.py && ./scripts/test_preflight_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/*.py scripts/check_preflight_policy.py scripts/test_nav_status_contract.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_nav_status_contract.py scripts/check_preflight_policy.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口超时，不能证明电量满足目标模式门槛。
+
+## 2026-06-27 04:41 - 下沉任务执行中的定位丢失和目标接收超时判断
+
+- Goal alignment:
+  - 目标模式电量门禁仍失败：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`
+  - 本次继续只做本地可验证减法：
+    - 不部署到 104；
+    - 不在 104 上构建；
+    - 不重启服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - `task_progress_contract.py` 新增：
+    - `localization_lost_timeout_decision(...)`：
+      - 首次定位/位姿丢失时返回 `start_timer`；
+      - 未超过阈值返回 `wait`；
+      - 超时返回 `fail`。
+    - `goal_accept_timeout_decision(...)`：
+      - 只检查当前点位且 Nav2 状态仍为 `sent` 的目标；
+      - 超过 `task_goal_accept_timeout_s` 仍未被 Nav2 接收时返回 `goal_accept_timeout`。
+  - `web_dashboard_node.py` 中对应逻辑改成调用 contract：
+    - Web 只负责保存计时状态、写 active task、调用 `_fail_active_task(...)`；
+    - “何时失败、失败原因和面向操作者的消息”由 contract 决定。
+- Why:
+  - 现场出现过“点击执行后往前走一段就停、前端不知道卡在哪”的问题。
+  - 这两条判断分别覆盖：
+    - 重定位/位姿链路执行中丢失；
+    - 目标发布到 `/m20pro/floor_goal` 后 Nav2/floor_manager 未真正接收。
+  - 下沉后可以离线复现和测试，不需要每次靠现场猜测。
+- Policy / tests:
+  - `scripts/test_task_progress_contract.py` 新增：
+    - `test_localization_lost_timeout_decision()`；
+    - `test_goal_accept_timeout_decision()`。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - 要求上述两个 timeout 判断归属 `task_progress_contract.py`；
+    - 要求 Web 委托给 contract。
+- Verification:
+  - passed:
+    - `./scripts/test_task_progress_contract.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_progress_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_progress_contract.py scripts/check_preflight_policy.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口超时，不能证明电量满足目标模式门槛。
+
+## 2026-06-27 03:29 - 收敛自启动模式命名，移除 undocumented safe alias
+
+- Goal alignment:
+  - 104 只读电量检查返回 `6%`，低于目标模式 `25%` 门槛。
+  - 本次只做本地启动脚本和离线策略检查：
+    - 不部署到 104；
+    - 不在 104 构建；
+    - 不重启 `m20pro-real.service`；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Issue found:
+  - `safe` 曾作为 `shadow` 的别名存在于自启动入口里，但没有形成清晰的现场操作语义。
+  - 这会增加后续维护歧义：现场到底是 `move` 还是 `shadow` 应该显式可见，而不是靠一个未文档化别名隐含判断。
+- Local-only changes:
+  - `scripts/104_autostart_entrypoint.sh`：
+    - 删除 `shadow|safe)` 分支；
+    - 只接受 `move` 和 `shadow`。
+  - `scripts/104_enable_autostart.sh`：
+    - 安装参数只接受 `move|shadow`；
+    - usage 文案保持 `./scripts/104_enable_autostart.sh [move|shadow]`。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - 要求自启动安装脚本只接受 `move|shadow`；
+    - 禁止 `104_enable_autostart.sh` 和 `104_autostart_entrypoint.sh` 重新出现 `safe` 别名；
+    - 要求 entrypoint 明确分发到 `104_start_real_move.sh` / `104_start_real_shadow.sh`。
+- Verification:
+  - passed:
+    - `bash -n scripts/104_enable_autostart.sh scripts/104_autostart_entrypoint.sh`;
+    - `python3 -m py_compile scripts/check_preflight_policy.py`;
+    - `rg -n "\\bsafe\\b" scripts/104_enable_autostart.sh scripts/104_autostart_entrypoint.sh` returned no matches;
+    - `./scripts/check_preflight_policy.py`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 battery `6%`，继续低于目标模式门槛。
+
+## 2026-06-27 03:36 - 导航状态展示规则下沉到 nav status contract
+
+- Goal alignment:
+  - 104 只读电量检查返回 `4%`，低于目标模式 `25%` 门槛。
+  - 本次只做本地代码减法和离线验证：
+    - 不部署到 104；
+    - 不在 104 构建；
+    - 不重启项目或原厂服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - `web_dashboard_node.py` 删除 `_friendly_nav_status(...)` 静态方法。
+  - `nav_status_contract.py` 新增 `friendly_nav_status(...)`：
+    - `nav_goal_accepted` -> “Nav2 已接收当前点位，正在导航”；
+    - `nav_goal_feedback` -> 输出剩余距离、导航时间、恢复次数；
+    - `nav_goal_succeeded`、取消/替换、重复目标、错误状态等统一在 contract 中转成人能看懂的任务状态文案。
+  - `web_dashboard_node.py` 改为直接调用 `friendly_nav_status(...)`。
+- Why:
+  - 导航状态字符串解析、目标匹配和面向操作员的中文提示都属于同一类纯规则。
+  - 把这些规则留在 6000 行 web 主节点里，会让后续任务执行问题更难定位。
+  - 下沉到 `nav_status_contract.py` 后，Web 主节点只负责接收状态和更新任务，不再拥有这类展示判断。
+- Policy / tests:
+  - `scripts/test_nav_status_contract.py` 增加 `test_friendly_nav_status()`，覆盖 accepted、feedback、succeeded、error 和未知状态透传。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - 要求 operator-facing Nav2 status text 在 `nav_status_contract.py`；
+    - 禁止 `web_dashboard_node.py` 重新出现 `_friendly_nav_status`。
+- Verification:
+  - passed:
+    - `./scripts/test_nav_status_contract.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/nav_status_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_nav_status_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_nav_status_contract.py scripts/check_preflight_policy.py`;
+    - `./scripts/check_preflight_policy.py`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 battery `4%`，继续低于目标模式门槛。
+
+## 2026-06-27 03:48 - 点位语义归一化下沉到 annotation contract
+
+- Goal alignment:
+  - 104 只读电量检查超时，无法确认电量高于目标模式 `25%` 门槛。
+  - 按安全规则，本次只做本地代码减法和离线验证：
+    - 不部署到 104；
+    - 不在 104 构建；
+    - 不重启项目或原厂服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - `annotation_contract.py` 现在拥有点位语义规则：
+    - `MANUAL_POINT_TYPES`;
+    - `UI_TYPE_TO_MANUAL_POINT_TYPE`;
+    - `DEFAULT_VENDOR_NAVIGATION`;
+    - `manual_point_type_from_payload(...)`;
+    - `resolve_annotation_dwell_s(...)`;
+    - `vendor_navigation_from_payload(...)`;
+    - `normalize_annotation_semantics(...)`;
+    - `annotation_semantics_payload(...)`;
+    - `annotation_dwell_s(...)`;
+    - `string_list(...)`。
+  - `web_dashboard_node.py` 删除对应常量和薄 wrapper：
+    - 不再定义 manual point type / vendor navigation 常量；
+    - 不再定义 `_manual_point_type_from_payload(...)`;
+    - 不再定义 `_vendor_navigation_from_payload(...)`;
+    - 不再定义 `_annotation_semantics_payload(...)`;
+    - 不再定义 `_annotation_dwell_s(...)`;
+    - 不再定义 `_normalize_annotation_semantics(...)`;
+    - 不再定义 `_string_list(...)`。
+  - Web 仍只负责读取 ROS 参数里的默认 dwell 值，然后交给 contract 计算最终点位语义。
+- Why:
+  - 任务执行“跑到错误点/停在错误状态”的排查需要点位语义稳定、可测试。
+  - 点位类型、停留时间、原厂 PointInfo/NavMode、vendor_navigation 合并都属于纯规则，不应该散落在 Web 主节点中。
+  - 下沉后，后续跨楼层/复杂重定位实习生可以直接围绕 contract 看边界，不需要进 5800+ 行 web 节点里找规则。
+- Policy / tests:
+  - `scripts/test_annotation_contract.py` 新增覆盖：
+    - 点位类型别名；
+    - dwell 默认值和显式值；
+    - vendor_navigation alias 合并；
+    - 语义归一化；
+    - runtime annotation semantics payload。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - annotation contract 必须拥有点位语义常量、归一化和 payload；
+    - web 主节点不能重新拥有这些常量或薄 wrapper。
+- Verification:
+  - passed:
+    - `./scripts/test_annotation_contract.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/annotation_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_annotation_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_annotation_contract.py scripts/check_preflight_policy.py`;
+    - `./scripts/check_preflight_policy.py`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口超时，不能证明电量满足目标模式门槛。
+
+## 2026-06-27 04:24 - preflight 结果汇总规则下沉到 preflight contract
+
+- Goal alignment:
+  - 104 只读电量检查继续超时，无法确认电量高于目标模式 `25%` 门槛。
+  - 按安全规则，本次只做本地代码减法和离线验证：
+    - 不部署到 104；
+    - 不在 104 构建；
+    - 不重启项目或原厂服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - 新增 `preflight_contract.py`：
+    - `preflight_result_payload(...)` 统一生成基础自检结果；
+    - 负责 `navigation_ready`、`relocalization_ready`、`failures`、`warnings`、summary 文案；
+    - 负责在原始点云和 `/scan` 都不可用时补充 `perception_chain` hard failure；
+    - 保留“工位未重定位时导航/costmap 可 deferred”的判断边界。
+  - `web_dashboard_node.py` 的 `_run_preflight_locked(...)` 继续负责采样 ROS 节点、话题和状态 item，但不再自己汇总最终结果。
+- Why:
+  - 自检曾经反复出现“工位/现场语义混淆”，例如未重定位时 costmap/导航状态到底算失败、警告还是 info。
+  - 这类汇总规则会直接影响用户能不能继续重定位、能不能开始任务，必须成为可离线测试的 contract。
+  - 下沉后，Web 主节点不再直接拥有自检最终判定逻辑。
+- Policy / tests:
+  - 新增 `scripts/test_preflight_contract.py`：
+    - field navigation ready；
+    - workstation navigation deferred；
+    - perception chain hard failure；
+    - 电量等非重定位核心失败时，地图/点云/scan 可用仍允许先做重定位排查。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - 要求 preflight contract 负责 `navigation_ready` 和 relocalization summary；
+    - 要求 Web 调用 `preflight_result_payload(...)`。
+- Verification:
+  - passed:
+    - `python3 scripts/test_preflight_contract.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/preflight_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_preflight_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_preflight_contract.py scripts/check_preflight_policy.py`;
+    - `./scripts/check_preflight_policy.py`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口超时，不能证明电量满足目标模式门槛。
+
+## 2026-06-27 04:14 - active task 时间诊断下沉到 active task contract
+
+- Goal alignment:
+  - 104 只读电量检查继续超时，无法确认电量高于目标模式 `25%` 门槛。
+  - 按安全规则，本次只做本地代码减法和离线验证：
+    - 不部署到 104；
+    - 不在 104 构建；
+    - 不重启项目或原厂服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - `active_task_contract.py` 新增：
+    - `remaining_dwell_s(...)`：根据 `dwell_until` 和当前时间计算剩余停留时间；
+    - `active_waypoint_elapsed_s(...)`：根据 `waypoint_started_monotonic` 和当前 monotonic 时间计算当前点位耗时。
+  - `web_dashboard_node.py` 删除：
+    - `_remaining_dwell_s(...)`;
+    - `_active_waypoint_elapsed_s(...)`。
+  - Web 现在只在生成 timeline / active waypoint payload 时把当前时间传给 contract，不再自己实现这些时间派生规则。
+- Why:
+  - 前端现场问题之一是“看起来停住了，但不知道是在 dwell、等待 Nav2、还是卡住”。
+  - 剩余停留时间和点位 elapsed time 是任务状态诊断的一部分，应该和 active task 状态机规则放在一起测试。
+  - 这继续减少 Web 主节点对任务执行细节的直接拥有范围。
+- Policy / tests:
+  - `scripts/test_active_task_contract.py` 增加 `test_active_waypoint_elapsed_s()`，并在 dwell 测试中覆盖 `remaining_dwell_s(...)`。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - active task contract 必须拥有 active task time-derived diagnostics；
+    - Web 不能重新定义 `_remaining_dwell_s` / `_active_waypoint_elapsed_s`。
+- Verification:
+  - passed:
+    - `./scripts/test_active_task_contract.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `./scripts/check_preflight_policy.py`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口超时，不能证明电量满足目标模式门槛。
+
+## 2026-06-27 04:02 - 任务运行 runtime guard 组合规则下沉到 task contract
+
+- Goal alignment:
+  - 104 只读电量检查继续超时，无法确认电量高于目标模式 `25%` 门槛。
+  - 按安全规则，本次只做本地代码减法和离线验证：
+    - 不部署到 104；
+    - 不在 104 构建；
+    - 不重启项目或原厂服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - `task_contract.py` 新增 `runtime_guard_readiness_payload(...)`：
+    - 电量 readiness 失败时，直接以电量失败作为 primary blocker；
+    - 电量通过但感知 readiness 失败时，以感知失败作为 blocker；
+    - 两者都通过时返回 “任务运行关键链路可用”。
+  - `web_dashboard_node.py` 的 `_task_runtime_guard_payload()` 现在只负责：
+    - 读取运行时电量参数并生成 battery readiness；
+    - 读取运行时感知参数并生成 perception readiness；
+    - 调用 `runtime_guard_readiness_payload(...)` 得出最终决策。
+- Why:
+  - 任务执行中“为什么停了/为什么等待”的最终 blocker 优先级属于任务契约，不应该散落在 Web 主节点。
+  - 下沉后，电量和感知失效的组合规则可以离线测试，避免未来前端/后端改动把运行时安全门槛改乱。
+- Policy / tests:
+  - `scripts/test_task_contract.py` 新增 `test_runtime_guard_readiness_payload()`：
+    - 覆盖 ready；
+    - 覆盖 battery_low 优先阻断；
+    - 覆盖 perception_scan_unavailable 阻断；
+    - 确认运行时证据被保留。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - 要求 runtime guard 组合规则在 `task_contract.py`；
+    - 要求 Web 采样 battery/perception 后调用 contract。
+- Verification:
+  - passed:
+    - `./scripts/test_task_contract.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `./scripts/check_preflight_policy.py`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口超时，不能证明电量满足目标模式门槛。
+
+## 2026-06-27 03:15 - 低电量下清理导航侧 pyflakes 静态问题
+
+- Goal alignment:
+  - 104 只读电量仍为 `8%`，低于目标模式 `25%` 门槛。
+  - 本次只做本地静态清理和离线验证：
+    - 不部署；
+    - 不构建 104；
+    - 不重启项目或原厂服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only changes:
+  - `control_gui.py` 删除未使用的 `scrolledtext` import。
+  - `floor_goal_bridge.py` 删除未使用的 `List` import。
+  - `dual_lidar_simulator.py` 删除 `_build_xy_index(...)` 中未使用的 `ix_max` 局部变量。
+  - `map_editor.py` 将 `MapEditorApp(...)` 实例挂到 `root._m20pro_map_editor_app`，明确由 Tk root 持有，消除未使用变量告警。
+- Verification:
+  - passed:
+    - `python3 -m pyflakes src/m20pro_navigation/m20pro_navigation/*.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/*.py scripts/104_*.py scripts/test_*.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_navigation/m20pro_navigation src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts`;
+    - `bash -n src/m20pro_bringup/scripts/m20pro_real_full.sh src/m20pro_bringup/scripts/m20pro_lidar_relay_guard.sh scripts/104_watch_frontend_task.sh scripts/104_enable_autostart.sh scripts/104_start_real_shadow.sh scripts/104_start_real_move.sh scripts/104_stop_real.sh`;
+    - `./scripts/check_preflight_policy.py`;
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/test_nav_status_contract.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 battery `8%`，继续低于目标模式门槛。
+
+## 2026-06-27 03:18 - 对齐自启动安装脚本的 lidar relay FastDDS 默认值
+
+- Goal alignment:
+  - 104 只读电量仍为 `8%`，低于目标模式 `25%` 门槛。
+  - 本次只做本地启动配置一致性修复和离线验证：
+    - 不部署；
+    - 不构建 104；
+    - 不安装或重启 systemd；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Issue found:
+  - `systemd/m20pro-real.default` 和 `m20pro_real_full.sh` 当前默认 lidar relay 使用 `project_udp` FastDDS profile。
+  - `scripts/104_enable_autostart.sh` 生成 `/etc/default/m20pro-real` 时仍默认写 `M20PRO_LIDAR_RELAY_FASTDDS_PROFILE=factory`。
+  - 这会导致“仓库默认自启动配置”和“现场运行安装脚本生成配置”不一致。
+- Local-only change:
+  - `scripts/104_enable_autostart.sh` 默认值改为：
+    - `M20PRO_LIDAR_RELAY_FASTDDS_PROFILE=${M20PRO_LIDAR_RELAY_FASTDDS_PROFILE:-project_udp}`。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - 要求自启动安装脚本写入同一个 `project_udp` relay profile 默认值。
+- Verification:
+  - passed:
+    - `bash -n scripts/104_enable_autostart.sh src/m20pro_bringup/scripts/m20pro_real_full.sh src/m20pro_bringup/scripts/m20pro_lidar_relay_guard.sh`;
+    - `python3 -m py_compile scripts/check_preflight_policy.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/test_nav_status_contract.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 battery `8%`，继续低于目标模式门槛。
+
+## 2026-06-27 04:48 - 下沉 runtime guard 丢失后的等待/停止决策
+
+- Goal alignment:
+  - 目标模式电量门禁仍失败：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`
+  - 本次只做本地可验证减法：
+    - 不部署到 104；
+    - 不在 104 上构建；
+    - 不重启服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - `task_contract.py` 新增 `runtime_guard_lost_decision(...)`：
+    - guard ready 时返回 `clear`，清理运行时异常计时状态；
+    - guard 不 ready 且未超过阈值时返回 `wait`；
+    - guard 持续异常超过 `task_runtime_guard_lost_timeout_s` 时返回 `fail`。
+  - `web_dashboard_node.py` 中 `_stop_task_if_runtime_guard_lost(...)` 改为委托 contract：
+    - Web 只负责保存 active task、追加 timeline、调用 `_fail_active_task(...)`；
+    - “何时开始计时、何时等待、何时停止任务”的规则归 `task_contract.py`。
+- Why:
+  - 任务执行中电池、scan、点云 relay 任一关键链路异常时，必须有可解释、可测试的停止规则。
+  - 这直接对应现场问题：任务中途停住时，前端和日志必须能说明是定位、Nav2 接收、规划路径，还是运行时关键链路导致。
+- Policy / tests:
+  - `scripts/test_task_contract.py` 新增 `test_runtime_guard_lost_decision()`，覆盖 clear、wait、timeout fail。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - 要求 runtime guard lost wait/stop 规则在 `task_contract.py`；
+    - 要求 Web 委托给 `runtime_guard_lost_decision(...)`。
+- Verification:
+  - passed:
+    - `./scripts/test_task_contract.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口超时，不能证明电量满足目标模式门槛。
+
+## 2026-06-27 05:00 - 下沉 Nav2 readiness 最终判断到 navigation contract
+
+- Goal alignment:
+  - 目标模式电量门禁仍失败：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`
+  - 本次继续只做本地可验证减法：
+    - 不部署到 104；
+    - 不在 104 上构建；
+    - 不重启服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - 新增 `navigation_readiness_contract.py`：
+    - 统一判断 `/scan` 是否新鲜且有有效距离；
+    - 统一判断 local/global costmap 是否新鲜且有尺寸；
+    - 统一判断 Nav2 lifecycle 是否全部 active；
+    - 统一输出 operator-facing readiness message。
+  - `web_dashboard_node.py` 中 `_navigation_readiness_payload(...)` 只保留 ROS 状态采样和 lifecycle 查询，最终 ready/message/checks 委托给 `navigation_readiness_payload(...)`。
+  - Web 主节点行数从 `5749` 降到 `5688`。
+- Why:
+  - 任务启动前“Nav2 到底准备好了没有”是单层导航闭环的核心门槛。
+  - 之前 scan/costmap/lifecycle 的 ready 判断和消息散在 Web 主节点里，不利于离线测试，也不利于后续实习生分工。
+- Policy / tests:
+  - 新增 `scripts/test_navigation_readiness_contract.py`，覆盖：
+    - ready；
+    - scan 缺失；
+    - costmap 缺失；
+    - lifecycle 未 active；
+    - reset 后等待新数据；
+    - lifecycle 检查关闭。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - 要求 navigation readiness message/rule 在 `navigation_readiness_contract.py`；
+    - 要求 Web 调用 `navigation_readiness_payload(...)`。
+- Verification:
+  - passed:
+    - `./scripts/test_navigation_readiness_contract.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/navigation_readiness_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_navigation_readiness_contract.py scripts/check_preflight_policy.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口超时，不能证明电量满足目标模式门槛。
+
+## 2026-06-27 05:04 - 下沉是否需要检查 Nav2 readiness 的前置条件
+
+- Goal alignment:
+  - 目标模式电量门禁仍失败：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`
+  - 本次继续只做本地可验证减法：
+    - 不部署到 104；
+    - 不在 104 上构建；
+    - 不重启服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - `navigation_readiness_contract.py` 新增 `should_check_navigation_readiness(...)`。
+  - `_should_check_navigation_readiness(...)` 现在只负责：
+    - 读取 Web 参数；
+    - 读取 pose/localization runtime state；
+    - 计算 pose age / plausible；
+    - 调用 contract 得出是否需要检查 Nav2 readiness。
+- Why:
+  - `navigation_readiness_payload(...)` 解决“Nav2 是否 ready”，但是否应该检查 Nav2 readiness 也属于任务启动准入规则。
+  - 该前置条件现在可离线测试，避免前端 state 和任务页对“定位已确认但任务不可启动”的判断再次分裂。
+- Policy / tests:
+  - `scripts/test_navigation_readiness_contract.py` 新增 `test_should_check_navigation_readiness()`，覆盖：
+    - nav readiness 检查关闭；
+    - localization 未确认；
+    - pose 不可信；
+    - pose 过期；
+    - fresh localized pose 允许检查。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - 要求 should-check 规则在 `navigation_readiness_contract.py`；
+    - 要求 Web 委托给 `should_check_navigation_readiness(...)`。
+- Verification:
+  - passed:
+    - `./scripts/test_navigation_readiness_contract.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/navigation_readiness_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_navigation_readiness_contract.py scripts/check_preflight_policy.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口超时，不能证明电量满足目标模式门槛。
+
+## 2026-06-27 05:43 - 下沉 active task failure payload 归一化规则
+
+- Goal alignment:
+  - 目标模式电量门禁仍失败：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`
+  - 本次继续只做本地可验证减法：
+    - 不部署到 104；
+    - 不在 104 上构建；
+    - 不重启服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - `active_task_contract.py` 新增 `active_task_failure_payload(...)`：
+    - 统一从 contract/decision failure dict 中取出 operator-facing message；
+    - 统一移除 `action`，避免把内部动作字段写进任务失败 extra；
+    - 统一合并 annotation/label 等诊断字段；
+    - 统一决定传给 `_fail_active_task(...)` 的 `task_id/message/extra`。
+  - `web_dashboard_node.py` 新增 `_fail_active_task_from_payload(...)`，Web 主节点只保留停止任务的副作用，失败负载归一化委托给 contract。
+  - 替换 Web 主节点中多处重复的：
+    - `extra = dict(...)`;
+    - `pop("message")`;
+    - `pop("action")`;
+    - `_fail_active_task(...)`。
+- Why:
+  - 任务失败原因是单层导航现场排障的核心证据。
+  - 以前同一类失败转换逻辑散在 Web 主节点里，容易出现某个分支漏掉 task_id、message、annotation_id 或内部 action 字段。
+  - 现在这条规则可离线测试，Web 主节点更接近“采样 ROS 状态 + 执行副作用”，减少隐性分支。
+- Policy / tests:
+  - `scripts/test_active_task_contract.py` 新增 `test_active_task_failure_payload()`，覆盖：
+    - message 保留；
+    - 默认 message 回退；
+    - `action` 从 extra 中移除；
+    - 显式 task_id 优先；
+    - 额外诊断字段合并。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - 要求 failure payload 归一化在 `active_task_contract.py`；
+    - 禁止 Web 主节点重新内联 `dict/pop("message")/pop("action")` 样板。
+- Verification:
+  - passed:
+    - `./scripts/test_active_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/*.py scripts/check_preflight_policy.py scripts/test_active_task_contract.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口超时，不能证明电量满足目标模式门槛。
+
+## 2026-06-27 05:48 - 统一定位丢失失败分支的 active task failure 路径
+
+- Goal alignment:
+  - 目标模式电量门禁仍失败：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`
+  - 本次继续只做本地可验证减法：
+    - 不部署到 104；
+    - 不在 104 上构建；
+    - 不重启服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - `_stop_task_if_localization_lost(...)` 不再手写 `_fail_active_task(...)` 的 `task_id/message/extra` 参数。
+  - 定位/位姿丢失超时后，现在统一走 `_fail_active_task_from_payload(...)`：
+    - 停止时仍保留 `reason`、`age_s`、`timeout_s`；
+    - 额外保留 `localization_lost_age_s`，方便前端和 watcher 直接识别。
+  - `scripts/check_preflight_policy.py` 新增防回归，要求定位丢失分支也使用共享 active-task failure payload 路径。
+- Why:
+  - 定位丢失是现场任务中止的高频原因之一。
+  - 这条分支之前仍然直接调用 `_fail_active_task(...)`，和其它任务失败路径不一致。
+  - 现在所有主要任务失败路径都更接近同一条失败负载归一化管线，减少前端任务结果和日志字段不一致。
+- Verification:
+  - passed:
+    - `./scripts/check_preflight_policy.py`;
+    - `./scripts/test_task_progress_contract.py`;
+    - `./scripts/test_active_task_contract.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/*.py scripts/check_preflight_policy.py scripts/test_task_progress_contract.py scripts/test_active_task_contract.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/check_preflight_policy.py scripts/test_task_progress_contract.py scripts/test_active_task_contract.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口超时，不能证明电量满足目标模式门槛。
+
+## 2026-06-27 05:52 - 收敛剩余任务失败分支到共享 failure payload 路径
+
+- Goal alignment:
+  - 目标模式电量门禁仍失败：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`
+  - 本次继续只做本地可验证减法：
+    - 不部署到 104；
+    - 不在 104 上构建；
+    - 不重启服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - `_stop_task_if_runtime_guard_lost(...)` 的 fail 分支改为 `_fail_active_task_from_payload(...)`。
+  - `_dispatch_active_goal(...)` 中 `waypoint_goal_payload(annotation)` 失败分支改为 `_fail_active_task_from_payload(...)`。
+  - 搜索确认 `web_dashboard_node.py` 中直接 `self._fail_active_task(...)` 只剩 `_fail_active_task_from_payload(...)` 封装内部一处。
+- Why:
+  - runtime guard failure 和 bad waypoint goal failure 都是任务失败结果，需要和定位丢失、Nav2 接收超时、路径不匹配等路径使用同一套结果字段规则。
+  - 这样前端任务卡片、watcher、`last_task_result` 和现场排障日志更容易一致。
+- Policy / tests:
+  - `scripts/check_preflight_policy.py` 更新：
+    - runtime guard 持续异常停止任务必须走 `_fail_active_task_from_payload(...)`；
+    - bad waypoint goal failure 必须走 `_fail_active_task_from_payload(...)`。
+- Verification:
+  - passed:
+    - `./scripts/check_preflight_policy.py`;
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/test_active_task_contract.py`;
+    - `./scripts/test_task_progress_contract.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/*.py scripts/check_preflight_policy.py scripts/test_task_contract.py scripts/test_active_task_contract.py scripts/test_task_progress_contract.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/check_preflight_policy.py scripts/test_task_contract.py scripts/test_active_task_contract.py scripts/test_task_progress_contract.py`;
+    - `rg -n "self\\._fail_active_task\\(" src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py` 仅剩 wrapper 内部调用；
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口超时，不能证明电量满足目标模式门槛。
+
+## 2026-06-27 05:56 - 下沉 runtime guard 等待态 active 字段更新
+
+- Goal alignment:
+  - 目标模式电量门禁仍失败：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`
+  - 本次继续只做本地可验证减法：
+    - 不部署到 104；
+    - 不在 104 上构建；
+    - 不重启服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - `task_contract.py` 新增 `apply_runtime_guard_wait_state(...)`：
+    - 统一写入 `runtime_guard_lost_started_monotonic`；
+    - 保留首次 `runtime_guard_lost_at`；
+    - 写入 `runtime_guard`、`runtime_guard_lost_age_s`、`last_wait_code`、`last_wait_at`、`status_message`。
+  - `web_dashboard_node.py` 中 `_stop_task_if_runtime_guard_lost(...)` 不再手写这些 active task 字段，只负责：
+    - 读取/保存 active task；
+    - 调用 contract；
+    - 追加 timeline；
+    - 持久化 settings。
+- Why:
+  - runtime guard 负责任务运行中的电池、scan、点云等关键链路。
+  - 等待态字段如果散在 Web 主节点里，后续容易造成前端显示、watcher 和 last_result 的字段不一致。
+  - 下沉后，Web 主节点继续做副作用，纯状态规则可离线测试。
+- Policy / tests:
+  - `scripts/test_task_contract.py` 新增 `test_apply_runtime_guard_wait_state()`。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - task contract 必须拥有 runtime guard waiting state update；
+    - Web 必须委托 `apply_runtime_guard_wait_state(...)`。
+- Verification:
+  - passed:
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/*.py scripts/check_preflight_policy.py scripts/test_task_contract.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/check_preflight_policy.py scripts/test_task_contract.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口超时，不能证明电量满足目标模式门槛。
+
+## 2026-06-27 05:59 - 下沉 localization lost 开始计时 active 字段更新
+
+- Goal alignment:
+  - 目标模式电量门禁仍失败：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`
+  - 本次继续只做本地可验证减法：
+    - 不部署到 104；
+    - 不在 104 上构建；
+    - 不重启服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - `task_progress_contract.py` 新增 `apply_localization_lost_start_state(...)`：
+    - 统一写入 `localization_lost_started_monotonic`；
+    - 统一写入定位丢失等待态 `status_message`。
+  - `web_dashboard_node.py` 中 `_stop_task_if_localization_lost(...)` 的 start-timer 分支不再手写 active task 字段，只负责锁、保存和持久化。
+- Why:
+  - 定位/位姿丢失是任务执行中非常关键的保护路径。
+  - 开始计时状态如果留在 Web 主节点里，后续容易和 timeout/fail 规则分裂。
+  - 现在 start/wait/fail 的纯规则都集中在 task progress contract，Web 主节点只执行副作用。
+- Policy / tests:
+  - `scripts/test_task_progress_contract.py` 新增 `test_apply_localization_lost_start_state()`。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - task progress contract 必须拥有 localization-lost start state update；
+    - Web 必须委托 `apply_localization_lost_start_state(...)`。
+- Verification:
+  - passed:
+    - `./scripts/test_task_progress_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_progress_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_progress_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/*.py scripts/check_preflight_policy.py scripts/test_task_progress_contract.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/check_preflight_policy.py scripts/test_task_progress_contract.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口超时，不能证明电量满足目标模式门槛。
+
+## 2026-06-27 06:03 - 下沉 generic active task waiting state 更新
+
+- Goal alignment:
+  - 目标模式电量门禁仍失败：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`
+  - 本次继续只做本地可验证减法：
+    - 不部署到 104；
+    - 不在 104 上构建；
+    - 不重启服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - `active_task_contract.py` 新增 `mark_active_task_waiting_state(...)`：
+    - 统一写入 `last_wait_code`；
+    - 统一写入 `status_message`；
+    - 统一写入 `last_wait_at`。
+  - `web_dashboard_node.py` 中 `_mark_active_task_waiting(...)` 不再手写这些字段，只负责锁、调用 contract、保存 settings。
+- Why:
+  - `_mark_active_task_waiting(...)` 被 active task tick gate、近目标等待等多个等待场景复用。
+  - 通用等待态字段如果留在 Web 主节点里，会和 runtime guard/localization lost 等等待态规则分裂。
+  - 下沉后，active task 的等待态字段更新有统一 contract，方便离线测试和后续拆给实习生维护。
+- Policy / tests:
+  - `scripts/test_active_task_contract.py` 新增 `test_mark_active_task_waiting_state()`。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - active task contract 必须拥有 generic waiting state update；
+    - Web 必须委托 `mark_active_task_waiting_state(...)`。
+- Verification:
+  - passed:
+    - `./scripts/test_active_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/*.py scripts/check_preflight_policy.py scripts/test_active_task_contract.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/check_preflight_policy.py scripts/test_active_task_contract.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口超时，不能证明电量满足目标模式门槛。
+
+## 2026-06-27 06:18 - 下沉 stall warning 和 plan verified active 字段更新
+
+- Goal alignment:
+  - 目标模式电量门禁仍失败：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`
+  - 本次继续只做本地可验证减法：
+    - 不部署到 104；
+    - 不在 104 上构建；
+    - 不重启服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - `task_progress_contract.py` 新增 `apply_stall_warning_state(...)`：
+    - 统一写入 `stall_warned`；
+    - 统一写入卡滞预警 `status_message`。
+  - `task_plan_contract.py` 新增 `apply_plan_goal_verified_state(...)`：
+    - 统一写入 `plan_goal_verified`；
+    - 统一写入 `plan_goal_error_m`；
+    - 统一写入 `plan_path_version`；
+    - 统一写入路径匹配确认 `status_message`。
+  - `web_dashboard_node.py` 中 `_stop_task_if_stalled(...)` 和 `_stop_task_if_plan_mismatched(...)` 不再直接手写这些 active task 字段，只负责：
+    - 读取/保存 active task；
+    - 调用 contract；
+    - 追加 timeline；
+    - 持久化 settings。
+- Why:
+  - 现场任务链路最容易出问题的两个显示点是“看似还在导航但实际卡住”和“路径到底是不是发给当前任务点”。
+  - 这两个状态如果留在 Web 主节点里直接写字段，后续前端、watcher、last_result 和任务恢复逻辑容易再次分裂。
+  - 下沉后，Web 主节点继续保留副作用，任务状态规则可离线测试，便于后续把复杂重定位和跨楼层逻辑拆给不同维护人。
+- Policy / tests:
+  - `scripts/test_task_progress_contract.py` 新增 `test_apply_stall_warning_state()`。
+  - `scripts/test_task_plan_contract.py` 新增 `test_apply_plan_goal_verified_state()`。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - task progress contract 必须拥有 stall warning state update；
+    - Web 必须委托 `apply_stall_warning_state(...)`；
+    - task plan contract 必须拥有 plan-goal verified state update；
+    - Web 必须委托 `apply_plan_goal_verified_state(...)`。
+- Verification:
+  - passed:
+    - `./scripts/test_task_progress_contract.py`;
+    - `./scripts/test_task_plan_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_progress_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_plan_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_progress_contract.py scripts/test_task_plan_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/*.py scripts/check_preflight_policy.py scripts/test_task_progress_contract.py scripts/test_task_plan_contract.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/check_preflight_policy.py scripts/test_task_progress_contract.py scripts/test_task_plan_contract.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口超时，不能证明电量满足目标模式门槛。
+
+## 2026-06-27 06:32 - 下沉 Nav2 status/feedback active 字段更新
+
+- Goal alignment:
+  - 目标模式电量门禁仍失败：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`
+  - 本次继续只做本地可验证减法：
+    - 不部署到 104；
+    - 不在 104 上构建；
+    - 不重启服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - `nav_status_contract.py` 新增 active task 状态更新函数：
+    - `apply_nav_failure_state(...)`：统一写入 Nav2 失败状态、原始状态、错误和友好提示；
+    - `apply_nav_goal_status_state(...)`：统一写入 accepted/succeeded 等 goal 状态、接收时间、goal_seq、match 和友好提示；
+    - `apply_nav_status_message_state(...)`：统一写入普通 Nav2 消息状态；
+    - `apply_nav_feedback_state(...)`：统一写入 Nav2 feedback、剩余距离、恢复次数、feedback 时间和友好提示；
+    - `should_record_nav_feedback_event(...)`：统一判断是否需要记录 feedback timeline；
+    - `apply_ignored_nav_status_state(...)`：统一写入被忽略的不匹配 Nav2 状态和 match 诊断。
+  - `web_dashboard_node.py` 中 Nav2 状态/反馈相关函数不再直接手写这些 active task 字段，只负责：
+    - 校验 active waypoint 是否存在；
+    - 调用 Nav2 status contract；
+    - 追加 timeline/event；
+    - 保存 settings / task result；
+    - 必要时停止任务或进入 dwell/advance。
+- Why:
+  - 前端任务页实时位置/导航状态不可信，会直接导致“看起来在导航、实际不动/跑错点/状态残留”的现场问题难以定位。
+  - Nav2 status、feedback、ignored mismatch、failure 这些字段必须有单一来源，否则 watcher、前端摘要、last_result 和后续状态机容易分裂。
+  - 下沉后，Web 主节点继续管理副作用，Nav2 状态进入 active task 的规则可以离线测试，后续维护人能独立理解这条链路。
+- Policy / tests:
+  - `scripts/test_nav_status_contract.py` 新增测试覆盖：
+    - Nav2 failure state；
+    - goal-status accepted state；
+    -普通消息 state；
+    - feedback state 和 feedback timeline 记录判断；
+    - ignored mismatch state。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - Nav status contract 必须拥有这些 active-task 状态更新；
+    - Web 必须委托 contract 更新 Nav2 failure、goal-status、message、feedback 和 ignored mismatch 状态；
+    - 旧的“Web 主节点直接保存 feedback 字段”检查改为 contract 保存、Web 持久化。
+- Verification:
+  - passed:
+    - `./scripts/test_nav_status_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/nav_status_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_nav_status_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/*.py scripts/check_preflight_policy.py scripts/test_nav_status_contract.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/check_preflight_policy.py scripts/test_nav_status_contract.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口超时，不能证明电量满足目标模式门槛。
+
+## 2026-06-27 06:45 - 下沉 active task 创建/停止/失败状态更新
+
+- Goal alignment:
+  - 目标模式电量门禁仍失败：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`
+  - 本次继续只做本地可验证减法：
+    - 不部署到 104；
+    - 不在 104 上构建；
+    - 不重启服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - `active_task_contract.py` 新增：
+    - `create_active_task_state(...)`：统一创建任务运行态初始字段；
+    - `mark_active_task_stopped_state(...)`：统一写入手动停止/复位提示；
+    - `mark_active_task_failed_state(...)`：统一写入失败错误和状态提示。
+  - `web_dashboard_node.py` 中 `_start_task(...)`、`_stop_task(...)`、`_fail_active_task(...)` 不再直接手写这些 active task 字段，只负责：
+    - readiness/expectation 校验；
+    - task status 和 last_result 持久化；
+    - timeline/event 记录；
+    - settings 保存；
+    - navigation session reset。
+- Why:
+  - 现场问题里出现过“明明没有任务却显示导航中/停止无效/状态残留”。
+  - 任务生命周期的入口、终止和失败状态必须由一个 contract 统一生成，否则 Web 主节点里不同路径容易写出不一致的 active task。
+  - 下沉后，任务生命周期状态更容易离线测试，也更适合后续拆给不同维护人接手。
+- Policy / tests:
+  - `scripts/test_active_task_contract.py` 新增：
+    - `test_create_active_task_state()`；
+    - `test_mark_active_task_terminal_states()`。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - active task contract 必须拥有创建、手动停止、失败状态更新；
+    - Web 的 start/stop/fail 必须委托 active task contract。
+- Verification:
+  - passed:
+    - `./scripts/test_active_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/*.py scripts/check_preflight_policy.py scripts/test_active_task_contract.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/check_preflight_policy.py scripts/test_active_task_contract.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口超时，不能证明电量满足目标模式门槛。
+
+## 2026-06-27 11:52 - 下沉 near-goal 等待状态字段更新
+
+- Goal alignment:
+  - 目标模式电量门禁仍失败：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`
+  - 本次继续只做本地可验证减法：
+    - 不部署到 104；
+    - 不在 104 上构建；
+    - 不重启服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - `task_progress_contract.py` 新增 `apply_near_goal_wait_state(...)`。
+  - `web_dashboard_node.py` 的 `_tick_active_task(...)` 不再手写：
+    - `near_goal_started_monotonic`；
+    - `near_goal_started_at`。
+  - Web 主节点现在只负责读取当前 active task、调用 contract、按 `changed` 决定是否持久化。
+- Why:
+  - near-goal 等待是现场“走一段就停、像是在等 Nav2 到达确认”的关键诊断状态。
+  - 决策和状态字段写入必须同属 `task_progress_contract.py`，否则后续容易出现 decision 说在等待、active task 字段却没有同步的状态残留。
+- Policy / tests:
+  - `scripts/test_task_progress_contract.py` 新增 `test_apply_near_goal_wait_state()`，覆盖：
+    - 首次写入 near-goal 计时字段；
+    - 已有相同字段时不误报 changed；
+    - 非 `wait_for_nav2` 决策不修改 active task；
+    - 不误改 `status_message` 等非本函数拥有字段。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - task progress contract 必须拥有 near-goal waiting state update；
+    - Web 必须委托 `apply_near_goal_wait_state(...)`；
+    - task progress contract 测试必须覆盖该函数。
+- Verification:
+  - passed:
+    - `./scripts/test_task_progress_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_progress_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_progress_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/*.py scripts/check_preflight_policy.py scripts/test_task_progress_contract.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/check_preflight_policy.py scripts/test_task_progress_contract.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口超时，不能证明电量满足目标模式门槛。
+
+## 2026-06-27 12:08 - 下沉 Nav2 success 当前任务点完成门禁
+
+- Goal alignment:
+  - 目标模式电量门禁仍失败：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`
+  - 本次继续只做本地可验证减法：
+    - 不部署到 104；
+    - 不在 104 上构建；
+    - 不重启服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - `nav_status_contract.py` 新增 `nav_success_completion_decision(...)`。
+  - `web_dashboard_node.py` 的 `_complete_active_waypoint_from_nav_result(...)` 不再内联判断：
+    - `last_goal_annotation_id` 是否等于当前 active annotation；
+    - `last_nav_goal_status` 是否处于 `sent/accepted`；
+    - Nav2 success payload 是否匹配当前目标点的 seq/pose。
+  - Web 主节点现在只根据 contract 的 `complete/ignore` 决策推进点位或记录“忽略非当前任务点 Nav2 成功事件”。
+- Why:
+  - 这块直接对应现场风险：旧的/残留的 Nav2 success 事件不能让前端任务推进，否则会出现“跑向固定残留点、点位顺序错乱、任务状态误完成”。
+  - 当前点完成门禁必须和 Nav2 goal matching 证据在同一个 contract 中，便于 watcher、last_result 和前端诊断复用同一套规则。
+- Policy / tests:
+  - `scripts/test_nav_status_contract.py` 新增 `test_nav_success_completion_decision()`，覆盖：
+    - 匹配当前点时允许 complete；
+    - Nav2 goal 不在 `sent/accepted` 时 ignore；
+    - active annotation 与 last goal 不一致时 ignore；
+    - goal_seq 不匹配时 ignore，并保留 mismatch 证据。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - nav status contract 必须拥有 Nav2 success completion gating；
+    - Web 必须委托 `nav_success_completion_decision(...)`；
+    - nav status contract 测试必须覆盖 success completion gating。
+- Verification:
+  - passed:
+    - `./scripts/test_nav_status_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/nav_status_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_nav_status_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/*.py scripts/check_preflight_policy.py scripts/test_nav_status_contract.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/check_preflight_policy.py scripts/test_nav_status_contract.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口超时，不能证明电量满足目标模式门槛。
+
+## 2026-06-27 12:24 - 下沉 active task timeline 事件状态更新
+
+- Goal alignment:
+  - 目标模式电量门禁仍失败：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`
+  - 本次继续只做本地可验证减法：
+    - 不部署到 104；
+    - 不在 104 上构建；
+    - 不重启服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - `active_task_contract.py` 新增 `append_active_task_timeline_event_state(...)`。
+  - `web_dashboard_node.py` 的 `_append_active_task_timeline_event(...)` 不再手写：
+    - timeline item 字段；
+    - active waypoint elapsed 计算；
+    - extra 合并；
+    - timeline 最大长度裁剪；
+    - `last_timeline_event` 更新。
+  - Web 主节点只负责提供当前时间、monotonic 时间和参数里的最大事件数。
+- Why:
+  - timeline 是任务现场诊断、watcher、last_result 的共同证据来源。
+  - 这块留在 Web 主节点里会让任务状态机副作用继续膨胀；下沉后，任务执行证据格式和裁剪规则有单一来源。
+- Policy / tests:
+  - `scripts/test_active_task_contract.py` 新增 `test_append_active_task_timeline_event_state()`，覆盖：
+    - 事件基础字段；
+    - elapsed_s；
+    - extra 合并；
+    - timeline 裁剪；
+    - 原 active 不被原地修改；
+    - max_events 小于 1 时仍保留至少一条。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - active task contract 必须拥有 timeline event state update；
+    - Web 必须委托 `append_active_task_timeline_event_state(...)`；
+    - active task contract 测试必须覆盖 timeline。
+- Verification:
+  - passed:
+    - `./scripts/test_active_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/*.py scripts/check_preflight_policy.py scripts/test_active_task_contract.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/check_preflight_policy.py scripts/test_active_task_contract.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口超时，不能证明电量满足目标模式门槛。
+
+## 2026-06-27 12:41 - 下沉 active waypoint 实时显示 payload
+
+- Goal alignment:
+  - 目标模式电量门禁仍失败：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`
+  - 本次继续只做本地可验证减法：
+    - 不部署到 104；
+    - 不在 104 上构建；
+    - 不重启服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - `task_snapshot_contract.py` 新增 `build_active_waypoint_payload(...)`。
+  - `web_dashboard_node.py` 的 `_publish_active_waypoint(...)` 不再手写实时任务显示 payload，只负责：
+    - 读取当前 path/pose 快照；
+    - 调用 snapshot contract 构造 payload；
+    - 发布 `/m20pro/active_waypoint`。
+  - active waypoint payload 中的以下字段由 snapshot contract 统一生成：
+    - goal pose / robot pose / state pose；
+    - state pose age；
+    - Nav2 feedback age；
+    - path endpoint error；
+    - plan version verification；
+    - runtime guard / progress / goal attempt diagnostics。
+- Why:
+  - 这块直接关系到前端任务页“是否实时显示机器狗位置、路径终点误差、Nav2 反馈和当前点位”。
+  - 下沉后，实时显示 payload 和 task runtime/result snapshot 属于同一个 contract，前端、watcher、last_result 使用的诊断语义更一致。
+- Policy / tests:
+  - `scripts/test_task_snapshot_contract.py` 新增 `test_active_waypoint_payload()`，覆盖：
+    - remaining dwell；
+    - elapsed；
+    - path goal error；
+    - Nav2 feedback age；
+    - state pose age；
+    - invalid state pose 过滤；
+    - goal/plan/waypoint 诊断字段。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - task snapshot contract 必须拥有 live active-waypoint payload；
+    - Web 必须委托 `build_active_waypoint_payload(...)`；
+    - plan-version verification 的实时输出归 snapshot contract 维护；
+    - snapshot contract 测试必须覆盖 live active-waypoint。
+- Verification:
+  - passed:
+    - `./scripts/test_task_snapshot_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_snapshot_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_snapshot_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/*.py scripts/check_preflight_policy.py scripts/test_task_snapshot_contract.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/check_preflight_policy.py scripts/test_task_snapshot_contract.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口超时，不能证明电量满足目标模式门槛。
+
+## 2026-06-27 12:55 - 下沉 selected map 选择状态更新
+
+- Goal alignment:
+  - 目标模式电量门禁仍失败：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`
+  - 本次继续只做本地可验证减法：
+    - 不部署到 104；
+    - 不在 104 上构建；
+    - 不重启服务；
+    - 不调用重定位；
+    - 不启动任务或发布运动目标。
+- Local-only change:
+  - `map_selection_contract.py` 新增 `apply_selected_map_choice_state(...)`。
+  - `web_dashboard_node.py` 的 `_select_map(...)` 不再手写：
+    - `settings.selected_map_id` 更新；
+    - `settings.map_relocalization_required` 写入/清理；
+    - 是否需要清空 localization/pose/path 的 `clear_pose` 判断。
+  - Web 仍负责：
+    - 拒绝任务执行中切图；
+    - 查找地图记录；
+    - 调用 Nav2 LoadMap；
+    - 持久化 settings；
+    - 执行实时位姿清理副作用。
+- Why:
+  - 单层任务闭环要求“前端选择地图、Nav2 当前地图、任务点地图、重定位状态”一致。
+  - 地图切换后是否必须重新按开发手册2101重定位，是任务下发能否可靠的核心门禁。
+  - 将 selected map choice state 下沉后，Web 不再分散维护这些字段，后续跨楼层逻辑也更容易接入同一 contract。
+- Policy / tests:
+  - `scripts/test_map_selection_contract.py` 新增 `test_apply_selected_map_choice_state()`，覆盖：
+    - 新地图/LoadMap 成功后要求重定位并清空位姿；
+    - 同地图且未重新加载时保留旧重定位要求；
+    - 切回实时 /map 时清理固定地图重定位要求。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - map selection contract 必须拥有 selected-map choice state update；
+    - Web 必须委托 `apply_selected_map_choice_state(...)`；
+    - map selection contract 测试必须覆盖该状态更新。
+- Verification:
+  - passed:
+    - `./scripts/test_map_selection_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/map_selection_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_map_selection_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/*.py scripts/check_preflight_policy.py scripts/test_map_selection_contract.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/check_preflight_policy.py scripts/test_map_selection_contract.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口超时，不能证明电量满足目标模式门槛。
+
+## 2026-06-27 13:20 - 下沉任务启动静态上下文校验
+
+- Goal alignment:
+  - 104 电量门禁仍未通过，本次继续只做本地可验证减法。
+  - 不部署到 104，不在 104 上构建，不重启服务，不重定位，不启动任务或发布运动目标。
+- Local-only change:
+  - `task_contract.py` 新增 `task_start_static_context(...)`。
+  - `_start_task(...)` 的复位前和复位后最终静态校验统一委托该 contract，Web 只负责：
+    - 保存 invalid 任务状态；
+    - 复位导航会话；
+    - 调用运行时 readiness；
+    - 创建 active task 并下发目标。
+- Why:
+  - 任务不存在、任务状态不可启动、点位缺失、充电点顺序、首点解析这些规则以前分散在 Web 节点里。
+  - 下沉后，任务列表展示、点击启动、导航复位后最终下发前使用同一套静态上下文语义，减少“前端看起来能启动，但后端实际跑错点/旧点”的风险。
+- Policy / tests:
+  - `scripts/test_task_contract.py` 新增 `test_task_start_static_context()`，覆盖：
+    - missing task；
+    - running/blocked status；
+    - empty waypoint；
+    - missing waypoint and invalidation hint；
+    - charge waypoint ordering；
+    - valid context first waypoint extraction。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - task contract 必须拥有 static task-start context validation；
+    - Web start-task 必须委托该 contract；
+    - 复位后必须重新检查 static context 和 task readiness，再下发第一个目标。
+- Verification:
+  - passed:
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/*.py scripts/check_preflight_policy.py scripts/test_task_contract.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/check_preflight_policy.py scripts/test_task_contract.py`;
+    - targeted `git diff --check`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口仍需通过目标模式门禁后才能做真实机器狗闭环验证。
+
+## 2026-06-27 13:35 - 统一任务页 readiness 与启动静态上下文
+
+- Goal alignment:
+  - 104 电量门禁仍失败，本次继续只做本地可验证减法。
+  - 不部署到 104，不在 104 上构建，不重启服务，不重定位，不启动任务或发布运动目标。
+- Local-only change:
+  - `task_start_static_context(...)` 现在同时返回：
+    - API error payload；
+    - task readiness payload；
+    - 是否需要将任务标记 invalid 的提示。
+  - `_task_readiness_for_task(...)` 不再手写任务状态、空点位、首点缺失、点位顺序等静态失败分支，改为委托同一个 contract。
+  - `_start_task(...)` 和任务列表 readiness 因此共用同一套静态上下文语义。
+- Why:
+  - 之前容易出现“任务页显示一套原因，点击启动后后端又走另一套原因”的分叉。
+  - 统一后，单层任务的可启动展示、点击启动、导航复位后最终下发前检查都围绕同一个静态任务上下文，降低旧点位/错点位/残留任务导致误跑的风险。
+- Policy / tests:
+  - `scripts/test_task_contract.py` 扩展 `test_task_start_static_context()`，覆盖 readiness code：
+    - `task_missing`;
+    - `task_status_blocked`;
+    - `no_waypoint`;
+    - `missing_waypoint`;
+    - `waypoint_order_invalid`。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - task contract 必须拥有 static context + readiness；
+    - Web 任务列表 readiness 必须委托 `task_start_static_context(...)`；
+    - Web 不再直接调用 `task_status_allows_start(...)`，避免状态规则重新分叉。
+- Verification:
+  - passed:
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/*.py scripts/check_preflight_policy.py scripts/test_task_contract.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/check_preflight_policy.py scripts/test_task_contract.py`;
+    - tracked `git diff --check` + untracked task contract whitespace check。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口仍超时，不能进入目标模式真实机验证。
+
+## 2026-06-27 13:50 - 下沉删除点位后的任务状态更新
+
+- Goal alignment:
+  - 104 电量门禁仍失败，本次继续只做本地可验证减法。
+  - 不部署到 104，不在 104 上构建，不重启服务，不重定位，不启动任务或发布运动目标。
+- Local-only change:
+  - `task_contract.py` 新增 `apply_deleted_annotation_to_tasks(...)`。
+  - `_delete_annotation(...)` 不再手写受影响任务的 `annotation_ids/status/updated_at` 更新，改为委托 task contract。
+  - Web 仍负责：
+    - 拦截正在当前任务中执行的点位删除；
+    - 删除 annotations；
+    - 保存 JSON；
+    - 返回 affected task ids。
+- Why:
+  - 删除点位后如果任务残留旧 point id，后续任务启动可能出现“任务页看起来存在，但实际首点/后续点已失效”的问题。
+  - 将这块状态转换下沉后，删除点位、任务 readiness、任务启动静态上下文都围绕同一个 task contract，减少旧点位/残留任务导致误跑的风险。
+- Policy / tests:
+  - `scripts/test_task_contract.py` 新增 `test_apply_deleted_annotation_to_tasks()`，覆盖：
+    - 删除点位会从任务点序列中移除；
+    - 单点任务被删空后变为 `invalid`；
+    - `ready/stopped/completed` 类任务保持可重新检查的 `ready`；
+    - `error` 任务保留错误状态用于诊断；
+    - 未命中点位时任务列表不变。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - task contract 必须拥有删除点位后的任务列表状态更新；
+    - Web 删除点位必须委托 `apply_deleted_annotation_to_tasks(...)`。
+- Verification:
+  - passed:
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/*.py scripts/check_preflight_policy.py scripts/test_task_contract.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/check_preflight_policy.py scripts/test_task_contract.py`;
+    - tracked `git diff --check` + untracked task contract whitespace check。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口仍超时，不能进入目标模式真实机验证。
+
+## 2026-06-27 14:05 - 下沉任务列表残留 running 清理
+
+- Goal alignment:
+  - 104 电量门禁仍失败，本次继续只做本地可验证减法。
+  - 不部署到 104，不在 104 上构建，不重启服务，不重定位，不启动任务或发布运动目标。
+- Local-only change:
+  - `task_contract.py` 新增 `stop_stale_running_tasks(...)`。
+  - `_tasks_payload(...)` 不再手写“非当前 active task 的 running 任务改为 stopped”，改为委托 task contract。
+  - Web 仍负责读取 active task、保存 `tasks.json` 和组装 API payload。
+- Why:
+  - 前端任务页曾出现“明明没有任务在执行，但仍显示导航中/运行中”的现场问题。
+  - 这类状态残留必须有单一规则来源：只有 settings.active_task 指向的 running task 才能保留 running，其余 running 任务在任务列表读取时统一落回 stopped。
+  - 下沉后，任务列表状态、任务启动静态上下文、删除点位后的任务更新都集中在 task contract，减少 Web 节点内状态分叉。
+- Policy / tests:
+  - `scripts/test_task_contract.py` 新增 `test_stop_stale_running_tasks()`，覆盖：
+    - 当前 active running task 保留 running；
+    - 其他 running task 转为 stopped 并更新时间；
+    - 没有 active task 时所有 running task 都视为 stale；
+    - 无 running task 时列表不变。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - task contract 必须拥有 stale running task cleanup；
+    - Web tasks API 必须委托 `stop_stale_running_tasks(...)`。
+- Verification:
+  - passed:
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/*.py scripts/check_preflight_policy.py scripts/test_task_contract.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/check_preflight_policy.py scripts/test_task_contract.py`;
+    - tracked `git diff --check` + untracked task contract whitespace check。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口仍超时，不能进入目标模式真实机验证。
+
+## 2026-06-27 14:20 - 下沉开机任务运行态归一化
+
+- Goal alignment:
+  - 104 电量门禁仍失败，本次继续只做本地可验证减法。
+  - 不部署到 104，不在 104 上构建，不重启服务，不重定位，不启动任务或发布运动目标。
+- Local-only change:
+  - `task_contract.py` 新增 `normalize_startup_task_runtime_state(...)`。
+  - `_normalize_runtime_state_on_startup(...)` 不再手写：
+    - 清空 `settings.active_task`；
+    - 把开机残留的 running task 转为 stopped。
+  - Web 启动归一化仍负责：
+    - selected map 缺失时回退默认地图；
+    - annotation semantics normalize；
+    - 保存 settings/tasks/annotations。
+- Why:
+  - 现场曾出现“明明没有任务在执行，但前端仍显示导航中”的状态残留问题。
+  - 开机时任务运行态必须统一归零：active task 不跨进程重启保留，残留 running task 一律停止。
+  - 这块规则现在和任务列表 stale running cleanup 同属 task contract，减少 Web 节点内多处 running/stopped 状态分叉。
+- Policy / tests:
+  - `scripts/test_task_contract.py` 新增 `test_normalize_startup_task_runtime_state()`，覆盖：
+    - running active task 开机后被停止；
+    - settings.active_task 被清空；
+    - 其他 running task 也被停止；
+    - 非运行任务不变；
+    - 无运行残留时不产生变更。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - task contract 必须拥有 startup active-task clearing + running-task normalization；
+    - Web startup runtime normalization 必须委托 `normalize_startup_task_runtime_state(...)`。
+- Verification:
+  - passed:
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/*.py scripts/check_preflight_policy.py scripts/test_task_contract.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/check_preflight_policy.py scripts/test_task_contract.py`;
+    - tracked `git diff --check` + untracked task contract whitespace check。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口仍超时，不能进入目标模式真实机验证。
+
+## 2026-06-27 14:35 - 下沉最近任务结果 payload
+
+- Goal alignment:
+  - 104 电量门禁仍失败，本次继续只做本地可验证减法。
+  - 不部署到 104，不在 104 上构建，不重启服务，不重定位，不启动任务或发布运动目标。
+- Local-only change:
+  - `task_snapshot_contract.py` 新增 `last_task_result_payload(...)`。
+  - `_last_task_result_unlocked(...)` 不再手写最近任务结果选择与 payload 拼装，改为委托 task snapshot contract。
+- Why:
+  - 前端需要区分“当前正在执行的 active task”和“历史 last_result”。
+  - 最近任务结果属于诊断快照，不应该散落在 Web 节点中，否则容易再次出现历史结果被误当成当前执行状态的问题。
+  - 下沉后，runtime snapshot、result snapshot、active waypoint payload、last task result payload 都由同一个 task snapshot contract 管理。
+- Policy / tests:
+  - `scripts/test_task_snapshot_contract.py` 新增 `test_last_task_result_payload()`，覆盖：
+    - 空任务列表返回 None；
+    - 选择最近有 `last_result/last_error/last_timeline` 的任务；
+    - 保留 last timeline event；
+    - 仅有 last_error 的任务也能作为诊断结果输出。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - task snapshot contract 必须拥有 last task result payload selection；
+    - Web 必须委托 `last_task_result_payload(self._tasks)`；
+    - 离线测试必须覆盖该 payload。
+- Verification:
+  - passed:
+    - `./scripts/test_task_snapshot_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_snapshot_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_snapshot_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/*.py scripts/check_preflight_policy.py scripts/test_task_snapshot_contract.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/check_preflight_policy.py scripts/test_task_snapshot_contract.py`;
+    - tracked `git diff --check` + untracked task snapshot whitespace check。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口仍超时，不能进入目标模式真实机验证。
+
+## 2026-06-27 14:50 - 下沉任务结果持久化状态更新
+
+- Goal alignment:
+  - 104 电量门禁仍失败，本次继续只做本地可验证减法。
+  - 不部署到 104，不在 104 上构建，不重启服务，不重定位，不启动任务或发布运动目标。
+- Local-only change:
+  - `task_snapshot_contract.py` 新增 `apply_task_result_persistence(...)`。
+  - `_persist_task_result_unlocked(...)` 不再手写 `last_result/last_timeline/last_error/updated_at` 更新，改为委托 task snapshot contract。
+- Why:
+  - 现场任务失败后，前端和 watcher/analyzer 依赖 `last_result`、`last_timeline`、`last_error` 做复盘。
+  - 这些字段属于任务诊断快照状态，和 runtime/result/last-task-result payload 应统一归 task snapshot contract 管理。
+  - 下沉后，历史结果持久化与当前 active task 展示边界更清楚，避免 Web 节点重复维护诊断字段。
+- Policy / tests:
+  - `scripts/test_task_snapshot_contract.py` 新增 `test_apply_task_result_persistence()`，覆盖：
+    - 保存 `last_result`；
+    - 保存 `last_timeline`；
+    - 失败时 message 优先成为 `last_error`；
+    - message 缺失时回退 active.last_error；
+    - completed 任务清空 `last_error`。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - task snapshot contract 必须拥有 persisted task result state updates；
+    - Web result persistence 必须委托 `apply_task_result_persistence(...)`；
+    - 离线测试必须覆盖该状态更新。
+- Verification:
+  - passed:
+    - `./scripts/test_task_snapshot_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_snapshot_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_snapshot_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/*.py scripts/check_preflight_policy.py scripts/test_task_snapshot_contract.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/check_preflight_policy.py scripts/test_task_snapshot_contract.py`;
+    - tracked `git diff --check` + untracked task snapshot whitespace check。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口仍超时，不能进入目标模式真实机验证。
+
+## 2026-06-27 15:05 - 下沉任务列表当前地图过滤
+
+- Goal alignment:
+  - 104 电量门禁仍失败，本次继续只做本地可验证减法。
+  - 不部署到 104，不在 104 上构建，不重启服务，不重定位，不启动任务或发布运动目标。
+- Local-only change:
+  - `task_contract.py` 新增 `task_list_filter_payload(...)`。
+  - `_tasks_payload(...)` 不再手写 `include_all / hidden_task_count / total_task_count` 和当前地图任务过滤，改为委托 task contract。
+- Why:
+  - 前端默认只能显示当前地图任务，历史/其他地图任务只能通过显式 `include_all=1` 用于审计。
+  - 这个规则直接影响任务下发是否会误选旧地图点位，属于任务数据契约，不应散落在 Web API 组装函数中。
+  - 下沉后，Web 节点只负责补 waypoint/readiness，任务列表过滤规则由独立离线测试覆盖。
+- Policy / tests:
+  - `scripts/test_task_contract.py` 新增 `test_task_list_filter_payload()`，覆盖：
+    - `include_all=1` 返回全部任务且隐藏数为 0；
+    - 当前地图模式只返回匹配 `selected_map_id` 的任务；
+    - 未选择地图时当前地图任务列表为空；
+    - 缺失 `map_id` 的任务不会出现在当前地图模式中。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - task contract 必须拥有当前地图任务列表过滤与隐藏计数；
+    - Web tasks API 必须委托 `task_list_filter_payload(...)`；
+    - 离线测试必须覆盖该规则。
+- Verification:
+  - passed:
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/check_preflight_policy.py scripts/test_task_contract.py`;
+    - tracked `git diff --check` + untracked task contract whitespace check。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口仍超时，不能进入目标模式真实机验证。
+
+## 2026-06-27 15:20 - 下沉 active task 当前点位解析
+
+- Goal alignment:
+  - 104 电量门禁仍失败，本次继续只做本地可验证减法。
+  - 不部署到 104，不在 104 上构建，不重启服务，不重定位，不启动任务或发布运动目标。
+- Local-only change:
+  - `active_task_contract.py` 新增 `active_annotation_resolution(...)` 和 `active_annotation_from_list(...)`。
+  - `_active_annotation(...)` 不再手写 `active.index / annotation_ids` 越界判断，改为委托 active task contract。
+- Why:
+  - 当前点位解析被 tick、Nav2 状态匹配、结果快照、目标下发共同依赖。
+  - 如果这里的索引/缺失点处理不稳定，现场会表现为任务卡住、跳点、或“明明任务不存在却还在导航”。
+  - 下沉后，active task 状态中的当前点位 id 解析、越界和已删除点位行为有独立测试覆盖。
+- Policy / tests:
+  - `scripts/test_active_task_contract.py` 新增：
+    - `test_active_annotation_resolution()`，覆盖正常索引、越界、坏 index 回退；
+    - `test_active_annotation_from_list()`，覆盖从点位列表解析当前点、返回副本、点位已删除和越界。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - active task contract 必须拥有 active waypoint id resolution；
+    - Web `_active_annotation(...)` 必须委托 `active_annotation_from_list(...)`；
+    - 离线 active task contract 测试必须覆盖当前点位解析。
+- Verification:
+  - passed:
+    - `./scripts/test_active_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/check_preflight_policy.py scripts/test_active_task_contract.py`;
+    - tracked `git diff --check` + untracked active task contract whitespace check。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口仍超时，不能进入目标模式真实机验证。
+
+## 2026-06-27 15:35 - 下沉任务重命名/删除状态更新
+
+- Goal alignment:
+  - 104 电量门禁仍失败，本次继续只做本地可验证减法。
+  - 不部署到 104，不在 104 上构建，不重启服务，不重定位，不启动任务或发布运动目标。
+- Local-only change:
+  - `task_contract.py` 新增 `apply_task_name_update(...)` 和 `apply_task_delete(...)`。
+  - `_update_task(...)` 不再手写任务名更新和 active task 名称同步，改为委托 task contract。
+  - `_delete_task(...)` 不再手写删除任务、拒绝删除运行中任务、清理历史 active task，改为委托 task contract。
+- Why:
+  - 任务名和任务删除会影响 `tasks.json` 与 `settings.active_task` 两份状态。
+  - 这类状态同步如果散落在 Web API 里，容易再次出现“界面显示旧任务名”“没有任务却显示导航中”“删除历史任务后 active_task 残留”等问题。
+  - 下沉后，任务元数据更新和删除规则由独立 contract 测试覆盖，Web 只负责保存文件和记录事件。
+- Policy / tests:
+  - `scripts/test_task_contract.py` 新增：
+    - `test_apply_task_name_update()`，覆盖任务重命名、运行中 active task 名称同步、非 active 任务重命名和缺失任务；
+    - `test_apply_task_delete()`，覆盖运行中任务拒绝删除、历史 active task 删除时清理 settings、普通删除和缺失任务。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - task contract 必须拥有任务重命名/删除状态更新；
+    - Web `_update_task(...)` 和 `_delete_task(...)` 必须委托 task contract；
+    - 离线测试必须覆盖上述规则。
+- Verification:
+  - passed:
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/check_preflight_policy.py scripts/test_task_contract.py`;
+    - tracked `git diff --check` + untracked task contract whitespace check。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口仍超时，不能进入目标模式真实机验证。
+
+## 2026-06-27 15:50 - 下沉任务创建静态上下文
+
+- Goal alignment:
+  - 104 电量门禁仍失败，本次继续只做本地可验证减法。
+  - 不部署到 104，不在 104 上构建，不重启服务，不重定位，不启动任务或发布运动目标。
+- Local-only change:
+  - `task_contract.py` 新增 `task_create_static_context(...)` 和 `build_task_create_record(...)`。
+  - `_create_task(...)` 不再手写 annotation id 规范化、缺失点检查、点位顺序检查、当前地图创建规则和 task record 拼装，改为委托 task contract。
+  - Web 侧仍保留运行时地图状态检查、点位地图/栅格验证和文件保存。
+- Why:
+  - 任务创建是现场任务链路入口，错误的点位顺序、旧地图点位、缺失点位会直接导致后续导航跑错点或卡住。
+  - 这些静态规则不依赖 ROS，属于任务数据契约，应由 contract 层统一维护。
+  - 下沉后，创建任务与启动任务共享同一批静态点位规则，Web 节点只负责运行时 map/Nav2 readiness。
+- Policy / tests:
+  - `scripts/test_task_contract.py` 新增：
+    - `test_task_create_static_context()`，覆盖有效创建、空点位、缺失点位、充电点顺序错误、任务地图与选中地图不一致；
+    - `test_build_task_create_record()`，覆盖 task record 字段和空名称回退。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - task contract 必须拥有静态任务创建上下文和记录构造；
+    - Web `_create_task(...)` 必须委托 `task_create_static_context(...)` 与 `build_task_create_record(...)`；
+    - 离线测试必须覆盖该规则。
+- Verification:
+  - passed:
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/check_preflight_policy.py scripts/test_task_contract.py`;
+    - tracked `git diff --check` + untracked task contract whitespace check。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口仍超时，不能进入目标模式真实机验证。
+
+## 2026-06-27 16:05 - 下沉点位静态构造
+
+- Goal alignment:
+  - 104 电量门禁仍失败，本次继续只做本地可验证减法。
+  - 不部署到 104，不在 104 上构建，不重启服务，不重定位，不启动任务或发布运动目标。
+- Local-only change:
+  - `annotation_contract.py` 新增 `annotation_create_static_context(...)` 和 `build_annotation_record(...)`。
+  - `_create_annotation(...)` 不再手写点位坐标解析、楼层校验、默认 label、点位 record 拼装和语义规范化，改为委托 annotation contract。
+  - Web 侧仍保留地图存在性、重定位 readiness、地图范围/占用栅格验证和文件保存。
+- Why:
+  - 点位是任务链路的源数据。点位 pose、floor、map_id、manual_point_type、vendor_navigation、dwell_s 等字段一旦构造不一致，后续任务创建和导航目标都会被污染。
+  - 这些字段解析不依赖 ROS，属于 annotation 数据契约，应由 contract 层统一维护。
+  - 本次同时修正 `build_annotation_record(...)` 优先使用已解析 context type，避免前端 type 只在 context 中时语义丢失。
+- Policy / tests:
+  - `scripts/test_annotation_contract.py` 新增：
+    - `test_annotation_create_static_context()`，覆盖有效坐标、默认 label、live_map 保留、无效坐标、缺楼层；
+    - `test_build_annotation_record()`，覆盖 map/floor/label/pose、manual point type、vendor navigation、dwell、target classes、created_at。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - annotation contract 必须拥有静态点位 payload 解析和 annotation record 构造；
+    - Web `_create_annotation(...)` 必须委托 `annotation_create_static_context(...)` 与 `build_annotation_record(...)`；
+    - 离线 annotation contract 测试必须覆盖该规则。
+- Verification:
+  - passed:
+    - `./scripts/test_annotation_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/annotation_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_annotation_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/annotation_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_annotation_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/check_preflight_policy.py scripts/test_annotation_contract.py`;
+    - tracked `git diff --check` + untracked annotation contract whitespace check。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口仍超时，不能进入目标模式真实机验证。
+
+## 2026-06-27 - 下沉停止任务语义
+
+- Goal alignment:
+  - 继续按“先把单层导航做扎实”的目标推进，只做本地可验证减法。
+  - 104 电量门禁仍失败，本次不部署到 104，不重启服务，不重定位，不启动任务或发布运动目标。
+- Local-only change:
+  - `active_task_contract.py` 新增 `normalize_stop_task_request(...)` 和 `stop_task_state(...)`。
+  - `_stop_task(...)` 不再直接手写停止请求归一化和 active task 停止事件/结果状态，改为委托 active task contract。
+  - Web 节点仍保留文件保存、事件记录和导航复位等运行时副作用。
+- Why:
+  - 停止任务是任务闭环里的安全出口，不能散落在前端节点里靠临时分支维护。
+  - 普通停止和显式导航复位的差异必须稳定：没有 active task 时，普通停止不复位导航；只有 `web_manual_reset` 才显式复位。
+  - 这类规则不依赖 ROS，适合下沉到纯 contract，方便后续实习生在重定位或跨楼层模块中复用，不直接改 active task 状态机。
+- Policy / tests:
+  - `scripts/test_active_task_contract.py` 新增 `test_stop_task_state()`，覆盖默认 stop、显式 reset、空 reason 回退、停止事件和 result status。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - active task contract 必须拥有 stop 请求归一化和 stop 状态构造；
+    - Web `_stop_task(...)` 必须委托 contract；
+    - 无 active task 且非显式 reset 时不得复位导航。
+- Verification:
+  - passed:
+    - `./scripts/test_active_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/check_preflight_policy.py scripts/test_active_task_contract.py`;
+    - `git diff --check`；
+    - active task contract/test 无行尾空白。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：`./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080` 仍返回超时，目标模式真机动作被电量门禁阻断。
+
+## 2026-06-27 - 下沉共享任务状态回写
+
+- Superseded:
+  - 该方案随后被“终态 status 与 last_result 一次性持久化”替代。
+  - 原因：单独保留 `_mark_task_status(...)` / `apply_task_status_update(...)` 会形成第二个任务状态入口，不如把 error/stopped/completed 的 status 与 `last_result` 同步写入同一个 task snapshot contract。
+- Goal alignment:
+  - 继续做单层任务链路的底层收口，减少 `web_dashboard_node.py` 直接维护任务状态的分支。
+  - 104 电量门禁仍失败，本次不部署到 104，不重启服务，不重定位，不启动任务或发布运动目标。
+- Local-only change:
+  - `task_contract.py` 新增 `apply_task_status_update(...)`。
+  - `_mark_task_status(...)` 不再直接查找并修改 `self._tasks`，改为委托 task contract 后统一替换任务列表。
+  - 文件保存仍由调用路径控制，避免 contract 层掺入 I/O 副作用。
+- Why:
+  - 任务完成、失败、停止都会经过 `_mark_task_status(...)`。这类共享状态回写如果留在 Web 节点里，后续很容易出现“active task、任务列表、last_result 三套状态说法不一致”的问题。
+  - 下沉后，任务状态字段和 `updated_at` 的更新规则有单一入口，便于后续定位任务为什么显示 running/stopped/completed/error。
+- Policy / tests:
+  - `scripts/test_task_contract.py` 新增 `test_apply_task_status_update()`，覆盖：
+    - 找到任务时更新 status 和 `updated_at`；
+    - 缺失 task id 不改任务；
+    - 找不到任务不改任务；
+    - 原始输入列表保持不被原地修改。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - task contract 必须拥有共享任务状态更新；
+    - Web `_mark_task_status(...)` 必须委托 task contract；
+    - 离线 task contract 测试必须覆盖该规则。
+- Verification:
+  - passed:
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/check_preflight_policy.py scripts/test_task_contract.py`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口仍超时，目标模式真机动作被电量门禁阻断。
+
+## 2026-06-27 - 合并终态 status 与 last_result 持久化
+
+- Goal alignment:
+  - 继续按“做减法、单层任务链路先可靠”的方向推进。
+  - 104 电量门禁仍失败，本次不部署到 104，不重启服务，不重定位，不启动任务或发布运动目标。
+- Local-only change:
+  - `task_snapshot_contract.py` 的 `apply_task_result_persistence(...)` 现在同步写入任务 `status`。
+  - 删除独立的 `apply_task_status_update(...)` 和 Web `_mark_task_status(...)` 路径。
+  - 任务进入 `error` / `stopped` / `completed` 时，任务卡状态、`last_result`、`last_error`、`last_timeline` 和 `updated_at` 由同一个持久化 contract 一次性落地。
+- Why:
+  - 现场问题里出现过“明明没有任务执行但前端显示导航中/任务状态不一致”。这类问题不能靠再加一个状态同步补丁解决。
+  - 更简单的规则是：凡是任务终态，必须有结果快照；凡是写结果快照，必须同时写终态 status。这样任务列表和诊断证据不会分叉。
+- Policy / tests:
+  - `scripts/test_task_snapshot_contract.py` 扩展 `test_apply_task_result_persistence()`，覆盖 error/completed status 与结果一起保存。
+  - `scripts/check_preflight_policy.py` 增加/调整防回归：
+    - task snapshot contract 必须拥有结果与终态 status 持久化；
+    - Web 不允许保留 `_mark_task_status(...)` 这类独立状态更新路径；
+    - 离线 task snapshot 测试必须覆盖终态 status。
+- Verification:
+  - passed:
+    - `./scripts/test_task_snapshot_contract.py`;
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_snapshot_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/test_task_snapshot_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_snapshot_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/test_task_snapshot_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/check_preflight_policy.py scripts/test_task_contract.py scripts/test_task_snapshot_contract.py`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口仍超时，目标模式真机动作被电量门禁阻断。
+
+## 2026-06-27 - 下沉列表级任务结果持久化
+
+- Goal alignment:
+  - 继续减少 Web 节点直接修改任务数据的入口，单层任务终态由 contract 层统一落地。
+  - 104 电量门禁仍失败，本次不部署到 104，不重启服务，不重定位，不启动任务或发布运动目标。
+- Local-only change:
+  - `task_snapshot_contract.py` 新增 `apply_task_result_to_tasks(...)`。
+  - `_persist_task_result_unlocked(...)` 不再直接 `_find_by_id(...)` 后 `task.update(...)`，改为：
+    - 先构造 result snapshot；
+    - 调用 task snapshot contract 返回新的 task 列表；
+    - Web 只替换 `self._tasks` 并负责保存文件。
+- Why:
+  - 任务终态持久化现在形成单一数据流：active task + runtime snapshot -> result snapshot -> task list 更新。
+  - Web 节点不再拥有“找到任务并原地改 task dict”的细节，减少任务卡状态、last_result、last_error、timeline 分叉的风险。
+- Policy / tests:
+  - `scripts/test_task_snapshot_contract.py` 新增 `test_apply_task_result_to_tasks()`，覆盖：
+    - 命中 task 时更新 status/last_result/last_error；
+    - 非目标 task 保持不变；
+    - 原始 task 列表不被原地修改；
+    - 缺失 task / 非 list 输入不产生假成功。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - task snapshot contract 必须拥有列表级任务结果持久化；
+    - Web `_persist_task_result_unlocked(...)` 必须委托列表级 contract；
+    - Web 不允许直接 `task.update(...)` 修改任务结果。
+- Verification:
+  - passed:
+    - `./scripts/test_task_snapshot_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_snapshot_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_snapshot_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_snapshot_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_snapshot_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/check_preflight_policy.py scripts/test_task_snapshot_contract.py`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口仍超时，目标模式真机动作被电量门禁阻断。
+
+## 2026-06-27 - 下沉空闲 active waypoint payload
+
+- Goal alignment:
+  - 继续收口单层任务前端状态口径，减少 Web 节点手写“当前任务/空闲任务”两套 payload。
+  - 104 电量门禁仍失败，本次不部署到 104，不重启服务，不重定位，不启动任务或发布运动目标。
+- Local-only change:
+  - `task_snapshot_contract.py` 新增 `build_idle_waypoint_payload(...)`。
+  - `_publish_idle_waypoint(...)` 不再手写 `{phase: idle, reason, updated_at}`，改为委托 task snapshot contract。
+- Why:
+  - 之前现场出现过“前端显示导航中，但实际没有任务执行”的状态混乱。
+  - live active waypoint 和 idle active waypoint 应该属于同一个任务快照契约，避免前端从两个手写来源理解任务执行状态。
+- Policy / tests:
+  - `scripts/test_task_snapshot_contract.py` 新增 `test_idle_waypoint_payload()`，覆盖 idle phase、reason、updated_at 和空 reason 回退。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - task snapshot contract 必须拥有 idle active-waypoint payload；
+    - Web `_publish_idle_waypoint(...)` 必须委托 contract；
+    - 离线 task snapshot 测试必须覆盖 idle payload。
+- Verification:
+  - passed:
+    - `./scripts/test_task_snapshot_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_snapshot_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_snapshot_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_snapshot_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_snapshot_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/check_preflight_policy.py scripts/test_task_snapshot_contract.py`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口仍超时，目标模式真机动作被电量门禁阻断。
+
+## 2026-06-27 - 下沉任务终态事件 payload
+
+- Goal alignment:
+  - 继续收口单层任务终态链路，减少 Web 节点分散手写任务完成/停止/失败事件。
+  - 104 电量门禁仍失败，本次不部署到 104，不重启服务，不重定位，不启动任务或发布运动目标。
+- Local-only change:
+  - `active_task_contract.py` 新增 `task_terminal_event_payload(...)`。
+  - Web 的四类终态事件 payload 改为委托 active task contract：
+    - `completed` -> `前端任务完成`;
+    - `stopped` -> `停止前端任务`;
+    - `failed` -> `前端任务停止`;
+    - `nav_failed` -> `前端任务因导航状态停止`。
+- Why:
+  - 任务终态事件是现场复盘和 watcher/analyzer 判断任务状态的重要证据。
+  - 事件名和 payload 字段不应该散在 Web 节点多个分支里手写，否则容易出现“任务卡、last_result、事件流”三方描述不一致。
+- Policy / tests:
+  - `scripts/test_active_task_contract.py` 新增 `test_task_terminal_event_payload()`，覆盖四类终态事件名和 payload 字段。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - active task contract 必须拥有终态事件 payload；
+    - Web 四类终态事件必须委托 contract。
+- Verification:
+  - passed:
+    - `./scripts/test_active_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/check_preflight_policy.py scripts/test_active_task_contract.py`。
+- Deployment status:
+  - 未部署到 104。
+  - 原因：104 电量接口仍超时，目标模式真机动作被电量门禁阻断。
+
+## 2026-06-27 - 下沉点位列表过滤 payload
+
+- Goal alignment:
+  - 继续按“单层楼任务链路先稳定、Web 大文件做减法”的方向推进。
+  - 本次只做本地契约化拆分，不碰 104 真机动作。
+- Local-only change:
+  - `annotation_contract.py` 新增 `annotation_list_filter_payload(...)`。
+  - `/api/annotations` 的 `map_id` 过滤不再由 `web_dashboard_node.py::_annotations_payload(...)` 手写，改为委托 annotation contract。
+  - payload 现在同时返回：
+    - `annotations`;
+    - `hidden_annotation_count`;
+    - `total_annotation_count`。
+- Why:
+  - 任务点、任务列表、当前地图过滤这些规则会直接影响“任务是否下发到正确点位”。
+  - Web 节点只保留锁内取数据和 HTTP 接口职责，过滤规则放到纯函数里，便于离线测试和后续交给实习生维护。
+- Policy / tests:
+  - `scripts/test_annotation_contract.py` 新增 `test_annotation_list_filter_payload()`，覆盖：
+    - 不传 `map_id` 返回全部合法点位；
+    - 指定 `map_id` 只返回当前地图点位；
+    - hidden / total 计数正确；
+    - 非 dict 脏数据不会混入列表。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - annotation contract 必须拥有点位列表过滤和 hidden/total 计数；
+    - Web annotations API 必须委托 `annotation_list_filter_payload(...)`；
+    - 离线 annotation contract 测试必须覆盖列表过滤。
+- Verification:
+  - passed:
+    - `./scripts/test_annotation_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/annotation_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_annotation_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/annotation_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_annotation_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_annotation_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/annotation_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_annotation_contract.py scripts/check_preflight_policy.py`;
+    - `rg -n "[ \t]+$" src/m20pro_cloud_bridge/m20pro_cloud_bridge/annotation_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_annotation_contract.py scripts/check_preflight_policy.py` 无输出。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 11:07 CST - resend-goal operator event 下沉到 active task contract
+
+- Goal alignment:
+  - 继续把单层任务目标下发链路从 Web 主节点中拆出来，减少临时拼事件。
+  - 针对现场“任务卡在导航中/下发后不动”的问题，目标重发是判断 Nav2 是否长时间未接收当前点位的重要证据。
+  - 本轮仍只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `active_task_contract.py::goal_dispatch_decision(...)` 在需要重发当前点位时返回：
+    - `operator_event=补发当前任务点`;
+    - `operator_payload`，包含 annotation id、label、last Nav2 goal status、age。
+  - 保留 `resend_event` 作为兼容 alias，指向同一份 payload。
+  - `web_dashboard_node.py::_dispatch_active_goal(...)` 不再直接拼 `"补发当前任务点"`，改为消费 decision 返回的 `operator_event/operator_payload`。
+- Why:
+  - 如果 Nav2 长时间停在 `sent` 而未 accepted，前端会周期性补发当前点位。
+  - 这条 operator event 是目标下发链路的一部分，应该和 `goal_dispatch_decision(...)` 同属 active task contract。
+  - 后续真实任务验证时，可以用 `waypoint_goal_sent` 和 `补发当前任务点` 的时间顺序判断是 Nav2 接收慢、DDS/bridge 异常，还是目标点已经切换。
+- Policy / tests:
+  - `scripts/test_active_task_contract.py::test_dispatch_decision()` 增加覆盖：
+    - resend decision 的 operator event；
+    - operator payload annotation id；
+    - resend age；
+    - legacy `resend_event` alias。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - active task contract 必须拥有 resend-goal operator payload；
+    - Web 必须通过 decision 的 `operator_event/operator_payload` 写 operator event；
+    - 离线测试必须覆盖该 payload。
+- Verification:
+  - passed:
+    - `./scripts/test_active_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`.
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务、发布 `/initialpose` 或发布运动目标。
+
+## 2026-06-27 11:11 CST - dwell-start operator event 下沉到 active task contract
+
+- Goal alignment:
+  - 继续把“到点 -> 停留 -> 切下一个点”的任务执行链路从 Web 主节点中拆到 active task contract。
+  - 针对现场“以为在等 5 秒，但实际不知道卡在哪”的问题，停留开始必须成为稳定证据，而不是 Web 临时拼出的提示。
+  - 本轮仍只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `active_task_contract.py::begin_waypoint_dwell_state(...)` 现在返回：
+    - `operator_event=到达点位并开始停留`;
+    - `operator_payload`，与 dwell timeline extra 一致，包含 annotation id、label、dwell_s、reason。
+  - `web_dashboard_node.py::_begin_waypoint_dwell_or_advance(...)` 不再直接拼 `"到达点位并开始停留"`，改为消费 contract 返回的 `operator_event/operator_payload`。
+- Why:
+  - `waypoint_dwell_started` timeline 说明任务状态进入 dwelling；
+  - operator event 说明对外事件也确实进入“到点停留”阶段；
+  - 两者都由同一个 contract 返回，后续现场可以判断“没切下一个点”到底是未到点、未进入 dwell，还是 dwell 后 advance 失败。
+- Policy / tests:
+  - `scripts/test_active_task_contract.py::test_dwell_state()` 增加覆盖：
+    - dwell operator event；
+    - annotation id；
+    - dwell seconds。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - active task contract 必须拥有 dwell-start operator payload；
+    - Web 必须通过 result 的 `operator_event/operator_payload` 写 operator event；
+    - 离线测试必须覆盖该 payload。
+- Verification:
+  - passed:
+    - `./scripts/test_active_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`.
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务、发布 `/initialpose` 或发布运动目标。
+
+## 2026-06-27 10:58 CST - 定位/位姿丢失等待证据写入任务 timeline
+
+- Goal alignment:
+  - 继续围绕单层任务闭环做底层加固，而不是新增临时脚本。
+  - 针对现场“任务跑一段停住”的问题，任务 timeline 必须能说明是定位/位姿先丢失、运行保护异常、Nav2 不接收、规划点不匹配，还是进展过慢。
+  - 本轮仍只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `task_progress_contract.py::apply_localization_lost_start_state(...)` 改为返回结构化结果：
+    - `active`;
+    - `changed`。
+  - 新增 `task_progress_contract.py::localization_lost_start_event_payload(...)`，统一生成：
+    - `event=localization_lost_waiting`;
+    - operator/timeline message;
+    - `reason`、`timeout_s`、`started_monotonic` 证据。
+  - `web_dashboard_node.py::_stop_task_if_localization_lost(...)` 在首次进入定位/位姿丢失等待时写一条 timeline；重复等待不刷屏，最终超时仍走已有失败路径。
+- Why:
+  - 之前定位/位姿丢失开始计时时只更新 `active_task.status_message`，timeline 缺少“从什么时候开始等定位恢复”的证据。
+  - 现场如果前端显示任务卡住，事后只能看到最终失败或当前状态，不够判断问题发生顺序。
+  - 现在第一次进入 localization lost waiting 会留下稳定证据，便于区分“定位先丢”与“Nav2/规划/点位问题”。
+- Policy / tests:
+  - `scripts/test_task_progress_contract.py` 增加覆盖：
+    - localization lost start state 返回 `changed`;
+    - 同一 start 状态重复应用不刷 timeline；
+    - localization lost waiting payload 保留 reason、timeout、开始时间；
+    - message fallback 行为。
+  - `scripts/check_preflight_policy.py` 增加/调整防回归：
+    - task progress contract 必须拥有 localization lost waiting timeline payload；
+    - Web 必须委托该 payload；
+    - Web 仍必须使用 shared failure payload path 和 `localization_lost_failure_extra(...)`。
+- Verification:
+  - passed:
+    - `./scripts/test_task_progress_contract.py`;
+    - `./scripts/test_task_progress_contract.py && ./scripts/test_active_task_contract.py && ./scripts/test_task_contract.py && ./scripts/test_nav_status_contract.py && ./scripts/test_task_plan_contract.py && ./scripts/test_task_snapshot_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_progress_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_progress_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_progress_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_progress_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_task_progress_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_progress_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_progress_contract.py scripts/check_preflight_policy.py`;
+    - `rg -n "[ \t]+$" src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_progress_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_progress_contract.py scripts/check_preflight_policy.py` 无输出。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务、发布 `/initialpose` 或发布运动目标。
+
+## 2026-06-27 11:04 CST - waypoint goal sent timeline payload 下沉到 active task contract
+
+- Goal alignment:
+  - 继续把单层任务执行链路拆成可测试契约，减少 `web_dashboard_node.py` 中的硬编码任务语义。
+  - 针对现场“任务不按点位走/像跑到固定残留点”的问题，目标下发证据必须稳定记录：
+    - 当前 annotation id/label；
+    - goal attempt id；
+    - path version；
+    - 当前点位发送次数、任务总发送次数、重发次数。
+  - 本轮仍只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `active_task_contract.py::mark_goal_sent(...)` 现在返回完整 timeline payload：
+    - `event=waypoint_goal_sent`;
+    - `message=已下发当前点位，等待 Nav2 接收`;
+    - `event_extra` 保留目标点、goal attempt、path version、send count 等证据。
+  - `web_dashboard_node.py::_dispatch_active_goal(...)` 不再硬编码 `"waypoint_goal_sent"` 和 `active["status_message"]`，改为消费 contract 返回的 `event/message/event_extra`。
+- Why:
+  - goal sent 是任务链路里最关键的证据之一，直接对应“前端到底给 Nav2 发的是哪个点”。
+  - 这条证据必须和 active task state 一起由 active task contract 维护，避免 Web 主节点在不同位置手写不一致的 event/message。
+  - 后续现场验证如果机器人跑错点，可直接核对 `waypoint_goal_sent -> floor_goal_published -> Nav2 accepted/feedback -> plan_goal_verified` 的证据链。
+- Policy / tests:
+  - `scripts/test_active_task_contract.py::test_mark_goal_sent_new_and_resend()` 增加覆盖：
+    - `event=waypoint_goal_sent`;
+    - message；
+    - `goal_attempt_id`；
+    - `goal_sent_path_version`。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - active task contract 必须拥有 waypoint-goal-sent timeline payload；
+    - Web 必须通过 `mark.get("event")/mark.get("message")` 消费 contract payload；
+    - 离线测试必须覆盖该 payload。
+- Verification:
+  - passed:
+    - `./scripts/test_active_task_contract.py`;
+    - `./scripts/test_active_task_contract.py && ./scripts/test_task_progress_contract.py && ./scripts/test_task_contract.py && ./scripts/test_nav_status_contract.py && ./scripts/test_task_plan_contract.py && ./scripts/test_task_snapshot_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `rg -n "[ \t]+$" src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py` 无输出。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务、发布 `/initialpose` 或发布运动目标。
+
+## 2026-06-27 10:52 CST - runtime guard waiting timeline payload 下沉到 task contract
+
+- Goal alignment:
+  - 继续把任务执行链路从 `web_dashboard_node.py` 中拆出来，减少 Web 主节点对业务语义的拥有量。
+  - 本轮聚焦任务运行中电量/scan/点云等关键链路异常时的 timeline 证据格式。
+  - 仍然遵守目标模式安全门禁：104 电量/API 超时，未做任何真机动作。
+- Local-only change:
+  - 新增 `task_contract.py::runtime_guard_waiting_event_payload(...)`。
+  - `web_dashboard_node.py::_stop_task_if_runtime_guard_lost(...)` 不再手写：
+    - `event="runtime_guard_waiting"`;
+    - operator message;
+    - `guard` / `age_s` / `timeout_s` extra payload。
+  - Web 节点现在只负责在 `should_record_event` 为 true 时写 timeline，事件内容由 task contract 统一生成。
+- Why:
+  - runtime guard 是任务执行安全保护的一部分，不是 HTTP/Web 展示细节。
+  - 现场排查“任务跑一段停住”时，需要稳定的 timeline 证据格式判断是电量、scan、点云还是其他运行保护触发。
+  - 这一步继续减少 Web 大文件中的散落 payload 拼装逻辑，为后续实习生拆分任务边界做准备。
+- Policy / tests:
+  - `scripts/test_task_contract.py::test_runtime_guard_waiting_event_payload()` 覆盖：
+    - waiting event 名称；
+    - active status message 优先；
+    - decision message fallback；
+    - `guard`、`age_s`、`timeout_s` 证据保留。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - task contract 必须拥有 runtime guard waiting timeline payload；
+    - 离线测试必须覆盖该 payload。
+- Verification:
+  - passed:
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/test_task_contract.py && ./scripts/test_active_task_contract.py && ./scripts/test_nav_status_contract.py && ./scripts/test_task_progress_contract.py && ./scripts/test_task_plan_contract.py && ./scripts/test_task_snapshot_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务、发布 `/initialpose` 或发布运动目标。
+
+## 2026-06-27 10:46 CST - Nav2 goal/status/feedback timeline payload 下沉到 nav status contract
+
+- Goal alignment:
+  - 继续把单层任务执行证据从 Web 主节点里拆出来。
+  - 本轮聚焦 Nav2 正常状态链路：
+    - `nav_goal_accepted`;
+    - 普通 `nav_status`;
+    - `nav_goal_feedback`。
+  - 这些 timeline 证据直接服务于现场判断：
+    - Nav2 是否真的接收当前点；
+    - 接收的 goal_seq / pose 是否匹配当前点；
+    - feedback 是否来自当前点；
+    - 前端能否持续展示剩余距离和恢复次数。
+  - 本轮仍只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `nav_status_contract.py` 新增：
+    - `nav_goal_status_event_payload(...)`;
+    - `nav_status_message_event_payload(...)`;
+    - `nav_feedback_event_payload(...)`。
+  - `web_dashboard_node.py` 中三处 timeline extra 不再手拼：
+    - `_update_active_task_from_nav_status(...)`;
+    - `_update_active_task_status_message(...)`;
+    - `_update_active_task_from_nav_feedback(...)`。
+  - Web 现在只负责状态保存和 timeline 副作用，Nav2 timeline 字段统一由 contract 生成。
+- Why:
+  - 之前 Nav2 状态字段更新已经在 contract，但 timeline payload 仍散落在 Web。
+  - 状态更新和 timeline 证据字段如果分离，后续排查“显示导航中但不按点跑”时容易出现字段不一致。
+  - 下沉后，Nav2 的状态解析、当前目标匹配、active task 状态更新、timeline 证据都集中在 `nav_status_contract.py`。
+- Policy / tests:
+  - `scripts/test_nav_status_contract.py` 增加覆盖：
+    - goal-status timeline event；
+    - generic nav-status timeline event；
+    - feedback timeline event。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - nav status contract 必须拥有三类 timeline payload helper；
+    - Web 三处 Nav2 状态处理必须委托这些 helper。
+- Verification:
+  - passed:
+    - `./scripts/test_nav_status_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_nav_status_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/nav_status_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_nav_status_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/nav_status_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_nav_status_contract.py scripts/check_preflight_policy.py`;
+    - `rg -n "[ \t]+$" src/m20pro_cloud_bridge/m20pro_cloud_bridge/nav_status_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_nav_status_contract.py scripts/check_preflight_policy.py` 无输出。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 10:41 CST - ignored Nav2 状态事件 payload 下沉到 nav status contract
+
+- Goal alignment:
+  - 继续围绕“单层任务必须能解释为什么没按当前点跑”做减法。
+  - 本轮聚焦 Nav2 状态/反馈与当前任务点不匹配时的证据结构。
+  - 该证据直接服务于现场问题：
+    - 任务看起来在导航中但目标可能不是当前点；
+    - 机器人可能执行了残留目标；
+    - 前端必须能留下 raw Nav2 status、目标匹配结果、点位 id/label。
+  - 本轮仍只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `nav_status_contract.py` 新增 `ignored_nav_status_event_payload(...)`。
+  - `web_dashboard_node.py::_record_ignored_nav_status(...)` 不再手拼：
+    - timeline extra；
+    - operator event payload。
+  - Web 现在只负责：
+    - 调用 `apply_ignored_nav_status_state(...)` 更新 active task；
+    - 调用 `ignored_nav_status_event_payload(...)` 生成证据；
+    - 追加 timeline / operator event；
+    - 保存状态。
+- Why:
+  - ignored Nav2 status 是判断“是否跑到了错误/残留目标”的核心证据。
+  - 之前状态字段在 contract，事件字段还在 Web 主节点，职责边界不完整。
+  - 下沉后，Nav2 状态匹配、忽略状态记录、事件证据字段都归 `nav_status_contract.py`，后续 A/B 实习生不需要进入 Web 主节点理解这部分语义。
+- Policy / tests:
+  - `scripts/test_nav_status_contract.py::test_apply_ignored_nav_status_state()` 增加覆盖：
+    - ignored raw status；
+    - match 诊断；
+    - timeline event；
+    - operator payload；
+    - task id / annotation id / label。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - nav status contract 必须拥有 ignored Nav2 status 的 timeline/operator payload；
+    - Web `_record_ignored_nav_status(...)` 必须委托该 contract。
+- Verification:
+  - passed:
+    - `./scripts/test_nav_status_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_nav_status_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/nav_status_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_nav_status_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/nav_status_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_nav_status_contract.py scripts/check_preflight_policy.py`;
+    - `rg -n "[ \t]+$" src/m20pro_cloud_bridge/m20pro_cloud_bridge/nav_status_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_nav_status_contract.py scripts/check_preflight_policy.py` 无输出。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 10:37 CST - 任务失败证据 extra 继续下沉到合同层
+
+- Goal alignment:
+  - 继续给单层任务执行链路做减法，减少 `web_dashboard_node.py` 里散落的失败证据字段拼接。
+  - 本轮聚焦不改变运行顺序的纯 payload 逻辑：
+    - runtime guard 丢失；
+    - 定位/位姿丢失；
+    - 当前点位进展停滞；
+    - 点位目标坐标无效。
+  - 本轮仍只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `task_contract.py` 新增 `runtime_guard_failure_extra(...)`。
+  - `task_progress_contract.py` 新增：
+    - `localization_lost_failure_extra(...)`;
+    - `stall_failure_extra(...)`。
+  - `active_task_contract.py` 新增 `waypoint_goal_failure_extra(...)`。
+  - `web_dashboard_node.py` 对应失败路径改为委托合同函数生成 extra。
+- Why:
+  - 失败 extra 是现场排障证据，不应该由 Web 主节点临时拼字段。
+  - 这些字段分别属于 runtime guard、task progress、active task 三个领域，按所属合同下沉后，实习生后续接复杂重定位或跨楼层逻辑时不会继续扩大 Web 主节点。
+  - 这次不改调度顺序、不发布目标、不触碰真机动作，只降低主节点职责。
+- Policy / tests:
+  - `scripts/test_task_contract.py` 覆盖 `runtime_guard_failure_extra(...)`。
+  - `scripts/test_task_progress_contract.py` 覆盖 `localization_lost_failure_extra(...)` 和 `stall_failure_extra(...)`。
+  - `scripts/test_active_task_contract.py` 覆盖 `waypoint_goal_failure_extra(...)`。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - 三个合同模块必须拥有对应 failure extra；
+    - Web 对 runtime guard、localization lost、stall、bad waypoint failure extra 必须委托合同层。
+- Verification:
+  - passed:
+    - `./scripts/test_active_task_contract.py`;
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/test_task_progress_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_active_task_contract.py scripts/test_task_contract.py scripts/test_task_progress_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_progress_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/test_task_contract.py scripts/test_task_progress_contract.py scripts/check_preflight_policy.py`.
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 10:31 CST - waypoint/near-goal timeout failure extra 下沉到 task progress contract
+
+- Goal alignment:
+  - 继续减少 Web 主节点中任务失败诊断字段的手写逻辑。
+  - 这次聚焦两类现场常见卡点：
+    - 当前点位执行超时；
+    - 已接近目标但 Nav2 未返回到达。
+  - 本轮仍只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `task_progress_contract.py` 新增 `timeout_failure_extra(...)`。
+  - `_stop_task_if_waypoint_timed_out(...)` 和 `_stop_task_if_near_goal_timed_out(...)` 不再手拼 `annotation_id/label`，改为委托 contract 生成 failure extra。
+  - extra 现在统一包含：
+    - `annotation_id`;
+    - `label`;
+    - `reason`;
+    - `distance_m`;
+    - `age_s`;
+    - `timeout_s`。
+- Why:
+  - 任务超时类问题是现场验证单层闭环的关键证据。
+  - 只记录点位 id/label 不够，必须同时记录距离、已等待时间和阈值，才能判断是目标点太远、Nav2 未反馈、近目标等待超时，还是路径/定位异常。
+  - 下沉后，timeout 失败证据字段由 task progress contract 统一维护，Web 只负责停止任务和持久化结果。
+- Policy / tests:
+  - `scripts/test_task_progress_contract.py::test_timeout_failure_extra()` 覆盖：
+    - annotation id/label；
+    - reason；
+    - distance；
+    - age；
+    - timeout threshold。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - task progress contract 必须拥有 waypoint/near-goal timeout failure extra；
+    - Web 两个 timeout 失败路径必须委托该 contract。
+- Verification:
+  - passed:
+    - `./scripts/test_task_progress_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_progress_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_progress_contract.py scripts/check_preflight_policy.py`.
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 10:26 CST - plan-goal verified 事件 payload 下沉到 task plan contract
+
+- Goal alignment:
+  - 继续收敛单层任务执行链路，把“规划路径是否指向当前任务点”的诊断语义放到 task plan contract。
+  - 这条证据直接服务于现场问题：前端看到规划路线，但机器狗没有按当前标点跑。
+  - 本轮仍只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `task_plan_contract.py` 新增 `plan_goal_verified_event_payload(...)`。
+  - `_stop_task_if_plan_mismatched(...)` 在 `task_plan_match_decision(...)` 返回 `verify` 时：
+    - 继续用 `apply_plan_goal_verified_state(...)` 更新 active task；
+    - 改为用 `plan_goal_verified_event_payload(...)` 生成 timeline event；
+    - Web 只负责追加 timeline 和保存状态。
+- Why:
+  - 之前 Web 节点手拼 `annotation_id/label/path_version/path_last_point/path_goal_error_m`。
+  - 这些字段是 Nav2 规划终点匹配证据，属于 task plan contract 的职责。
+  - 下沉后，后续排查“跑到固定残留点/规划终点不对/任务点不匹配”时，证据字段有单一来源。
+- Policy / tests:
+  - `scripts/test_task_plan_contract.py::test_plan_goal_verified_event_payload()` 覆盖：
+    - event 名称；
+    - message；
+    - annotation id/label；
+    - path version；
+    - path last point；
+    - path goal error。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - task plan contract 必须拥有 plan-goal verified timeline event payload；
+    - Web 必须委托该 contract 组装事件 payload。
+- Verification:
+  - passed:
+    - `./scripts/test_task_plan_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_plan_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_plan_contract.py scripts/check_preflight_policy.py`.
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 10:21 CST - stall warning 事件 payload 下沉到 task progress contract
+
+- Goal alignment:
+  - 继续减少 Web 主节点中任务执行链路的手写诊断字段。
+  - 这次聚焦“当前点位进展过慢”的 warning 事件，统一 timeline 和全局事件 payload 的字段来源。
+  - 本轮仍只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `task_progress_contract.py` 新增 `stall_warning_event_payload(...)`。
+  - `_stop_task_if_stalled(...)` 在 `task_stall_decision(...)` 返回 `warn` 时：
+    - 继续用 `apply_stall_warning_state(...)` 更新 active task；
+    - 改为用 `stall_warning_event_payload(...)` 生成 timeline event 和 operator event；
+    - operator event 在 `_data_lock` 外追加，避免引入新的锁顺序风险。
+- Why:
+  - 之前 Web 节点手拼 `annotation_id/label/distance_m/stall_age_s/last_nav_status/last_nav_feedback`。
+  - 这些字段属于任务进展诊断语义，不属于 Web 节点职责。
+  - 下沉后，现场看到“导航中但不动/进展慢”的证据字段由 task progress contract 统一维护，便于后续按任务链路定位问题。
+- Policy / tests:
+  - `scripts/test_task_progress_contract.py::test_stall_warning_event_payload()` 覆盖：
+    - timeline event 名称；
+    - timeline message；
+    - annotation、distance、stall age、Nav2 feedback；
+    - operator event 名称和 payload。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - task progress contract 必须拥有 stall warning timeline/operator payload；
+    - Web 必须委托该 contract 组装 stall warning 事件。
+- Verification:
+  - passed:
+    - `./scripts/test_task_progress_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_progress_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_progress_contract.py scripts/check_preflight_policy.py`.
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 10:17 CST - 任务 tick 预下发决策下沉到 task progress contract
+
+- Goal alignment:
+  - 继续把单层任务执行链路从 Web 主节点里拆出来，减少主节点里的业务判断顺序。
+  - 这次聚焦 `_tick_active_task()` 中“定位/楼层/位姿检查 -> 当前点距离计算 -> wait/fail/pass”的组合逻辑。
+  - 本轮仍只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `task_progress_contract.py` 新增 `active_task_pre_dispatch_decision(...)`。
+  - 该函数统一组合：
+    - `active_task_tick_gate_decision(...)`；
+    - `active_task_distance_decision(...)`。
+  - `_tick_active_task()` 现在只调用 `active_task_pre_dispatch_decision(...)`，根据返回的 `action` 做副作用：
+    - `wait_and_monitor_localization` -> 标记等待并启动定位丢失监控；
+    - `wait` -> 标记等待；
+    - `fail` -> 走统一失败路径；
+    - `pass` -> 取 `distance_m` 继续 runtime guard、progress、timeout、plan 检查。
+- Why:
+  - 之前单个判断虽然已经在 contract 里，但 Web 节点仍然拥有“判断顺序”和“哪个失败先发生”的业务语义。
+  - 下沉后，任务 tick 的预下发规则有单一出处，后续调试“为什么还没下发当前点”时直接看 task progress contract。
+  - 这对现场问题更关键：任务不按点跑、卡在某一步时，前端/Web 不应该靠散落条件推断，而应该通过 contract 输出一致的 action/reason/stage。
+- Policy / tests:
+  - `scripts/test_task_progress_contract.py::test_pre_dispatch_decision()` 覆盖：
+    - 定位丢失 -> `wait_and_monitor_localization` / `stage=tick_gate`；
+    - 楼层不一致 -> `wait` / `stage=tick_gate`；
+    - 当前任务点坐标无效 -> `fail` / `stage=distance`；
+    - 正常状态 -> `pass` / `stage=ready` / `distance_m`。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - task progress contract 必须拥有 pre-dispatch 组合决策；
+    - Web `_tick_active_task()` 必须消费组合决策结果，不能重新拥有 tick gate 和 distance 的组合顺序。
+- Verification:
+  - passed:
+    - `./scripts/test_task_progress_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_progress_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_progress_contract.py scripts/check_preflight_policy.py`.
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 10:12 CST - initialpose API 返回结构下沉到 localization contract
+
+- Goal alignment:
+  - 继续减少 `web_dashboard_node.py` 里和重定位相关的业务语义，让 Web 节点只负责 ROS 发布和状态采样。
+  - API 层必须清楚区分：
+    - `/initialpose` 已发布；
+    - 开发手册 TCP `2101/1/ErrorCode=0` 是否确认；
+    - 任务页当前是否可启动。
+  - 本轮仍只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `localization_contract.py` 新增 `initialpose_api_response_payload(...)`。
+  - `_publish_initialpose(...)` 不再手拼 `confirmed/task_ready/navigation_ready/verification` 等 API 返回字段，改为委托 localization contract 组装。
+  - `relocalization_response_payload(...)` 继续负责生成定位状态，新的 response payload 负责把定位状态、验证证据、任务 readiness、发布 topic/repeats、frame/floor/pose 组合成 `/api/localization/initialpose` 的完整响应。
+- Why:
+  - 之前 Web 节点既发布 `/initialpose`，又解释定位状态和任务 readiness，容易再次把“发布成功”误当成“定位成功”。
+  - 下沉后，重定位 API 返回语义有单一出处，后续 A 实习生做复杂环境重定位时应该改 `localization_contract.py`，而不是在 Web 主节点继续加分支。
+- Policy / tests:
+  - `scripts/test_localization_contract.py::test_initialpose_api_response_payload()` 覆盖：
+    - confirmed 来自 localization status；
+    - task_ready 和 navigation_ready 分开；
+    - topic/repeats/frame/floor/pose 正常透传和归一化。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - localization contract 必须拥有完整 initialpose API response payload；
+    - Web initialpose API 必须先生成 localization status，再委托 contract 组装 response；
+    - 离线测试必须覆盖 response assembly。
+- Verification:
+  - passed:
+    - `./scripts/test_localization_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/localization_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_localization_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/localization_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_localization_contract.py scripts/check_preflight_policy.py`.
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 09:56 CST - 任务启动预检查失败状态下沉到 contract
+
+- Goal alignment:
+  - 继续按“单层任务链路先做扎实、Web 主节点做减法、规则进入可测试 contract”的方向推进。
+  - 本轮仍只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `task_contract.py` 新增 `apply_task_start_pre_runtime_failure_state(...)`。
+  - 该纯函数负责在任务启动预检查失败时判断是否需要把任务标为 `invalid`，并写入：
+    - `status=invalid`;
+    - `updated_at`;
+    - `last_error`。
+  - `web_dashboard_node.py::_task_start_pre_runtime_context(...)` 删除本地手写 invalid 状态修改，改为调用 contract 后只负责保存 `tasks.json`。
+- Why:
+  - 之前 Web 主节点里还保留了“如果 missing waypoint 或点位校验失败，就直接改 task dict”的业务规则。
+  - 这类规则没有 ROS 副作用，不应该留在 HTTP/ROS 集成层；下沉后，任务启动失败、任务列表状态和前端可重试状态更容易离线验证。
+- Policy / tests:
+  - `scripts/test_task_contract.py::test_apply_task_start_pre_runtime_failure_state()` 覆盖：
+    - missing waypoint 会把任务标为 `invalid`;
+    - task validation failure 会把任务标为 `invalid`;
+    - 非 invalid 类型失败不修改任务；
+    - 输入任务列表不被原地修改。
+  - `scripts/check_preflight_policy.py` 新增防回归：
+    - task contract 必须拥有预检查失败 invalid 状态更新；
+    - Web 预检查 helper 必须调用 `apply_task_start_pre_runtime_failure_state(...)`；
+    - 离线测试必须覆盖该状态更新。
+- Verification:
+  - passed:
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`。
+- Deployment status:
+  - 未部署到 104。
+  - 没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 10:01 CST - initialpose 请求解析下沉到 localization contract
+
+- Goal alignment:
+  - 继续减少 `web_dashboard_node.py` 里的业务规则，把重定位链路的纯数据解析放进可测试 contract。
+  - 仍以开发手册 2101/1 作为重定位成功证据；本轮不改变 `/initialpose` 发布次数、协方差或 2101 成功判据。
+  - 104 电量/API 门禁仍超时，本轮只做本地代码和离线验证，不碰真机动作。
+- Local-only change:
+  - `localization_contract.py` 新增 `parse_initialpose_request(...)`。
+  - 该函数统一解析并校验：
+    - `x`;
+    - `y`;
+    - `z`，缺省为 `0.0`，但空字符串等脏值不静默当成 0；
+    - `yaw`;
+    - `frame_id`，默认 `map` 并去首尾空白；
+    - `floor`，去首尾空白。
+  - `web_dashboard_node.py::_publish_initialpose(...)` 改为先调用 `parse_initialpose_request(...)`，通过后再构造 `PoseWithCovarianceStamped` 并发布。
+- Why:
+  - 前端重定位入口之前在 Web 主节点里手写 `float(payload.get(...))` 和 frame/floor 兜底。
+  - 这些属于纯请求契约，不应该留在 ROS 发布函数里；下沉后，脏 pose、默认 z、frame/floor 归一化都有离线测试。
+- Policy / tests:
+  - `scripts/test_localization_contract.py::test_parse_initialpose_request()` 覆盖：
+    - 空字符串 `z` 无效；
+    - 缺省 `z` 正常默认 `0.0`；
+    - `frame_id` / `floor` 去空白；
+    - 非有限数 pose 无效。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - localization contract 必须拥有 initialpose 请求解析；
+    - Web initialpose API 必须先调用该解析函数再构造 ROS 消息；
+    - localization contract 测试必须覆盖解析、sent-vs-confirmed、任务阻断和手册 2101 必要证据。
+- Verification:
+  - passed:
+    - `./scripts/test_localization_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/localization_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_localization_contract.py scripts/check_preflight_policy.py`。
+- Deployment status:
+  - 未部署到 104。
+  - 没有调用 `/api/localization/initialpose`，没有发布 `/initialpose`，没有重定位，未启动任务或发布运动目标。
+
+## 2026-06-27 10:06 CST - 重定位轮询证据判断下沉到 localization contract
+
+- Goal alignment:
+  - 继续把重定位链路做成“开发手册证据 + 可测试 contract + Web 只做 ROS/HTTP 副作用”的结构。
+  - 本轮只处理每次轮询样本的证据判断，不改变 `/initialpose` 发布行为、不改变 2101 成功判据、不触发真机重定位。
+  - 104 电量/API 门禁仍超时，本轮只做本地代码和离线验证。
+- Local-only change:
+  - `localization_contract.py` 新增：
+    - `wrap_angle(...)`;
+    - `relocalization_sample_evidence(...)`。
+  - `relocalization_sample_evidence(...)` 统一判断：
+    - 2101 回执是否新鲜；
+    - 2101 是否 success；
+    - 原厂定位是否为 true；
+    - 地图位姿是否在本次请求后更新且可信；
+    - 位姿是否接近请求 pose；
+    - yaw 误差是否按 `[-pi, pi]` 包络计算；
+    - scan/local costmap/global costmap 是否在本次请求后恢复；
+    - 是否可以结束等待。
+  - `web_dashboard_node.py::_wait_for_relocalization_verification(...)` 删除手写 evidence 判断，改为每轮读取 ROS 状态后调用 `relocalization_sample_evidence(...)`，最终再交给 `manual_relocalization_verification_payload(...)` 汇总。
+- Why:
+  - 之前 Web 主节点里混着轮询、状态读取、2101 新鲜度判断、pose 误差计算、scan/costmap 判断。
+  - 这些判断直接决定前端是否显示重定位成功，必须能离线测，而不是藏在 ROS loop 里。
+- Policy / tests:
+  - `scripts/test_localization_contract.py::test_relocalization_sample_evidence()` 覆盖：
+    - 新鲜 2101 success 被接受；
+    - 新鲜 pose、scan、costmap 被接受；
+    - yaw 跨 `pi` 边界时误差正确包络；
+    - 旧 2101、旧 pose、旧 scan 不会被当成本次重定位证据。
+  - `scripts/check_preflight_policy.py` 新增防回归：
+    - localization contract 必须拥有 per-sample relocalization evidence 判断；
+    - Web initialpose API 必须委托该判断；
+    - 离线测试必须覆盖该判断。
+- Verification:
+  - passed:
+    - `./scripts/test_localization_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/localization_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_localization_contract.py scripts/check_preflight_policy.py`。
+- Deployment status:
+  - 未部署到 104。
+  - 没有调用 `/api/localization/initialpose`，没有发布 `/initialpose`，没有重定位，未启动任务或发布运动目标。
+
+## 2026-06-27 09:51 CST - 架构文档补齐任务执行证据链
+
+- Goal alignment:
+  - 继续按“先单层、先证据、少补丁”的目标模式推进。
+  - 之前代码和前端已经有 `/m20pro/floor_goal` 发布证据、现场快照 `task_execution_evidence`、watcher/analyzer 列，但架构文档没有把这组证据写成现场排障顺序。
+  - 本轮仍只做本地文档/防回归检查；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `docs/single_floor_navigation_architecture.md` 新增“任务执行证据链”小节。
+  - 明确区分：
+    - `/api/tasks/start` 成功只代表后端接受启动请求；
+    - `floor_goal_published` timeline、`last_floor_goal_published_at`、`last_floor_goal_annotation_id`、`last_floor_goal_pose`、`floor_goal_publish_count` 才证明 Web 真正发布 `/m20pro/floor_goal`；
+    - `/m20pro/floor_nav_status`、Nav2 feedback、`nav_goal_match` 证明 Nav2 接收到当前任务点；
+    - `plan_goal_verified` 和 `path_goal_error_m` 证明路径终点匹配当前任务点；
+    - `task_execution_evidence`、`active_waypoint`、`last_result.runtime_snapshot`、watcher 的 `floor_goal_published` / `floor_goal_publishes` 用于现场复盘。
+  - `scripts/check_preflight_policy.py` 新增两条规则：
+    - 架构文档必须解释 floor-goal 发布证据和前端现场快照证据；
+    - 架构文档必须说明如何按证据定位任务执行断点。
+- Why:
+  - 你的核心问题是“前端显示导航中，但狗到底有没有按当前任务点跑”。这不能靠再加一个脚本解决，必须让主链路本身产出可验收证据。
+  - 这次改动把代码里已有的证据链提升为架构约束，避免后续 AI 或实习生只看局部字段继续打补丁。
+- Verification:
+  - Before edit:
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js scripts/104_frontend_task_smoke.py scripts/check_preflight_policy.py m20pro日志.md` passed；
+    - `rg -n "[ \t]+$" src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js scripts/104_frontend_task_smoke.py scripts/check_preflight_policy.py m20pro日志.md` 无输出；
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080` returned `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+- Deployment status:
+  - 未部署到 104。
+  - 没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 09:45 CST - 现场快照增加结构化任务执行证据
+
+- Goal alignment:
+  - 继续围绕单层任务闭环做现场可诊断性加固。
+  - 之前已把 `/m20pro/floor_goal` 发布证据显示到任务摘要；本轮把同一类证据结构化写入“复制现场快照”，方便测试后直接贴给人或 AI 分析。
+  - 这仍是本地前端证据整理，不新增控制路径，也不碰真实运动。
+- Local-only change:
+  - `static/dashboard.js` 新增 `taskExecutionEvidence(activeTask, activeWaypoint)`。
+  - `buildFieldSnapshot()` 新增 `task_execution_evidence` 对象，包含：
+    - `task_id` / `task_name`;
+    - `phase`;
+    - 当前 waypoint id / label;
+    - `goal_attempt_id`;
+    - `floor_goal_published_at`;
+    - `floor_goal_publish_count`;
+    - `nav_goal_status`;
+    - `nav_goal_seq`;
+    - `nav_goal_matches`;
+    - `nav_feedback_age_s`;
+    - `nav_distance_remaining_m`;
+    - `plan_goal_verified`;
+    - `path_goal_error_m`;
+    - `status_message`。
+  - `scripts/104_frontend_task_smoke.py` 要求现场快照必须包含 `task_execution_evidence` 且为对象。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - 必须存在结构化执行证据 helper；
+    - field snapshot 必须包含 `task_execution_evidence`；
+    - smoke 必须检查该字段。
+- Why:
+  - 现场复制快照是最容易交给人/AI 复盘的入口。
+  - 如果只把证据放在页面文本或原始 `active_task` 大对象里，排查时还要人工翻字段。
+  - 新的 `task_execution_evidence` 把“Web 是否发布目标、Nav2 是否接收、路径是否匹配、当前状态文案”收拢到一个明确对象里。
+- Verification:
+  - passed:
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile scripts/104_frontend_task_smoke.py scripts/check_preflight_policy.py && python3 -m pyflakes scripts/104_frontend_task_smoke.py scripts/check_preflight_policy.py`;
+    - `./scripts/test_active_task_contract.py && ./scripts/test_task_snapshot_contract.py && ./scripts/test_task_contract.py && ./scripts/test_task_progress_contract.py && ./scripts/test_nav_status_contract.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_active_task_contract.py scripts/test_task_snapshot_contract.py scripts/check_preflight_policy.py scripts/104_frontend_task_smoke.py scripts/104_analyze_frontend_task_watch.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js scripts/104_frontend_task_smoke.py scripts/check_preflight_policy.py m20pro日志.md`;
+    - `rg -n "[ \t]+$" src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js scripts/104_frontend_task_smoke.py scripts/check_preflight_policy.py m20pro日志.md` 无输出。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 09:40 CST - 前端任务摘要直接展示 `/m20pro/floor_goal` 发布证据
+
+- Goal alignment:
+  - 继续围绕单层任务闭环做可诊断性加固。
+  - 上一轮已把 `/m20pro/floor_goal` 发布证据写入 active task、快照、watcher 和 analyzer；本轮把同一证据直接显示到前端任务摘要，避免现场只能靠导出日志判断。
+  - 本轮仍未触碰真实运动链路，104 电量/API 门禁仍超时。
+- Local-only change:
+  - `static/dashboard.js::renderActiveTaskSummary(...)` 新增显示：
+    - `floor_goal已发 <timestamp>`；
+    - `/floor_goal <count>次`。
+  - 取值优先来自 `active_waypoint.parsed`，回退到 `active_task`。
+  - `scripts/104_frontend_task_smoke.py` 的合成任务摘要新增：
+    - `last_floor_goal_published_at`;
+    - `floor_goal_publish_count`;
+    - 必须渲染 `floor_goal已发 2026-06-27 09:29:00` 和 `/floor_goal 1次`。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - 前端 active task summary 必须渲染 floor-goal 发布证据；
+    - smoke 必须覆盖该显示项。
+- Why:
+  - 操作员现场看前端时，需要直接知道“Web 是否已经把目标发布出去了”。
+  - 如果任务显示已创建/导航中，但没有 `floor_goal已发`，问题在 Web 目标发布前；
+  - 如果有 `floor_goal已发` 但 Nav2 不 accepted，问题更靠近 `floor_goal_bridge` / Nav2 接收；
+  - 如果 accepted/feedback 后失败，则继续看路径、定位、避障、计划终点校验等证据。
+- Verification:
+  - passed:
+    - `python3 -m py_compile scripts/104_frontend_task_smoke.py scripts/check_preflight_policy.py scripts/104_analyze_frontend_task_watch.py`;
+    - `python3 -m pyflakes scripts/104_frontend_task_smoke.py scripts/check_preflight_policy.py scripts/104_analyze_frontend_task_watch.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `./scripts/test_active_task_contract.py && ./scripts/test_task_snapshot_contract.py && ./scripts/test_task_contract.py && ./scripts/test_task_progress_contract.py && ./scripts/test_nav_status_contract.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_active_task_contract.py scripts/test_task_snapshot_contract.py scripts/check_preflight_policy.py scripts/104_frontend_task_smoke.py scripts/104_analyze_frontend_task_watch.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js scripts/104_frontend_task_smoke.py scripts/check_preflight_policy.py m20pro日志.md`;
+    - `rg -n "[ \t]+$" src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js scripts/104_frontend_task_smoke.py scripts/check_preflight_policy.py m20pro日志.md` 无输出。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 09:29 CST - `/m20pro/floor_goal` 发布证据透传到快照和 watcher
+
+- Goal alignment:
+  - 延续上一条“任务目标下发证据链加固”。
+  - 只把已有证据透传到前端快照、任务结果和只读 watcher，不新增运动控制路径。
+  - 目标是现场测试后能直接从 `summary.tsv` / `analysis.txt` 判断目标是否已经从 Web 发布到 `/m20pro/floor_goal`。
+- Local-only change:
+  - `task_snapshot_contract.py`：
+    - `RUNTIME_ACTIVE_KEYS` 增加 floor-goal 发布证据；
+    - `RESULT_ACTIVE_KEYS` 增加 floor-goal 发布证据；
+    - `build_active_waypoint_payload(...)` 增加：
+      - `last_floor_goal_published_at`;
+      - `last_floor_goal_annotation_id`;
+      - `last_floor_goal_label`;
+      - `last_floor_goal_pose`;
+      - `floor_goal_publish_count`。
+  - `scripts/104_watch_frontend_task.sh`：
+    - `summary.tsv` 增加 `floor_goal_published` 和 `floor_goal_publishes` 两列；
+    - 取值优先来自 `active_waypoint.parsed`，回退到 `active_task`。
+  - `scripts/104_analyze_frontend_task_watch.py`：
+    - runtime snapshot 摘要增加 `floor_goal=published_at=.../count=...`。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - watcher 表头、读取来源、输出列顺序都必须包含 floor-goal 发布证据；
+    - analyzer 必须总结 floor-goal 发布证据；
+    - task snapshot contract 必须保留 floor-goal 发布证据。
+- Why:
+  - 单靠 active_task 内部 timeline 不够；现场排查通常看 watcher 的 `summary.tsv` 和 analyzer 的 `analysis.txt`。
+  - 这次透传后，任务卡住时可以快速判断：
+    - `floor_goal_published` 为空：Web 还没真正 publish 目标；
+    - 有发布时间但 `nav_goal_status` 未 accepted：`floor_goal_bridge` / Nav2 接收链路问题；
+    - accepted/feedback 后失败：进入 Nav2 规划、定位、避障或执行问题。
+- Verification:
+  - passed:
+    - `./scripts/test_task_snapshot_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `bash -n scripts/104_watch_frontend_task.sh`;
+    - `python3 -m py_compile scripts/104_analyze_frontend_task_watch.py`;
+    - `./scripts/test_active_task_contract.py && ./scripts/test_task_snapshot_contract.py && ./scripts/test_task_contract.py && ./scripts/test_task_progress_contract.py && ./scripts/test_nav_status_contract.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_active_task_contract.py scripts/test_task_snapshot_contract.py scripts/check_preflight_policy.py scripts/104_analyze_frontend_task_watch.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_snapshot_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/test_task_snapshot_contract.py scripts/check_preflight_policy.py scripts/104_analyze_frontend_task_watch.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_snapshot_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/test_task_snapshot_contract.py scripts/check_preflight_policy.py scripts/104_watch_frontend_task.sh scripts/104_analyze_frontend_task_watch.py m20pro日志.md`;
+    - `rg -n "[ \t]+$" src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_snapshot_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/test_task_snapshot_contract.py scripts/check_preflight_policy.py scripts/104_watch_frontend_task.sh scripts/104_analyze_frontend_task_watch.py m20pro日志.md` 无输出。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 09:29 CST - 任务目标下发证据链加固
+
+- Goal alignment:
+  - 继续加固单层任务执行链路，目标是让现场“走一段停住/不按点走”这类问题能被前端和 watcher 直接定位到具体环节。
+  - 本轮仍坚持做减法：把任务下发后的状态证据收进 `active_task_contract.py`，而不是在 Web 主节点里继续散写补丁逻辑。
+  - 104 电量/API 门禁仍超时，本轮没有触碰真实运动链路。
+- Local-only change:
+  - `active_task_contract.py` 新增 `mark_floor_goal_published_state(...)`。
+  - `web_dashboard_node.py::_dispatch_active_goal(...)` 在真正调用 `_publish_floor_goal(...)` 之后，记录：
+    - `floor_goal_published` timeline 事件；
+    - `last_floor_goal_published_at`;
+    - `last_floor_goal_published_monotonic`;
+    - `last_floor_goal_annotation_id`;
+    - `last_floor_goal_pose`;
+    - `floor_goal_publish_count`;
+    - `goal_attempt_id`、send count 和目标位姿。
+  - `GOAL_SENT_RESET_KEYS` 纳入旧 `/m20pro/floor_goal` 发布证据，切换任务点时会清掉上一点的发布记录，避免前端短暂显示残留证据。
+- Why:
+  - 之前 active task 能看到“已下发当前点位，等待 Nav2 接收”，但缺少“前端确实已经 publish 到 `/m20pro/floor_goal`”这一层证据。
+  - 现场排查任务不动时，需要区分：
+    - 前端还没发布目标；
+    - 前端已发布，但 `floor_goal_bridge` / Nav2 没接收；
+    - Nav2 已接收但执行/规划/定位出了问题。
+  - 新状态让这一层边界可见，也能被 watcher 和持久化 result 继续保留下来。
+- Policy / tests:
+  - `scripts/test_active_task_contract.py` 新增 `test_mark_floor_goal_published_state()`。
+  - 测试覆盖：
+    - 发布后 active task 保存 `/m20pro/floor_goal` 证据；
+    - 非 running task 不改变状态；
+    - 新点下发会清理旧发布证据。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - active task contract 必须拥有 floor-goal publish evidence state；
+    - Web 必须在 `_publish_floor_goal(...)` 后记录 `floor_goal_published` 证据。
+- Verification:
+  - passed:
+    - `./scripts/test_active_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/test_task_progress_contract.py`;
+    - `./scripts/test_task_snapshot_contract.py`;
+    - `./scripts/test_nav_status_contract.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py m20pro日志.md`;
+    - `rg -n "[ \t]+$" src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py m20pro日志.md` 无输出。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 - 统一 Nav2 失败终止路径
+
+- Goal alignment:
+  - 继续减少任务执行 terminal 状态的分叉，尤其是 Nav2 报错/取消导致的任务终止。
+  - 本轮只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `web_dashboard_node.py::_fail_active_task_from_nav_status(...)` 现在先通过 `apply_nav_failure_state(...)` 写入 Nav2 失败字段，再通过 `fail_active_task_state(...)` 生成统一 terminal failure payload。
+  - Nav2 失败路径现在和其他失败路径一样，从 contract 读取：
+    - timeline event；
+    - message；
+    - event extra；
+    - result status。
+  - Web 仍只负责持久化 task result、清 active task、reset navigation、发布外部 terminal event。
+- Why:
+  - 现场任务异常有一部分来自 Nav2 状态变化，例如目标取消、替换、action 不可用。
+  - 这条路径之前单独硬编码 `"error"` 和 timeline event，容易与 runtime guard、路径不匹配、点位超时等失败路径不一致。
+  - 现在 Nav2 失败只保留 Nav2 字段更新在 nav-status contract，terminal 失败语义统一走 active-task contract。
+- Policy / tests:
+  - `scripts/check_preflight_policy.py` 更新防回归：
+    - `_fail_active_task_from_nav_status(...)` 必须先委托 `apply_nav_failure_state(...)`；
+    - 然后必须委托 `fail_active_task_state(...)`；
+    - 持久化时必须读取 `failed.get("result_status")`。
+  - 本轮未新增 contract 单测，因为没有改变 contract 行为；改动是 Web 对已有 terminal failure contract 的复用路径。
+- Verification:
+  - passed:
+    - `./scripts/test_nav_status_contract.py && ./scripts/test_active_task_contract.py`;
+    - `./scripts/test_task_contract.py && ./scripts/test_active_task_contract.py && ./scripts/test_nav_status_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/nav_status_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/test_nav_status_contract.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/nav_status_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/test_nav_status_contract.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_active_task_contract.py scripts/test_nav_status_contract.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/check_preflight_policy.py`;
+    - `rg -n "[ \t]+$" src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/check_preflight_policy.py` 无输出。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 - 统一任务完成终止结果
+
+- Goal alignment:
+  - 继续减少任务执行链路里 Web 节点对 terminal 状态的硬编码。
+  - 本轮只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `active_task_contract.py::advance_active_task_state(...)` 的 completed 返回值新增 `result_status: "completed"`。
+  - `web_dashboard_node.py::_advance_active_task(...)` 不再硬编码完成结果状态，而是从 `advance_active_task_state(...)` 的返回值读取：
+    - `task_id`;
+    - `message`;
+    - `event_extra`;
+    - `result_status`。
+- Why:
+  - 上一轮已把失败终止状态下沉到 active-task contract。
+  - 本轮把正常完成路径也收齐，避免 “failed/stopped/completed” 三类 terminal 结果由不同层拼装。
+  - Web 继续只负责持久化、清 active、reset navigation 和发布外部事件。
+- Policy / tests:
+  - `scripts/test_active_task_contract.py::test_advance_active_task_state()` 增加 completed event/message/result_status/event_extra 断言。
+  - `scripts/check_preflight_policy.py` 更新防回归：
+    - active-task contract 必须拥有 waypoint advance/completion terminal state update；
+    - Web 必须从 `advance_active_task_state(...)` 读取 `result_status`。
+- Verification:
+  - passed:
+    - `./scripts/test_active_task_contract.py`;
+    - `./scripts/test_task_contract.py && ./scripts/test_active_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_active_task_contract.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `rg -n "[ \t]+$" src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py` 无输出。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 - 下沉任务失败终止状态
+
+- Goal alignment:
+  - 继续减少任务执行链路里 Web 节点直接拼 active-task 终止状态的分支。
+  - 本轮只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `active_task_contract.py` 新增 `fail_active_task_state(...)`。
+  - 该 helper 统一输出任务失败终止时的：
+    - updated active；
+    - task id；
+    - timeline event；
+    - operator message；
+    - event extra；
+    - result status。
+  - `web_dashboard_node.py::_fail_active_task(...)` 现在委托 `fail_active_task_state(...)`，Web 只负责：
+    - 追加 timeline；
+    - 持久化 task result；
+    - 清空 active task；
+    - 保存 JSON；
+    - reset navigation；
+    - 发布外部 terminal event。
+- Why:
+  - 任务失败可能来自定位丢失、Nav2 未接收、路径目标不匹配、点位超时、runtime guard、点位删除等多条路径。
+  - 这些路径最终都进入 `_fail_active_task(...)`，失败终止语义应由 active-task contract 固化，避免 Web 以后新增失败分支时出现终止状态字段不一致。
+  - 这一步不改变导航行为，只减少终止状态的维护面。
+- Policy / tests:
+  - `scripts/test_active_task_contract.py` 新增 `test_fail_active_task_state()`。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - active-task contract 必须拥有 terminal failure state payload；
+    - Web 必须委托 `fail_active_task_state(...)`；
+    - active-task 离线测试必须覆盖失败终止状态。
+- Verification:
+  - passed:
+    - `./scripts/test_active_task_contract.py`;
+    - `./scripts/test_task_contract.py && ./scripts/test_active_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_active_task_contract.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `rg -n "[ \t]+$" src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py` 无输出。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 - 统一任务启动前后预检查路径
+
+- Goal alignment:
+  - 继续减少前端任务启动链路中的重复分支，降低“任务列表显示 ready，但启动接口使用另一套判断”的风险。
+  - 本轮只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `web_dashboard_node.py` 新增 `_task_start_pre_runtime_context(...)`。
+  - `_start_task(...)` 不再维护两套手写的静态任务/点位/地图检查。
+  - 启动前和 reset/Nav2 恢复后，均复用同一个 `_task_start_pre_runtime_context(...)`：
+    - 读取 active task、selected map、task、annotations；
+    - 调用 `task_start_static_context(...)`；
+    - 调用 `_validate_task_annotations_for_map(...)`；
+    - 委托 `task_readiness_pre_runtime_payload(...)`；
+    - 调用 `validate_task_start_expectations(...)`；
+    - 通过后返回 `task_map_id`、`selected_map_id`、`first_annotation`。
+  - reset 后重新下发前，现在也走完整 pre-runtime 路径，包括点位/地图校验，而不是只重复一部分静态检查。
+- Why:
+  - 真实现场的问题表现为任务启动后不按点走、状态不一致、任务页和定位页语义分叉。
+  - 在真实运动闭环前，必须先保证“能不能启动任务”的入口只使用一条准入路径。
+  - 这不是新增补丁脚本，而是删除 `_start_task(...)` 内部重复判断，减少维护面。
+- Policy / tests:
+  - `scripts/check_preflight_policy.py` 更新防回归：
+    - Web task start pre-runtime helper 必须委托 `task_start_static_context(...)` 和 `task_readiness_pre_runtime_payload(...)`；
+    - Web task start pre-runtime helper 必须通过 `validate_task_start_expectations(...)` 校验前端确认快照；
+    - `_start_task(...)` 在 reset 前后必须复用同一个 pre-runtime helper，并在下发前再次执行 final readiness。
+  - 本轮未新增 contract 单测，因为 contract 逻辑未变；改动点是 Web 对 contract 的复用路径。
+- Verification:
+  - passed:
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `rg -n "[ \t]+$" src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py` 无输出。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 - 下沉任务卡片启动前预检查
+
+- Goal alignment:
+  - 继续做前端任务链路减法，减少 `web_dashboard_node.py` 中直接拼装任务可启动状态的分支。
+  - 本轮仍为本地代码和离线验证；104 电量/API 门禁超时，不碰真机动作。
+- Local-only change:
+  - `task_contract.py` 新增 `task_readiness_pre_runtime_payload(...)`。
+  - 该 contract 统一处理任务卡片进入实时检查前的纯数据判断：
+    - 当前已有任务运行；
+    - `task_start_static_context(...)` 静态任务/点位上下文失败；
+    - 点位列表/地图校验失败；
+    - 当前选择地图与任务地图不一致；
+    - 预检查通过后返回 `task_map_id`、`selected_map_id`、`first_annotation`，再进入实时位姿/电量/感知/Nav2 检查。
+  - `web_dashboard_node.py::_task_readiness_for_task(...)` 现在只负责：
+    - 读取 active task、selected map 和 annotations；
+    - 构造 static context；
+    - 必要时调用 `_validate_task_annotations_for_map(...)`；
+    - 委托 `task_readiness_pre_runtime_payload(...)`；
+    - 预检查通过后继续调用 `_task_start_readiness_payload(...)`。
+- Why:
+  - 任务页之前最容易出现“某处显示 ready，任务卡片又显示另一套状态”的分叉。
+  - 任务启动前的静态/地图/运行中状态属于纯业务规则，应在 contract 层固定，Web 层只做 I/O 和实时数据采样。
+  - 这一步不会直接解决真机路径跟踪问题，但会减少后续排查任务链路时的状态分叉。
+- Policy / tests:
+  - `scripts/test_task_contract.py` 新增 `test_task_readiness_pre_runtime_payload()`，覆盖：
+    - 当前任务正在执行；
+    - 其他任务正在执行；
+    - 静态 readiness 透传；
+    - 静态 error fallback；
+    - task validation 透传；
+    - selected map mismatch；
+    - pre-runtime passes。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - task contract 必须拥有 task-card pre-runtime startability composition；
+    - Web 任务列表 readiness 必须委托 `task_readiness_pre_runtime_payload(...)`；
+    - 离线 task contract 测试必须覆盖该逻辑。
+- Verification:
+  - passed:
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `rg -n "[ \t]+$" src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py` 无输出。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 - 下沉任务启动最终 readiness 组合
+
+- Goal alignment:
+  - 继续把单层任务启动链路做成可解释、可测试、可交接的 contract，而不是让 Web 节点直接拥有业务分支。
+  - 本轮仍只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `task_contract.py` 新增 `task_start_runtime_readiness_payload(...)`。
+  - `web_dashboard_node.py::_task_start_readiness_payload(...)` 不再手写最终任务启动判断，改为：
+    - Web 只负责读取 ROS/runtime 状态、地图快照和 Nav2 readiness；
+    - task contract 统一判断能否开始任务。
+  - 下沉的最终启动准入分支包括：
+    - 首点缺失；
+    - 当前楼层未知；
+    - 当前楼层与任务首点楼层不一致；
+    - 机器人当前位置不在当前地图范围内；
+    - 任务首点不在任务地图范围内；
+    - Nav2 当前 `/map` 与网页选中固定地图元数据不一致；
+    - 机器人距离任务首点超过上限；
+    - Nav2/costmap readiness 未就绪。
+- Why:
+  - 这些规则直接对应现场“定位看起来成功，但任务跑到错误点/旧点或任务页状态不一致”的风险。
+  - Web 节点现在只保留状态采集和服务入口职责，任务启动是否允许运动由纯 contract 决定，更容易离线测试，也更适合后续拆给实习生维护。
+- Policy / tests:
+  - `scripts/test_task_contract.py` 新增 `test_task_start_runtime_readiness_payload()`，覆盖：
+    - ready 成功；
+    - 首点缺失；
+    - runtime readiness 失败透传；
+    - 楼层未知；
+    - 楼层不一致；
+    - 机器人越界；
+    - 首点越界；
+    - 地图元数据不一致；
+    - 首点过远；
+    - Nav2 未就绪。
+  - `scripts/check_preflight_policy.py` 增加/调整防回归：
+    - 首点过远判断由 task contract 拥有；
+    - 最终任务启动 readiness 组合由 task contract 拥有；
+    - Web 必须委托 `task_start_runtime_readiness_payload(...)`；
+    - Web 不再直接拥有 live/selected map metadata 判断调用路径。
+- Verification:
+  - passed:
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `rg -n "[ \t]+$" src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py` 无输出。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 - 下沉任务启动 runtime readiness 组合
+
+- Goal alignment:
+  - 继续收口单层任务启动链路，让任务是否可启动由纯 contract 统一解释，减少 Web 节点里的补丁式分支。
+  - 本轮仍只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `task_contract.py` 新增 `task_runtime_readiness_payload(...)`。
+  - `web_dashboard_node.py::_task_runtime_readiness_payload(...)` 不再手写：
+    - map relocalization readiness 是否优先返回；
+    - pose readiness 失败是否直接返回；
+    - battery readiness 失败时如何合并 pose evidence；
+    - perception readiness 失败时如何合并 pose/battery evidence；
+    - 全部通过时 runtime success payload 如何构造。
+  - Web 现在只负责采样/构造输入：
+    - `map_relocalization_task_readiness_payload(...)`;
+    - `task_pose_readiness_payload(...)`;
+    - `_task_battery_readiness_payload(...)`;
+    - `_task_perception_readiness_payload(...)`;
+    - 然后委托 `task_runtime_readiness_payload(...)` 统一组合。
+- Why:
+  - 现场问题里多次出现“定位显示成功，但任务页/任务执行状态不一致”。
+  - 任务启动前的失败优先级必须稳定：先地图重定位要求，再 pose/localization，再电池，再感知。
+  - 这个顺序不应该散落在 Web 节点里，否则后续改页面或接口时容易把任务准入条件改乱。
+- Policy / tests:
+  - `scripts/test_task_contract.py` 新增 `test_task_runtime_readiness_payload()`，覆盖：
+    - map relocalization required 优先；
+    - pose invalid/stale 优先；
+    - battery low 阻断并保留 pose evidence；
+    - perception lidar unavailable 阻断并保留 pose/battery evidence；
+    - 全部通过时保留 battery/perception evidence。
+  - `scripts/check_preflight_policy.py` 增加/调整防回归：
+    - task contract 必须拥有任务启动 pose/battery/perception readiness 组合；
+    - Web 必须委托 `task_runtime_readiness_payload(...)`；
+    - selected-map relocalization readiness 作为输入传入 runtime contract；
+    - runtime guard 测试检查拆分，避免新增 task runtime 测试后误报。
+- Verification:
+  - passed:
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `rg -n "[ \t]+$" src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py` 无输出。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 - 下沉任务页当前 readiness 汇总
+
+- Goal alignment:
+  - 继续解决“定位页显示 ready，但任务页状态不一致”的结构性风险。
+  - 本轮仍只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `task_contract.py` 新增 `current_task_readiness_payload(...)`。
+  - `web_dashboard_node.py::_current_task_readiness_payload(...)` 不再手写：
+    - 当前 active task running 时的任务页阻断 payload；
+    - runtime ready 后是否继续检查 Nav2 readiness；
+    - Nav2 未就绪时如何合并 runtime evidence；
+    - 当前任务页全局 ready 成功消息。
+  - Web 现在只负责：
+    - 读取 active task；
+    - 生成 runtime readiness；
+    - 必要时读取 cached Nav2 readiness；
+    - 然后委托 `current_task_readiness_payload(...)`。
+- Why:
+  - 任务页的“当前是否可启动”是 operator 最容易误判的位置。
+  - 这个汇总必须和定位页、任务列表、启动接口共用同一套 contract 口径，否则现场会再次出现“一个地方显示已定位，另一个地方不允许启动/显示导航中”的状态分叉。
+- Policy / tests:
+  - `scripts/test_task_contract.py` 新增 `test_current_task_readiness_payload()`，覆盖：
+    - active task running 阻断并保留任务/导航字段；
+    - runtime failure 透传；
+    - Nav2 readiness 失败阻断；
+    - Nav2 ready 后当前任务页 ready；
+    - 不要求 Nav2 时保留 runtime readiness。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - task contract 必须拥有当前任务页 readiness 汇总；
+    - Web 必须委托 `contract_current_task_readiness_payload(...)`；
+    - 离线 task contract 测试必须覆盖该汇总。
+- Verification:
+  - passed:
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `rg -n "[ \t]+$" src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py` 无输出。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 09:06 CST - 任务结果保留原始 Nav2 失败状态
+
+- Goal alignment:
+  - 继续加固单层任务闭环的失败可诊断性。
+  - 针对“任务只往前走一段就停 / 前端状态不清楚 / 可能跑到残留目标”的问题，任务失败结果必须直接保留原始 Nav2 状态，不能只留下前端友好文案。
+  - 本轮仍只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `task_snapshot_contract.py` 的 `RESULT_EXTRA_KEYS` 增加 `nav_status`。
+  - `build_task_result_snapshot(...)` 现在会把 terminal `extra["nav_status"]` 提升到任务结果顶层，同时仍保留在 `extra` 中。
+  - 这样 `_fail_active_task_from_nav_status(...)` 持久化失败结果时，后续前端、日志和 watcher 分析都能直接看到原始 Nav2 文本，例如 `error nav2 action unavailable`。
+- Why:
+  - `apply_nav_failure_state(...)` 会先保存 raw `last_nav_status`，但随后 `fail_active_task_state(...)` 会把 `last_error/status_message` 统一成面向操作员的中文错误。
+  - 友好文案适合前端显示，但不够排查底层问题。
+  - `nav_status` 作为结果顶层字段后，后续排查不用只从 timeline/extra 深层结构里找。
+- Policy / tests:
+  - `scripts/test_task_snapshot_contract.py` 的 `test_result_snapshot()` 覆盖：
+    - raw Nav2 status 被提升到结果顶层；
+    - raw Nav2 status 仍保留在 `extra`。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - `RESULT_EXTRA_KEYS` 必须包含 `nav_status`；
+    - 离线 snapshot 测试必须覆盖 raw Nav2 status retention。
+- Verification:
+  - passed:
+    - `./scripts/test_task_snapshot_contract.py`;
+    - `./scripts/test_nav_status_contract.py && ./scripts/test_active_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_snapshot_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_snapshot_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_snapshot_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_snapshot_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_task_snapshot_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_snapshot_contract.py scripts/test_task_snapshot_contract.py scripts/check_preflight_policy.py`;
+    - `rg -n "[ \t]+$" src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_snapshot_contract.py scripts/test_task_snapshot_contract.py scripts/check_preflight_policy.py` 无输出。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 09:09 CST - 下沉无任务停止响应语义
+
+- Goal alignment:
+  - 继续减少 Web 主节点里的任务状态手写分支。
+  - 针对“明明没有任务执行，但前端/状态像还在导航中”的历史问题，停止接口的 no-op 语义必须统一，不能散落在 Web 层。
+  - 本轮仍只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `active_task_contract.py` 新增 `idle_stop_task_response()`。
+  - 当没有 active task 且不是显式 reset 时，统一返回：
+    - `ok: True`;
+    - `active_task: None`;
+    - `stopped_task_id: None`;
+    - `reset_navigation: False`;
+    - `message: 当前没有前端任务在执行，无需停止`。
+  - `web_dashboard_node.py::_stop_task(...)` 不再内联构造该返回，改为直接委托 `idle_stop_task_response()`。
+- Why:
+  - 停止按钮既可能表示“停止正在执行的前端任务”，也可能被误点成“清掉残留导航状态”。
+  - 没有 active task 时，普通停止不应该重置导航；只有显式 reset 才允许走 `_reset_navigation_session(...)`。
+  - 将 no-active-task stop 响应放到 contract 后，Web 只负责调用和副作用，状态口径由同一处维护。
+- Policy / tests:
+  - `scripts/test_active_task_contract.py::test_stop_task_state()` 增加 idle stop 覆盖：
+    - no-op 成功；
+    - 不清 active task；
+    - 不记录 stopped task；
+    - 不 reset navigation；
+    - 返回固定提示文案。
+  - `scripts/check_preflight_policy.py` 调整防回归：
+    - contract 必须拥有 no-active-task stop no-reset 语义；
+    - Web 必须在无 active task 且不是 reset 时调用 `idle_stop_task_response()`；
+    - Web 停止接口必须同时委托 request normalization、idle stop 和 active stop state。
+- Verification:
+  - passed:
+    - `./scripts/test_active_task_contract.py`;
+    - `./scripts/test_active_task_contract.py && ./scripts/test_task_contract.py && ./scripts/test_task_snapshot_contract.py && ./scripts/test_nav_status_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `rg -n "[ \t]+$" src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py` 无输出。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 09:13 CST - 任务 tick 距离计算不再静默返回
+
+- Goal alignment:
+  - 继续加固单层任务执行链路的可诊断性。
+  - 针对“任务走一段后卡住，但前端不知道卡在哪”的问题，任务 tick 中机器人/目标位姿无效不能静默 `return`。
+  - 本轮仍只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `task_progress_contract.py` 新增 `active_task_distance_decision(...)`。
+  - 该 contract 统一处理：
+    - 机器人地图位姿无效：返回 `wait_and_monitor_localization / pose_invalid`，Web 会进入等待并沿用定位丢失超时机制；
+    - 当前任务点目标位姿无效：返回 `fail / active_waypoint_pose_invalid`，Web 通过统一 failure payload 停止任务；
+    - 位姿为非有限数：进入 `pose_invalid` 等待；
+    - 位姿正常：返回 `distance_ready` 和 `distance_m`。
+  - `web_dashboard_node.py::_tick_active_task(...)` 删除原来的 `try/except ... return` 静默路径，改为委托 `active_task_distance_decision(...)`。
+- Why:
+  - 原逻辑在 `pose["x"]`、`pose["y"]`、目标 `x/y` 取值失败时直接返回，不更新 active task，也不写 timeline/result。
+  - 这类静默返回会让前端看起来像“还在运行但不动了”，现场排查没有证据。
+  - 新逻辑把机器人位姿问题归入定位丢失等待/超时，把任务点数据问题归入可持久化失败结果。
+- Policy / tests:
+  - `scripts/test_task_progress_contract.py` 新增 `test_distance_decision()`，覆盖：
+    - 正常距离计算；
+    - 机器人 pose 无效；
+    - 任务点目标 pose 无效；
+    - 非有限数 pose。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - progress contract 必须拥有 active task distance/invalid-pose 决策；
+    - Web tick 必须委托该 contract；
+    - Web 不得在距离计算失败时静默返回，而要进入定位丢失监控或统一失败路径。
+- Verification:
+  - passed:
+    - `./scripts/test_task_progress_contract.py`;
+    - `./scripts/test_task_progress_contract.py && ./scripts/test_active_task_contract.py && ./scripts/test_task_contract.py && ./scripts/test_task_snapshot_contract.py && ./scripts/test_nav_status_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_progress_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_progress_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_progress_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_progress_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_task_progress_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_progress_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_progress_contract.py scripts/check_preflight_policy.py`;
+    - `rg -n "[ \t]+$" src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_progress_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_progress_contract.py scripts/check_preflight_policy.py` 无输出。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 09:16 CST - runtime guard 等待事件去噪
+
+- Goal alignment:
+  - 继续提升单层任务执行链路的可诊断性。
+  - 针对任务运行时电量/scan/点云等关键链路短暂异常，前端应该保留第一次、原因变化和最终失败证据，但不应该每个 tick 都刷同一条 `runtime_guard_waiting`。
+  - 本轮仍只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `task_contract.py::apply_runtime_guard_wait_state(...)` 从直接返回 active dict 改为返回：
+    - `active`;
+    - `changed`;
+    - `should_record_event`。
+  - `should_record_event` 在以下场景为 true：
+    - 第一次进入 runtime guard lost；
+    - wait code / 状态文案变化；
+    - decision action 为 `fail`。
+  - `web_dashboard_node.py::_stop_task_if_runtime_guard_lost(...)` 现在只在 `should_record_event` 为 true 时追加 `runtime_guard_waiting` timeline。
+  - 状态仍会更新 `last_wait_at`、`runtime_guard_lost_age_s` 等字段；停止策略不变。
+- Why:
+  - 旧逻辑每个 tick 都追加一条 runtime guard waiting，长时间 scan/点云异常时会快速冲掉更关键的 timeline。
+  - 去噪后，现场分析能更容易看到“首次异常 -> 是否恢复 -> 是否最终失败”的状态变化。
+  - 这属于 contract 层状态语义，不应该由 Web 主节点用散落条件判断维护。
+- Policy / tests:
+  - `scripts/test_task_contract.py::test_apply_runtime_guard_wait_state()` 增加覆盖：
+    - 第一次 waiting 需要记录事件；
+    - 同一原因重复 waiting 不刷 timeline；
+    - 原因变化需要记录；
+    - fail 需要记录；
+    - 重复 waiting 仍刷新 `last_wait_at`。
+  - `scripts/check_preflight_policy.py` 调整防回归：
+    - `apply_runtime_guard_wait_state(...)` 必须输出 `should_record_event`；
+    - 离线测试必须覆盖 runtime guard wait/clear/lost-link timeout。
+- Verification:
+  - passed:
+    - `./scripts/test_task_contract.py`;
+    - `./scripts/test_task_contract.py && ./scripts/test_task_progress_contract.py && ./scripts/test_active_task_contract.py && ./scripts/test_task_snapshot_contract.py && ./scripts/test_nav_status_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py`;
+    - `rg -n "[ \t]+$" src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_task_contract.py scripts/check_preflight_policy.py` 无输出。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-27 09:19 CST - 通用 task waiting 状态去噪并保留证据
+
+- Goal alignment:
+  - 继续减少 Web 主节点里的任务状态手写分支，同时保证任务“等待中”的状态可追踪。
+  - 针对 `pose_stale`、`wrong_floor`、`near_goal_waiting_nav2` 等等待状态，前端需要保留首次/原因变化证据，但不应该每个 tick 刷重复 timeline。
+  - 本轮仍只做本地代码和离线验证；104 电量/API 门禁仍超时，不碰真机动作。
+- Local-only change:
+  - `active_task_contract.py::mark_active_task_waiting_state(...)` 从直接返回 active dict 改为返回：
+    - `active`;
+    - `changed`;
+    - `should_record_event`;
+    - `event`;
+    - `message`;
+    - `event_extra`。
+  - `should_record_event` 在以下场景为 true：
+    - 第一次进入等待；
+    - wait code 变化；
+    - 等待文案变化。
+  - `web_dashboard_node.py::_mark_active_task_waiting(...)` 现在只在 `should_record_event` 为 true 时追加 `task_waiting` timeline。
+  - 重复等待仍会刷新 `last_wait_at` 和状态字段，但不会刷屏。
+- Why:
+  - 之前 `_mark_active_task_waiting(...)` 只更新状态，不写 timeline；某些“等待但未失败”的状态缺少现场证据。
+  - 如果直接每次 waiting 都写 timeline，又会和 runtime guard 一样刷屏。
+  - 现在等待状态由 contract 统一决定是否记录事件，Web 只负责持久化和事件副作用。
+- Policy / tests:
+  - `scripts/test_active_task_contract.py::test_mark_active_task_waiting_state()` 增加覆盖：
+    - 首次 waiting 记录事件；
+    - 同一 code/message 重复 waiting 不刷 timeline；
+    - 原因变化记录事件；
+    - 重复 waiting 仍刷新 `last_wait_at`。
+  - `scripts/check_preflight_policy.py` 增加/调整防回归：
+    - `mark_active_task_waiting_state(...)` 必须输出 `should_record_event`；
+    - Web `_mark_active_task_waiting(...)` 必须委托 contract 并根据 `should_record_event` 写 `task_waiting`。
+- Verification:
+  - passed:
+    - `./scripts/test_active_task_contract.py`;
+    - `./scripts/check_preflight_policy.py`;
+    - `./scripts/test_active_task_contract.py && ./scripts/test_task_contract.py && ./scripts/test_task_progress_contract.py && ./scripts/test_task_snapshot_contract.py && ./scripts/test_nav_status_contract.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m pyflakes src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `git diff --check -- src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py`;
+    - `rg -n "[ \t]+$" src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_active_task_contract.py scripts/check_preflight_policy.py` 无输出。
+- Deployment status:
+  - 未部署到 104。
+  - 104 电量门禁结果：
+    - `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080`;
+    - `BLOCK: cannot read robot battery from http://10.21.31.104:8080: <urlopen error timed out>`。
+  - 因此本轮没有在 104 上构建、重启服务、重定位、启动任务或发布运动目标。
+
+## 2026-06-29 16:47 CST - 重定位成功语义收口、红箭头生命周期与 1000x 位姿缩放修复
+
+- Field symptom:
+  - 用户现场拖红色箭头做重定位后，右侧重定位结果在“成功/失败”之间闪烁。
+  - 地图中蓝色实时位姿没有明确接管红色候选位姿，实时激光轮廓也看起来没有对上。
+  - 用户明确要求最终判定只有两种：
+    - 真成功：红色箭头消失，蓝色实时箭头移动到新位姿，激光轮廓用蓝色实时位姿对齐地图；
+    - 未真成功：继续显示失败，不把 2101 分段回执或任务页阻塞说成最终成功。
+- Root cause fixed:
+  - 104 上 `/m20pro_tcp_bridge.vendor_position_scale` 曾为 `0.001`，导致原厂 2101 成功回执的米级坐标被缩小 1000 倍：
+    - 2101 回执示例：`x=-10.923 y=-3.264 yaw=-1.549`;
+    - 旧 live pose 曾约为 `x=-0.011 y=-0.003`。
+  - 已改为米级直通：
+    - `src/m20pro_bringup/config/m20pro_real.yaml`: `vendor_position_scale: 1.0`;
+    - `src/m20pro_bringup/config/m20pro.yaml`: `vendor_position_scale: 1.0`;
+    - `src/m20pro_navigation/m20pro_navigation/tcp_bridge_node.py` 默认 `vendor_position_scale=1.0`。
+  - `scripts/check_preflight_policy.py` 增加防回归，禁止把 vendor pose 再缩回 `0.001`。
+- Localization contract change:
+  - `localization_contract.py` 新增/收口 2101 与 live pose 一致性检查：
+    - 最近 2101 success 回执存在时，live map pose 必须接近 2101 坐标，否则返回 `pose_not_near_tcp_2101`；
+    - 这种情况会明确提示“实时地图位姿与最近 2101 回执坐标不一致”，避免再次出现坐标单位错但 UI 误判成功。
+  - `localized_task_not_ready` 现在表示“重定位成功，但任务页暂不可启动”，不再用“重定位失败”描述低电量、导航未 ready 等任务条件。
+  - `relocalization_response_payload(...)` 同步区分：
+    - `/initialpose` 已发布；
+    - 原厂/2101 证据确认定位；
+    - 任务页是否可启动。
+- Frontend behavior change:
+  - `static/dashboard.js` 的最终重定位结果不再依赖 `task_ready`：
+    - `confirmed=true` 且无固定地图重定位锁、无 2101/live pose mismatch、pose fresh 时显示“重定位成功”；
+    - 任务页因低电量等原因不可启动，只显示为任务页阻塞，不改变定位成功判定。
+  - 红色箭头生命周期收口：
+    - API 返回 `payload.confirmed=true` 后清空 `state.localizeDraft` 并刷新 `/api/state`；
+    - `drawLocalizeDraft()` 在 `localizationConfirmedForDisplay()` 为真时不再画红色箭头；
+    - `drawScanOverlay()` 只有在“定位页 + 有红色草稿 + 尚未 confirmed”时才用红色预览位姿，confirmed 后强制回到蓝色实时位姿。
+  - 任务页提示去误导：
+    - `/api/state` 快照里的 `localization_status` 和 `task_readiness` 复用同一个 `now` 计算 pose age，避免 API 慢一拍时两个面板年龄不一致；
+    - 如果定位已 confirmed 但任务页碰到 `pose_invalid_or_stale`，前端提示改为“等待地图位姿刷新”，不再直接叫用户重定位。
+- Files touched in this round:
+  - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/localization_contract.py`;
+  - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py`;
+  - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js`;
+  - `scripts/test_localization_contract.py`;
+  - `scripts/104_frontend_task_smoke.py`;
+  - `scripts/check_preflight_policy.py`;
+  - earlier scale fix files listed above.
+- Local verification:
+  - passed:
+    - `python3 scripts/test_localization_contract.py`;
+    - `python3 scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/localization_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_localization_contract.py scripts/104_frontend_task_smoke.py scripts/check_preflight_policy.py`.
+- Deployment to 104:
+  - Synced changed cloud bridge/frontend/test/policy files to `/home/user/m20pro_real_ros2_ws`.
+  - On 104 passed:
+    - `python3 scripts/test_localization_contract.py`;
+    - `python3 scripts/check_preflight_policy.py`;
+    - Python compile check for touched modules/scripts;
+    - `colcon build --packages-select m20pro_cloud_bridge --symlink-install`.
+  - Restarted `m20pro-real.service`; service returned `active`.
+  - No task was started, no `/m20pro/floor_goal` was published, no `/cmd_vel` was sent, and no new `/api/localization/initialpose` was called during verification.
+- 104 final observed state:
+  - `ros2 param get /m20pro_tcp_bridge vendor_position_scale` returned `Double value is: 1.0`.
+  - `/api/state.pose` is meter-scale, latest sampled around:
+    - `x=-11.18 y=-3.29 yaw=-1.607`。
+  - `/api/state.localization_status`:
+    - `confirmed=true`;
+    - `code=localized_task_not_ready`;
+    - message starts with `重定位成功：定位已确认`;
+    - `map_relocalization_required=null`;
+    - `pose_fresh=true`;
+    - `navigation_ready=true`.
+  - `/api/state.task_readiness`:
+    - `ready=false`;
+    - `code=battery_low`;
+    - message: `电量 17% 低于任务要求 25%，请先充电再执行任务`.
+  - `/api/state.perception_status`:
+    - `ready=true`;
+    - `code=perception_ready`;
+    - `/scan` fresh, finite ranges around 200+;
+    - lidar relay source `/LIDAR/POINTS`, relay output around 5.9k points, `downsample_method=numpy_stride`.
+  - `scripts/104_frontend_task_smoke.py --url http://10.21.31.104:8080` passed read-only smoke.
+- Operational interpretation:
+  - 当前不是“重定位失败”，而是“定位已确认，任务页因低电量禁止开跑”。
+  - 现在前端判定应按以下肉眼标准验收：
+    - 如果重定位真成功，红色候选箭头消失；
+    - 蓝色实时箭头成为唯一当前位姿；
+    - 激光轮廓使用蓝色实时位姿绘制；
+    - 右侧定位面板显示“重定位成功”，即使任务页因为电量低仍不可启动。
+  - 现阶段继续单层导航实测前，必须先充电到任务门限以上；否则任务页会正确保持 blocked。
+
+## 2026-06-30 轻量化：Web 大节点纯工具层拆分
+
+- 目标：
+  - 在不碰重定位发布、任务执行状态机、Nav2 交互、`/m20pro/floor_goal`、`/initialpose` 等关键路径的前提下，继续给整体瘦身；
+  - 优先拆低风险、可单测、没有 ROS 副作用的通用工具逻辑；
+  - 为后续按“前端 API / 任务执行 / 地图管理 / 感知诊断 / ROS 消息转换”继续拆分做铺垫。
+- 本次拆分：
+  - 新增 `src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_runtime_contract.py`：
+    - JSON 文本解析；
+    - 当前时间文本；
+    - 年龄显示；
+    - payload age 注入；
+    - id 生成；
+    - 文件/地图名清洗；
+    - 布尔值解析；
+    - API 错误 payload 组装；
+    - 短随机后缀。
+  - 新增 `src/m20pro_cloud_bridge/m20pro_cloud_bridge/ros_message_contract.py`：
+    - ROS stamp 转秒；
+    - Pose 转 `{x,y,z,yaw,yaw_deg}`；
+    - yaw wrap；
+    - yaw 写入 PoseStamped 四元数。
+  - `web_dashboard_node.py` 删除原先内联的上述纯工具函数，改为从新模块导入。
+  - `_as_bool(...)` / `_error(...)` 保留为薄壳，内部转发到新模块，避免一次性大范围改动业务调用点。
+  - `scripts/check_preflight_policy.py` 同步认识新的 `new_id(...)` / `now_text(...)` 名字，保持原有防回归检查继续有效。
+- 风险控制：
+  - 没改前端重定位判定；
+  - 没改 `/api/localization/initialpose` 的发布和验证逻辑；
+  - 没改任务启动、任务 tick、目标点发布、Nav2 状态处理；
+  - 没改 `/m20pro/active_waypoint` payload 内容；
+  - 没启动 104 服务，没发布运动/重定位/任务话题。
+- 规模变化：
+  - `web_dashboard_node.py` 当前约 `4951` 行；
+  - 新增纯工具模块：
+    - `web_runtime_contract.py` 约 `67` 行；
+    - `ros_message_contract.py` 约 `48` 行。
+- 本地验证：
+  - 通过：
+    - `python3 scripts/test_web_runtime_contract.py`;
+    - `python3 scripts/test_ros_message_contract.py`;
+    - 全量 `scripts/test_*_contract.py`;
+    - `python3 scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile` 覆盖本次触碰模块和检查脚本；
+    - `colcon build --packages-select m20pro_cloud_bridge --symlink-install`.
+- 后续轻量化建议：
+  - 下一刀优先拆 HTTP 路由层，把 `/api/...` 路径分发从 `web_dashboard_node.py` 中抽成路由表/handler 模块；
+  - 再下一刀拆地图导入/选择操作的有副作用包装层，让地图纯规则、文件操作、ROS LoadMap 调用边界更清晰；
+  - 任务执行和重定位相关路径继续谨慎，只在已有合同测试覆盖足够时小步迁移。
+
+## 2026-06-30 104 同步与轻量化回归验证
+
+- 同步到 104：
+  - `web_dashboard_node.py`;
+  - `web_runtime_contract.py`;
+  - `ros_message_contract.py`;
+  - `test_web_runtime_contract.py`;
+  - `test_ros_message_contract.py`;
+  - `check_preflight_policy.py`;
+  - `m20pro日志.md`。
+- 104 构建/测试：
+  - 通过：
+    - `python3 scripts/test_web_runtime_contract.py`;
+    - `python3 scripts/test_ros_message_contract.py`;
+    - `python3 scripts/test_localization_contract.py`;
+    - `python3 scripts/test_active_task_contract.py`;
+    - `python3 scripts/test_task_snapshot_contract.py`;
+    - `python3 scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile` 覆盖本次触碰模块/脚本；
+    - `colcon build --packages-select m20pro_cloud_bridge --symlink-install`。
+- 服务重启：
+  - 使用 104 上的 `m20pro-real.service` 重启整套 real 服务；
+  - 重启后 `m20pro-real.service=active`;
+  - `web_dashboard` 新进程已加载，启动时间约 `2026-06-30 15:39:19`;
+  - `/healthz` 返回 `{"ok":true}`。
+- 只读回归：
+  - `/api/state` 正常返回；
+  - `/api/map`、`/api/maps`、`/api/tasks`、`/api/annotations`、`/api/preflight` 正常返回；
+  - `scripts/104_frontend_task_smoke.py --url http://10.21.31.104:8080` 通过；
+  - 新拆出的两个模块可在 104 安装环境中 import。
+- 当前 104 现场状态：
+  - `active_task=null`;
+  - `active_waypoint=null`;
+  - `perception_status=perception_ready`;
+  - `/scan` 和点云 relay 在 Web API 中均为新鲜数据；
+  - `lidar_relay.downsample_method=numpy_stride`;
+  - `localization_status.code=map_relocalization_required`;
+  - `localization_status.confirmed=false`;
+  - `task_readiness.code=map_relocalization_required`。
+- 解释：
+  - 当前不是这次轻量化导致的功能异常；
+  - 104 开机/重启后 Web 已把固定地图同步到 Nav2，因此按现有安全规则需要重新执行开发手册 2101 重定位；
+  - `104_frontend_task_ready_check.py` 返回“没有 ready task”是正确结果，因为当前被 `map_relocalization_required` 阻止。
+- 本轮没有做的事：
+  - 没启动前端任务；
+  - 没发布 `/m20pro/floor_goal`;
+  - 没调用 `/api/localization/initialpose`;
+  - 没发送 `/cmd_vel`。
+
+## 2026-06-30 视频链路按需化与 Web 状态轻量化
+
+- 目标：
+  - 继续往更高效方向走，但不碰重定位、任务执行、Nav2 目标下发和运动控制；
+  - 先做低风险优化：前端不看视频时不拉 RTSP；状态轮询不反复读完整地图；网页激光轮廓不每帧重算。
+- 视频链路改动：
+  - 前端前/后摄 `<img>` 默认只保留 `data-src="/camera/*.mjpg"`，不再自动设置真实 `src`；
+  - 前端新增前/后摄“打开/关闭”按需切换，同一时间只打开一路；
+  - `_CameraProxyWorker` 增加 viewer 计数：
+    - 有浏览器连接时才启动/保持 RTSP worker；
+    - 浏览器断开后 `clients` 归零，清空旧帧并释放 RTSP capture；
+    - `/api/state.camera_proxy.cameras.*.running` 只有有 viewer 时才为 `true`；
+    - 默认 worker 未创建时也返回 `clients: 0`，便于排查。
+- 地图状态轻量化：
+  - `map_contract.py` 新增：
+    - `read_pgm_header(...)`：只读 PGM 头，不读整张图像；
+    - `map_file_metadata_payload(...)`：返回地图宽高、resolution、origin、楼层/名称等轻量元数据，不含 `data`；
+    - `map_file_fingerprint(...)`：用 yaml/image 的 mtime/size 做缓存指纹。
+  - `web_dashboard_node.py` 的 `selected_map_status` 改为使用 `_map_file_summary(...)` 轻量缓存；
+  - `/api/map_file?map_id=...` 仍保留完整 occupancy `data` 数组，前端真正加载地图时不受影响。
+- 网页激光轮廓轻量化：
+  - 新增 `scan_overlay_update_min_interval_s=0.1`；
+  - `/scan` 新鲜度、`finite_ranges`、任务感知判断仍每帧更新；
+  - 只把“转成前端轮廓点数组”的计算节流到最多约 10Hz；
+  - 不改变 `/scan` 话题发布、Nav2、避障或点云融合。
+- 防回归：
+  - `scripts/check_preflight_policy.py` 增加检查：
+    - 前端摄像头不能自动加载 MJPEG；
+    - camera proxy 必须跟踪 viewer 并在断开后释放；
+    - selected-map 状态必须走轻量地图 metadata/cache；
+    - scan overlay 必须保留前端点数组节流。
+  - `scripts/test_map_contract.py` 增加轻量 metadata/fingerprint 测试。
+- 本地验证：
+  - 通过：
+    - `python3 scripts/test_map_contract.py`;
+    - `python3 scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/check_preflight_policy.py`;
+    - `git diff --check` 覆盖本轮触碰文件。
+- 104 同步/构建：
+  - 同步：
+    - `web_dashboard_node.py`;
+    - `map_contract.py`;
+    - `dashboard.html`;
+    - `dashboard.css`;
+    - `dashboard.js`;
+    - `scripts/test_map_contract.py`;
+    - `scripts/check_preflight_policy.py`。
+  - 104 上通过：
+    - `python3 scripts/test_map_contract.py`;
+    - `python3 -m py_compile` 覆盖触碰模块/脚本；
+    - `python3 scripts/check_preflight_policy.py`;
+    - `colcon build --packages-select m20pro_cloud_bridge --symlink-install`。
+  - 重启 `m20pro-real.service` 后 `/healthz` 返回 `{"ok":true}`。
+- 104 只读验证结果：
+  - 前端 HTML：
+    - 前摄/后摄没有真实 `src="/camera/*.mjpg"`；
+    - 前摄/后摄保留 `data-src="/camera/*.mjpg"`。
+  - 摄像头默认状态：
+    - `front.running=false, clients=0`;
+    - `rear.running=false, clients=0`。
+  - 摄像头短连接实测：
+    - 打开前摄时 `front.running=true, clients=1`，断开后回到 `front.running=false, clients=0`；
+    - 打开后摄时 `rear.running=true, clients=1`，断开后回到 `rear.running=false, clients=0`。
+  - 地图接口：
+    - `/api/state.selected_map_status.ready=true`;
+    - `/api/map_file?map_id=...` 仍返回完整 `data` 数组；
+    - 实测当前地图 `width=423, height=500, data_len=211500`。
+  - 状态接口：
+    - 30 次连续 `/api/state` 请求约 `0.54-0.56s`；
+    - scan 状态仍有 `ranges=361`、`finite_ranges` 约 `100+`、`overlay_points` 约 `100+`；
+    - `perception_status.code=perception_ready`。
+  - CPU 观察：
+    - 本轮优化前 `web_dashboard` 空闲约 `33%`;
+    - 地图状态轻量化后约 `20-21%`;
+    - scan 轮廓节流后约 `19%`;
+    - 当前主要 CPU 仍在 `lidar_relay`、Nav2 gate、pointcloud_fusion 等实时链路，不再是摄像头自动解码。
+- 当前 104 状态解释：
+  - `active_task=null`;
+  - `selected_map_status.ready=true`;
+  - `localization_status.code=map_relocalization_required`;
+  - `task_readiness.code=map_relocalization_required`;
+  - 这不是本轮优化导致的异常，而是重启/固定地图同步后按规则需要现场重新做 2101 重定位。
+- 本轮没有做的事：
+  - 没调用 `/api/localization/initialpose`;
+  - 没发布 `/m20pro/floor_goal`;
+  - 没启动前端任务；
+  - 没发送 `/cmd_vel`；
+  - 没改 Nav2/避障算法。
+
+## 2026-06-30 视频链路切换到 FFmpeg-MJPEG 并在 104 验证
+
+- 背景：
+  - 用户反馈“画面可能清晰了一点点，但还是很卡顿”；
+  - 检查 104 当时真实运行参数发现仍是旧链路/旧参数：
+    - `camera_proxy_fps:=4.0`;
+    - `camera_proxy_max_width:=320`;
+    - `camera_proxy_jpeg_quality:=35`;
+    - `/api/state.camera_proxy` 没有 `backend` 字段；
+    - 进程参数仍未传 `camera_proxy_backend:=ffmpeg_mjpeg`。
+  - 这解释了为什么前端肉眼几乎没变化：之前代码虽有 FFmpeg worker 雏形，但启动链路没有完整传参，104 实际没有真正跑到新后端。
+- 本轮改动：
+  - `web_dashboard_node.py`：
+    - camera proxy 默认后端改为 `ffmpeg_mjpeg`;
+    - 默认视频 profile 改为 `10fps / max_width=480 / jpeg_quality=45 / ffmpeg_mjpeg_qscale=5`;
+    - `/api/state.camera_proxy` 增加：
+      - `backend`;
+      - `ffmpeg_available`;
+      - `ffmpeg_mjpeg_qscale`;
+      - 每路摄像头自己的 `backend`。
+    - FFmpeg 后端直接执行：
+      - `ffmpeg -rtsp_transport tcp -fflags nobuffer -flags low_delay -i rtsp://10.21.31.103:8554/video1 -an -vf fps=10,scale=480:-2 -q:v 5 -f mjpeg pipe:1`;
+      - Python 只从 stdout 切 JPEG 帧并转发给浏览器，不再经 OpenCV 解码/重新编码。
+    - OpenCV 仍保留为 fallback：只有 FFmpeg 不可用或显式不选 FFmpeg 时才走 OpenCV。
+  - 启动链路补齐：
+    - `m20pro_real.launch.py`;
+    - `m20pro_web_dashboard.launch.py`;
+    - `m20pro.launch.py`;
+    - `m20pro_real_full.sh`。
+  - `m20pro_real_full.sh` 现在显式传：
+    - `camera_proxy_backend:=ffmpeg_mjpeg`;
+    - `camera_proxy_fps:=10.0`;
+    - `camera_proxy_jpeg_quality:=45`;
+    - `camera_proxy_ffmpeg_mjpeg_qscale:=5`;
+    - `camera_proxy_max_width:=480`。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - 必须默认/传递 FFmpeg-MJPEG 后端；
+    - 必须声明和传递 qscale；
+    - 必须保留 FFmpeg worker 和 OpenCV fallback；
+    - 状态接口必须能报告后端和 qscale；
+    - real full 启动必须请求本轮验证过的 FFmpeg-MJPEG profile。
+- 本地验证：
+  - 通过：
+    - `python3 -m py_compile` 覆盖本轮触碰的 Python 节点、launch、检查脚本；
+    - `python3 scripts/check_preflight_policy.py`;
+    - `git diff --check` 覆盖本轮触碰文件。
+- 104 同步/构建/重启：
+  - 同步：
+    - `web_dashboard_node.py`;
+    - `m20pro_real.launch.py`;
+    - `m20pro_web_dashboard.launch.py`;
+    - `m20pro.launch.py`;
+    - `m20pro_real_full.sh`;
+    - `check_preflight_policy.py`。
+  - 104 上通过：
+    - `python3 -m py_compile` 覆盖上述文件；
+    - `python3 scripts/check_preflight_policy.py`;
+    - `colcon build --packages-select m20pro_cloud_bridge m20pro_bringup --symlink-install`。
+  - 已重启 `m20pro-real.service`；
+  - `/healthz` 返回 `{"ok":true}`；
+  - `m20pro-real.service=active`。
+- 104 运行时硬证据：
+  - 104 当前 launch 进程参数已包含：
+    - `camera_proxy_backend:=ffmpeg_mjpeg`;
+    - `camera_proxy_fps:=10.0`;
+    - `camera_proxy_ffmpeg_mjpeg_qscale:=5`;
+    - `camera_proxy_max_width:=480`。
+  - `/api/state.camera_proxy` 返回：
+    - `backend=ffmpeg_mjpeg`;
+    - `ffmpeg_available=true`;
+    - `ffmpeg_mjpeg_qscale=5`;
+    - `fps=10.0`;
+    - `max_width=480`;
+    - 前/后摄 worker 均报告 `backend=ffmpeg_mjpeg`。
+  - 104 本机 loopback 读取前摄 `/camera/front.mjpg` 8 秒：
+    - `65 frames / 8.034s`;
+    - 总体约 `8.09fps`;
+    - 稳定窗口约 `10.25fps`;
+    - 带宽约 `1.615 Mbps`。
+  - 本机通过 `http://10.21.31.104:8080/camera/front.mjpg` 读取 8 秒：
+    - `63 frames / 8.039s`;
+    - 总体约 `7.84fps`;
+    - 稳定窗口约 `10.73fps`;
+    - 带宽约 `1.443 Mbps`。
+  - 打开视频时 104 上能看到真实 FFmpeg 进程：
+    - `ffmpeg ... -vf fps=10,scale=480:-2 -q:v 5 -f mjpeg pipe:1`。
+  - 浏览器/测试断开后：
+    - `front.clients=0`;
+    - `front.running=false`;
+    - `has_frame=false`;
+    - 后台无残留 `ffmpeg` 进程。
+- 当前结论：
+  - 这次 FFmpeg-MJPEG 优化已经真正部署并在 104 生效；
+  - 相比旧 OpenCV worker 约 `4-5fps`，当前稳定窗口约 `10fps`，属于明确改善；
+  - 但它仍不是原厂手柄那种流畅链路：
+    - 原厂手柄很可能是专用播放器/硬解 H.265/H.264 或低延迟私有链路；
+    - 当前 Web 仍是 MJPEG，浏览器 `<img>` 播 JPEG 帧，没有 H.265 硬解和真正视频时钟；
+    - 所以即使后端优化成功，肉眼仍可能觉得“不够顺”，尤其和原厂手柄对比时。
+- 如果继续追求更流畅：
+  - 不建议继续只调 `jpeg_quality/max_width/fps`，收益有限；
+  - 下一条技术路线应该评估：
+    - WebRTC：104/103 侧把 RTSP 转 WebRTC，浏览器用硬件视频解码，目标接近原厂低延迟体验；
+    - 或 MSE/fMP4/HLS/WS-FMP4：比 MJPEG 更像真正视频流，但延迟/兼容性要单独测试；
+    - 或在 103/104 上寻找原厂手柄实际使用的码流/协议，尽量复用原厂低延迟视频路径。
+- 当前 104 非视频状态：
+  - `selected_map_status.code=ready`;
+  - `perception_status.code=perception_ready`;
+  - `localization_status.code=map_relocalization_required`;
+  - `task_readiness.code=map_relocalization_required`;
+  - 这是重启后固定地图同步触发的预期状态，需要现场重新按开发手册 2101 重定位。
+- 本轮没有做的事：
+  - 没调用 `/api/localization/initialpose`;
+  - 没启动任务；
+  - 没发布 `/m20pro/floor_goal`;
+  - 没发送 `/cmd_vel`;
+  - 没改 Nav2/避障算法。

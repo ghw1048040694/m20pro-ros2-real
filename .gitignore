@@ -22,6 +22,7 @@ __pycache__/
 
 # Runtime data, bags, point clouds, and model artifacts
 bags/
+task_watch_logs/
 *.bag
 *.db3
 *.mcap

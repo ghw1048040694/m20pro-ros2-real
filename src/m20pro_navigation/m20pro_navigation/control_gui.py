@@ -2,7 +2,7 @@ import socket
 import json
 import struct
 import tkinter as tk
-from tkinter import ttk, scrolledtext
+from tkinter import ttk
 import time
 import threading
 

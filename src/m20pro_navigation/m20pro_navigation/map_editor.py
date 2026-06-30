@@ -359,7 +359,7 @@ def main() -> None:
             return
         root.deiconify()
 
-    app = MapEditorApp(root, yaml_path)
+    root._m20pro_map_editor_app = MapEditorApp(root, yaml_path)
     root.minsize(1000, 720)
     root.mainloop()
 

@@ -23,24 +23,19 @@ def generate_launch_description():
     factory_mapping_start_command = LaunchConfiguration("factory_mapping_start_command")
     factory_mapping_finish_command = LaunchConfiguration("factory_mapping_finish_command")
     factory_mapping_cancel_command = LaunchConfiguration("factory_mapping_cancel_command")
-    enable_map_pcd_postprocess = LaunchConfiguration("enable_map_pcd_postprocess")
-    pcd_terrain_cell_size = LaunchConfiguration("pcd_terrain_cell_size")
+    enable_stair_zone_postprocess = LaunchConfiguration("enable_stair_zone_postprocess")
     stair_zones_topic = LaunchConfiguration("stair_zones_topic")
     enable_camera_proxy = LaunchConfiguration("enable_camera_proxy")
     front_camera_url = LaunchConfiguration("front_camera_url")
     rear_camera_url = LaunchConfiguration("rear_camera_url")
+    camera_proxy_backend = LaunchConfiguration("camera_proxy_backend")
     camera_proxy_fps = LaunchConfiguration("camera_proxy_fps")
     camera_proxy_jpeg_quality = LaunchConfiguration("camera_proxy_jpeg_quality")
+    camera_proxy_ffmpeg_mjpeg_qscale = LaunchConfiguration("camera_proxy_ffmpeg_mjpeg_qscale")
     camera_proxy_max_width = LaunchConfiguration("camera_proxy_max_width")
     camera_proxy_transport = LaunchConfiguration("camera_proxy_transport")
     initialpose_topic = LaunchConfiguration("initialpose_topic")
     relocalization_result_topic = LaunchConfiguration("relocalization_result_topic")
-    factory_initialpose_remote_publish = LaunchConfiguration("factory_initialpose_remote_publish")
-    factory_initialpose_topic = LaunchConfiguration("factory_initialpose_topic")
-    factory_initialpose_source_command = LaunchConfiguration("factory_initialpose_source_command")
-    factory_initialpose_command_timeout_s = LaunchConfiguration("factory_initialpose_command_timeout_s")
-    factory_initialpose_ssh_identity_file = LaunchConfiguration("factory_initialpose_ssh_identity_file")
-    factory_initialpose_ssh_known_hosts_file = LaunchConfiguration("factory_initialpose_ssh_known_hosts_file")
 
     return LaunchDescription([
         DeclareLaunchArgument("host", default_value="0.0.0.0"),
@@ -61,10 +56,8 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "factory_mapping_start_command",
             default_value=(
-                "ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new "
-                "-i /home/user/.ssh/id_ed25519 -o IdentitiesOnly=yes "
-                "-o UserKnownHostsFile=/home/user/.ssh/known_hosts {factory_user}@{factory_host} "
-                "\"nohup sudo -n /usr/local/bin/drmap mapping -s -n {map_name} > "
+                "ssh -o BatchMode=yes -o ConnectTimeout=8 {factory_user}@{factory_host} "
+                "\"nohup sudo -n drmap mapping -s -n {map_name} > "
                 "/tmp/m20pro_drmap_mapping_{session_id}.log 2>&1 &\""
             ),
             description="Shell command template for starting drmap mapping on 106.",
@@ -72,55 +65,34 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "factory_mapping_finish_command",
             default_value=(
-                "ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new "
-                "-i /home/user/.ssh/id_ed25519 -o IdentitiesOnly=yes "
-                "-o UserKnownHostsFile=/home/user/.ssh/known_hosts {factory_user}@{factory_host} "
-                "\"sudo -n /usr/local/bin/drmap stop_mapping\""
+                "ssh -o BatchMode=yes -o ConnectTimeout=8 {factory_user}@{factory_host} "
+                "\"sudo -n drmap stop_mapping\""
             ),
             description="Shell command template for stopping/saving drmap mapping on 106.",
         ),
         DeclareLaunchArgument(
             "factory_mapping_cancel_command",
             default_value=(
-                "ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new "
-                "-i /home/user/.ssh/id_ed25519 -o IdentitiesOnly=yes "
-                "-o UserKnownHostsFile=/home/user/.ssh/known_hosts {factory_user}@{factory_host} "
-                "\"sudo -n /usr/local/bin/drmap stop_mapping\""
+                "ssh -o BatchMode=yes -o ConnectTimeout=8 {factory_user}@{factory_host} "
+                "\"sudo -n drmap stop_mapping\""
             ),
             description="Shell command template for cancelling drmap mapping on 106.",
         ),
-        DeclareLaunchArgument("enable_map_pcd_postprocess", default_value="true"),
-        DeclareLaunchArgument("pcd_terrain_cell_size", default_value="0.25"),
+        DeclareLaunchArgument("enable_stair_zone_postprocess", default_value="true"),
         DeclareLaunchArgument("stair_zones_topic", default_value="/m20pro/stair_zones"),
         DeclareLaunchArgument("enable_camera_proxy", default_value="false"),
         DeclareLaunchArgument("front_camera_url", default_value="rtsp://10.21.31.103:8554/video1"),
         DeclareLaunchArgument("rear_camera_url", default_value="rtsp://10.21.31.103:8554/video2"),
-        DeclareLaunchArgument("camera_proxy_fps", default_value="3.0"),
-        DeclareLaunchArgument("camera_proxy_jpeg_quality", default_value="55"),
+        DeclareLaunchArgument("camera_proxy_backend", default_value="ffmpeg_mjpeg"),
+        DeclareLaunchArgument("camera_proxy_fps", default_value="10.0"),
+        DeclareLaunchArgument("camera_proxy_jpeg_quality", default_value="45"),
+        DeclareLaunchArgument("camera_proxy_ffmpeg_mjpeg_qscale", default_value="5"),
         DeclareLaunchArgument("camera_proxy_max_width", default_value="480"),
         DeclareLaunchArgument("camera_proxy_transport", default_value="tcp"),
         DeclareLaunchArgument("initialpose_topic", default_value="/initialpose"),
         DeclareLaunchArgument(
             "relocalization_result_topic",
             default_value="/m20pro_tcp_bridge/relocalization_result",
-        ),
-        DeclareLaunchArgument("factory_initialpose_remote_publish", default_value="true"),
-        DeclareLaunchArgument("factory_initialpose_topic", default_value="/initialpose"),
-        DeclareLaunchArgument(
-            "factory_initialpose_source_command",
-            default_value=(
-                "source /opt/robot/scripts/setup_ros2.sh >/dev/null 2>&1 || "
-                "source /opt/ros/foxy/setup.bash"
-            ),
-        ),
-        DeclareLaunchArgument("factory_initialpose_command_timeout_s", default_value="15.0"),
-        DeclareLaunchArgument(
-            "factory_initialpose_ssh_identity_file",
-            default_value="/home/user/.ssh/id_ed25519",
-        ),
-        DeclareLaunchArgument(
-            "factory_initialpose_ssh_known_hosts_file",
-            default_value="/home/user/.ssh/known_hosts",
         ),
         Node(
             package="m20pro_cloud_bridge",
@@ -144,21 +116,22 @@ def generate_launch_description():
                     "factory_mapping_start_command": factory_mapping_start_command,
                     "factory_mapping_finish_command": factory_mapping_finish_command,
                     "factory_mapping_cancel_command": factory_mapping_cancel_command,
-                    "enable_map_pcd_postprocess": ParameterValue(
-                        enable_map_pcd_postprocess,
+                    "enable_stair_zone_postprocess": ParameterValue(
+                        enable_stair_zone_postprocess,
                         value_type=bool,
-                    ),
-                    "pcd_terrain_cell_size": ParameterValue(
-                        pcd_terrain_cell_size,
-                        value_type=float,
                     ),
                     "stair_zones_topic": stair_zones_topic,
                     "enable_camera_proxy": ParameterValue(enable_camera_proxy, value_type=bool),
                     "front_camera_url": front_camera_url,
                     "rear_camera_url": rear_camera_url,
+                    "camera_proxy_backend": camera_proxy_backend,
                     "camera_proxy_fps": ParameterValue(camera_proxy_fps, value_type=float),
                     "camera_proxy_jpeg_quality": ParameterValue(
                         camera_proxy_jpeg_quality,
+                        value_type=int,
+                    ),
+                    "camera_proxy_ffmpeg_mjpeg_qscale": ParameterValue(
+                        camera_proxy_ffmpeg_mjpeg_qscale,
                         value_type=int,
                     ),
                     "camera_proxy_max_width": ParameterValue(
@@ -168,18 +141,6 @@ def generate_launch_description():
                     "camera_proxy_transport": camera_proxy_transport,
                     "initialpose_topic": initialpose_topic,
                     "relocalization_result_topic": relocalization_result_topic,
-                    "factory_initialpose_remote_publish": ParameterValue(
-                        factory_initialpose_remote_publish,
-                        value_type=bool,
-                    ),
-                    "factory_initialpose_topic": factory_initialpose_topic,
-                    "factory_initialpose_source_command": factory_initialpose_source_command,
-                    "factory_initialpose_command_timeout_s": ParameterValue(
-                        factory_initialpose_command_timeout_s,
-                        value_type=float,
-                    ),
-                    "factory_initialpose_ssh_identity_file": factory_initialpose_ssh_identity_file,
-                    "factory_initialpose_ssh_known_hosts_file": factory_initialpose_ssh_known_hosts_file,
                 }
             ],
         ),

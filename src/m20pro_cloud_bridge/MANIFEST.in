@@ -1,0 +1,1 @@
+recursive-include m20pro_cloud_bridge/static *.html *.css *.js

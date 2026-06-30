@@ -378,7 +378,7 @@ else
   fail "web /api/state failed"
 fi
 
-launch_args="$(ps -eo args | grep 'ros2 launch m20pro_bringup m20pro_real.launch.py' | grep -v grep | tail -1 || true)"
+launch_args="$(ps -eo args | grep 'ros2 launch m20pro_bringup m20pro.launch.py' | grep -v grep | tail -1 || true)"
 mode_line=""
 search_dirs=()
 if [[ -d "${HOME}/.ros/log" && -r "${HOME}/.ros/log" ]]; then

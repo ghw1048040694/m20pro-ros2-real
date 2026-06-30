@@ -35,6 +35,30 @@ BRINGUP_LIBEXEC="${BRINGUP_PREFIX}/lib/m20pro_bringup"
 
 PROJECT_FASTDDS="${WS_DIR}/install/m20pro_bringup/share/m20pro_bringup/config/m20pro_fastdds_udp.xml"
 FACTORY_FASTDDS="/opt/robot/fastdds.xml"
+
+cleanup_stale_fastdds_shm() {
+  if [[ "${M20PRO_CLEAN_STALE_FASTDDS_SHM:-1}" != "1" ]]; then
+    return
+  fi
+  local stale=0
+  local kept=0
+  local file
+  shopt -s nullglob
+  for file in /dev/shm/fastrtps_*; do
+    if fuser "${file}" >/dev/null 2>&1; then
+      kept=$((kept + 1))
+    else
+      rm -f -- "${file}" && stale=$((stale + 1))
+    fi
+  done
+  shopt -u nullglob
+  if [[ "${stale}" -gt 0 || "${kept}" -gt 0 ]]; then
+    echo "[m20pro_real_full] stale FastDDS SHM cleanup: removed=${stale} kept_open=${kept}" >&2
+  fi
+}
+
+cleanup_stale_fastdds_shm
+
 case "${M20PRO_FASTDDS_PROFILE:-project_udp}" in
   project_udp|udp)
     if [[ -f "${PROJECT_FASTDDS}" ]]; then
@@ -72,7 +96,7 @@ fi
 "${BRINGUP_LIBEXEC}/m20pro_runtime_snapshot.sh" || true
 
 relay_fastdds_profile_file() {
-  case "${M20PRO_LIDAR_RELAY_FASTDDS_PROFILE:-factory}" in
+  case "${M20PRO_LIDAR_RELAY_FASTDDS_PROFILE:-project_udp}" in
     factory)
       if [[ -f "${FACTORY_FASTDDS}" ]]; then
         echo "${FACTORY_FASTDDS}"
@@ -96,7 +120,8 @@ relay_fastdds_profile_file() {
 }
 
 if ps -eo pid,args | awk '
-  /ros2 launch m20pro_bringup m20pro_real.launch.py/ &&
+  /ros2 launch m20pro_bringup m20pro.launch.py/ &&
+  /mode:=real/ &&
   !/awk/ {print}
 ' >/tmp/m20pro_real_existing_stack.out && [[ -s /tmp/m20pro_real_existing_stack.out ]]; then
   cat >&2 <<'EOF'
@@ -137,8 +162,7 @@ if [[ -n "${LIDAR_RELAY_FASTDDS}" ]]; then
 fi
 set +e
 FASTRTPS_DEFAULT_PROFILES_FILE="${LIDAR_RELAY_FASTDDS}" \
-  M20PRO_LIDAR_RELAY_WAIT_S="${M20PRO_LIDAR_RELAY_WAIT_S:-45}" \
-  "${BRINGUP_LIBEXEC}/m20pro_lidar_relay_guard.sh" start-wait
+  "${BRINGUP_LIBEXEC}/m20pro_lidar_relay_guard.sh" start
 relay_status="$?"
 set -e
 if [[ "${relay_status}" -ne 0 ]]; then
@@ -150,7 +174,7 @@ if [[ "${relay_status}" -ne 0 ]]; then
 fi
 
 BACKUP_CLOUD_TOPIC=""
-if [[ "${M20PRO_ENABLE_LIDAR2_RELAY:-1}" == "1" && -n "${LIDAR2_INPUT_TOPIC}" && -n "${LIDAR2_RELAY_TOPIC}" ]]; then
+if [[ "${M20PRO_ENABLE_LIDAR2_RELAY:-0}" == "1" && -n "${LIDAR2_INPUT_TOPIC}" && -n "${LIDAR2_RELAY_TOPIC}" ]]; then
   set +e
   FASTRTPS_DEFAULT_PROFILES_FILE="${LIDAR_RELAY_FASTDDS}" \
     M20PRO_LIDAR_TOPIC="${LIDAR2_INPUT_TOPIC}" \
@@ -158,13 +182,12 @@ if [[ "${M20PRO_ENABLE_LIDAR2_RELAY:-1}" == "1" && -n "${LIDAR2_INPUT_TOPIC}" &&
     M20PRO_LIDAR_RELAY_STATUS_TOPIC="${M20PRO_LIDAR2_RELAY_STATUS_TOPIC:-/m20pro/lidar_relay2/status}" \
     M20PRO_LIDAR_RELAY_PID_FILE="${M20PRO_LIDAR2_RELAY_PID_FILE:-/tmp/m20pro_lidar_relay2.pid}" \
     M20PRO_LIDAR_RELAY_LOG_FILE="${M20PRO_LIDAR2_RELAY_LOG_FILE:-/tmp/m20pro_lidar_relay2.log}" \
-    M20PRO_LIDAR_RELAY_WAIT_S="${M20PRO_LIDAR2_RELAY_WAIT_S:-8}" \
-    "${BRINGUP_LIBEXEC}/m20pro_lidar_relay_guard.sh" start-wait
+    "${BRINGUP_LIBEXEC}/m20pro_lidar_relay_guard.sh" start
   relay2_status="$?"
   set -e
   if [[ "${relay2_status}" -eq 0 ]]; then
     BACKUP_CLOUD_TOPIC="${LIDAR2_RELAY_TOPIC}"
-    echo "[m20pro_real_full] optional LIDAR2 relay is ready: ${LIDAR2_INPUT_TOPIC} -> ${LIDAR2_RELAY_TOPIC}" >&2
+    echo "[m20pro_real_full] optional LIDAR2 relay started: ${LIDAR2_INPUT_TOPIC} -> ${LIDAR2_RELAY_TOPIC}" >&2
   else
     echo "[m20pro_real_full] optional LIDAR2 relay not ready (${LIDAR2_INPUT_TOPIC}); continuing with primary lidar only." >&2
     M20PRO_LIDAR_RELAY_PID_FILE="${M20PRO_LIDAR2_RELAY_PID_FILE:-/tmp/m20pro_lidar_relay2.pid}" \
@@ -175,14 +198,17 @@ if [[ "${M20PRO_ENABLE_LIDAR2_RELAY:-1}" == "1" && -n "${LIDAR2_INPUT_TOPIC}" &&
 fi
 
 COMMON_ARGS=(
+  mode:=real
   rviz:=false
   enable_web_dashboard:=true
-  enable_initialpose_relocalization:=false
+  enable_initialpose_relocalization:=true
   web_dashboard_data_dir:=/home/user/.m20pro_web
   web_dashboard_map_archive_dir:=/home/user/m20pro_maps
   enable_camera_proxy:=true
-  camera_proxy_fps:=2.0
+  camera_proxy_backend:=ffmpeg_mjpeg
+  camera_proxy_fps:=10.0
   camera_proxy_jpeg_quality:=45
+  camera_proxy_ffmpeg_mjpeg_qscale:=5
   camera_proxy_max_width:=480
   cloud_topic:="${LIDAR_RELAY_TOPIC}"
 )
@@ -205,7 +231,7 @@ with open(src, "r", encoding="utf-8") as file:
 
 bridge = data.setdefault("m20pro_tcp_bridge", {}).setdefault("ros__parameters", {})
 bridge["enable_axis_command"] = axis_text.lower() in ("1", "true", "yes", "on")
-bridge["enable_initialpose_relocalization"] = False
+bridge["enable_initialpose_relocalization"] = True
 bridge["enable_initialpose_3d_relocalization"] = False
 
 with open(dst, "w", encoding="utf-8") as file:
@@ -217,16 +243,16 @@ PY
 case "${MODE}" in
   shadow|safe)
     RUNTIME_PARAMS="$(make_runtime_params false)"
-    exec ros2 launch m20pro_bringup m20pro_real.launch.py \
+    exec ros2 launch m20pro_bringup m20pro.launch.py \
       "${COMMON_ARGS[@]}" \
-      params_file:="${RUNTIME_PARAMS}" \
+      real_params_file:="${RUNTIME_PARAMS}" \
       enable_axis_command:=false
     ;;
   move)
     RUNTIME_PARAMS="$(make_runtime_params true)"
-    exec ros2 launch m20pro_bringup m20pro_real.launch.py \
+    exec ros2 launch m20pro_bringup m20pro.launch.py \
       "${COMMON_ARGS[@]}" \
-      params_file:="${RUNTIME_PARAMS}" \
+      real_params_file:="${RUNTIME_PARAMS}" \
       enable_axis_command:=true
     ;;
   *)
