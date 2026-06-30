@@ -4,7 +4,7 @@ set -euo pipefail
 WS_DIR="${M20PRO_WS:-/home/user/m20pro_ros2_ws}"
 REMOTE="${M20PRO_REMOTE:-gitlab}"
 BRANCH="${M20PRO_BRANCH:-main}"
-REMOTE_URL="${M20PRO_REMOTE_URL:-git@git.fabu.ai:genghaowei/m20pro-ros2-navigation.git}"
+REMOTE_URL="${M20PRO_REMOTE_URL:-git@git.fabu.ai:genghaowei/m20pro-ros2-real.git}"
 PACKAGES="${M20PRO_BUILD_PACKAGES:-}"
 RESTART_SERVICE="${M20PRO_RESTART_SERVICE:-0}"
 

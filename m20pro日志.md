@@ -1,10 +1,27 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-06-30 20:28 CST
+Last updated: 2026-06-30 20:58 CST
 
 This file is maintained by Codex as the local M20 Pro project memory for future ChatGPT review. It records the current architecture, important decisions, recent changes, verification status, and next steps.
 
 Naming note: this file replaced the previous local-only `codex.md`. Going forward, maintain this file, `m20pro日志.md`, after every meaningful project change or field diagnosis.
+
+## 2026-06-30 20:58 CST - GitHub/GitLab real 仓库和 Unre 分支对齐
+
+- Repository scope:
+  - 当前仓库按 real-only 项目维护，不再按旧 real/sim 二合一仓库处理。
+  - GitHub origin 为 `git@github.com:ghw1048040694/m20pro-ros2-real.git`。
+  - GitLab real 项目为 `git@git.fabu.ai:genghaowei/m20pro-ros2-real.git`。
+- Branch setup:
+  - 已创建并推送 `Unre` 分支，供昂锐雷达方向实习生使用。
+  - `main` 和 `Unre` 当前都指向 `990e2cc chore: sync field-ready dashboard contracts`。
+- Script cleanup:
+  - `scripts/104_update_from_gitlab.sh` 默认 GitLab 地址改为 real 仓库。
+  - `scripts/104_update_from_mirror.sh` 默认 GitHub 镜像地址改为 real 仓库。
+  - `scripts/README.md` 同步更新默认镜像仓库说明。
+- Safety status:
+  - 本轮只做 git/文档/脚本默认远端地址维护；
+  - 不调用重定位、不启动任务、不发布 `/m20pro/floor_goal` 或 `/cmd_vel`。
 
 ## 2026-06-30 20:28 CST - README 和 git 提交前收口
 
