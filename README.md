@@ -36,7 +36,7 @@ docs/single_floor_navigation_architecture.md
 104 推荐固定工作区：
 
 ```text
-/home/user/m20pro_ros2_ws
+/home/user/m20pro_real_ros2_ws
 ```
 
 104 上进入环境的固定顺序：
@@ -45,7 +45,7 @@ docs/single_floor_navigation_architecture.md
 ssh user@10.21.31.104
 source /opt/robot/scripts/setup_ros2.sh
 su
-cd /home/user/m20pro_ros2_ws
+cd /home/user/m20pro_real_ros2_ws
 source install/setup.bash
 ```
 
@@ -55,7 +55,7 @@ source install/setup.bash
 
 ```bash
 source /opt/robot/scripts/setup_ros2.sh
-cd /home/user/m20pro_ros2_ws
+cd /home/user/m20pro_real_ros2_ws
 source install/setup.bash
 colcon build --packages-select m20pro_bringup m20pro_cloud_bridge m20pro_navigation --symlink-install
 source install/setup.bash
@@ -121,7 +121,7 @@ source install/setup.bash
 ssh user@10.21.31.104
 source /opt/robot/scripts/setup_ros2.sh
 su
-cd /home/user/m20pro_ros2_ws
+cd /home/user/m20pro_real_ros2_ws
 ./scripts/104_enable_autostart.sh move
 systemctl start m20pro-real.service
 ./scripts/104_autostart_status.sh
@@ -131,7 +131,7 @@ systemctl start m20pro-real.service
 
 ```bash
 su
-cd /home/user/m20pro_ros2_ws
+cd /home/user/m20pro_real_ros2_ws
 ./scripts/104_disable_autostart.sh
 ```
 
@@ -169,7 +169,7 @@ ros2 launch m20pro_bringup m20pro.launch.py mode:=sim
 ssh user@10.21.31.104
 source /opt/robot/scripts/setup_ros2.sh
 su
-cd /home/user/m20pro_ros2_ws
+cd /home/user/m20pro_real_ros2_ws
 source install/setup.bash
 ./scripts/104_preflight_check.sh move
 ```

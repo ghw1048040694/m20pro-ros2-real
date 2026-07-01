@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-WS_DIR="${M20PRO_WS:-/home/user/m20pro_ros2_ws}"
+WS_DIR="${M20PRO_WS:-/home/user/m20pro_real_ros2_ws}"
 WEB_URL="${M20PRO_WEB_URL:-http://127.0.0.1:8080}"
 SINCE="${M20PRO_DIAG_SINCE:-15 min ago}"
 PREFLIGHT_TIMEOUT_S="${M20PRO_DIAG_PREFLIGHT_TIMEOUT_S:-45}"
@@ -224,7 +224,7 @@ fi
 section "Selected ROS graph"
 M20PRO_WS="${WS_DIR}" bash <<'BASH' || true
 set +euo pipefail
-WS_DIR="${M20PRO_WS:-/home/user/m20pro_ros2_ws}"
+WS_DIR="${M20PRO_WS:-/home/user/m20pro_real_ros2_ws}"
 if [[ -f /opt/robot/scripts/setup_ros2.sh ]]; then
   # shellcheck disable=SC1091
   source /opt/robot/scripts/setup_ros2.sh >/dev/null 2>&1 || true

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 HOST="${1:-user@10.21.31.104}"
-REMOTE_WS="${2:-/home/user/m20pro_ros2_ws}"
+REMOTE_WS="${2:-/home/user/m20pro_real_ros2_ws}"
 BRANCH="${M20PRO_DEPLOY_BRANCH:-main}"
 REMOTE_NAME="${M20PRO_DEPLOY_REMOTE:-gitlab}"
 

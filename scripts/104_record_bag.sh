@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-WS_DIR="${M20PRO_WS:-/home/user/m20pro_ros2_ws}"
+WS_DIR="${M20PRO_WS:-/home/user/m20pro_real_ros2_ws}"
 DURATION_S="${1:-180}"
 PREFIX="${2:-m20_real}"
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-WS_DIR="${M20PRO_WS:-/home/user/m20pro_ros2_ws}"
+WS_DIR="${M20PRO_WS:-/home/user/m20pro_real_ros2_ws}"
 MODE="${1:-move}"
 TIMEOUT_S="${2:-45}"
 WEB_URL="${M20PRO_WEB_URL:-http://127.0.0.1:8080}"

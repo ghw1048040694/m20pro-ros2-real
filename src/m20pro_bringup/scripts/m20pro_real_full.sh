@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-WS_DIR="${M20PRO_WS:-/home/user/m20pro_ros2_ws}"
+WS_DIR="${M20PRO_WS:-/home/user/m20pro_real_ros2_ws}"
 MODE="${1:-shadow}"
 
 if [[ "${EUID}" -ne 0 ]]; then
@@ -11,7 +11,7 @@ m20pro_real_full.sh must be run after the known-good 104 root sequence:
   ssh user@10.21.31.104
   source /opt/robot/scripts/setup_ros2.sh
   su
-  cd /home/user/m20pro_ros2_ws
+  cd /home/user/m20pro_real_ros2_ws
   source install/setup.bash
   ros2 run m20pro_bringup m20pro_real_full.sh shadow
 

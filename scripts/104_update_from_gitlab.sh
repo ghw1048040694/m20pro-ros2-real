@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-WS_DIR="${M20PRO_WS:-/home/user/m20pro_ros2_ws}"
+WS_DIR="${M20PRO_WS:-/home/user/m20pro_real_ros2_ws}"
 REMOTE="${M20PRO_REMOTE:-gitlab}"
 BRANCH="${M20PRO_BRANCH:-main}"
 REMOTE_URL="${M20PRO_REMOTE_URL:-git@git.fabu.ai:genghaowei/m20pro-ros2-real.git}"
@@ -15,7 +15,7 @@ Run this on 104 after su:
   ssh user@10.21.31.104
   source /opt/robot/scripts/setup_ros2.sh
   su
-  cd /home/user/m20pro_ros2_ws
+  cd /home/user/m20pro_real_ros2_ws
   ./scripts/104_update_from_gitlab.sh
 EOF
   exit 2

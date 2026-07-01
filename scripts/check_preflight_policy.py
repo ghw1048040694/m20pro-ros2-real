@@ -83,6 +83,26 @@ MAPPING_CONTRACT_TEST = ROOT / "scripts/test_mapping_contract.py"
 STARTUP_MAP_SYNC_CONTRACT_TEST = ROOT / "scripts/test_startup_map_sync_contract.py"
 PCD_DERIVED_TEST = ROOT / "scripts/test_pcd_derived.py"
 
+REAL_ONLY_WORKSPACE_FILES = (
+    ROOT / "README.md",
+    ROOT / "scripts/README.md",
+    ROOT / "scripts/104_update_from_gitlab.sh",
+    ROOT / "scripts/104_enable_autostart.sh",
+    ROOT / "scripts/104_preflight_check.sh",
+    ROOT / "scripts/104_start_real_shadow.sh",
+    ROOT / "scripts/104_start_real_move.sh",
+    ROOT / "scripts/104_record_bag.sh",
+    ROOT / "scripts/104_start_web.sh",
+    ROOT / "scripts/104_check_lidar.sh",
+    ROOT / "scripts/104_diagnose_preflight.sh",
+    ROOT / "scripts/104_autostart_entrypoint.sh",
+    ROOT / "scripts/local_deploy_to_test_robot.sh",
+    ROOT / "src/m20pro_bringup/scripts/m20pro_real_full.sh",
+    ROOT / "src/m20pro_bringup/scripts/m20pro_real_nav.sh",
+    ROOT / "src/m20pro_bringup/scripts/m20pro_real_web.sh",
+    ROOT / "src/m20pro_bringup/scripts/m20pro_record_real.sh",
+)
+
 
 def fail(message: str) -> None:
     print(f"[FAIL] {message}")
@@ -197,6 +217,20 @@ def main() -> int:
     mapping_contract_test = read(MAPPING_CONTRACT_TEST)
     startup_map_sync_contract_test = read(STARTUP_MAP_SYNC_CONTRACT_TEST)
     pcd_derived_test = read(PCD_DERIVED_TEST)
+    real_only_workspace_text = "\n".join(
+        f"{path.relative_to(ROOT)}\n{read(path)}" for path in REAL_ONLY_WORKSPACE_FILES
+    )
+
+    forbid(
+        real_only_workspace_text,
+        r"/home/user/m20pro_ros2_ws(?!_)",
+        "real-only runtime docs and scripts must not default to the legacy /home/user/m20pro_ros2_ws path",
+    )
+    require(
+        real_only_workspace_text,
+        r"/home/user/m20pro_real_ros2_ws",
+        "real-only runtime docs and scripts point at /home/user/m20pro_real_ros2_ws",
+    )
 
     require(
         web,

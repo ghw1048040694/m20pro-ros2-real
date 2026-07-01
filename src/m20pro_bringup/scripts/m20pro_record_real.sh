@@ -13,7 +13,7 @@ if [[ -z "${ROS_DISTRO:-}" ]]; then
   set -u
 fi
 if [[ -z "${FASTRTPS_DEFAULT_PROFILES_FILE:-}" ]]; then
-  UDP_PROFILE="/home/user/m20pro_ros2_ws/install/m20pro_bringup/share/m20pro_bringup/config/m20pro_fastdds_udp.xml"
+  UDP_PROFILE="/home/user/m20pro_real_ros2_ws/install/m20pro_bringup/share/m20pro_bringup/config/m20pro_fastdds_udp.xml"
   if [[ -f "${UDP_PROFILE}" && "${M20PRO_FASTDDS_PROFILE:-project_udp}" != "factory" ]]; then
     export FASTRTPS_DEFAULT_PROFILES_FILE="${UDP_PROFILE}"
   else
@@ -29,7 +29,7 @@ m20pro_record_real.sh should be run from the known-good root ROS environment:
   ssh user@10.21.31.104
   source /opt/robot/scripts/setup_ros2.sh
   su
-  cd /home/user/m20pro_ros2_ws
+  cd /home/user/m20pro_real_ros2_ws
   source install/setup.bash
   ros2 run m20pro_bringup m20pro_record_real.sh 90 factory_baseline
 

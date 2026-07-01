@@ -15,7 +15,7 @@ SSH 到 `user@10.21.31.104` 并在 104 上检查：
 ssh user@10.21.31.104
 source /opt/robot/scripts/setup_ros2.sh
 su
-cd /home/user/m20pro_ros2_ws
+cd /home/user/m20pro_real_ros2_ws
 source install/setup.bash
 ```
 
@@ -102,7 +102,7 @@ source install/setup.bash
 - `104_autostart_status.sh` 查看自启动服务、8080 端口和最近日志。
 - `104_disable_autostart.sh` 停止并移除自启动服务。
 - `local_deploy_to_test_robot.sh` 从上位机同步当前工作区到测试机，不同步 `.git/build/install/log/bags`。
-- 如果 104 上 `/home/user/m20pro_ros2_ws` 不是 git 工作区，`git pull` 不会工作；先用 `104_diagnose_preflight.sh` 确认 `git_repo=yes/no`，非 git 工作区继续用上位机 `local_deploy_to_test_robot.sh`，或在网络稳定后用 `104_update_from_gitlab.sh`/`104_update_from_mirror.sh` 转成 git 工作区。
+- 如果 104 上 `/home/user/m20pro_real_ros2_ws` 不是 git 工作区，`git pull` 不会工作；先用 `104_diagnose_preflight.sh` 确认 `git_repo=yes/no`，非 git 工作区继续用上位机 `local_deploy_to_test_robot.sh`，或在网络稳定后用 `104_update_from_gitlab.sh`/`104_update_from_mirror.sh` 转成 git 工作区。
 - 如果 104 需要通过 103 上网，104 必须能拿到默认路由和 DNS，103 自己也必须有 Wi-Fi/上游默认路由、IPv4 转发、NAT 和 dnsmasq；只看到 104 能 ping 到 `10.21.31.103` 不等于能访问 GitHub。
 - `104_update_from_gitlab.sh` 是 104 直连 GitLab 后使用的更新入口；如果当前网络访问不到 `git.fabu.ai`，先不要用它。
 - `104_update_from_mirror.sh` 是测试机直连镜像仓库的入口，默认使用 `git@github.com:ghw1048040694/m20pro-ros2-real.git`；如果改用 Gitee，可执行：

@@ -1,10 +1,36 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-07-01 17:18 CST
+Last updated: 2026-07-01 17:21 CST
 
 This file is maintained by Codex as the local M20 Pro project memory for future ChatGPT review. It records the current architecture, important decisions, recent changes, verification status, and next steps.
 
 Naming note: this file replaced the previous local-only `codex.md`. Going forward, maintain this file, `m20pro日志.md`, after every meaningful project change or field diagnosis.
+
+## 2026-07-01 17:21 CST - real-only 工作区路径去软链接化
+
+- Decision:
+  - 用户明确要求清理 `/home/user/m20pro_ros2_ws` 旧路径软链接。
+  - 原因：后续不止一台机器狗部署，不能继续依赖旧 real/sim 二合一仓库路径；新部署应统一使用 real-only 工作区。
+- Code/docs cleanup:
+  - 当前运行文档和脚本默认路径统一改为：
+    - `/home/user/m20pro_real_ros2_ws`。
+  - 涉及：
+    - `README.md`;
+    - `scripts/README.md`;
+    - `scripts/104_*` 现场入口脚本；
+    - `scripts/local_deploy_to_test_robot.sh`;
+    - `src/m20pro_bringup/scripts/m20pro_real_*.sh`;
+    - `src/m20pro_bringup/scripts/m20pro_record_real.sh`。
+  - `scripts/check_preflight_policy.py` 增加防回归：
+    - 当前运行文档和脚本不得默认使用 `/home/user/m20pro_ros2_ws`;
+    - 必须指向 `/home/user/m20pro_real_ros2_ws`。
+- Scope note:
+  - `m20pro日志.md` 历史记录中的旧路径不机械替换，避免污染早期排障历史。
+  - 本轮清理的是当前运行入口、部署入口和说明文档。
+- 104 migration plan:
+  - 同步本次提交到 104 后，删除 `/home/user/m20pro_ros2_ws` 软链接。
+  - 保留真实工作区 `/home/user/m20pro_real_ros2_ws`。
+  - 不重启服务，不调用重定位，不启动任务，不发布运动目标。
 
 ## 2026-07-01 17:18 CST - 外科手术级纠正：104 git 工作区安全对齐到 real main
 

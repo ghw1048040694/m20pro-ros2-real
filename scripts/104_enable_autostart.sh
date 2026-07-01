@@ -2,7 +2,7 @@
 set -euo pipefail
 
 MODE="${1:-move}"
-WS_DIR="${M20PRO_WS:-/home/user/m20pro_ros2_ws}"
+WS_DIR="${M20PRO_WS:-/home/user/m20pro_real_ros2_ws}"
 UNIT_SRC="${WS_DIR}/systemd/m20pro-real.service"
 UNIT_DST="/etc/systemd/system/m20pro-real.service"
 ENV_DST="/etc/default/m20pro-real"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-WS_DIR="${M20PRO_WS:-/home/user/m20pro_ros2_ws}"
+WS_DIR="${M20PRO_WS:-/home/user/m20pro_real_ros2_ws}"
 MODE="${1:-safe}"
 CLOUD_TOPIC="${M20PRO_CLOUD_TOPIC:-/LIDAR/POINTS}"
 

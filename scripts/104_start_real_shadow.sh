@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-WS_DIR="${M20PRO_WS:-/home/user/m20pro_ros2_ws}"
+WS_DIR="${M20PRO_WS:-/home/user/m20pro_real_ros2_ws}"
 
 if [[ "${EUID}" -ne 0 ]]; then
   echo "Run this after su on 104. Shadow mode does not enable motion control." >&2
