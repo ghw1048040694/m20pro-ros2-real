@@ -1,10 +1,105 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-06-30 20:58 CST
+Last updated: 2026-07-01 17:00 CST
 
 This file is maintained by Codex as the local M20 Pro project memory for future ChatGPT review. It records the current architecture, important decisions, recent changes, verification status, and next steps.
 
 Naming note: this file replaced the previous local-only `codex.md`. Going forward, maintain this file, `m20pro日志.md`, after every meaningful project change or field diagnosis.
+
+## 2026-07-01 17:00 CST - 轻量化/接口化阶段评估与 104 git 状态确认
+
+- Local repository status:
+  - 本地 real 仓库在 `main`，远端为 GitHub `origin` 与 GitLab `gitlab`。
+  - 本地最新提交为 `6f42eca chore: align real git remotes`。
+  - 本地目前只有 `m20pro日志.md` 处于已修改状态，本轮为日志维护。
+- Lightweight / interface split assessment:
+  - 已完成一轮有效拆分：
+    - `web_dashboard_node.py` 当前约 `5293` 行，已明显从原先更重的单体节点中拆出大量纯规则；
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/` 下已有 `18` 个 `*_contract.py`；
+    - `scripts/` 下已有 `19` 个离线 contract / pcd 测试脚本；
+    - 前端已拆为 `static/dashboard.html`、`static/dashboard.css`、`static/dashboard.js`。
+  - 当前已有接口化基础：
+    - HTTP API 已覆盖状态、地图、点位、任务、自检、重定位等；
+    - ROS JSON topic `/m20pro/active_waypoint` 已作为当前任务点对外接口；
+    - 纯规则大量下沉到 contract，方便后续甲方前端和昂锐雷达 package 复用。
+  - 仍未完全到位：
+    - 还没有正式 `docs/frontend_api_contract.md` / OpenAPI；
+    - HTTP API 还没有 `/api/v1` 版本化；
+    - 面向甲方前端的字段表、错误码、流程示例和鉴权策略还没固定；
+    - 点位合同还没正式纳入 `building/unit/house/scan_point/radar.scans`。
+- 104 robot repository status:
+  - 只读 SSH 查看 `/home/user/m20pro_ros2_ws`：
+    - 是 git 工作区；
+    - 当前 `HEAD` 仍是 `b7f84c3 fix: harden frontend field workflow feedback`；
+    - 104 的 `origin/main` 也停在 `b7f84c3`，尚未反映本地/GitHub/GitLab 最新 `6f42eca`；
+    - 但工作区内已经有当前拆分后的文件形态：`18` 个 contract、`19` 个测试、`web_dashboard_node.py` 约 `5293` 行、`dashboard.js` 约 `2536` 行；
+    - `git diff --name-only` 为 `34` 个已跟踪改动；
+    - `git ls-files --others --exclude-standard` 为 `58` 个未跟踪文件。
+  - 结论：104 文件内容像是前两天通过同步/部署带上去了，但 git 视角不是干净同步状态；不能把 104 当作“已 git pull 到最新 main”的机器。
+- Risk / next action:
+  - 在下一次正式同步 104 前，不要直接在 104 上 `git reset --hard`，因为那会丢掉当前工作区里的部署文件形态。
+  - 推荐做法是：确认 GitHub/GitLab `main` 已完整包含 104 工作区这些改动后，再在 104 上用受控流程 fetch/reset/build/restart。
+  - 同步前应先保存 104 当前 `git status`、必要 diff 和运行状态，避免现场可运行版本被覆盖。
+- Safety status:
+  - 本轮只做只读 SSH 检查和日志维护；
+  - 不调用重定位、不启动任务、不发布 `/m20pro/floor_goal` 或 `/cmd_vel`。
+
+## 2026-07-01 16:54 CST - 实习生分支、昂锐雷达接口边界和甲方前端接口化判断
+
+- Repository / branch status:
+  - 当前项目继续按 real-only 仓库维护，不再按旧 real/sim 二合一仓库处理。
+  - GitHub `origin` 与 GitLab `gitlab` 都指向 real 仓库。
+  - 已为昂锐雷达方向实习生建立 `Unre` 分支；`main` 与 `Unre` 已同步到 GitHub/GitLab。
+  - 给实习生的建议是：所有昂锐雷达改动先提交到 `Unre`，不要直接改 `main`。
+- Intern collaboration decision:
+  - 昂锐雷达部分允许实习生先按自己的思路做一版，但要求尽量接口化、模块化。
+  - 建议她做成独立 package 或独立模块，不直接改重定位、任务启动、Nav2 下发、任务状态机等核心链路。
+  - 如需读取当前任务点，应优先订阅 `/m20pro/active_waypoint`，不要读取网页内部变量，也不要把昂锐逻辑硬塞进 `web_dashboard_node.py`。
+  - 如果字段不够，由她先列出所需字段，再统一扩展主项目接口合同。
+- Active waypoint / radar naming discussion:
+  - 实习生提出部分房间可能需要两种扫描模式，例如 `measuring` / `modeling`。
+  - 当前主项目正式已有的点位语义字段包括：
+    - `label`;
+    - `area`;
+    - `room`;
+    - `result_file_prefix`;
+    - `floor`;
+    - `pose`;
+    - `manual_point_type`;
+    - `dwell_s`;
+    - `vendor_navigation`。
+  - 当前尚未正式纳入点位合同的字段包括：
+    - `building`;
+    - `unit`;
+    - `house`;
+    - `scan_point`;
+    - `radar.scans`。
+  - 暂定建议：昂锐 package 先使用 `waypoint.result_file_prefix + mode/result_suffix + timestamp` 生成结果文件名；后续再把楼栋/单元/户号/扫描点/雷达扫描模式正式扩展进点位合同。
+- Interface status for customer frontend:
+  - 当前项目已经有接口化基础，但还不是完整交付给甲方前端的正式 API 合同。
+  - 已有 HTTP API：
+    - `GET /api/state`;
+    - `GET /api/maps`;
+    - `GET /api/map_file`;
+    - `GET /api/annotations`;
+    - `POST /api/annotations`;
+    - `GET /api/tasks`;
+    - `POST /api/tasks`;
+    - `POST /api/tasks/start`;
+    - `POST /api/tasks/stop`;
+    - `POST /api/localization/initialpose`;
+    - `GET/POST /api/preflight`。
+  - 已有 ROS JSON topic：
+    - `/m20pro/active_waypoint`。
+  - 纯规则已大量下沉到 `*_contract.py`，对后续接口稳定化有帮助。
+  - 仍缺正式 `docs/frontend_api_contract.md` / OpenAPI、接口版本号、字段表、示例 JSON、鉴权方案，以及面向甲方前端的错误码说明。
+- Next suggested work:
+  - 新增 `docs/frontend_api_contract.md`，把甲方前端应接的 HTTP API、字段、流程、错误码和示例 JSON 写清楚。
+  - 再按合同补强点位字段：`building/unit/house/scan_point/radar.scans`。
+  - 保持自研网页作为开发/现场调试台，甲方前端只依赖稳定 HTTP API 与必要 ROS topic。
+- Safety status:
+  - 本轮只是沟通、接口边界梳理和日志维护；
+  - 不调用重定位、不启动任务、不发布 `/m20pro/floor_goal` 或 `/cmd_vel`。
 
 ## 2026-06-30 20:58 CST - GitHub/GitLab real 仓库和 Unre 分支对齐
 
