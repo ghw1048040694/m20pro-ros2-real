@@ -1,10 +1,89 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-07-01 17:00 CST
+Last updated: 2026-07-01 17:18 CST
 
 This file is maintained by Codex as the local M20 Pro project memory for future ChatGPT review. It records the current architecture, important decisions, recent changes, verification status, and next steps.
 
 Naming note: this file replaced the previous local-only `codex.md`. Going forward, maintain this file, `m20pro日志.md`, after every meaningful project change or field diagnosis.
+
+## 2026-07-01 17:18 CST - 外科手术级纠正：104 git 工作区安全对齐到 real main
+
+- User concern:
+  - 用户指出：如果直接把上位机代码 git 到机器狗，可能导致之前弄好的重定位和导航失效。
+  - 这个担心成立；104 当时是“旧 `HEAD` + 大量新文件/未提交改动”的状态，不能粗暴 `reset --hard`。
+- Safety backups before alignment:
+  - 本地审计目录：
+    - `/home/fabu/m20pro_local_audit_20260701_170352`。
+  - 104 工作区备份目录：
+    - `/home/user/m20pro_safety_snapshots/20260701_170713`。
+  - 104 备份内容包括：
+    - `git_status.txt`;
+    - `git_log.txt`;
+    - `git_diff_stat.txt`;
+    - `git_diff.patch`;
+    - `untracked_files.txt`;
+    - `worktree_files.txt`;
+    - `m20pro_ros2_ws_worktree.tgz`;
+    - bundle 文件。
+  - 104 还创建了本地安全分支：
+    - `safety/104-pre-align-20260701_1710`;
+    - commit `c2a4da9 safety: snapshot 104 worktree before alignment 20260701_1710`。
+- Core code comparison before alignment:
+  - 本地 main 与 104 当前工作区的核心文件 hash 一致：
+    - `web_dashboard_node.py`;
+    - `static/dashboard.js`;
+    - `static/dashboard.html`;
+    - `localization_contract.py`;
+    - `task_contract.py`;
+    - `task_snapshot_contract.py`;
+    - `m20pro_real.launch.py`;
+    - `m20pro_real_full.sh`;
+    - `floor_manager.py`;
+    - `lidar_relay_node.py`;
+    - `scripts/check_preflight_policy.py`。
+  - 结论：风险不是源码内容差异，而是 104 git 元数据停在旧提交。
+- Offline git alignment:
+  - 因 104 无法解析 `github.com`，没有让 104 自己 `git fetch`。
+  - 从上位机创建并传入 bundle：
+    - `/home/user/m20pro_safety_snapshots/20260701_170713/m20pro_real_bf678b3.bundle`。
+  - 104 从 bundle fetch 到 `offline/main` / `offline/Unre`。
+  - 将 104 的 `main`、`origin/main`、`origin/Unre`、`gitlab/main`、`gitlab/Unre`、`Unre` 对齐到：
+    - `bf678b3 docs: record interface and robot repo audit`。
+  - 配置 104 远端：
+    - `origin=git@github.com:ghw1048040694/m20pro-ros2-real.git`;
+    - `gitlab=git@git.fabu.ai:genghaowei/m20pro-ros2-real.git`。
+- Important path clarification:
+  - `/home/user/m20pro_ros2_ws` 是软链接，指向：
+    - `/home/user/m20pro_real_ros2_ws`。
+  - `m20pro-real.service` 的 `WorkingDirectory` 和 `ExecStart` 均使用 `/home/user/m20pro_real_ros2_ws`。
+  - 因此不是两套仓库；服务正在使用 real 仓库同一套文件。
+- Verification after alignment:
+  - 104 `git status --short --branch` 干净：
+    - `## main...origin/main`。
+  - 104 分支：
+    - `main` -> `bf678b3`;
+    - `Unre` -> `bf678b3`;
+    - `safety/104-pre-align-20260701_1710` -> `c2a4da9`。
+  - 104 通过：
+    - `python3 scripts/check_preflight_policy.py`;
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/check_preflight_policy.py scripts/104_frontend_task_smoke.py`。
+  - 104 没有安装 `node`，因此未在 104 上执行 `node --check`；上位机已执行通过。
+  - 104 服务状态：
+    - `m20pro-real.service` active;
+    - `curl http://127.0.0.1:8080/healthz` 返回 `{"ok":true}`。
+  - 104 `/api/state` 只读摘要：
+    - `perception_status.code=perception_ready`;
+    - `localization_status.code=map_relocalization_required`;
+    - `task_readiness.code=map_relocalization_required`;
+    - `localization_ok=false`。
+  - 这是当前固定地图需要重新按 2101 重定位的状态，不是本次 git 对齐触发的任务/运动。
+  - 排除 `__pycache__` 后，上位机和 104 工作区文件列表与 hash 完全一致。
+- Safety status:
+  - 本轮没有调用 `/api/localization/initialpose`；
+  - 没有启动任务；
+  - 没有发布 `/m20pro/floor_goal`；
+  - 没有发布 `/cmd_vel`；
+  - 没有重启 `m20pro-real.service`。
 
 ## 2026-07-01 17:00 CST - 轻量化/接口化阶段评估与 104 git 状态确认
 
