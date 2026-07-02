@@ -3,6 +3,14 @@ set -euo pipefail
 
 WS_DIR="${M20PRO_WS:-/home/user/m20pro_real_ros2_ws}"
 MODE="${1:-shadow}"
+RADAR_ENABLED="${M20PRO_ENABLE_RADAR_INSPECTION:-false}"
+RADAR_BACKEND="${M20PRO_RADAR_BACKEND:-dry_run}"
+RADAR_SCAN_MODE="${M20PRO_RADAR_SCAN_MODE:-measuring}"
+RADAR_DEVICE_URL="${M20PRO_RADAR_DEVICE_URL:-http://192.168.107.72:8080}"
+RADAR_OUTPUT_DIR="${M20PRO_RADAR_OUTPUT_DIR:-/home/user/m20pro_radar_results}"
+RADAR_RELEASE_ON_ANALYSIS="${M20PRO_RADAR_RELEASE_ON_ANALYSIS:-true}"
+RADAR_START_RETRY_TIMEOUT_S="${M20PRO_RADAR_START_RETRY_TIMEOUT_S:-120.0}"
+RADAR_START_RETRY_INTERVAL_S="${M20PRO_RADAR_START_RETRY_INTERVAL_S:-5.0}"
 
 if [[ "${EUID}" -ne 0 ]]; then
   cat >&2 <<'EOF'
@@ -211,6 +219,14 @@ COMMON_ARGS=(
   camera_proxy_ffmpeg_mjpeg_qscale:=5
   camera_proxy_max_width:=480
   cloud_topic:="${LIDAR_RELAY_TOPIC}"
+  enable_radar_inspection:="${RADAR_ENABLED}"
+  radar_backend:="${RADAR_BACKEND}"
+  radar_scan_mode:="${RADAR_SCAN_MODE}"
+  radar_device_url:="${RADAR_DEVICE_URL}"
+  radar_output_dir:="${RADAR_OUTPUT_DIR}"
+  radar_release_on_analysis:="${RADAR_RELEASE_ON_ANALYSIS}"
+  radar_start_retry_timeout_s:="${RADAR_START_RETRY_TIMEOUT_S}"
+  radar_start_retry_interval_s:="${RADAR_START_RETRY_INTERVAL_S}"
 )
 if [[ -n "${BACKUP_CLOUD_TOPIC}" ]]; then
   COMMON_ARGS+=(backup_cloud_topic:="${BACKUP_CLOUD_TOPIC}")

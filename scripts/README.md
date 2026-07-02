@@ -71,6 +71,7 @@ source install/setup.bash
 - 全量 real 会同时拉起 tcp_bridge、Nav2、点云融合和网页前端；笔记本/手柄访问 `http://10.21.31.104:8080`。
 - 全量 real 启动前必须实际收到 `/LIDAR/POINTS` 的 `PointCloud2` 样本；只看到 topic 名不算通过。点云未就绪时脚本会停止启动，避免反复创建 DDS 参与者。
 - 全量 real 会尝试把可选第二路 `/LIDAR/POINTS2` relay 到 `/m20pro/lidar_points2_relay` 并融合进 `/scan`；如果当前机器狗没有发布 `/LIDAR/POINTS2`，只记录提示并继续使用主雷达，不阻塞开机自检。
+- U360 雷达巡检默认关闭；需要联动任务点扫描时，启动前设置 `M20PRO_ENABLE_RADAR_INSPECTION=true`、`M20PRO_RADAR_BACKEND=u360_http` 和 `M20PRO_RADAR_DEVICE_URL=http://192.168.107.72:8080`。结果默认写到 `M20PRO_RADAR_OUTPUT_DIR`，未设置时使用 `/home/user/m20pro_radar_results`。
 - 网页“自检”页是开机基础自检主入口；点一次“开机基础自检”，确认全量系统、网页、原始点云、电量和原厂状态链路。
 - 定位、`/scan`、代价地图和 Nav2 生命周期需要到测试场地重定位后再确认；网页自检会把未重定位前的 costmap/Nav2 延后启动显示为信息项，不再作为 WARN 阻塞重定位。
 - `104_preflight_check.sh move` 是终端备用基础自检；网页自检异常、或现场需要保存终端输出时使用。它会自动使用项目 UDP-only FastDDS 配置观察 relay 点云，避免 root 服务和 user 终端之间的 SHM 隔离造成“echo 不出点云”的假阴性。

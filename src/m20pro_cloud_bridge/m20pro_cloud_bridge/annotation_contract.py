@@ -71,11 +71,68 @@ def string_list(value: Any) -> List[str]:
     return []
 
 
+def radar_scan_plan_from_payload(payload: Any) -> Dict[str, Any]:
+    if isinstance(payload, dict):
+        enabled = payload.get("enabled", True)
+        raw_scans = payload.get("scans")
+    else:
+        enabled = True
+        raw_scans = None
+    if isinstance(enabled, str):
+        enabled = enabled.strip().lower() not in ("0", "false", "no", "off", "disabled")
+    scans: List[Dict[str, Any]] = []
+    if isinstance(raw_scans, list):
+        for index, raw in enumerate(raw_scans):
+            item = raw if isinstance(raw, dict) else {"mode": raw}
+            mode = str(item.get("mode") or "").strip().lower()
+            if mode not in ("measuring", "modeling"):
+                continue
+            label = str(item.get("label") or ("实测实量" if mode == "measuring" else "点云建模")).strip()
+            suffix = str(item.get("result_suffix") or ("measure" if mode == "measuring" else "cloud")).strip()
+            density = str(item.get("density") or item.get("scan_density") or "").strip()
+            artifact_policy = str(
+                item.get("artifact_policy")
+                or ("manual_import" if mode == "modeling" else "auto_result")
+            ).strip()
+            manual_required = item.get("manual_measure_required", mode == "modeling")
+            if isinstance(manual_required, str):
+                manual_required = manual_required.strip().lower() in ("1", "true", "yes", "on")
+            scans.append(
+                {
+                    "mode": mode,
+                    "label": label,
+                    "result_suffix": suffix,
+                    "density": density,
+                    "artifact_policy": artifact_policy,
+                    "manual_measure_required": bool(manual_required),
+                    "order": int(item.get("order", index)),
+                }
+            )
+    if not scans and enabled:
+        scans = [
+            {
+                "mode": "measuring",
+                "label": "实测实量",
+                "result_suffix": "measure",
+                "density": "",
+                "artifact_policy": "auto_result",
+                "manual_measure_required": False,
+                "order": 0,
+            }
+        ]
+    scans.sort(key=lambda item: int(item.get("order", 0)))
+    return {"enabled": bool(enabled), "scans": scans}
+
+
 def annotation_result_prefix(item: Dict[str, Any]) -> str:
     parts = [
+        str(item.get("building") or "").strip(),
+        str(item.get("unit") or "").strip(),
+        str(item.get("house") or "").strip(),
         str(item.get("floor") or "").strip(),
         str(item.get("area") or "").strip(),
         str(item.get("room") or "").strip(),
+        str(item.get("scan_point") or "").strip(),
         str(item.get("label") or item.get("id") or "").strip(),
     ]
     raw = "_".join(part for part in parts if part)
@@ -142,6 +199,19 @@ def vendor_navigation_from_payload(payload: Dict[str, Any]) -> Dict[str, int]:
     return defaults
 
 
+def annotation_location_payload(payload: Dict[str, Any]) -> Dict[str, str]:
+    return {
+        "building": str(payload.get("building") or payload.get("building_name") or "").strip(),
+        "building_no": str(payload.get("building_no") or "").strip(),
+        "unit": str(payload.get("unit") or payload.get("suite") or "").strip(),
+        "unit_no": str(payload.get("unit_no") or "").strip(),
+        "house": str(payload.get("house") or payload.get("house_no") or payload.get("apartment") or "").strip(),
+        "area": str(payload.get("area") or payload.get("region") or "").strip(),
+        "room": str(payload.get("room") or payload.get("place") or "").strip(),
+        "scan_point": str(payload.get("scan_point") or payload.get("station") or "").strip(),
+    }
+
+
 def annotation_create_static_context(
     payload: Dict[str, Any],
     *,
@@ -203,13 +273,13 @@ def build_annotation_record(
         "type": payload_with_context["type"],
         "floor": str(context.get("floor") or "").strip(),
         "label": str(context.get("label") or "").strip(),
-        "area": str(payload.get("area") or payload.get("region") or "").strip(),
-        "room": str(payload.get("room") or payload.get("place") or "").strip(),
+        **annotation_location_payload(payload),
         "result_file_prefix": str(payload.get("result_file_prefix") or "").strip(),
         "pose": dict(context.get("pose") or {}),
         "dwell_s": max(0.0, float(dwell_s)),
         "manual_point_type": manual_point_type_from_payload(payload_with_context),
         "vendor_navigation": vendor_navigation_from_payload(payload_with_context),
+        "radar": radar_scan_plan_from_payload(payload.get("radar")),
         "camera": str(payload.get("camera") or "").strip(),
         "target_classes": string_list(payload.get("target_classes")),
         "notes": str(payload.get("notes") or "").strip(),
@@ -279,8 +349,15 @@ def normalize_annotation_semantics(item: Dict[str, Any]) -> Dict[str, Any]:
     item["inspect_duration_s"] = item["dwell_s"]
 
     item["label"] = str(item.get("label") or item.get("name") or item.get("id") or "").strip()
+    item["building"] = str(item.get("building") or item.get("building_name") or "").strip()
+    item["building_no"] = str(item.get("building_no") or "").strip()
+    item["unit"] = str(item.get("unit") or item.get("suite") or "").strip()
+    item["unit_no"] = str(item.get("unit_no") or "").strip()
+    item["house"] = str(item.get("house") or item.get("house_no") or item.get("apartment") or "").strip()
     item["area"] = str(item.get("area") or item.get("region") or "").strip()
     item["room"] = str(item.get("room") or item.get("place") or item.get("location") or "").strip()
+    item["scan_point"] = str(item.get("scan_point") or item.get("station") or "").strip()
+    item["radar"] = radar_scan_plan_from_payload(item.get("radar"))
     result_prefix = str(item.get("result_file_prefix") or "").strip()
     item["result_file_prefix"] = result_prefix or annotation_result_prefix(item)
 
@@ -312,8 +389,14 @@ def annotation_semantics_payload(annotation: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "id": annotation.get("id"),
         "label": annotation.get("label"),
+        "building": annotation.get("building"),
+        "building_no": annotation.get("building_no"),
+        "unit": annotation.get("unit"),
+        "unit_no": annotation.get("unit_no"),
+        "house": annotation.get("house"),
         "area": annotation.get("area"),
         "room": annotation.get("room"),
+        "scan_point": annotation.get("scan_point"),
         "result_file_prefix": annotation.get("result_file_prefix"),
         "floor": annotation.get("floor"),
         "type": annotation.get("type"),
@@ -322,6 +405,7 @@ def annotation_semantics_payload(annotation: Dict[str, Any]) -> Dict[str, Any]:
         "pose": dict(pose),
         "yaw": float(pose.get("yaw", 0.0) or 0.0),
         "dwell_s": annotation_dwell_s(annotation),
+        "radar": dict(annotation.get("radar") or {}),
         "camera": annotation.get("camera"),
         "target_classes": list(annotation.get("target_classes") or []),
         "vendor_navigation": vendor,

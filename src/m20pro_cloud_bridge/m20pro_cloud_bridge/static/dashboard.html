@@ -108,6 +108,10 @@
             <div id="detections" class="mono">等待数据</div>
           </div>
           <div class="section">
+            <h2>雷达扫描</h2>
+            <div id="radarInspection" class="radar-box">等待数据</div>
+          </div>
+          <div class="section">
             <h2>事件</h2>
             <div id="events" class="mono">等待数据</div>
           </div>
@@ -256,6 +260,18 @@
               <input id="markLabel" placeholder="例如 20层东区2008房间" />
             </div>
             <div class="row">
+              <label>楼栋</label>
+              <input id="markBuilding" placeholder="例如 3栋" />
+            </div>
+            <div class="row">
+              <label>单元</label>
+              <input id="markUnit" placeholder="例如 1单元" />
+            </div>
+            <div class="row">
+              <label>户号</label>
+              <input id="markHouse" placeholder="例如 2008户" />
+            </div>
+            <div class="row">
               <label>区域</label>
               <input id="markArea" placeholder="例如 东区、核心筒、样板段" />
             </div>
@@ -266,6 +282,19 @@
             <div class="row">
               <label>结果前缀</label>
               <input id="markResultPrefix" placeholder="留空自动生成昂锐雷达结果文件名前缀" />
+            </div>
+            <div class="row">
+              <label>扫描点</label>
+              <input id="markScanPoint" placeholder="例如 P01、客厅东侧点" />
+            </div>
+            <div class="row">
+              <label>雷达扫描</label>
+              <select id="markRadarPlan">
+                <option value="measuring">仅实测实量</option>
+                <option value="modeling">仅点云建模</option>
+                <option value="both">实测实量 + 点云建模</option>
+                <option value="none">不触发雷达</option>
+              </select>
             </div>
             <div class="row">
               <label>坐标 X/Y</label>

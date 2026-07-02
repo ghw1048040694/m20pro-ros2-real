@@ -1,0 +1,41 @@
+m20pro_radar_inspection:
+  ros__parameters:
+    active_waypoint_topic: "/m20pro/active_waypoint"
+    status_topic: "/m20pro/radar_inspection/status"
+    result_topic: "/m20pro/radar_inspection/result"
+    event_topic: "/m20pro/radar_inspection/events"
+
+    # backend=dry_run is for local simulation. Use backend=u360_http on the robot.
+    backend: "dry_run"
+    device_url: "http://192.168.107.72:8080"
+    request_timeout_s: 10.0
+    poll_interval_s: 2.0
+    max_wait_s: 1800.0
+    dry_run_duration_s: 2.0
+
+    # measuring -> /nuc/scan + /nuc/getResult
+    # modeling  -> /nuc/startModelingTask + /nuc/getTaskInfo + optional downloadFile
+    scan_mode: "measuring"
+    scan_density: "low"
+
+    # In measuring mode, the scanner enters analyzing after the physical scan.
+    # The web task may leave the point at that moment while this node continues
+    # polling for the final getResult output in the background.
+    release_on_analysis: true
+    start_retry_timeout_s: 120.0
+    start_retry_interval_s: 5.0
+
+    modeling_scene: "modeling"
+    modeling_enable_camera: false
+
+    output_dir: "~/.m20pro_radar_results"
+    enabled_waypoint_types: ["task"]
+    trigger_phases: ["dwelling"]
+
+    project: "M20巡检"
+    building: "1栋"
+    building_no: "1"
+    unit: "1单元"
+    unit_no: "1"
+    stage: "设备安装"
+    task_type: "Measuring"

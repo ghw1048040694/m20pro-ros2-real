@@ -5,7 +5,7 @@
 - 在 104 通用主机上运行 Nav2、楼层管理、点云融合和网页操作台；
 - 使用 106 原厂建图结果做 2D 导航地图，并保留面向后续跨楼层的楼梯语义基础；
 - 对接 103 官方 TCP JSON 协议读取位姿/状态，并在允许时下发运动控制；
-- 支持单楼层巡检、多楼层地图切换、巡检点编排、YOLO 检测和现场录包。
+- 支持单楼层巡检、多楼层地图切换、巡检点编排、YOLO 检测、U360 雷达巡检和现场录包。
 
 详细调试日志、实测记录、问题排查过程放在：
 
@@ -57,7 +57,13 @@ source install/setup.bash
 source /opt/robot/scripts/setup_ros2.sh
 cd /home/user/m20pro_real_ros2_ws
 source install/setup.bash
-colcon build --packages-select m20pro_bringup m20pro_cloud_bridge m20pro_navigation --symlink-install
+colcon build --packages-select \
+  m20pro_bringup \
+  m20pro_cloud_bridge \
+  m20pro_navigation \
+  m20pro_inspection \
+  m20pro_radar_inspection \
+  --symlink-install
 source install/setup.bash
 ```
 
@@ -291,7 +297,72 @@ NavMode=1    自主导航
 /m20pro/stop_task
 ```
 
-`/m20pro/active_waypoint` 是 JSON，包含当前点位名称、区域、房间/部位、结果文件名前缀、点位类型、yaw、停留时间和原厂导航字段。昂锐雷达检测节点应优先使用这里的 `waypoint.result_file_prefix` 命名结果文件。
+`/m20pro/active_waypoint` 是 JSON，包含当前点位名称、楼栋、单元、户号、区域、房间/部位、扫描点、结果文件名前缀、点位类型、yaw、停留时间和原厂导航字段。昂锐雷达检测节点应优先使用这里的 `waypoint.result_file_prefix` 命名结果文件，并读取 `waypoint.radar.scans` 决定当前点位要做哪些扫描。
+
+雷达扫描计划示例：
+
+```json
+{
+  "waypoint": {
+    "building": "3栋",
+    "unit": "1单元",
+    "house": "2008户",
+    "floor": "F20",
+    "room": "客厅",
+    "scan_point": "P01",
+    "result_file_prefix": "3栋_1单元_2008户_F20_客厅_P01",
+    "radar": {
+      "enabled": true,
+      "scans": [
+        {"mode": "measuring", "label": "实测实量", "result_suffix": "measure"},
+        {"mode": "modeling", "label": "点云建模", "result_suffix": "cloud", "artifact_policy": "manual_import", "manual_measure_required": true}
+      ]
+    }
+  }
+}
+```
+
+## U360 雷达巡检
+
+雷达巡检包默认不启动；需要接入 U360RSE/UCL360 时，在全量 real 启动前设置环境变量：
+
+```bash
+export M20PRO_ENABLE_RADAR_INSPECTION=true
+export M20PRO_RADAR_BACKEND=u360_http
+export M20PRO_RADAR_SCAN_MODE=measuring      # 或 modeling
+export M20PRO_RADAR_DEVICE_URL=http://192.168.107.72:8080
+export M20PRO_RADAR_OUTPUT_DIR=/home/user/m20pro_radar_results
+./scripts/104_start_real_move.sh
+```
+
+节点订阅 `/m20pro/active_waypoint`，任务点进入 `dwelling` 阶段后触发扫描，并发布：
+
+```text
+/m20pro/radar_inspection/status
+/m20pro/radar_inspection/result
+/m20pro/radar_inspection/events
+```
+
+网页标点时可以为每个任务点选择“不触发雷达 / 仅实测实量 / 仅点云建模 / 实测实量 + 点云建模”。测量模式下默认在 U360 进入 `analyzing` 后允许机器人去下一个点，最终结果继续后台收集；点云建模模式如果设备不能直接返回点云文件，会把该次扫描标记为 `pending_import`，由人工从雷达导出点云工程后在任务卡片点击“登记点云”填入路径。
+
+网页看板会显示最近一次雷达扫描；任务列表按任务点展示对应雷达结果、点云登记状态和人工回填状态。任务卡片提供 `雷达JSON` / `雷达CSV` 导出，也可以直接访问：
+
+```bash
+curl -o radar_task.json "http://127.0.0.1:8080/api/radar/task_export?task_id=<task_id>&format=json"
+curl -o radar_task.csv  "http://127.0.0.1:8080/api/radar/task_export?task_id=<task_id>&format=csv"
+```
+
+人工登记接口：
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/radar/artifact \
+  -H 'Content-Type: application/json' \
+  -d '{"task_id":"<task_id>","run_id":"<run_id>","artifact_path":"/path/to/u360/project"}'
+
+curl -X POST http://127.0.0.1:8080/api/radar/manual_measurement \
+  -H 'Content-Type: application/json' \
+  -d '{"task_id":"<task_id>","run_id":"<run_id>","measurements":[{"name":"开关高度","value":"1.32m"}]}'
+```
 
 ## 真机测试顺序
 
@@ -313,6 +384,7 @@ src/m20pro_bringup/config/inspection_waypoints.yaml   # 楼层、楼梯、巡检
 src/m20pro_bringup/maps/                              # PGM 地图
 src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py
 src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/   # 前端 HTML/CSS/JS
+src/m20pro_radar_inspection/                          # U360 雷达巡检节点
 src/m20pro_cloud_bridge/m20pro_cloud_bridge/*_contract.py
 src/m20pro_navigation/m20pro_navigation/floor_manager.py
 src/m20pro_navigation/m20pro_navigation/tcp_bridge_node.py
@@ -339,6 +411,7 @@ docs/single_floor_navigation_architecture.md          # 单层导航架构和拆
 | `m20pro_navigation` | TCP 桥、点云融合、楼层管理、目标桥、健康检查 |
 | `m20pro_cloud_bridge` | 网页操作台 |
 | `m20pro_inspection` | YOLOv8/RKNN 巡检检测 |
+| `m20pro_radar_inspection` | U360 雷达任务点扫描与结果导出 |
 
 说明：real-only 仓库已移除 `m20pro_description` 和 sim 启动链路。真机运行使用 `m20pro_base_link` 主链路，不再依赖 URDF/mesh、`robot_state_publisher` 或零关节发布器；仿真模型资源留在 sim 仓库维护。
 

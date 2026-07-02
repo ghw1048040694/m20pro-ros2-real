@@ -22,6 +22,7 @@ def has_package(package_name: str) -> bool:
 def generate_launch_description():
     bringup_share = get_package_share_directory("m20pro_bringup")
     inspection_share = get_package_share_directory("m20pro_inspection")
+    radar_share = get_package_share_directory("m20pro_radar_inspection")
     nav2_stack_available = (
         has_package("nav2_bringup")
         and has_package("nav2_map_server")
@@ -42,6 +43,7 @@ def generate_launch_description():
         inspection_share, "models", "playphone_bg_best_rk3588_int8.rknn"
     )
     default_inspection_classes = os.path.join(inspection_share, "models", "labels_zh.txt")
+    radar_launch = os.path.join(radar_share, "launch", "m20pro_radar_inspection.launch.py")
 
     params_file = LaunchConfiguration("params_file")
     nav2_params_file = LaunchConfiguration("nav2_params_file")
@@ -92,6 +94,22 @@ def generate_launch_description():
     inspection_camera_name = LaunchConfiguration("inspection_camera_name")
     inspection_model_path = LaunchConfiguration("inspection_model_path")
     inspection_class_names_path = LaunchConfiguration("inspection_class_names_path")
+    enable_radar_inspection = LaunchConfiguration("enable_radar_inspection")
+    radar_backend = LaunchConfiguration("radar_backend")
+    radar_device_url = LaunchConfiguration("radar_device_url")
+    radar_request_timeout_s = LaunchConfiguration("radar_request_timeout_s")
+    radar_poll_interval_s = LaunchConfiguration("radar_poll_interval_s")
+    radar_max_wait_s = LaunchConfiguration("radar_max_wait_s")
+    radar_dry_run_duration_s = LaunchConfiguration("radar_dry_run_duration_s")
+    radar_scan_mode = LaunchConfiguration("radar_scan_mode")
+    radar_scan_density = LaunchConfiguration("radar_scan_density")
+    radar_release_on_analysis = LaunchConfiguration("radar_release_on_analysis")
+    radar_start_retry_timeout_s = LaunchConfiguration("radar_start_retry_timeout_s")
+    radar_start_retry_interval_s = LaunchConfiguration("radar_start_retry_interval_s")
+    radar_modeling_scene = LaunchConfiguration("radar_modeling_scene")
+    radar_modeling_enable_camera = LaunchConfiguration("radar_modeling_enable_camera")
+    radar_inspection_timeout_s = LaunchConfiguration("radar_inspection_timeout_s")
+    radar_output_dir = LaunchConfiguration("radar_output_dir")
     use_rviz = LaunchConfiguration("rviz")
     rviz_config = LaunchConfiguration("rviz_config")
     rviz_delay_s = LaunchConfiguration("rviz_delay_s")
@@ -154,6 +172,22 @@ def generate_launch_description():
         DeclareLaunchArgument("inspection_camera_name", default_value="front_wide"),
         DeclareLaunchArgument("inspection_model_path", default_value=default_inspection_model),
         DeclareLaunchArgument("inspection_class_names_path", default_value=default_inspection_classes),
+        DeclareLaunchArgument("enable_radar_inspection", default_value="false"),
+        DeclareLaunchArgument("radar_backend", default_value="dry_run"),
+        DeclareLaunchArgument("radar_device_url", default_value="http://192.168.107.72:8080"),
+        DeclareLaunchArgument("radar_request_timeout_s", default_value="10.0"),
+        DeclareLaunchArgument("radar_poll_interval_s", default_value="2.0"),
+        DeclareLaunchArgument("radar_max_wait_s", default_value="1800.0"),
+        DeclareLaunchArgument("radar_dry_run_duration_s", default_value="2.0"),
+        DeclareLaunchArgument("radar_scan_mode", default_value="measuring"),
+        DeclareLaunchArgument("radar_scan_density", default_value="low"),
+        DeclareLaunchArgument("radar_release_on_analysis", default_value="true"),
+        DeclareLaunchArgument("radar_start_retry_timeout_s", default_value="120.0"),
+        DeclareLaunchArgument("radar_start_retry_interval_s", default_value="5.0"),
+        DeclareLaunchArgument("radar_modeling_scene", default_value="modeling"),
+        DeclareLaunchArgument("radar_modeling_enable_camera", default_value="false"),
+        DeclareLaunchArgument("radar_inspection_timeout_s", default_value="1800.0"),
+        DeclareLaunchArgument("radar_output_dir", default_value=""),
         DeclareLaunchArgument(
             "factory_mapping_start_command",
             default_value=(
@@ -409,6 +443,26 @@ def generate_launch_description():
             }.items(),
             condition=IfCondition(enable_inspection),
         ),
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(radar_launch),
+            launch_arguments={
+                "backend": radar_backend,
+                "device_url": radar_device_url,
+                "request_timeout_s": radar_request_timeout_s,
+                "poll_interval_s": radar_poll_interval_s,
+                "max_wait_s": radar_max_wait_s,
+                "dry_run_duration_s": radar_dry_run_duration_s,
+                "scan_mode": radar_scan_mode,
+                "scan_density": radar_scan_density,
+                "release_on_analysis": radar_release_on_analysis,
+                "start_retry_timeout_s": radar_start_retry_timeout_s,
+                "start_retry_interval_s": radar_start_retry_interval_s,
+                "modeling_scene": radar_modeling_scene,
+                "modeling_enable_camera": radar_modeling_enable_camera,
+                "output_dir": radar_output_dir,
+            }.items(),
+            condition=IfCondition(enable_radar_inspection),
+        ),
         Node(
             package="m20pro_cloud_bridge",
             executable="web_dashboard",
@@ -459,6 +513,15 @@ def generate_launch_description():
                         value_type=int,
                     ),
                     "camera_proxy_transport": camera_proxy_transport,
+                    "wait_for_radar_inspection": ParameterValue(
+                        enable_radar_inspection,
+                        value_type=bool,
+                    ),
+                    "radar_inspection_timeout_s": ParameterValue(
+                        radar_inspection_timeout_s,
+                        value_type=float,
+                    ),
+                    "radar_results_dir": radar_output_dir,
                 }
             ],
             condition=IfCondition(enable_web_dashboard),

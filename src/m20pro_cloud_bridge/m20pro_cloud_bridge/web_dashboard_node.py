@@ -1,3 +1,5 @@
+import csv
+import io
 import json
 import math
 import os
@@ -805,6 +807,8 @@ class WebDashboardNode(Node):
             "map_version": 0,
             "dynamic_obstacles": [],
             "detections": None,
+            "radar_inspection": None,
+            "radar_inspection_results": {},
             "active_waypoint": None,
             "relocalization_result": None,
             "map_relocalization_required": None,
@@ -953,6 +957,13 @@ class WebDashboardNode(Node):
         self.declare_parameter("events_topic", "/m20pro_yolov8_inspection/events")
         self.declare_parameter("annotated_image_topic", "/m20pro_yolov8_inspection/annotated_image")
         self.declare_parameter("subscribe_annotated_image", False)
+        self.declare_parameter("radar_inspection_status_topic", "/m20pro/radar_inspection/status")
+        self.declare_parameter("radar_inspection_result_topic", "/m20pro/radar_inspection/result")
+        self.declare_parameter("radar_inspection_events_topic", "/m20pro/radar_inspection/events")
+        self.declare_parameter("wait_for_radar_inspection", False)
+        self.declare_parameter("radar_inspection_timeout_s", 1800.0)
+        self.declare_parameter("advance_on_radar_scan_release", True)
+        self.declare_parameter("radar_results_dir", "~/.m20pro_radar_results")
         self.declare_parameter("enable_camera_proxy", False)
         self.declare_parameter("front_camera_url", "rtsp://10.21.31.103:8554/video1")
         self.declare_parameter("rear_camera_url", "rtsp://10.21.31.103:8554/video2")
@@ -1257,6 +1268,24 @@ class WebDashboardNode(Node):
         )
         self.create_subscription(String, self._topic("detections_topic"), self._on_detections, 10)
         self.create_subscription(String, self._topic("events_topic"), self._on_event, 10)
+        self.create_subscription(
+            String,
+            self._topic("radar_inspection_status_topic"),
+            self._on_radar_inspection_status,
+            10,
+        )
+        self.create_subscription(
+            String,
+            self._topic("radar_inspection_result_topic"),
+            self._on_radar_inspection_result,
+            10,
+        )
+        self.create_subscription(
+            String,
+            self._topic("radar_inspection_events_topic"),
+            self._on_event,
+            10,
+        )
 
         if bool(self.get_parameter("subscribe_annotated_image").value):
             self.create_subscription(Image, self._topic("annotated_image_topic"), self._on_annotated_image, 2)
@@ -1618,6 +1647,37 @@ class WebDashboardNode(Node):
             }
             self._mark_topic("detections")
 
+    def _on_radar_inspection_status(self, msg: String) -> None:
+        parsed = parse_json_text(msg.data)
+        with self._lock:
+            self._state["radar_inspection"] = {
+                "last_update": time.time(),
+                "raw": msg.data,
+                "parsed": parsed,
+            }
+            self._mark_topic("radar_inspection_status")
+
+    def _on_radar_inspection_result(self, msg: String) -> None:
+        parsed = parse_json_text(msg.data)
+        key = ""
+        if isinstance(parsed, dict):
+            key = str(parsed.get("waypoint_key") or "").strip()
+        with self._lock:
+            if key:
+                results = dict(self._state.get("radar_inspection_results") or {})
+                results[key] = {
+                    "last_update": time.time(),
+                    "raw": msg.data,
+                    "parsed": parsed,
+                }
+                self._state["radar_inspection_results"] = results
+            self._state["radar_inspection"] = {
+                "last_update": time.time(),
+                "raw": msg.data,
+                "parsed": parsed,
+            }
+            self._mark_topic("radar_inspection_result")
+
     def _on_relocalization_result(self, msg: String) -> None:
         with self._lock:
             self._state["relocalization_result"] = {
@@ -1658,7 +1718,16 @@ class WebDashboardNode(Node):
             snapshot["pose_history"] = list(self._state.get("pose_history") or [])
             snapshot["dynamic_obstacles"] = list(self._state["dynamic_obstacles"])
             snapshot["events"] = list(self._state["events"])
-            for key in ("lidar_points", "lidar_relay_status", "scan", "odom", "local_costmap", "global_costmap", "active_waypoint"):
+            for key in (
+                "lidar_points",
+                "lidar_relay_status",
+                "scan",
+                "odom",
+                "local_costmap",
+                "global_costmap",
+                "active_waypoint",
+                "radar_inspection",
+            ):
                 if isinstance(self._state.get(key), dict):
                     snapshot[key] = dict(self._state[key])
             snapshot["topics"] = {
@@ -2993,20 +3062,309 @@ class WebDashboardNode(Node):
             )
             task["multi_floor"] = len(task["floors"]) > 1
             task["readiness"] = self._task_readiness_for_task(task, map_cache, nav_readiness=nav_readiness)
+            task["radar_results"] = self._radar_jobs_for_task(str(task.get("id") or ""))
         return {
             "ok": True,
             "tasks": tasks,
+            "hidden_task_count": task_list["hidden_task_count"],
+            "total_task_count": task_list["total_task_count"],
             "selected_map_id": selected_map_id,
             "selected_map_status": self._selected_map_status_payload(selected_map_id=selected_map_id),
             "map_relocalization_required": map_relocalization_required,
             "include_all": task_list["include_all"],
-            "hidden_task_count": task_list["hidden_task_count"],
-            "total_task_count": task_list["total_task_count"],
             "active_task": active_task,
             "preflight": preflight,
             "task_readiness": self._current_task_readiness_payload(nav_readiness=nav_readiness),
             "last_preflight_ok": bool(preflight and preflight.get("ok")),
         }
+
+    def _radar_results_dir(self) -> FsPath:
+        value = str(self.get_parameter("radar_results_dir").value or "").strip()
+        if not value:
+            if os.geteuid() == 0 and FsPath("/home/user").exists():
+                value = "/home/user/m20pro_radar_results"
+            else:
+                value = "~/.m20pro_radar_results"
+        return FsPath(os.path.expandvars(os.path.expanduser(value)))
+
+    def _radar_manual_dir(self) -> FsPath:
+        path = self._radar_results_dir() / "manual"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _radar_manual_path(self, task_id: str) -> FsPath:
+        return self._radar_manual_dir() / ("%s.json" % sanitize_name(task_id, "task"))
+
+    def _load_radar_manual_records(self, task_id: str) -> Dict[str, Any]:
+        path = self._radar_manual_path(task_id)
+        if not path.exists():
+            return {"artifacts": {}, "measurements": {}}
+        try:
+            with path.open("r", encoding="utf-8") as file:
+                payload = json.load(file)
+        except Exception:
+            return {"artifacts": {}, "measurements": {}}
+        if not isinstance(payload, dict):
+            return {"artifacts": {}, "measurements": {}}
+        artifacts = payload.get("artifacts") if isinstance(payload.get("artifacts"), dict) else {}
+        measurements = payload.get("measurements") if isinstance(payload.get("measurements"), dict) else {}
+        return {"artifacts": artifacts, "measurements": measurements}
+
+    def _save_radar_manual_records(self, task_id: str, payload: Dict[str, Any]) -> None:
+        path = self._radar_manual_path(task_id)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with tmp.open("w", encoding="utf-8") as file:
+            json.dump(payload, file, ensure_ascii=False, indent=2)
+        tmp.replace(path)
+
+    @staticmethod
+    def _radar_run_id(job: Dict[str, Any]) -> str:
+        return sanitize_name(
+            "%s_%s_%s"
+            % (
+                str(job.get("waypoint_key") or "waypoint"),
+                str(job.get("scan_mode") or "scan"),
+                str(job.get("result_suffix") or job.get("scan_index") or "0"),
+            ),
+            "radar_run",
+        )
+
+    def _decorate_radar_job(self, job: Dict[str, Any], manual: Dict[str, Any]) -> Dict[str, Any]:
+        item = dict(job)
+        run_id = self._radar_run_id(item)
+        item["run_id"] = run_id
+        artifacts = manual.get("artifacts") if isinstance(manual.get("artifacts"), dict) else {}
+        measurements = manual.get("measurements") if isinstance(manual.get("measurements"), dict) else {}
+        artifact = artifacts.get(run_id)
+        measurement = measurements.get(run_id)
+        if isinstance(artifact, dict):
+            item["manual_artifact"] = artifact
+            item["artifact_status"] = artifact.get("status") or "imported"
+        if isinstance(measurement, dict):
+            item["manual_measurement"] = measurement
+            item["manual_measure_status"] = "completed"
+        elif item.get("manual_measure_required") and not item.get("manual_measure_status"):
+            item["manual_measure_status"] = "pending"
+        return item
+
+    def _radar_jobs_from_payload(self, path: FsPath, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        active = payload.get("active_waypoint") or {}
+        waypoint = active.get("waypoint") or {}
+        results = payload.get("scan_results") if isinstance(payload.get("scan_results"), list) else [payload]
+        jobs: List[Dict[str, Any]] = []
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+            summary = result.get("summary") or {}
+            request = result.get("request") or {}
+            jobs.append(
+                {
+                    "ok": bool(result.get("ok", True)),
+                    "job_path": str(path),
+                    "waypoint_key": result.get("waypoint_key") or payload.get("waypoint_key"),
+                    "taskId": result.get("taskId"),
+                    "backend": result.get("backend") or payload.get("backend"),
+                    "scan_mode": result.get("scan_mode") or request.get("mode"),
+                    "scan_label": result.get("scan_label") or request.get("scanLabel"),
+                    "scan_index": result.get("scan_index") if result.get("scan_index") is not None else request.get("scanIndex"),
+                    "scan_count": result.get("scan_count") if result.get("scan_count") is not None else request.get("scanCount"),
+                    "result_suffix": result.get("result_suffix") or request.get("result_suffix"),
+                    "status": result.get("status"),
+                    "state": result.get("state"),
+                    "progress": result.get("progress"),
+                    "artifact_status": result.get("artifact_status"),
+                    "artifact_policy": result.get("artifact_policy") or request.get("artifact_policy"),
+                    "manual_measure_required": bool(result.get("manual_measure_required") or request.get("manual_measure_required")),
+                    "manual_measure_status": result.get("manual_measure_status"),
+                    "started_at": result.get("started_at"),
+                    "finished_at": result.get("finished_at"),
+                    "duration_s": result.get("duration_s"),
+                    "scan_released_at": result.get("scan_released_at"),
+                    "scan_release_duration_s": result.get("scan_release_duration_s"),
+                    "error": result.get("error"),
+                    "raw_path": result.get("raw_path"),
+                    "summary_path": result.get("summary_path"),
+                    "task_info_path": result.get("task_info_path"),
+                    "downloads": result.get("downloads") or [],
+                    "active_waypoint": active,
+                    "waypoint": waypoint,
+                    "request": request,
+                    "summary": summary,
+                }
+            )
+        return jobs
+
+    def _radar_jobs_for_task(self, task_id: str) -> List[Dict[str, Any]]:
+        task_id = str(task_id or "").strip()
+        if not task_id:
+            return []
+        jobs_dir = self._radar_results_dir() / "jobs"
+        if not jobs_dir.exists():
+            return []
+        jobs: List[Dict[str, Any]] = []
+        prefix = sanitize_name(task_id, "task")
+        for path in sorted(jobs_dir.glob(f"{prefix}_*.json")):
+            try:
+                with path.open("r", encoding="utf-8") as file:
+                    payload = json.load(file)
+            except Exception as exc:
+                jobs.append({"ok": False, "job_path": str(path), "error": str(exc)})
+                continue
+            if not isinstance(payload, dict):
+                continue
+            active = payload.get("active_waypoint") or {}
+            if str(active.get("task_id") or "") != task_id:
+                continue
+            jobs.extend(self._radar_jobs_from_payload(path, payload))
+        manual = self._load_radar_manual_records(task_id)
+        jobs = [self._decorate_radar_job(job, manual) for job in jobs]
+        jobs.sort(
+            key=lambda item: (
+                int((item.get("active_waypoint") or {}).get("index", 0) or 0),
+                int(item.get("scan_index", 0) or 0),
+                str(item.get("scan_mode") or ""),
+            )
+        )
+        return jobs
+
+    def _radar_task_export_payload(self, task_id: str) -> Dict[str, Any]:
+        with self._data_lock:
+            task = self._find_by_id(self._tasks, task_id)
+        jobs = self._radar_jobs_for_task(task_id)
+        return {
+            "ok": True,
+            "task": task,
+            "task_id": task_id,
+            "exported_at": now_text(),
+            "results_dir": str(self._radar_results_dir()),
+            "point_count": len(jobs),
+            "results": jobs,
+        }
+
+    def _radar_record_artifact(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        task_id = str(payload.get("task_id") or "").strip()
+        run_id = str(payload.get("run_id") or "").strip()
+        artifact_path = str(payload.get("artifact_path") or payload.get("path") or "").strip()
+        if not task_id or not run_id or not artifact_path:
+            return self._error("缺少 task_id、run_id 或 artifact_path", {"code": "radar_artifact_bad_request"})
+        records = self._load_radar_manual_records(task_id)
+        artifacts = records.get("artifacts") if isinstance(records.get("artifacts"), dict) else {}
+        artifact = {
+            "status": "imported",
+            "artifact_path": artifact_path,
+            "artifact_type": str(payload.get("artifact_type") or "modeling_project"),
+            "note": str(payload.get("note") or ""),
+            "recorded_at": now_text(),
+        }
+        artifacts[run_id] = artifact
+        records["artifacts"] = artifacts
+        self._save_radar_manual_records(task_id, records)
+        return {"ok": True, "artifact": artifact, "task_id": task_id, "run_id": run_id}
+
+    def _radar_save_manual_measurement(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        task_id = str(payload.get("task_id") or "").strip()
+        run_id = str(payload.get("run_id") or "").strip()
+        measurements = payload.get("measurements")
+        if not isinstance(measurements, list):
+            measurements = []
+        if not task_id or not run_id:
+            return self._error("缺少 task_id 或 run_id", {"code": "radar_manual_bad_request"})
+        records = self._load_radar_manual_records(task_id)
+        saved = {
+            "status": "completed",
+            "measurements": measurements,
+            "operator": str(payload.get("operator") or ""),
+            "note": str(payload.get("note") or ""),
+            "saved_at": now_text(),
+        }
+        manual_measurements = records.get("measurements") if isinstance(records.get("measurements"), dict) else {}
+        manual_measurements[run_id] = saved
+        records["measurements"] = manual_measurements
+        self._save_radar_manual_records(task_id, records)
+        return {"ok": True, "manual_measurement": saved, "task_id": task_id, "run_id": run_id}
+
+    def _radar_task_export_csv(self, task_id: str) -> bytes:
+        payload = self._radar_task_export_payload(task_id)
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(
+            [
+                "task_id",
+                "waypoint_index",
+                "waypoint_label",
+                "building",
+                "unit",
+                "house",
+                "floor",
+                "room",
+                "scan_point",
+                "radar_task_id",
+                "status",
+                "state",
+                "scan_mode",
+                "scan_label",
+                "started_at",
+                "finished_at",
+                "duration_s",
+                "scan_released_at",
+                "scan_release_duration_s",
+                "artifact_status",
+                "artifact_path",
+                "manual_measure_status",
+                "measurement_item_id",
+                "measurement_item",
+                "location",
+                "value",
+                "summary_path",
+                "raw_path",
+                "error",
+            ]
+        )
+        for job in payload.get("results") or []:
+            active = job.get("active_waypoint") or {}
+            waypoint = job.get("waypoint") or {}
+            summary = job.get("summary") or {}
+            metrics = summary.get("metrics") if isinstance(summary, dict) else None
+            manual_measurement = job.get("manual_measurement") if isinstance(job.get("manual_measurement"), dict) else {}
+            manual_metrics = manual_measurement.get("measurements") if isinstance(manual_measurement.get("measurements"), list) else []
+            if not isinstance(metrics, list) or not metrics:
+                metrics = manual_metrics if manual_metrics else [{}]
+            for metric in metrics:
+                metric = metric if isinstance(metric, dict) else {}
+                writer.writerow(
+                    [
+                        payload.get("task_id"),
+                        active.get("index"),
+                        waypoint.get("label") or waypoint.get("id"),
+                        waypoint.get("building"),
+                        waypoint.get("unit"),
+                        waypoint.get("house"),
+                        waypoint.get("floor"),
+                        waypoint.get("room"),
+                        waypoint.get("scan_point"),
+                        job.get("taskId"),
+                        job.get("status"),
+                        job.get("state"),
+                        job.get("scan_mode"),
+                        job.get("scan_label"),
+                        job.get("started_at"),
+                        job.get("finished_at"),
+                        job.get("duration_s"),
+                        job.get("scan_released_at"),
+                        job.get("scan_release_duration_s"),
+                        job.get("artifact_status"),
+                        (job.get("manual_artifact") or {}).get("artifact_path") if isinstance(job.get("manual_artifact"), dict) else "",
+                        job.get("manual_measure_status"),
+                        metric.get("measurementItemId") or metric.get("measurement_item_id") or metric.get("id"),
+                        metric.get("measurementItem") or metric.get("measurement_item") or metric.get("name"),
+                        metric.get("location"),
+                        metric.get("displayValue") or metric.get("rawValue") or metric.get("value"),
+                        job.get("summary_path"),
+                        job.get("raw_path") or job.get("task_info_path"),
+                        job.get("error"),
+                    ]
+                )
+        return output.getvalue().encode("utf-8-sig")
 
     def _current_task_readiness_payload(
         self,
@@ -4934,6 +5292,8 @@ class WebDashboardNode(Node):
         self._append_event(str(failed["operator_event"]), failed["operator_payload"])
 
     def _advance_active_task(self, annotation: Dict[str, Any]) -> None:
+        if self._hold_active_task_for_radar_inspection(annotation):
+            return
         completed_task_id = None
         with self._data_lock:
             active = self._settings.get("active_task") or {}
@@ -4965,6 +5325,96 @@ class WebDashboardNode(Node):
             self._reset_navigation_session("task_completed", clear_costmaps=True)
             self._append_event(str(result["operator_event"]), result["operator_payload"])
         self._dispatch_active_goal(force=True)
+
+    def _hold_active_task_for_radar_inspection(self, annotation: Dict[str, Any]) -> bool:
+        if not bool(self.get_parameter("wait_for_radar_inspection").value):
+            return False
+        with self._data_lock:
+            active = dict(self._settings.get("active_task") or {})
+        if active.get("phase") != "dwelling":
+            return False
+        radar_state = self._radar_completion_for_active(annotation, active)
+        if radar_state == "running":
+            self._publish_active_waypoint(annotation, active, "dwelling")
+            return True
+        if radar_state == "failed":
+            self._stop_task({"reason": "radar_inspection_failed"})
+            return True
+        return False
+
+    @staticmethod
+    def _active_waypoint_key(annotation: Dict[str, Any], active: Dict[str, Any]) -> str:
+        return "%s:%s:%s" % (
+            str(active.get("task_id") or "manual"),
+            str(active.get("index", 0)),
+            str(annotation.get("id") or annotation.get("label") or "waypoint"),
+        )
+
+    def _radar_completion_for_active(self, annotation: Dict[str, Any], active: Dict[str, Any]) -> str:
+        normalized = normalize_annotation_semantics(dict(annotation))
+        radar = normalized.get("radar") if isinstance(normalized.get("radar"), dict) else {}
+        if normalized.get("manual_point_type") != "task" or not radar.get("enabled", True):
+            return "completed"
+        scans = radar.get("scans") if isinstance(radar.get("scans"), list) else []
+        if not scans:
+            return "completed"
+        timeout_s = max(0.0, float(self.get_parameter("radar_inspection_timeout_s").value))
+        if timeout_s > 0.0:
+            try:
+                dwell_until = float(active.get("dwell_until", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                dwell_until = 0.0
+            if dwell_until > 0.0 and time.time() > dwell_until + timeout_s:
+                return "failed"
+        key = self._active_waypoint_key(annotation, active)
+        with self._lock:
+            results = dict(self._state.get("radar_inspection_results") or {})
+            latest = dict(self._state.get("radar_inspection") or {})
+        result = results.get(key)
+        parsed = result.get("parsed") if isinstance(result, dict) else None
+        if isinstance(parsed, dict):
+            status = str(parsed.get("status") or "").strip()
+            if status == "completed" and self._radar_payload_covers_plan(parsed, scans):
+                return "completed"
+            if status == "failed":
+                return "failed"
+            if self._radar_payload_covers_plan(parsed, scans) and self._is_radar_scan_released(parsed):
+                return "completed"
+        latest_parsed = latest.get("parsed") if isinstance(latest, dict) else None
+        if isinstance(latest_parsed, dict) and str(latest_parsed.get("waypoint_key") or "") == key:
+            status = str(latest_parsed.get("status") or "").strip()
+            if status == "failed":
+                return "failed"
+            if self._radar_payload_covers_plan(latest_parsed, scans) and self._is_radar_scan_released(latest_parsed):
+                return "completed"
+            if status in ("starting", "running"):
+                return "running"
+        return "running"
+
+    @staticmethod
+    def _radar_payload_covers_plan(parsed: Dict[str, Any], scans: List[Dict[str, Any]]) -> bool:
+        if parsed.get("scan_mode") == "plan":
+            try:
+                return int(parsed.get("scan_count") or 0) >= len(scans)
+            except (TypeError, ValueError):
+                return True
+        try:
+            scan_index = int(parsed.get("scan_index"))
+            scan_count = int(parsed.get("scan_count") or len(scans))
+        except (TypeError, ValueError):
+            return len(scans) <= 1
+        return scan_index >= len(scans) - 1 and scan_count >= len(scans)
+
+    def _is_radar_scan_released(self, parsed: Dict[str, Any]) -> bool:
+        if not bool(self.get_parameter("advance_on_radar_scan_release").value):
+            return False
+        status = str(parsed.get("status") or "").strip()
+        state = str(parsed.get("state") or "").strip()
+        if bool(parsed.get("scan_released")):
+            return True
+        if status in ("scan_complete", "analysis_pending"):
+            return True
+        return state == "analyzing" and bool(parsed.get("analysis_pending"))
 
     def _dispatch_active_goal(self, force: bool) -> None:
         with self._data_lock:
@@ -5380,6 +5830,23 @@ class WebDashboardNode(Node):
                     self._send_json(node._tasks_payload(query))
                 elif parsed.path == "/api/preflight":
                     self._send_json(node._preflight_payload())
+                elif parsed.path == "/api/radar/task_export":
+                    task_id = (query.get("task_id") or [""])[0]
+                    export_format = (query.get("format") or ["json"])[0]
+                    if export_format == "csv":
+                        payload = node._radar_task_export_csv(task_id)
+                        filename = f"radar_{sanitize_name(task_id, 'task')}.csv"
+                        self._send_bytes(
+                            payload,
+                            "text/csv; charset=utf-8",
+                            extra_headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+                        )
+                    else:
+                        filename = f"radar_{sanitize_name(task_id, 'task')}.json"
+                        self._send_json(
+                            node._radar_task_export_payload(task_id),
+                            extra_headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+                        )
                 elif parsed.path in ("/camera/front.mjpg", "/camera/rear.mjpg"):
                     camera_name = "front" if parsed.path == "/camera/front.mjpg" else "rear"
                     node._serve_mjpeg(camera_name, self)
@@ -5424,6 +5891,10 @@ class WebDashboardNode(Node):
                     self._send_api(node._run_preflight(payload))
                 elif parsed.path == "/api/localization/initialpose":
                     self._send_api(node._publish_initialpose(payload))
+                elif parsed.path == "/api/radar/artifact":
+                    self._send_api(node._radar_record_artifact(payload))
+                elif parsed.path == "/api/radar/manual_measurement":
+                    self._send_api(node._radar_save_manual_measurement(payload))
                 else:
                     self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -5459,11 +5930,17 @@ class WebDashboardNode(Node):
                     status = HTTPStatus.OK
                 self._send_json(payload, status=status)
 
-            def _send_json(self, payload: Dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
+            def _send_json(
+                self,
+                payload: Dict[str, Any],
+                status: HTTPStatus = HTTPStatus.OK,
+                extra_headers: Optional[Dict[str, str]] = None,
+            ) -> None:
                 self._send_bytes(
                     json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
                     "application/json; charset=utf-8",
                     status=status,
+                    extra_headers=extra_headers,
                 )
 
             def _send_bytes(
@@ -5471,12 +5948,18 @@ class WebDashboardNode(Node):
                 payload: bytes,
                 content_type: str,
                 status: HTTPStatus = HTTPStatus.OK,
+                extra_headers: Optional[Dict[str, str]] = None,
             ) -> None:
                 self.send_response(status)
-                self._send_common_headers(content_type, len(payload))
+                self._send_common_headers(content_type, len(payload), extra_headers=extra_headers)
                 self.wfile.write(payload)
 
-            def _send_common_headers(self, content_type: str, length: int) -> None:
+            def _send_common_headers(
+                self,
+                content_type: str,
+                length: int,
+                extra_headers: Optional[Dict[str, str]] = None,
+            ) -> None:
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(length))
                 self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
@@ -5485,6 +5968,8 @@ class WebDashboardNode(Node):
                 self.send_header("Access-Control-Allow-Origin", "*")
                 self.send_header("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
                 self.send_header("Access-Control-Allow-Headers", "Content-Type")
+                for key, value in (extra_headers or {}).items():
+                    self.send_header(str(key), str(value))
                 self.end_headers()
 
         server = _ReusableThreadingHTTPServer((host, port), DashboardHandler)

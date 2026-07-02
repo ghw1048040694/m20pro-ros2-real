@@ -57,6 +57,22 @@ def generate_launch_description():
     inspection_camera_name = LaunchConfiguration("inspection_camera_name")
     inspection_model_path = LaunchConfiguration("inspection_model_path")
     inspection_class_names_path = LaunchConfiguration("inspection_class_names_path")
+    enable_radar_inspection = LaunchConfiguration("enable_radar_inspection")
+    radar_backend = LaunchConfiguration("radar_backend")
+    radar_device_url = LaunchConfiguration("radar_device_url")
+    radar_request_timeout_s = LaunchConfiguration("radar_request_timeout_s")
+    radar_poll_interval_s = LaunchConfiguration("radar_poll_interval_s")
+    radar_max_wait_s = LaunchConfiguration("radar_max_wait_s")
+    radar_dry_run_duration_s = LaunchConfiguration("radar_dry_run_duration_s")
+    radar_scan_mode = LaunchConfiguration("radar_scan_mode")
+    radar_scan_density = LaunchConfiguration("radar_scan_density")
+    radar_release_on_analysis = LaunchConfiguration("radar_release_on_analysis")
+    radar_start_retry_timeout_s = LaunchConfiguration("radar_start_retry_timeout_s")
+    radar_start_retry_interval_s = LaunchConfiguration("radar_start_retry_interval_s")
+    radar_modeling_scene = LaunchConfiguration("radar_modeling_scene")
+    radar_modeling_enable_camera = LaunchConfiguration("radar_modeling_enable_camera")
+    radar_inspection_timeout_s = LaunchConfiguration("radar_inspection_timeout_s")
+    radar_output_dir = LaunchConfiguration("radar_output_dir")
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -131,6 +147,22 @@ def generate_launch_description():
             "inspection_class_names_path",
             default_value=os.path.join(inspection_share, "models", "labels_zh.txt"),
         ),
+        DeclareLaunchArgument("enable_radar_inspection", default_value="false"),
+        DeclareLaunchArgument("radar_backend", default_value="dry_run"),
+        DeclareLaunchArgument("radar_device_url", default_value="http://192.168.107.72:8080"),
+        DeclareLaunchArgument("radar_request_timeout_s", default_value="10.0"),
+        DeclareLaunchArgument("radar_poll_interval_s", default_value="2.0"),
+        DeclareLaunchArgument("radar_max_wait_s", default_value="1800.0"),
+        DeclareLaunchArgument("radar_dry_run_duration_s", default_value="2.0"),
+        DeclareLaunchArgument("radar_scan_mode", default_value="measuring"),
+        DeclareLaunchArgument("radar_scan_density", default_value="low"),
+        DeclareLaunchArgument("radar_release_on_analysis", default_value="true"),
+        DeclareLaunchArgument("radar_start_retry_timeout_s", default_value="120.0"),
+        DeclareLaunchArgument("radar_start_retry_interval_s", default_value="5.0"),
+        DeclareLaunchArgument("radar_modeling_scene", default_value="modeling"),
+        DeclareLaunchArgument("radar_modeling_enable_camera", default_value="false"),
+        DeclareLaunchArgument("radar_inspection_timeout_s", default_value="1800.0"),
+        DeclareLaunchArgument("radar_output_dir", default_value=""),
         DeclareLaunchArgument(
             "factory_mapping_start_command",
             default_value=(
@@ -205,6 +237,22 @@ def generate_launch_description():
                 "inspection_camera_name": inspection_camera_name,
                 "inspection_model_path": inspection_model_path,
                 "inspection_class_names_path": inspection_class_names_path,
+                "enable_radar_inspection": enable_radar_inspection,
+                "radar_backend": radar_backend,
+                "radar_device_url": radar_device_url,
+                "radar_request_timeout_s": radar_request_timeout_s,
+                "radar_poll_interval_s": radar_poll_interval_s,
+                "radar_max_wait_s": radar_max_wait_s,
+                "radar_dry_run_duration_s": radar_dry_run_duration_s,
+                "radar_scan_mode": radar_scan_mode,
+                "radar_scan_density": radar_scan_density,
+                "radar_release_on_analysis": radar_release_on_analysis,
+                "radar_start_retry_timeout_s": radar_start_retry_timeout_s,
+                "radar_start_retry_interval_s": radar_start_retry_interval_s,
+                "radar_modeling_scene": radar_modeling_scene,
+                "radar_modeling_enable_camera": radar_modeling_enable_camera,
+                "radar_inspection_timeout_s": radar_inspection_timeout_s,
+                "radar_output_dir": radar_output_dir,
             }.items(),
             condition=IfCondition(PythonExpression(["'", mode, "' == 'real'"])),
         ),
