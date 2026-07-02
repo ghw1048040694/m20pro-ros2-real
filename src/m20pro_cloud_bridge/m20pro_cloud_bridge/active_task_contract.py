@@ -42,6 +42,15 @@ GOAL_SENT_RESET_KEYS = (
     "last_floor_goal_annotation_id",
     "last_floor_goal_label",
     "last_floor_goal_pose",
+    "last_floor_goal_source_floor",
+    "last_floor_goal_target_floor",
+    "last_floor_goal_cross_floor",
+    "last_transition_nav_status",
+    "last_transition_nav_status_at",
+    "last_transition_nav_payload",
+    "last_transition_nav_goal_status",
+    "last_transition_nav_label",
+    "last_transition_nav_monotonic",
     "plan_goal_verified",
     "plan_goal_error_m",
     "plan_path_version",
@@ -461,6 +470,7 @@ def mark_floor_goal_published_state(
     *,
     now_text: str,
     now_monotonic: float,
+    source_floor: Optional[str] = None,
 ) -> Dict[str, Any]:
     if active.get("status") != "running":
         return {"changed": False, "active": dict(active), "reason": "task_not_running"}
@@ -470,6 +480,13 @@ def mark_floor_goal_published_state(
     updated["last_floor_goal_annotation_id"] = annotation.get("id")
     updated["last_floor_goal_label"] = annotation.get("label")
     updated["floor_goal_publish_count"] = int(updated.get("floor_goal_publish_count", 0) or 0) + 1
+    target_floor = str(goal.get("floor") or "").strip()
+    normalized_source_floor = str(source_floor or "").strip()
+    updated["last_floor_goal_source_floor"] = normalized_source_floor or None
+    updated["last_floor_goal_target_floor"] = target_floor or None
+    updated["last_floor_goal_cross_floor"] = bool(
+        normalized_source_floor and target_floor and normalized_source_floor != target_floor
+    )
     updated["last_floor_goal_pose"] = {
         "floor": goal["floor"],
         "x": goal["x"],
@@ -486,6 +503,9 @@ def mark_floor_goal_published_state(
         "total_goal_send_count": updated.get("total_goal_send_count"),
         "floor_goal_publish_count": updated.get("floor_goal_publish_count"),
         "goal": dict(updated["last_floor_goal_pose"]),
+        "source_floor": updated.get("last_floor_goal_source_floor"),
+        "target_floor": updated.get("last_floor_goal_target_floor"),
+        "cross_floor": updated.get("last_floor_goal_cross_floor"),
     }
     return {
         "changed": updated != active,

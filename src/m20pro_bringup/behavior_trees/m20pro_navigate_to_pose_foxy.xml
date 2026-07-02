@@ -1,7 +1,7 @@
 <!--
   Foxy-compatible M20 Pro NavigateToPose tree.
   Keep this tree conservative: Foxy Nav2 does not provide the newer smoother
-  and controller plugins used by the Humble simulation config.
+  and controller plugins used by the old Humble-oriented config.
 -->
 <root main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">

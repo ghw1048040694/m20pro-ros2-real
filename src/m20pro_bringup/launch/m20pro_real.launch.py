@@ -21,7 +21,6 @@ def has_package(package_name: str) -> bool:
 
 def generate_launch_description():
     bringup_share = get_package_share_directory("m20pro_bringup")
-    desc_share = get_package_share_directory("m20pro_description")
     inspection_share = get_package_share_directory("m20pro_inspection")
     nav2_stack_available = (
         has_package("nav2_bringup")
@@ -36,9 +35,8 @@ def generate_launch_description():
     default_nav2_params = os.path.join(bringup_share, "config", "nav2_params_real.yaml")
     default_floor_config = os.path.join(bringup_share, "config", "inspection_waypoints.yaml")
     default_map_manifest = os.path.join(bringup_share, "config", "map_manifest.yaml")
-    default_urdf = os.path.join(desc_share, "urdf", "M20.urdf")
     default_map = os.path.join(bringup_share, "maps", "F20", "occ_grid.yaml")
-    default_rviz = os.path.join(bringup_share, "rviz", "m20pro_sim.rviz")
+    default_rviz = os.path.join(bringup_share, "rviz", "m20pro_navigation.rviz")
     inspection_launch = os.path.join(inspection_share, "launch", "m20pro_inspection.launch.py")
     default_inspection_model = os.path.join(
         inspection_share, "models", "playphone_bg_best_rk3588_int8.rknn"
@@ -99,9 +97,6 @@ def generate_launch_description():
     rviz_delay_s = LaunchConfiguration("rviz_delay_s")
     enable_axis_command = LaunchConfiguration("enable_axis_command")
     enable_initialpose_relocalization = LaunchConfiguration("enable_initialpose_relocalization")
-
-    with open(default_urdf, "r", encoding="utf-8") as urdf_file:
-        robot_description = urdf_file.read()
 
     return LaunchDescription([
         DeclareLaunchArgument("params_file", default_value=default_params),
@@ -210,37 +205,6 @@ def generate_launch_description():
                 }
             ],
             condition=IfCondition(enable_config_audit),
-        ),
-        Node(
-            package="m20pro_navigation",
-            executable="zero_joint_state_publisher",
-            name="zero_joint_state_publisher",
-            output="screen",
-            parameters=[
-                {
-                    "robot_description": robot_description,
-                    "publish_rate_hz": 5.0,
-                }
-            ],
-        ),
-        Node(
-            package="robot_state_publisher",
-            executable="robot_state_publisher",
-            name="robot_state_publisher",
-            output="screen",
-            parameters=[{"robot_description": robot_description}],
-        ),
-        Node(
-            package="tf2_ros",
-            executable="static_transform_publisher",
-            name="m20pro_nav_base_to_urdf_base",
-            output="screen",
-            arguments=[
-                "0", "0", "0",
-                "0", "0", "0",
-                "m20pro_base_link",
-                "base_link",
-            ],
         ),
         Node(
             package="m20pro_navigation",
@@ -515,7 +479,6 @@ def generate_launch_description():
                     "require_nav2": nav2_stack_available,
                     "require_costmaps": nav2_stack_available,
                     "require_map": nav2_stack_available,
-                    "require_robot_model": nav2_stack_available,
                     "require_nodes": nav2_stack_available,
                     "require_scan": nav2_stack_available,
                     "require_dynamic_obstacles": False,

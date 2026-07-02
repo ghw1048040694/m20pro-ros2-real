@@ -1401,7 +1401,6 @@ class FloorManager(Node):
             or stair.get("platform_switch")
             or stair.get("traverse_to")
             or stair.get("stair_map_exit")
-            or stair.get("sim_traverse_to")
         )
         return source_platform if isinstance(source_platform, dict) else {}
 

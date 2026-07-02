@@ -81,6 +81,24 @@ def test_blocks_selected_map_metadata_mismatch() -> None:
     assert_true("Nav2 当前加载地图不一致" in payload["message"], "message")
 
 
+def test_manual_map_click_does_not_require_live_pose() -> None:
+    payload = ready_payload(
+        selected_map_status={
+            "ready": False,
+            "code": "selected_map_metadata_mismatch",
+            "message": "网页选择地图与 Nav2 当前加载地图不一致",
+        },
+        map_relocalization_required={"map_id": "map_a", "reason": "manual_select"},
+        localization_ok=False,
+        pose={},
+        pose_age_sec=None,
+        require_live_pose=False,
+    )
+    assert_equal(payload["ready"], True, "manual map click ready")
+    assert_equal(payload["code"], "ready", "manual map click code")
+    assert_equal(payload["require_live_pose"], False, "manual map click live pose flag")
+
+
 def test_blocks_required_relocalization() -> None:
     payload = ready_payload(
         map_relocalization_required={
@@ -311,6 +329,7 @@ def main() -> int:
         test_requires_fixed_map,
         test_blocks_map_mismatch,
         test_blocks_selected_map_metadata_mismatch,
+        test_manual_map_click_does_not_require_live_pose,
         test_blocks_required_relocalization,
         test_blocks_unconfirmed_or_stale_pose,
         test_ready,

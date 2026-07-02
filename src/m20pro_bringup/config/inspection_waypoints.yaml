@@ -5,7 +5,7 @@
 # yaw is in radians.
 
 mission:
-  name: "multi_floor_sim_demo"
+  name: "multi_floor_real_validation"
   frame_id: "map"
   # M20 software development manual, single navigation task Type=1003.
   # PointInfo: transition=0, task=1, charge=3.
@@ -276,7 +276,7 @@ floors:
         camera: "front_wide"
         target_classes: ["person", "smoke"]
         required_events: []
-        notes: "Placeholder F20 point for simulation map switching."
+        notes: "Placeholder F20 point for real multi-floor validation."
 
   F21:
     level: 21
@@ -352,4 +352,4 @@ floors:
         camera: "front_wide"
         target_classes: ["person", "smoke"]
         required_events: []
-        notes: "Placeholder F21 point for simulation map switching."
+        notes: "Placeholder F21 point for real multi-floor validation."

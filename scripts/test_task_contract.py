@@ -130,6 +130,27 @@ def test_pose_helpers_and_readiness() -> None:
     assert_equal(ready["first_waypoint_distance_m"], math.hypot(1.0, 2.0), "first waypoint distance recorded")
     assert_equal(ready["updated_at"], "fixed-time", "pose readiness timestamp")
 
+    cross_floor_ready = task_pose_readiness_payload(
+        sample_robot_pose(),
+        {**sample_annotation(), "floor": "F21"},
+        task_id="task_1",
+        task_map_id="builtin_F21",
+        selected_map_id="builtin_F20",
+        localization_ok=True,
+        current_floor="F20",
+        navigation_status="ok",
+        pose_age_sec=1.0,
+        pose_timeout_s=5.0,
+        require_localization_ok=True,
+        warn_first_waypoint_distance_m=8.0,
+        max_first_waypoint_distance_m=25.0,
+        now_text=now_text,
+    )
+    assert_equal(cross_floor_ready["ready"], True, "cross-floor fresh pose passes")
+    assert_equal(cross_floor_ready["first_waypoint_cross_floor"], True, "cross-floor pose readiness marked")
+    assert_equal(cross_floor_ready["first_waypoint_distance_skipped"], "cross_floor", "cross-floor distance skipped")
+    assert_true("first_waypoint_distance_m" not in cross_floor_ready, "cross-floor distance is not compared")
+
     unlocalized = task_pose_readiness_payload(
         sample_robot_pose(),
         sample_annotation(),
@@ -813,6 +834,19 @@ def test_validate_task_annotations_for_map() -> None:
     )
     assert_equal(mixed_floor["code"], "waypoint_floor_mixed", "mixed floor fails")
 
+    cross_floor = validate_task_annotations_for_map(
+        [
+            sample_annotation("p1"),
+            {**sample_annotation("p2"), "floor": "F21", "map_id": "builtin_F21"},
+        ],
+        "builtin_F20",
+        target_map_payloads={"builtin_F20": sample_map(), "builtin_F21": sample_map()},
+        allow_multi_floor=True,
+        allow_multi_map=True,
+        now_text=now_text,
+    )
+    assert_equal(cross_floor, None, "explicit cross-floor annotations pass")
+
     bad_pose = validate_task_annotations_for_map(
         [{**sample_annotation(), "pose": {"x": 1.0}}],
         "builtin_F20",
@@ -929,6 +963,28 @@ def test_task_start_runtime_readiness_payload() -> None:
         )
     )
     assert_equal(too_far["code"], "first_waypoint_too_far", "far first waypoint fails")
+
+    cross_floor_far = call(
+        current_floor="F20",
+        require_current_floor_match=False,
+        first_annotation={**sample_annotation(), "floor": "F21", "map_id": "builtin_F21"},
+        task_map_id="builtin_F21",
+        target_map_payload=live_map,
+        runtime_readiness=readiness_success(
+            "runtime ok",
+            {
+                "task_id": "task_1",
+                "task_map_id": "builtin_F21",
+                "selected_map_id": "builtin_F20",
+                "first_waypoint_distance_m": 300.0,
+                "first_waypoint_cross_floor": True,
+            },
+            now_text=now_text,
+        ),
+    )
+    assert_equal(cross_floor_far["ready"], True, "cross-floor first waypoint distance does not block start")
+    assert_equal(cross_floor_far["first_waypoint_distance_skipped"], "cross_floor", "runtime distance skip retained")
+    assert_equal(cross_floor_far["target_floor"], "F21", "cross-floor target retained")
 
     nav_failed = call(nav_readiness=readiness_failure("costmap_stale", "costmap stale", now_text=now_text))
     assert_equal(nav_failed["code"], "navigation_not_ready", "nav not ready fails")
@@ -1420,22 +1476,36 @@ def test_task_list_filter_payload() -> None:
     tasks = [
         {"id": "task_a", "map_id": "map_a"},
         {"id": "task_b", "map_id": "map_b"},
+        {"id": "task_cross", "map_id": "map_a", "annotation_ids": ["p_a", "p_b"]},
         {"id": "task_missing_map"},
     ]
+    annotations_by_id = {
+        "p_a": {"id": "p_a", "map_id": "map_a"},
+        "p_b": {"id": "p_b", "map_id": "map_b"},
+    }
     include_all = task_list_filter_payload(tasks, selected_map_id="map_a", include_all=True)
-    assert_equal([task["id"] for task in include_all["tasks"]], ["task_a", "task_b", "task_missing_map"], "all tasks visible")
+    assert_equal([task["id"] for task in include_all["tasks"]], ["task_a", "task_b", "task_cross", "task_missing_map"], "all tasks visible")
     assert_equal(include_all["include_all"], True, "include_all flag preserved")
     assert_equal(include_all["hidden_task_count"], 0, "history mode hides nothing")
-    assert_equal(include_all["total_task_count"], 3, "total task count")
+    assert_equal(include_all["total_task_count"], 4, "total task count")
 
     current_map = task_list_filter_payload(tasks, selected_map_id="map_a", include_all=False)
-    assert_equal([task["id"] for task in current_map["tasks"]], ["task_a"], "current map task visible")
+    assert_equal([task["id"] for task in current_map["tasks"]], ["task_a", "task_cross"], "current map task visible")
     assert_equal(current_map["hidden_task_count"], 2, "non-current and missing-map tasks hidden")
-    assert_equal(current_map["total_task_count"], 3, "current map total task count")
+    assert_equal(current_map["total_task_count"], 4, "current map total task count")
+
+    annotation_map = task_list_filter_payload(
+        tasks,
+        selected_map_id="map_b",
+        include_all=False,
+        annotations_by_id=annotations_by_id,
+    )
+    assert_equal([task["id"] for task in annotation_map["tasks"]], ["task_b", "task_cross"], "annotation map task visible")
+    assert_equal(annotation_map["hidden_task_count"], 2, "annotation map hidden count")
 
     no_selected_map = task_list_filter_payload(tasks, selected_map_id=None, include_all=False)
     assert_equal(no_selected_map["tasks"], [], "no selected map shows no current-map tasks")
-    assert_equal(no_selected_map["hidden_task_count"], 3, "no selected map hides all tasks")
+    assert_equal(no_selected_map["hidden_task_count"], 4, "no selected map hides all tasks")
 
 
 def test_normalize_startup_task_runtime_state() -> None:

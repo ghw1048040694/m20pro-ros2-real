@@ -41,7 +41,6 @@ WRAPPER_LAUNCH = ROOT / "src/m20pro_bringup/launch/m20pro.launch.py"
 WEB_DASHBOARD_LAUNCH = ROOT / "src/m20pro_bringup/launch/m20pro_web_dashboard.launch.py"
 NAV2_PARAMS = ROOT / "src/m20pro_bringup/config/nav2_params_real.yaml"
 REAL_CONFIG = ROOT / "src/m20pro_bringup/config/m20pro_real.yaml"
-SIM_CONFIG = ROOT / "src/m20pro_bringup/config/m20pro.yaml"
 TCP_BRIDGE = ROOT / "src/m20pro_navigation/m20pro_navigation/tcp_bridge_node.py"
 SETUP = ROOT / "src/m20pro_navigation/setup.py"
 CLOUD_BRIDGE_SETUP = ROOT / "src/m20pro_cloud_bridge/setup.py"
@@ -177,7 +176,6 @@ def main() -> int:
     web_dashboard_launch = read(WEB_DASHBOARD_LAUNCH)
     nav2 = read(NAV2_PARAMS)
     real_config = read(REAL_CONFIG)
-    sim_config = read(SIM_CONFIG)
     tcp = read(TCP_BRIDGE)
     setup = read(SETUP)
     cloud_bridge_setup = read(CLOUD_BRIDGE_SETUP)
@@ -272,13 +270,8 @@ def main() -> int:
         r'vendor_position_scale:\s*1\.0',
         "real config keeps vendor map pose coordinates in meters",
     )
-    require(
-        sim_config,
-        r'vendor_position_scale:\s*1\.0',
-        "sim config keeps vendor map pose coordinates in meters",
-    )
     forbid(
-        real_config + "\n" + sim_config + "\n" + tcp,
+        real_config + "\n" + tcp,
         r'vendor_position_scale:\s*0\.001|declare_parameter\("vendor_position_scale",\s*0\.001\)',
         "vendor map pose scale must not shrink meter coordinates by 1000x",
     )
@@ -894,7 +887,6 @@ def main() -> int:
 
     forbid(dashboard, r'api/usage_mode|data-usage-mode|setUsageMode', "web has no usage-mode control route/button")
     require(real_config, r'enable_usage_mode_command:\s*false', "real config keeps usage-mode command disabled")
-    require(sim_config, r'enable_usage_mode_command:\s*false', "sim config keeps usage-mode command disabled")
     require(tcp, r'declare_parameter\("enable_usage_mode_command",\s*False\)', "TCP bridge default disables usage-mode command")
 
     require(setup, r'nav2_startup_gate\s*=\s*m20pro_navigation\.nav2_startup_gate:main', "Nav2 startup gate is installed")
@@ -1389,8 +1381,13 @@ def main() -> int:
     )
     require(
         task_snapshot_contract_test,
-        r'test_result_snapshot[\s\S]{0,1600}"nav_status": "error nav2 action unavailable"[\s\S]{0,900}raw Nav2 status promoted[\s\S]{0,900}raw Nav2 status retained in extra',
+        r'test_result_snapshot[\s\S]{0,2600}"nav_status": "error nav2 action unavailable"[\s\S]{0,2600}raw Nav2 status promoted[\s\S]{0,1400}raw Nav2 status retained in extra',
         "offline task snapshot tests cover raw Nav2 status retention in task results",
+    )
+    require(
+        task_snapshot_contract_test,
+        r'test_result_snapshot[\s\S]{0,3200}last_floor_goal_cross_floor[\s\S]{0,1600}last_transition_nav_label',
+        "offline task snapshot tests cover cross-floor diagnostics in task results",
     )
     require(
         task_snapshot_contract,
@@ -1414,7 +1411,7 @@ def main() -> int:
     )
     require(
         task_snapshot_contract,
-        r'def build_active_waypoint_payload[\s\S]{0,2600}path_goal_error_m[\s\S]{0,2600}nav_feedback_age_s[\s\S]{0,2200}"waypoint": waypoint',
+        r'def build_active_waypoint_payload[\s\S]{0,3600}path_goal_error_m[\s\S]{0,3600}last_transition_nav_label[\s\S]{0,2600}nav_feedback_age_s[\s\S]{0,2600}"waypoint": waypoint',
         "task snapshot contract owns live active-waypoint payloads for frontend task diagnostics",
     )
     require(
@@ -1460,7 +1457,7 @@ def main() -> int:
     require(
         autostart_unit,
         r'WorkingDirectory=/home/user/m20pro_real_ros2_ws[\s\S]{0,120}ExecStart=/home/user/m20pro_real_ros2_ws/scripts/104_autostart_entrypoint\.sh',
-        "autostart unit runs from the real workspace instead of the legacy/sim workspace",
+        "autostart unit runs from the real workspace instead of the legacy mixed workspace",
     )
     require(
         autostart_unit,
@@ -1540,7 +1537,7 @@ def main() -> int:
     )
     require(
         nav_status_contract,
-        r'def friendly_nav_status[\s\S]{0,1200}Nav2 正在执行当前点位[\s\S]{0,1200}导航链路报错，任务已停止',
+        r'def friendly_nav_status[\s\S]{0,2200}正在通过楼梯平台[\s\S]{0,2200}Nav2 正在执行当前点位[\s\S]{0,2200}导航链路报错，任务已停止',
         "nav status contract owns operator-facing Nav2 status text",
     )
     require(
@@ -1706,7 +1703,7 @@ def main() -> int:
     require(
         dashboard,
         r'const evidenceCommandHtml = canCopyEvidence \? `[\s\S]{0,220}开跑前验收：\$\{readyCheckCommand\}[\s\S]{0,220}开跑前记录：\$\{watcherCommand\}',
-        "frontend task cards show ready-check and watcher commands only for executable current-map tasks",
+        "frontend task cards show ready-check and watcher commands for current-map tasks",
     )
     require(
         dashboard,
@@ -1725,8 +1722,8 @@ def main() -> int:
     )
     require(
         dashboard,
-        r'const canCopyEvidence = !mapMismatchText && readiness\.ready === true;',
-        "frontend disables field evidence copy actions for old-map or unready tasks",
+        r'const canCopyEvidence = !mapMismatchText;',
+        "frontend keeps read-only field evidence copy actions for current-map tasks, even when readiness is blocked",
     )
     require(
         dashboard,
@@ -1755,18 +1752,18 @@ def main() -> int:
     )
     require(
         dashboard_js,
-        r'function markBlockedReason\(payload = state\.latest\)[\s\S]{0,700}重定位成功[\s\S]{0,500}/m20pro_tcp_bridge/map_pose',
-        "frontend blocks mark saving until manual relocalization and fresh map pose are confirmed",
+        r'function markBlockedReason\(payload = state\.latest\)[\s\S]{0,500}先选择固定地图[\s\S]{0,500}shownFloor[\s\S]{0,500}inputFloor',
+        "frontend keeps manual map-click mark saving scoped to the displayed fixed map and floor",
     )
     require(
         dashboard_js,
-        r'function markBlockedReason\(payload = state\.latest\)[\s\S]{0,500}selectedMapStatus[\s\S]{0,500}Nav2 当前加载地图不一致',
-        "frontend blocks mark saving when selected map differs from Nav2 map",
+        r'function updateMarkControls\(payload = state\.latest\)[\s\S]{0,700}selectedMapFloorMismatchText[\s\S]{0,700}selectedMapStatus[\s\S]{0,700}hasFreshPose[\s\S]{0,500}重定位成功',
+        "frontend blocks use-current-robot-pose marking until floor, selected map and live pose are usable",
     )
     require(
         dashboard_js,
-        r'function updateMarkControls\(payload = state\.latest\)[\s\S]{0,900}saveMarkBtn[\s\S]{0,900}useRobotPoseBtn',
-        "frontend disables mark controls through one shared readiness check",
+        r'api\("POST", "/api/annotations"[\s\S]{0,300}source:\s*state\.markDraftSource',
+        "frontend tags annotations with map-click versus robot-pose source",
     )
     require(
         dashboard,
@@ -1800,8 +1797,8 @@ def main() -> int:
     )
     require(
         dashboard,
-        r'function taskExecutionEvidence\(activeTask,\s*activeWaypoint\)[\s\S]{0,2400}floor_goal_published_at[\s\S]{0,1800}nav_goal_status[\s\S]{0,1800}path_goal_error_m',
-        "frontend field snapshot has structured task execution evidence helper",
+        r'function taskExecutionEvidence\(activeTask,\s*activeWaypoint\)[\s\S]{0,2600}floor_goal_published_at[\s\S]{0,1200}floor_goal_cross_floor[\s\S]{0,1200}transition_nav_label[\s\S]{0,1800}nav_goal_status[\s\S]{0,1800}path_goal_error_m',
+        "frontend field snapshot has structured task execution and cross-floor evidence helper",
     )
     require(
         dashboard,
@@ -1820,8 +1817,8 @@ def main() -> int:
     )
     require(
         dashboard_js,
-        r'function renderActiveTaskSummary\(activeTask,\s*waypoint\)[\s\S]{0,3000}last_floor_goal_published_at[\s\S]{0,160}floor_goal已发[\s\S]{0,260}floor_goal_publish_count[\s\S]{0,260}/floor_goal',
-        "frontend active task summary renders floor-goal publish evidence",
+        r'function renderActiveTaskSummary\(activeTask,\s*waypoint\)[\s\S]{0,3600}last_floor_goal_published_at[\s\S]{0,220}floor_goal已发[\s\S]{0,900}跨楼层[\s\S]{0,900}floor_goal_publish_count[\s\S]{0,300}/floor_goal[\s\S]{0,800}楼梯阶段',
+        "frontend active task summary renders floor-goal and cross-floor stage evidence",
     )
     require(
         dashboard_js,
@@ -2330,7 +2327,7 @@ def main() -> int:
     )
     require(
         task_snapshot_contract_test,
-        r'test_runtime_snapshot[\s\S]{0,1800}last_goal_attempt_id[\s\S]{0,1800}last_nav_feedback[\s\S]{0,1800}test_active_waypoint_payload[\s\S]{0,2400}path_goal_error_m[\s\S]{0,1800}test_idle_waypoint_payload[\s\S]{0,1200}test_result_snapshot',
+        r'test_runtime_snapshot[\s\S]{0,2200}last_goal_attempt_id[\s\S]{0,2200}last_nav_feedback[\s\S]{0,2200}last_transition_nav_label[\s\S]{0,2200}test_active_waypoint_payload[\s\S]{0,3000}path_goal_error_m[\s\S]{0,2200}test_idle_waypoint_payload[\s\S]{0,1200}test_result_snapshot',
         "offline task snapshot contract tests cover runtime, live/idle active-waypoint and result diagnostics",
     )
     require(
@@ -2465,7 +2462,7 @@ def main() -> int:
     )
     require(
         task_progress_contract,
-        r'def active_task_tick_gate_decision[\s\S]{0,1200}no_pose[\s\S]{0,1200}localization_lost[\s\S]{0,1200}pose_stale[\s\S]{0,1200}wrong_floor',
+        r'def active_task_tick_gate_decision[\s\S]{0,1400}no_pose[\s\S]{0,1400}localization_lost[\s\S]{0,1400}pose_stale[\s\S]{0,1600}pass_cross_floor[\s\S]{0,1200}cross_floor_transitioning',
         "task progress contract owns active task tick gate decisions",
     )
     require(
@@ -2565,12 +2562,12 @@ def main() -> int:
     )
     require(
         web,
-        r'def _tick_active_task[\s\S]{0,2600}pre_dispatch\.get\("action"\) == "wait_and_monitor_localization"[\s\S]{0,1200}pre_dispatch\.get\("action"\) == "fail"[\s\S]{0,900}distance = float\(pre_dispatch\.get\("distance_m"\)\)',
-        "web consumes the pre-dispatch contract result for wait/fail/pass without reordering checks",
+        r'def _tick_active_task[\s\S]{0,3000}pre_dispatch\.get\("action"\) == "pass_cross_floor"[\s\S]{0,1000}pre_dispatch\.get\("action"\) == "wait_and_monitor_localization"[\s\S]{0,900}pre_dispatch\.get\("action"\) == "wait"[\s\S]{0,900}pre_dispatch\.get\("action"\) == "fail"[\s\S]{0,900}distance = float\(pre_dispatch\.get\("distance_m"\)\)',
+        "web consumes the pre-dispatch contract result for cross-floor/wait/fail/pass without reordering checks",
     )
     require(
         web,
-        r'def _tick_active_task[\s\S]{0,1800}pre_dispatch\["code"\][\s\S]{0,500}pre_dispatch\["message"\][\s\S]{0,500}pre_dispatch\["reason"\][\s\S]{0,900}pre_dispatch\["code"\][\s\S]{0,500}pre_dispatch\["message"\]',
+        r'def _tick_active_task[\s\S]{0,2400}pre_dispatch\.get\("action"\) == "pass_cross_floor"[\s\S]{0,700}pre_dispatch\["code"\][\s\S]{0,500}pre_dispatch\["message"\][\s\S]{0,1100}pre_dispatch\["reason"\][\s\S]{0,900}pre_dispatch\["code"\][\s\S]{0,500}pre_dispatch\["message"\]',
         "web task tick consumes required pre-dispatch contract fields instead of fallback messages",
     )
     forbid(
@@ -2890,8 +2887,8 @@ def main() -> int:
     )
     require(
         annotation_contract,
-        r'def annotation_create_readiness_payload[\s\S]{0,1600}annotation_fixed_map_required[\s\S]{0,1200}annotation_map_metadata_mismatch[\s\S]{0,1200}annotation_map_relocalization_required[\s\S]{0,1200}annotation_localization_not_confirmed[\s\S]{0,1200}annotation_pose_invalid_or_stale',
-        "annotation contract owns fixed-map, selected-map, relocalization and pose readiness for point saving",
+        r'def annotation_create_readiness_payload[\s\S]{0,1200}annotation_fixed_map_required[\s\S]{0,900}require_live_pose[\s\S]{0,1400}annotation_map_metadata_mismatch[\s\S]{0,1200}annotation_map_relocalization_required[\s\S]{0,1200}annotation_localization_not_confirmed[\s\S]{0,1200}annotation_pose_invalid_or_stale',
+        "annotation contract owns fixed-map manual saving plus strict live-pose readiness for robot-pose marks",
     )
     require(
         annotation_contract,
@@ -2940,7 +2937,7 @@ def main() -> int:
     )
     require(
         web,
-        r'def _task_start_readiness_payload[\s\S]{0,2600}return task_start_runtime_readiness_payload\(',
+        r'def _task_start_readiness_payload[\s\S]{0,4200}multi_floor[\s\S]{0,2600}return task_start_runtime_readiness_payload\(',
         "web delegates final task-start runtime readiness composition to task contract",
     )
     require(
@@ -2950,12 +2947,12 @@ def main() -> int:
     )
     require(
         web,
-        r'def _validate_task_annotations_for_map[\s\S]{0,900}contract_validate_task_annotations_for_map\(',
+        r'def _validate_task_annotations_for_map[\s\S]{0,1600}target_map_payloads[\s\S]{0,900}contract_validate_task_annotations_for_map\([\s\S]{0,700}allow_multi_floor=True[\s\S]{0,500}allow_multi_map=True',
         "web delegates task waypoint list validation to task contract",
     )
     require(
         web,
-        r'def _tasks_payload\(self,\s*query:[\s\S]{0,3200}task_list_filter_payload\([\s\S]{0,1200}"hidden_task_count": task_list\["hidden_task_count"\][\s\S]{0,800}"total_task_count": task_list\["total_task_count"\]',
+        r'def _tasks_payload\(self,\s*query:[\s\S]{0,3600}task_list_filter_payload\([\s\S]{0,900}annotations_by_id=known_annotations[\s\S]{0,2200}"hidden_task_count": task_list\["hidden_task_count"\][\s\S]{0,800}"total_task_count": task_list\["total_task_count"\]',
         "web tasks API delegates current-map task filtering and hidden old-map counts to task contract",
     )
     require(
@@ -3010,7 +3007,7 @@ def main() -> int:
     )
     require(
         web,
-        r'def _tasks_payload\(self,\s*query:[\s\S]{0,2800}"selected_map_status": self\._selected_map_status_payload',
+        r'def _tasks_payload\(self,\s*query:[\s\S]{0,3800}"selected_map_status": self\._selected_map_status_payload',
         "web tasks API exposes selected-map status for task-page gating",
     )
     require(
@@ -3045,8 +3042,8 @@ def main() -> int:
     )
     require(
         web,
-        r'def _create_annotation[\s\S]{0,1800}_annotation_create_readiness_payload\(map_id,\s*selected_map_id\)[\s\S]{0,500}readiness_error_payload\(annotation_readiness\)',
-        "web annotation API rejects point saving before localization readiness is confirmed",
+        r'def _create_annotation[\s\S]{0,1600}annotation_source[\s\S]{0,500}require_live_pose = annotation_source == "robot_pose"[\s\S]{0,600}_annotation_create_readiness_payload\([\s\S]{0,500}require_live_pose=require_live_pose[\s\S]{0,600}readiness_error_payload\(annotation_readiness\)',
+        "web annotation API requires live-pose readiness only for robot-pose mark sources",
     )
     require(
         web,
@@ -3433,8 +3430,8 @@ def main() -> int:
     )
     require(
         frontend_task_smoke,
-        r'saveMarkButton[\s\S]{0,700}useRobotPoseButton[\s\S]{0,1800}save-mark button must be disabled until localization is confirmed[\s\S]{0,1000}final relocalization success',
-        "frontend smoke verifies mark controls stay disabled before localization confirmation",
+        r'useRobotPoseButton[\s\S]{0,1400}use-robot-pose button must be disabled until map and localization are usable[\s\S]{0,1200}use-robot-pose mark button must be disabled until localization is confirmed[\s\S]{0,900}final relocalization success',
+        "frontend smoke verifies live-pose marking stays disabled before map/localization readiness",
     )
     require(
         frontend_task_smoke,
@@ -3758,7 +3755,7 @@ def main() -> int:
     )
     require(
         task_snapshot_contract,
-        r'def build_active_waypoint_payload[\s\S]{0,3200}goal_sent_path_version[\s\S]{0,1300}plan_goal_verified[\s\S]{0,1300}last_floor_goal_published_at[\s\S]{0,900}floor_goal_publish_count',
+        r'def build_active_waypoint_payload[\s\S]{0,4200}goal_sent_path_version[\s\S]{0,1600}plan_goal_verified[\s\S]{0,1600}last_floor_goal_published_at[\s\S]{0,1200}last_floor_goal_cross_floor[\s\S]{0,900}floor_goal_publish_count',
         "task snapshot contract exposes plan-version verification for frontend and watcher diagnostics",
     )
     require(
@@ -3768,7 +3765,7 @@ def main() -> int:
     )
     require(
         task_snapshot_contract,
-        r'RESULT_ACTIVE_KEYS[\s\S]{0,1600}"last_goal_attempt_id"[\s\S]{0,1200}"last_floor_goal_published_at"[\s\S]{0,1200}"plan_goal_verified"[\s\S]{0,1200}"last_nav_feedback"[\s\S]{0,1200}"last_robot_pose"',
+        r'RESULT_ACTIVE_KEYS[\s\S]{0,1800}"last_goal_attempt_id"[\s\S]{0,1400}"last_floor_goal_published_at"[\s\S]{0,1400}"last_floor_goal_cross_floor"[\s\S]{0,1400}"plan_goal_verified"[\s\S]{0,1400}"last_nav_feedback"[\s\S]{0,1400}"last_transition_nav_label"[\s\S]{0,1400}"last_robot_pose"',
         "task snapshot contract preserves goal, plan, Nav2 and robot diagnostics",
     )
     require(
@@ -4188,7 +4185,7 @@ def main() -> int:
     )
     require(
         frontend_task_smoke,
-        r'狗差[\s\S]{0,600}Nav2差[\s\S]{0,600}位姿差[\s\S]{0,600}反馈差[\s\S]{0,600}Nav2反馈 2s前[\s\S]{0,600}路径差 0\.12m[\s\S]{0,600}路径已校验[\s\S]{0,600}floor_goal已发[\s\S]{0,600}/floor_goal 1次',
+        r'狗差[\s\S]{0,700}Nav2差[\s\S]{0,700}位姿差[\s\S]{0,700}反馈差[\s\S]{0,700}Nav2反馈 2s前[\s\S]{0,700}路径差 0\.12m[\s\S]{0,700}路径已校验[\s\S]{0,900}floor_goal已发[\s\S]{0,900}/floor_goal 1次',
         "frontend task smoke asserts live summary diagnostic labels are rendered",
     )
     require(

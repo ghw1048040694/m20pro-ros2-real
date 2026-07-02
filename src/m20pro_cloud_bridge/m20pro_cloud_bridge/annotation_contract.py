@@ -357,6 +357,7 @@ def annotation_create_readiness_payload(
     localization_ok: Any,
     pose_age_sec: Optional[float],
     pose_timeout_s: float,
+    require_live_pose: bool = True,
     now_text: Optional[NowText] = None,
 ) -> Dict[str, Any]:
     bounded_timeout_s = max(0.5, float(pose_timeout_s))
@@ -365,6 +366,16 @@ def annotation_create_readiness_payload(
             "annotation_fixed_map_required",
             "实时 /map 只用于临时观察；请先选择固定地图，再保存任务点位",
             {"map_id": map_id, "selected_map_id": selected_map_id},
+            now_text=now_text,
+        )
+    if not require_live_pose:
+        return readiness_success(
+            "点位保存条件已满足；手动地图标点不要求机器狗位于当前查看楼层",
+            {
+                "map_id": map_id,
+                "selected_map_id": selected_map_id,
+                "require_live_pose": False,
+            },
             now_text=now_text,
         )
     if not selected_map_id:

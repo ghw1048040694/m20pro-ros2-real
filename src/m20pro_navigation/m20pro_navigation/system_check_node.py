@@ -10,17 +10,16 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
 from sensor_msgs.msg import LaserScan, PointCloud2
-from std_msgs.msg import String
 from tf2_ros import Buffer, TransformListener
 from visualization_msgs.msg import MarkerArray
 
 
 class SystemCheckNode(Node):
-    """Compact runtime health check for sim and real bringup."""
+    """Compact runtime health check for M20Pro real bringup."""
 
     def __init__(self) -> None:
         super().__init__("m20pro_system_check")
-        self.declare_parameter("mode", "sim")
+        self.declare_parameter("mode", "real")
         self.declare_parameter("startup_grace_s", 8.0)
         self.declare_parameter("check_period_s", 2.0)
         self.declare_parameter("cloud_topic", "/cloud_nav")
@@ -29,7 +28,6 @@ class SystemCheckNode(Node):
         self.declare_parameter("require_costmaps", True)
         self.declare_parameter("require_nav2", True)
         self.declare_parameter("require_map", True)
-        self.declare_parameter("require_robot_model", True)
         self.declare_parameter("require_nodes", True)
         self.declare_parameter("require_floor_manager", True)
         self.declare_parameter("require_cloud_topic", True)
@@ -58,7 +56,7 @@ class SystemCheckNode(Node):
             ],
         )
 
-        self.mode = str(self.get_parameter("mode").value).strip() or "sim"
+        self.mode = str(self.get_parameter("mode").value).strip() or "real"
         self.start_time = self.get_clock().now()
         self.reported_ok = False
         self.seen_topics: Set[str] = set()
@@ -92,13 +90,6 @@ class SystemCheckNode(Node):
         latched_qos.reliability = ReliabilityPolicy.RELIABLE
         latched_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
 
-        if require_messages and self._bool("require_robot_model"):
-            self.create_subscription(
-                String,
-                "/robot_description",
-                self._mark("/robot_description"),
-                latched_qos,
-            )
         if require_messages and self._bool("require_map"):
             self.create_subscription(OccupancyGrid, "/map", self._mark("/map"), latched_qos)
         if self._bool("require_scan") and (require_messages or need_scan_stats):
@@ -201,8 +192,6 @@ class SystemCheckNode(Node):
 
     def _required_topics(self) -> List[str]:
         topics = []
-        if self._bool("require_robot_model"):
-            topics.append("/robot_description")
         if self._bool("require_map"):
             topics.append("/map")
         cloud_topic = str(self.get_parameter("cloud_topic").value).strip()
@@ -276,7 +265,6 @@ class SystemCheckNode(Node):
             return configured
 
         expected = [
-            "robot_state_publisher",
             "m20pro_tcp_bridge",
             "m20pro_pointcloud_fusion",
             "map_server",
@@ -284,12 +272,8 @@ class SystemCheckNode(Node):
             "planner_server",
             "bt_navigator",
         ]
-        if self.mode == "sim":
-            expected.append("m20pro_dual_lidar_simulator")
         if self._bool("require_floor_manager"):
             expected.append("m20pro_floor_manager")
-        if self._bool("require_dynamic_obstacles"):
-            expected.append("m20pro_dynamic_obstacle_simulator")
         return expected
 
     def _missing_nodes(self, expected: List[str]) -> List[str]:

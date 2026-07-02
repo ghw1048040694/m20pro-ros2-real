@@ -280,9 +280,27 @@ def test_mark_floor_goal_published_state() -> None:
     assert_equal(updated["last_floor_goal_annotation_id"], "p1", "publish annotation id")
     assert_equal(updated["floor_goal_publish_count"], 1, "publish count")
     assert_equal(updated["last_floor_goal_pose"]["floor"], "F20", "publish floor")
+    assert_equal(updated["last_floor_goal_source_floor"], None, "missing source floor stored as none")
+    assert_equal(updated["last_floor_goal_target_floor"], "F20", "target floor stored")
+    assert_equal(updated["last_floor_goal_cross_floor"], False, "same or unknown source floor is not cross-floor")
     assert_equal(updated["status_message"], "已发布 /m20pro/floor_goal，等待 floor_goal_bridge/Nav2 接收", "publish message")
     assert_equal(result["event_extra"]["goal_attempt_id"], "goal_1", "publish attempt id")
     assert_equal(result["event_extra"]["goal"]["x"], 1.0, "publish goal x")
+    assert_equal(result["event_extra"]["cross_floor"], False, "event records same-floor/cross-floor state")
+
+    cross_goal = {**goal, "floor": "F21"}
+    cross = mark_floor_goal_published_state(
+        active(last_goal_attempt_id="goal_2", waypoint_goal_send_count=1, total_goal_send_count=1),
+        {**ann, "floor": "F21"},
+        cross_goal,
+        now_text="now",
+        now_monotonic=15.0,
+        source_floor="F20",
+    )
+    assert_equal(cross["active"]["last_floor_goal_source_floor"], "F20", "cross source floor stored")
+    assert_equal(cross["active"]["last_floor_goal_target_floor"], "F21", "cross target floor stored")
+    assert_equal(cross["active"]["last_floor_goal_cross_floor"], True, "cross-floor publish marked")
+    assert_equal(cross["event_extra"]["cross_floor"], True, "cross-floor event marked")
 
     idle = mark_floor_goal_published_state(
         active(status="completed"),

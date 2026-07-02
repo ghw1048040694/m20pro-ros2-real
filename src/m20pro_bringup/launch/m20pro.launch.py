@@ -2,7 +2,7 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, LogInfo
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PythonExpression
@@ -11,7 +11,6 @@ from launch.substitutions import LaunchConfiguration, PythonExpression
 def generate_launch_description():
     bringup_share = get_package_share_directory("m20pro_bringup")
     inspection_share = get_package_share_directory("m20pro_inspection")
-    sim_launch = os.path.join(bringup_share, "launch", "m20pro_sim.launch.py")
     real_launch = os.path.join(bringup_share, "launch", "m20pro_real.launch.py")
 
     mode = LaunchConfiguration("mode")
@@ -20,9 +19,7 @@ def generate_launch_description():
     map_yaml = LaunchConfiguration("map")
     floor_config = LaunchConfiguration("floor_config")
     map_manifest = LaunchConfiguration("map_manifest")
-    params_file = LaunchConfiguration("params_file")
     real_params_file = LaunchConfiguration("real_params_file")
-    nav2_params_file = LaunchConfiguration("nav2_params_file")
     real_nav2_params_file = LaunchConfiguration("real_nav2_params_file")
     cloud_topic = LaunchConfiguration("cloud_topic")
     backup_cloud_topic = LaunchConfiguration("backup_cloud_topic")
@@ -30,7 +27,6 @@ def generate_launch_description():
     enable_initialpose_relocalization = LaunchConfiguration("enable_initialpose_relocalization")
     enable_initialpose_3d_adapter = LaunchConfiguration("enable_initialpose_3d_adapter")
     initialpose_3d_z = LaunchConfiguration("initialpose_3d_z")
-    enable_dynamic_obstacles = LaunchConfiguration("enable_dynamic_obstacles")
     enable_web_dashboard = LaunchConfiguration("enable_web_dashboard")
     web_dashboard_port = LaunchConfiguration("web_dashboard_port")
     web_dashboard_data_dir = LaunchConfiguration("web_dashboard_data_dir")
@@ -65,8 +61,8 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             "mode",
-            default_value="sim",
-            description="sim or real. This is the unified M20Pro startup entry.",
+            default_value="real",
+            description="Real-only workspace compatibility argument; use real.",
         ),
         DeclareLaunchArgument("rviz", default_value="true"),
         DeclareLaunchArgument("initial_floor", default_value="F20"),
@@ -83,16 +79,8 @@ def generate_launch_description():
             default_value=os.path.join(bringup_share, "config", "map_manifest.yaml"),
         ),
         DeclareLaunchArgument(
-            "params_file",
-            default_value=os.path.join(bringup_share, "config", "m20pro.yaml"),
-        ),
-        DeclareLaunchArgument(
             "real_params_file",
             default_value=os.path.join(bringup_share, "config", "m20pro_real.yaml"),
-        ),
-        DeclareLaunchArgument(
-            "nav2_params_file",
-            default_value=os.path.join(bringup_share, "config", "nav2_params_sim.yaml"),
         ),
         DeclareLaunchArgument(
             "real_nav2_params_file",
@@ -108,7 +96,6 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument("enable_initialpose_3d_adapter", default_value="false"),
         DeclareLaunchArgument("initialpose_3d_z", default_value="0.0"),
-        DeclareLaunchArgument("enable_dynamic_obstacles", default_value="true"),
         DeclareLaunchArgument("enable_web_dashboard", default_value="false"),
         DeclareLaunchArgument("web_dashboard_port", default_value="8080"),
         DeclareLaunchArgument("web_dashboard_data_dir", default_value="~/.m20pro_web"),
@@ -168,43 +155,9 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument("enable_stair_zone_postprocess", default_value="true"),
 
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(sim_launch),
-            launch_arguments={
-                "rviz": rviz,
-                "initial_floor": initial_floor,
-                "map": map_yaml,
-                "floor_config": floor_config,
-                "map_manifest": map_manifest,
-                "params_file": params_file,
-                "nav2_params_file": nav2_params_file,
-                "enable_dynamic_obstacles": enable_dynamic_obstacles,
-                "enable_web_dashboard": enable_web_dashboard,
-                "web_dashboard_port": web_dashboard_port,
-                "web_dashboard_data_dir": web_dashboard_data_dir,
-                "web_dashboard_map_archive_dir": web_dashboard_map_archive_dir,
-                "robot_pose_display_yaw_offset_rad": robot_pose_display_yaw_offset_rad,
-                "initialpose_topic": initialpose_topic,
-                "relocalization_result_topic": relocalization_result_topic,
-                "factory_host": factory_host,
-                "factory_user": factory_user,
-                "factory_active_map": factory_active_map,
-                "factory_mapping_start_command": factory_mapping_start_command,
-                "factory_mapping_finish_command": factory_mapping_finish_command,
-                "factory_mapping_cancel_command": factory_mapping_cancel_command,
-                "enable_stair_zone_postprocess": enable_stair_zone_postprocess,
-                "enable_camera_proxy": enable_camera_proxy,
-                "front_camera_url": front_camera_url,
-                "rear_camera_url": rear_camera_url,
-                "camera_proxy_backend": camera_proxy_backend,
-                "camera_proxy_fps": camera_proxy_fps,
-                "camera_proxy_jpeg_quality": camera_proxy_jpeg_quality,
-                "camera_proxy_ffmpeg_mjpeg_qscale": camera_proxy_ffmpeg_mjpeg_qscale,
-                "camera_proxy_max_width": camera_proxy_max_width,
-                "camera_proxy_transport": camera_proxy_transport,
-                "enable_inspection": "false",
-            }.items(),
-            condition=IfCondition(PythonExpression(["'", mode, "' == 'sim'"])),
+        LogInfo(
+            msg="m20pro_bringup is real-only; non-real mode is unsupported in this workspace.",
+            condition=IfCondition(PythonExpression(["'", mode, "' != 'real'"])),
         ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(real_launch),

@@ -196,12 +196,22 @@ def task_pose_readiness_payload(
         "first_waypoint": readiness_waypoint_payload(first_annotation),
     }
     if first_annotation is not None:
-        first_pose = first_annotation.get("pose") if isinstance(first_annotation.get("pose"), dict) else {}
-        first_distance = pose_distance_m(pose, first_pose)
-        if first_distance is not None:
-            base["first_waypoint_distance_m"] = first_distance
-            base["first_waypoint_distance_warn_m"] = max(0.0, float(warn_first_waypoint_distance_m))
-            base["first_waypoint_distance_max_m"] = max(0.0, float(max_first_waypoint_distance_m))
+        target_floor = str(first_annotation.get("floor") or "").strip()
+        normalized_current_floor = str(current_floor or "").strip()
+        cross_floor_first_waypoint = bool(
+            normalized_current_floor and target_floor and normalized_current_floor != target_floor
+        )
+        base["target_floor"] = target_floor
+        base["first_waypoint_cross_floor"] = cross_floor_first_waypoint
+        if cross_floor_first_waypoint:
+            base["first_waypoint_distance_skipped"] = "cross_floor"
+        else:
+            first_pose = first_annotation.get("pose") if isinstance(first_annotation.get("pose"), dict) else {}
+            first_distance = pose_distance_m(pose, first_pose)
+            if first_distance is not None:
+                base["first_waypoint_distance_m"] = first_distance
+                base["first_waypoint_distance_warn_m"] = max(0.0, float(warn_first_waypoint_distance_m))
+                base["first_waypoint_distance_max_m"] = max(0.0, float(max_first_waypoint_distance_m))
     if require_localization_ok and localization_ok is not True:
         return readiness_failure(
             "localization_not_confirmed",
@@ -838,9 +848,17 @@ def task_start_runtime_readiness_payload(
                     now_text=now_text,
                 )
 
+    same_floor_first_waypoint = not (
+        current_floor and target_floor and str(current_floor).strip() != target_floor
+    )
     first_distance = runtime.get("first_waypoint_distance_m")
     max_first_distance = max(0.0, float(max_first_waypoint_distance_m))
-    if isinstance(first_distance, (int, float)) and max_first_distance > 0.0 and first_distance > max_first_distance:
+    if (
+        same_floor_first_waypoint
+        and isinstance(first_distance, (int, float))
+        and max_first_distance > 0.0
+        and first_distance > max_first_distance
+    ):
         return readiness_failure(
             "first_waypoint_too_far",
             "机器人当前位置距离任务首点 %.2f m，超过 %.2f m；请确认重定位和首点是否属于同一现场后再开始"
@@ -854,6 +872,9 @@ def task_start_runtime_readiness_payload(
             },
             now_text=now_text,
         )
+    if not same_floor_first_waypoint:
+        runtime["first_waypoint_distance_skipped"] = "cross_floor"
+        runtime["first_waypoint_cross_floor"] = True
     if require_nav_ready:
         nav_ready = dict(nav_readiness or {})
         if not nav_ready.get("ready"):
@@ -872,6 +893,10 @@ def task_start_runtime_readiness_payload(
             **runtime,
             "current_floor": current_floor,
             "target_floor": target_floor,
+            "floors": runtime.get("floors"),
+            "map_ids": runtime.get("map_ids"),
+            "multi_floor": runtime.get("multi_floor"),
+            "multi_map": runtime.get("multi_map"),
             "navigation_readiness": success_navigation_readiness if success_navigation_readiness is not None else nav_readiness,
         },
         now_text=now_text,
@@ -927,7 +952,13 @@ def task_readiness_pre_runtime_payload(
     task_map_id = str(context.get("task_map_id") or "").strip() or "live_map"
     selected = str(selected_map_id or context.get("selected_map_id") or "").strip() or "live_map"
     first_annotation = context.get("first_annotation")
-    if task_map_id != selected:
+    annotation_map_ids = {
+        str(item.get("map_id") or "").strip()
+        for item in (context.get("annotations") or [])
+        if isinstance(item, dict) and str(item.get("map_id") or "").strip()
+    }
+    task_contains_selected_map = bool(selected and selected in annotation_map_ids)
+    if task_map_id != selected and not task_contains_selected_map:
         return {
             "proceed": False,
             "readiness": readiness_failure(
@@ -989,6 +1020,9 @@ def validate_task_annotations_for_map(
     task_map_id: str,
     *,
     target_map_payload: Optional[Dict[str, Any]] = None,
+    target_map_payloads: Optional[Dict[str, Dict[str, Any]]] = None,
+    allow_multi_floor: bool = False,
+    allow_multi_map: bool = False,
     now_text: Optional[NowText] = None,
 ) -> Optional[Dict[str, Any]]:
     items = list(annotations)
@@ -1014,7 +1048,7 @@ def validate_task_annotations_for_map(
         assert annotation is not None
         annotation_id = annotation.get("id")
         annotation_map_id = str(annotation.get("map_id") or "").strip() or "live_map"
-        if annotation_map_id != expected_map_id:
+        if not allow_multi_map and annotation_map_id != expected_map_id:
             bad_maps.append(
                 {
                     "index": index,
@@ -1046,8 +1080,11 @@ def validate_task_annotations_for_map(
                 }
             )
             continue
-        if target_map_payload is not None:
-            pose_error = pose_map_bounds_error(pose, target_map_payload, "任务点位")
+        point_map_payload = target_map_payload
+        if target_map_payloads is not None and annotation_map_id:
+            point_map_payload = target_map_payloads.get(annotation_map_id)
+        if point_map_payload is not None:
+            pose_error = pose_map_bounds_error(pose, point_map_payload, "任务点位")
             if pose_error:
                 out_of_map.append(
                     {
@@ -1059,7 +1096,7 @@ def validate_task_annotations_for_map(
                     }
                 )
                 continue
-            occupancy_error = pose_map_occupancy_error(pose, target_map_payload, "任务点位")
+            occupancy_error = pose_map_occupancy_error(pose, point_map_payload, "任务点位")
             if occupancy_error:
                 target = blocked_cells if occupancy_error.get("code") == "pose_on_occupied_cell" else unknown_cells
                 target.append(
@@ -1090,7 +1127,7 @@ def validate_task_annotations_for_map(
             {**base, "bad_waypoints": bad_floors[:10]},
             now_text=now_text,
         )
-    if len(floors) > 1:
+    if len(floors) > 1 and not allow_multi_floor:
         return readiness_failure(
             "waypoint_floor_mixed",
             "当前任务包含多个楼层点位，请先拆分为单楼层任务",
@@ -1531,6 +1568,7 @@ def task_list_filter_payload(
     *,
     selected_map_id: Optional[str],
     include_all: bool,
+    annotations_by_id: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     all_tasks = [dict(task) for task in tasks]
     if include_all:
@@ -1541,7 +1579,14 @@ def task_list_filter_payload(
         visible_tasks = [
             task
             for task in all_tasks
-            if selected_map_id and str(task.get("map_id") or "") == selected
+            if selected_map_id
+            and (
+                str(task.get("map_id") or "") == selected
+                or any(
+                    str((annotations_by_id or {}).get(str(annotation_id), {}).get("map_id") or "") == selected
+                    for annotation_id in (task.get("annotation_ids") or [])
+                )
+            )
         ]
         hidden_task_count = len(all_tasks) - len(visible_tasks)
     return {

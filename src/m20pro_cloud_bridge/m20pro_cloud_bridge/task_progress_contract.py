@@ -133,6 +133,7 @@ def update_active_task_progress_state(
 
 def active_task_tick_gate_decision(
     *,
+    active: Optional[Dict[str, Any]] = None,
     pose: Dict[str, Any],
     annotation: Dict[str, Any],
     current_floor: Any,
@@ -166,11 +167,21 @@ def active_task_tick_gate_decision(
         }
     target_floor = annotation.get("floor")
     if current_floor and target_floor and current_floor != target_floor:
+        active_state = dict(active or {})
+        if active is not None and active_state.get("last_goal_annotation_id") != annotation.get("id"):
+            return {
+                "action": "pass_cross_floor",
+                "code": "cross_floor_dispatch",
+                "reason": "target_floor_differs",
+                "message": "当前点位在 %s，先下发跨楼层目标给 floor_manager" % target_floor,
+                "current_floor": current_floor,
+                "target_floor": target_floor,
+            }
         return {
             "action": "wait",
-            "code": "wrong_floor",
-            "reason": "wrong_floor",
-            "message": "当前楼层与点位楼层不一致，等待楼层切换或人工确认",
+            "code": "cross_floor_transitioning",
+            "reason": "waiting_floor_switch",
+            "message": "跨楼层目标已下发，等待从 %s 切换到 %s" % (current_floor, target_floor),
             "current_floor": current_floor,
             "target_floor": target_floor,
         }
@@ -224,6 +235,7 @@ def active_task_distance_decision(
 
 def active_task_pre_dispatch_decision(
     *,
+    active: Optional[Dict[str, Any]] = None,
     pose: Dict[str, Any],
     annotation: Dict[str, Any],
     current_floor: Any,
@@ -239,6 +251,7 @@ def active_task_pre_dispatch_decision(
     """
 
     gate = active_task_tick_gate_decision(
+        active=active,
         pose=pose,
         annotation=annotation,
         current_floor=current_floor,
@@ -246,6 +259,8 @@ def active_task_pre_dispatch_decision(
         pose_age=pose_age,
         pose_timeout_s=pose_timeout_s,
     )
+    if gate.get("action") == "pass_cross_floor":
+        return {**gate, "stage": "tick_gate"}
     if gate.get("action") != "pass":
         return {**gate, "stage": "tick_gate"}
 

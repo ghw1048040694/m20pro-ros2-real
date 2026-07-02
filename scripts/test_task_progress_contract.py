@@ -111,7 +111,7 @@ def test_tick_gate_decisions() -> None:
     )
     assert_equal(stale["reason"], "pose_stale", "stale pose reason")
 
-    wrong_floor = active_task_tick_gate_decision(
+    legacy_cross_floor_wait = active_task_tick_gate_decision(
         pose={"x": 0.0, "y": 0.0, "yaw": 0.0},
         annotation={**annotation(), "floor": "F21"},
         current_floor="F20",
@@ -119,8 +119,8 @@ def test_tick_gate_decisions() -> None:
         pose_age=0.2,
         pose_timeout_s=2.0,
     )
-    assert_equal(wrong_floor["action"], "wait", "wrong floor waits without localization timeout")
-    assert_equal(wrong_floor["target_floor"], "F21", "wrong floor target")
+    assert_equal(legacy_cross_floor_wait["action"], "wait", "legacy cross-floor call waits without active state")
+    assert_equal(legacy_cross_floor_wait["target_floor"], "F21", "legacy cross-floor target")
 
     ready = active_task_tick_gate_decision(
         pose={"x": 0.0, "y": 0.0, "yaw": 0.0},
@@ -176,7 +176,7 @@ def test_pre_dispatch_decision() -> None:
     assert_equal(lost["action"], "wait_and_monitor_localization", "lost localization waits")
     assert_equal(lost["stage"], "tick_gate", "lost localization stage")
 
-    wrong_floor = active_task_pre_dispatch_decision(
+    legacy_cross_floor_wait = active_task_pre_dispatch_decision(
         pose={"x": 0.0, "y": 0.0, "yaw": 0.0},
         annotation={**annotation(), "floor": "F21"},
         current_floor="F20",
@@ -184,8 +184,8 @@ def test_pre_dispatch_decision() -> None:
         pose_age=0.1,
         pose_timeout_s=2.0,
     )
-    assert_equal(wrong_floor["action"], "wait", "wrong floor waits")
-    assert_equal(wrong_floor["stage"], "tick_gate", "wrong floor stage")
+    assert_equal(legacy_cross_floor_wait["action"], "wait", "legacy cross-floor call waits")
+    assert_equal(legacy_cross_floor_wait["stage"], "tick_gate", "legacy cross-floor wait stage")
 
     bad_goal = active_task_pre_dispatch_decision(
         pose={"x": 0.0, "y": 0.0, "yaw": 0.0},
@@ -211,6 +211,33 @@ def test_pre_dispatch_decision() -> None:
     assert_equal(ready["reason"], "pre_dispatch_ready", "pre-dispatch ready reason")
     assert_equal(ready["stage"], "ready", "pre-dispatch ready stage")
     assert_equal(ready["distance_m"], 5.0, "pre-dispatch distance")
+
+
+def test_cross_floor_pre_dispatch_decision() -> None:
+    first_dispatch = active_task_pre_dispatch_decision(
+        active=active(last_goal_annotation_id=None),
+        pose={"x": 0.0, "y": 0.0, "yaw": 0.0},
+        annotation={**annotation(), "floor": "F21"},
+        current_floor="F20",
+        localization_ok=True,
+        pose_age=0.1,
+        pose_timeout_s=2.0,
+    )
+    assert_equal(first_dispatch["action"], "pass_cross_floor", "first cross-floor goal is dispatched")
+    assert_equal(first_dispatch["code"], "cross_floor_dispatch", "cross-floor dispatch code")
+    assert_equal(first_dispatch["target_floor"], "F21", "cross-floor target floor")
+
+    waiting = active_task_pre_dispatch_decision(
+        active=active(last_goal_annotation_id="p1"),
+        pose={"x": 0.0, "y": 0.0, "yaw": 0.0},
+        annotation={**annotation(), "floor": "F21"},
+        current_floor="F20",
+        localization_ok=True,
+        pose_age=0.1,
+        pose_timeout_s=2.0,
+    )
+    assert_equal(waiting["action"], "wait", "published cross-floor goal waits for floor switch")
+    assert_equal(waiting["code"], "cross_floor_transitioning", "cross-floor waiting code")
 
 
 def test_progress_detects_stall_and_recovery() -> None:
@@ -582,6 +609,7 @@ def main() -> int:
         test_tick_gate_decisions,
         test_distance_decision,
         test_pre_dispatch_decision,
+        test_cross_floor_pre_dispatch_decision,
         test_progress_detects_stall_and_recovery,
         test_stall_decision,
         test_apply_stall_warning_state,

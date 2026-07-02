@@ -103,6 +103,7 @@ from .nav_status_contract import (
     apply_nav_feedback_state,
     apply_nav_goal_status_state,
     apply_nav_status_message_state,
+    apply_transition_nav_status_state,
     classify_navigation_status,
     ignored_nav_status_event_payload,
     nav_feedback_dispatch_payload,
@@ -113,6 +114,7 @@ from .nav_status_contract import (
     nav_success_completion_decision,
     parse_key_value_status,
     should_record_nav_feedback_event,
+    transition_nav_status_event_payload,
 )
 from .navigation_readiness_contract import (
     navigation_readiness_disabled_payload,
@@ -2844,7 +2846,13 @@ class WebDashboardNode(Node):
             if not map_id:
                 return self._error("没有可用地图，请等待实时 /map 或先选择固定地图")
             selected_map_id = self._settings.get("selected_map_id")
-        annotation_readiness = self._annotation_create_readiness_payload(map_id, selected_map_id)
+        annotation_source = str(payload.get("source") or "map_click").strip()
+        require_live_pose = annotation_source == "robot_pose"
+        annotation_readiness = self._annotation_create_readiness_payload(
+            map_id,
+            selected_map_id,
+            require_live_pose=require_live_pose,
+        )
         if not annotation_readiness.get("ready"):
             return self._error(
                 str(annotation_readiness["message"]),
@@ -2877,6 +2885,7 @@ class WebDashboardNode(Node):
         self,
         map_id: Optional[str],
         selected_map_id: Optional[str],
+        require_live_pose: bool = True,
     ) -> Dict[str, Any]:
         selected_map_status = self._selected_map_status_payload(selected_map_id=selected_map_id)
         with self._data_lock:
@@ -2895,6 +2904,7 @@ class WebDashboardNode(Node):
             localization_ok=localization_ok,
             pose_age_sec=pose_age,
             pose_timeout_s=pose_timeout_s,
+            require_live_pose=require_live_pose,
             now_text=now_text,
         )
 
@@ -2954,6 +2964,7 @@ class WebDashboardNode(Node):
             all_tasks,
             selected_map_id=selected_map_id,
             include_all=include_all,
+            annotations_by_id=known_annotations,
         )
         tasks = list(task_list["tasks"])
         with self._preflight_lock:
@@ -2965,6 +2976,22 @@ class WebDashboardNode(Node):
                 task_waypoint_payload(str(annotation_id), known_annotations.get(str(annotation_id)), index)
                 for index, annotation_id in enumerate(task.get("annotation_ids") or [])
             ]
+            task["map_ids"] = sorted(
+                {
+                    str(known_annotations.get(str(annotation_id), {}).get("map_id") or "")
+                    for annotation_id in (task.get("annotation_ids") or [])
+                    if str(known_annotations.get(str(annotation_id), {}).get("map_id") or "")
+                }
+            )
+            task["multi_map"] = len(task["map_ids"]) > 1
+            task["floors"] = sorted(
+                {
+                    str(known_annotations.get(str(annotation_id), {}).get("floor") or "")
+                    for annotation_id in (task.get("annotation_ids") or [])
+                    if str(known_annotations.get(str(annotation_id), {}).get("floor") or "")
+                }
+            )
+            task["multi_floor"] = len(task["floors"]) > 1
             task["readiness"] = self._task_readiness_for_task(task, map_cache, nav_readiness=nav_readiness)
         return {
             "ok": True,
@@ -3066,10 +3093,26 @@ class WebDashboardNode(Node):
         target_map_payload: Optional[Dict[str, Any]] = None
         if expected_map_id and expected_map_id != "live_map":
             target_map_payload = self._map_file_snapshot_cached(expected_map_id, map_cache)
+        target_map_payloads: Dict[str, Dict[str, Any]] = {}
+        for annotation in annotations:
+            if not isinstance(annotation, dict):
+                continue
+            annotation_map_id = str(annotation.get("map_id") or "").strip()
+            if not annotation_map_id or annotation_map_id == "live_map":
+                continue
+            if annotation_map_id in target_map_payloads:
+                continue
+            target_map_payloads[annotation_map_id] = self._map_file_snapshot_cached(
+                annotation_map_id,
+                map_cache,
+            )
         return contract_validate_task_annotations_for_map(
             annotations,
             expected_map_id,
             target_map_payload=target_map_payload,
+            target_map_payloads=target_map_payloads or None,
+            allow_multi_floor=True,
+            allow_multi_map=True,
             now_text=now_text,
         )
 
@@ -3295,6 +3338,36 @@ class WebDashboardNode(Node):
         )
         if not runtime.get("ready"):
             return runtime
+        with self._data_lock:
+            task_record = self._find_by_id(self._tasks, task_id)
+            known_annotations = {
+                str(item.get("id")): dict(item)
+                for item in self._annotations
+                if item.get("id")
+            }
+        if task_record:
+            annotation_ids = [str(item) for item in (task_record.get("annotation_ids") or [])]
+            floors = sorted(
+                {
+                    str(known_annotations.get(annotation_id, {}).get("floor") or "")
+                    for annotation_id in annotation_ids
+                    if str(known_annotations.get(annotation_id, {}).get("floor") or "")
+                }
+            )
+            map_ids = sorted(
+                {
+                    str(known_annotations.get(annotation_id, {}).get("map_id") or "")
+                    for annotation_id in annotation_ids
+                    if str(known_annotations.get(annotation_id, {}).get("map_id") or "")
+                }
+            )
+            runtime = {
+                **runtime,
+                "floors": floors,
+                "map_ids": map_ids,
+                "multi_floor": len(floors) > 1,
+                "multi_map": len(map_ids) > 1,
+            }
         if runtime_state is None:
             with self._lock:
                 runtime_state = {
@@ -3306,8 +3379,13 @@ class WebDashboardNode(Node):
         live_map = dict(runtime_state.get("map") or {})
         pose = dict(runtime_state.get("pose") or {})
         target_map_payload = live_map
-        if task_map_id and task_map_id != "live_map":
-            target_map_payload = self._map_file_snapshot_cached(task_map_id, map_cache)
+        target_map_id = str(task_map_id or "").strip()
+        if isinstance(first_annotation, dict):
+            annotation_map_id = str(first_annotation.get("map_id") or "").strip()
+            if annotation_map_id:
+                target_map_id = annotation_map_id
+        if target_map_id and target_map_id != "live_map":
+            target_map_payload = self._map_file_snapshot_cached(target_map_id, map_cache)
         required_nav_ready = bool(self.get_parameter("task_start_require_nav_ready").value)
         resolved_nav_readiness = nav_readiness
         if required_nav_ready and resolved_nav_readiness is None:
@@ -3642,6 +3720,12 @@ class WebDashboardNode(Node):
         if action == "update_goal_status":
             self._update_active_task_from_nav_status(str(decision.get("goal_status") or ""), status_text)
             return
+        if action in ("update_transition_status", "update_transition_feedback"):
+            self._update_active_task_from_transition_nav_status(
+                str(decision.get("goal_status") or ""),
+                status_text,
+            )
+            return
         if action == "update_feedback":
             self._update_active_task_from_nav_feedback(status_text)
             return
@@ -3687,6 +3771,39 @@ class WebDashboardNode(Node):
             self._save_json("tasks.json", self._tasks)
         self._reset_navigation_session("navigation_error", clear_costmaps=True)
         self._append_event(str(failed["operator_event"]), failed["operator_payload"])
+
+    def _update_active_task_from_transition_nav_status(
+        self,
+        status: str,
+        status_text: str,
+        save: bool = True,
+    ) -> None:
+        status_payload = parse_key_value_status(status_text)
+        with self._data_lock:
+            active = dict(self._settings.get("active_task") or {})
+            if active.get("status") != "running":
+                return
+            active = apply_transition_nav_status_state(
+                active,
+                goal_status=status or None,
+                status_text=status_text,
+                status_payload=status_payload,
+                now_text=now_text(),
+            )
+            event_payload = transition_nav_status_event_payload(
+                active,
+                status_text=status_text,
+                status_payload=status_payload,
+            )
+            self._append_active_task_timeline_event(
+                active,
+                str(event_payload["event"]),
+                str(event_payload["message"]),
+                event_payload.get("extra") if isinstance(event_payload.get("extra"), dict) else {},
+            )
+            self._settings["active_task"] = active
+            if save:
+                self._save_json("settings.json", self._settings)
 
     def _update_active_task_from_nav_status(
         self,
@@ -4283,6 +4400,21 @@ class WebDashboardNode(Node):
             if decision.get("action") == "advance":
                 self._advance_active_task(annotation)
                 return
+        if self._active_waypoint_waiting_cross_floor(active, annotation):
+            target_floor = str(annotation.get("floor") or "")
+            self._mark_active_task_waiting(
+                active,
+                "cross_floor_transitioning",
+                "跨楼层目标已下发，等待 floor_manager 切换到 %s" % target_floor,
+            )
+            with self._data_lock:
+                active_snapshot = dict(self._settings.get("active_task") or active)
+            self._publish_active_waypoint(annotation, active_snapshot, "cross_floor")
+            if self._stop_task_if_cross_floor_unresponsive(active_snapshot, annotation):
+                return
+            if self._stop_task_if_cross_floor_transition_timed_out(active_snapshot, annotation):
+                return
+            return
         with self._lock:
             pose = dict(self._state.get("pose") or {})
             current_floor = self._state.get("floor")
@@ -4291,6 +4423,7 @@ class WebDashboardNode(Node):
         pose_age = pose_age_sec(pose, time.time())
         pose_timeout_s = max(0.5, float(self.get_parameter("task_start_pose_timeout_s").value))
         pre_dispatch = active_task_pre_dispatch_decision(
+            active=active,
             pose=pose,
             annotation=annotation,
             current_floor=current_floor,
@@ -4298,6 +4431,14 @@ class WebDashboardNode(Node):
             pose_age=pose_age,
             pose_timeout_s=pose_timeout_s,
         )
+        if pre_dispatch.get("action") == "pass_cross_floor":
+            self._mark_active_task_waiting(
+                active,
+                str(pre_dispatch["code"]),
+                str(pre_dispatch["message"]),
+            )
+            self._dispatch_active_goal(force=False)
+            return
         if pre_dispatch.get("action") == "wait_and_monitor_localization":
             self._mark_active_task_waiting(
                 active,
@@ -4364,6 +4505,93 @@ class WebDashboardNode(Node):
                 return
             return
         self._dispatch_active_goal(force=False)
+
+    def _active_waypoint_waiting_cross_floor(
+        self,
+        active: Dict[str, Any],
+        annotation: Dict[str, Any],
+    ) -> bool:
+        target_floor = str(annotation.get("floor") or "").strip()
+        if not target_floor:
+            return False
+        with self._lock:
+            current_floor = str(self._state.get("floor") or "").strip()
+        if current_floor == target_floor:
+            return False
+        return (
+            active.get("last_goal_annotation_id") == annotation.get("id")
+            and active.get("last_floor_goal_annotation_id") == annotation.get("id")
+            and bool(active.get("last_floor_goal_cross_floor"))
+        )
+
+    def _stop_task_if_cross_floor_unresponsive(
+        self,
+        active: Dict[str, Any],
+        annotation: Dict[str, Any],
+    ) -> bool:
+        published_at = 0.0
+        try:
+            published_at = float(active.get("last_floor_goal_published_monotonic") or 0.0)
+        except (TypeError, ValueError):
+            published_at = 0.0
+        if published_at <= 0.0:
+            return False
+        if active.get("last_transition_nav_status") or active.get("last_nav_status"):
+            return False
+        timeout_s = max(1.0, float(self.get_parameter("task_goal_accept_timeout_s").value))
+        age_s = max(0.0, time.monotonic() - published_at)
+        if age_s < timeout_s:
+            return False
+        self._fail_active_task(
+            str(active.get("task_id") or ""),
+            "跨楼层目标下发 %.1f 秒后未收到 floor_manager/Nav2 回应，已停止任务；请检查 floor_manager、/m20pro/stair_status 和 /m20pro/floor_goal"
+            % timeout_s,
+            {
+                "reason": "cross_floor_goal_no_response",
+                "annotation_id": annotation.get("id"),
+                "label": annotation.get("label"),
+                "target_floor": annotation.get("floor"),
+                "age_s": age_s,
+                "timeout_s": timeout_s,
+            },
+        )
+        return True
+
+    def _stop_task_if_cross_floor_transition_timed_out(
+        self,
+        active: Dict[str, Any],
+        annotation: Dict[str, Any],
+    ) -> bool:
+        published_at = 0.0
+        try:
+            published_at = float(active.get("last_floor_goal_published_monotonic") or 0.0)
+        except (TypeError, ValueError):
+            published_at = 0.0
+        if published_at <= 0.0:
+            return False
+        timeout_s = max(10.0, float(self.get_parameter("task_waypoint_timeout_s").value))
+        age_s = max(0.0, time.monotonic() - published_at)
+        if age_s < timeout_s:
+            return False
+        self._fail_active_task(
+            str(active.get("task_id") or ""),
+            "跨楼层目标下发 %.1f 秒后仍未切换到目标楼层，已停止任务；请查看最近楼梯阶段、/m20pro/stair_status 和 Nav2 状态"
+            % timeout_s,
+            {
+                "reason": "cross_floor_transition_timeout",
+                "annotation_id": annotation.get("id"),
+                "label": annotation.get("label"),
+                "source_floor": active.get("last_floor_goal_source_floor"),
+                "target_floor": annotation.get("floor"),
+                "last_transition_nav_status": active.get("last_transition_nav_status"),
+                "last_transition_nav_label": active.get("last_transition_nav_label"),
+                "last_transition_nav_payload": active.get("last_transition_nav_payload"),
+                "last_nav_status": active.get("last_nav_status"),
+                "age_s": age_s,
+                "timeout_s": timeout_s,
+            },
+        )
+        return True
 
     def _begin_waypoint_dwell_or_advance(self, annotation: Dict[str, Any], reason: str) -> None:
         self._publish_zero_cmd(samples=3)
@@ -4824,6 +5052,8 @@ class WebDashboardNode(Node):
         if missing_failure is not None:
             self._fail_active_task_from_payload(missing_failure)
             return
+        with self._lock:
+            source_floor = str(self._state.get("floor") or "").strip()
         self._publish_floor_goal(str(goal["floor"]), float(goal["x"]), float(goal["y"]), float(goal["yaw"]), float(goal["z"]))
         with self._data_lock:
             current = dict(self._settings.get("active_task") or {})
@@ -4834,6 +5064,7 @@ class WebDashboardNode(Node):
                     goal,
                     now_text=now_text(),
                     now_monotonic=time.monotonic(),
+                    source_floor=source_floor,
                 )
                 current = result["active"]
                 self._append_active_task_timeline_event(

@@ -13,9 +13,11 @@
       selectedMapStatus: null,
       sessionId: null,
       markDraft: null,
+      markDraftSource: "map_click",
       localizeDraft: null,
       markPointer: null,
       panPointer: null,
+      robotDisplayPose: null,
       view: {
         zoom: 1,
         panX: 0,
@@ -411,6 +413,89 @@
     function freshPose(payload = state.latest) {
       return hasFreshPose(payload) ? payload.pose : null;
     }
+    function yawDelta(from, to) {
+      return Math.atan2(Math.sin(to - from), Math.cos(to - from));
+    }
+    function stableRobotDisplayPose(pose, activeTask = null) {
+      if (!pose || !Number.isFinite(Number(pose.x)) || !Number.isFinite(Number(pose.y))) {
+        state.robotDisplayPose = null;
+        return null;
+      }
+      const raw = {
+        x: Number(pose.x),
+        y: Number(pose.y),
+        yaw: normalizeYaw(Number.isFinite(Number(pose.display_yaw)) ? pose.display_yaw : pose.yaw)
+      };
+      if (activeTask && activeTask.status === "running") {
+        state.robotDisplayPose = raw;
+        return raw;
+      }
+      const prev = state.robotDisplayPose;
+      if (!prev) {
+        state.robotDisplayPose = raw;
+        return raw;
+      }
+      const dx = raw.x - prev.x;
+      const dy = raw.y - prev.y;
+      const dist = Math.hypot(dx, dy);
+      const dyaw = yawDelta(prev.yaw, raw.yaw);
+      if (dist > 0.35 || Math.abs(dyaw) > 0.35) {
+        state.robotDisplayPose = raw;
+        return raw;
+      }
+      if (dist < 0.03 && Math.abs(dyaw) < 0.035) return prev;
+      const alpha = 0.4;
+      state.robotDisplayPose = {
+        x: prev.x + dx * alpha,
+        y: prev.y + dy * alpha,
+        yaw: normalizeYaw(prev.yaw + dyaw * alpha)
+      };
+      return state.robotDisplayPose;
+    }
+    function mapRecordById(mapId) {
+      const id = String(mapId || "");
+      if (!id) return null;
+      return state.maps.find(item => String(item.id || "") === id) || null;
+    }
+    function displayedMapFloor() {
+      if (state.map && state.map.floor) return String(state.map.floor).trim();
+      const record = mapRecordById(state.selectedMapId);
+      return record && record.floor ? String(record.floor).trim() : "";
+    }
+    function currentRobotFloor(payload = state.latest) {
+      return payload && payload.floor ? String(payload.floor).trim() : "";
+    }
+    function isViewingRobotFloor(payload = state.latest) {
+      if (!state.selectedMapId) return true;
+      const shownFloor = displayedMapFloor();
+      const robotFloor = currentRobotFloor(payload);
+      if (!shownFloor) return true;
+      if (!robotFloor) return false;
+      return shownFloor === robotFloor;
+    }
+    function selectedMapFloorMismatchText(payload = state.latest) {
+      const shownFloor = displayedMapFloor();
+      const robotFloor = currentRobotFloor(payload);
+      if (!state.selectedMapId || !shownFloor) return "";
+      if (!robotFloor) return `正在查看 ${shownFloor}，尚未收到机器狗真实楼层`;
+      if (shownFloor !== robotFloor) return `正在查看 ${shownFloor}，机器狗实际在 ${robotFloor}`;
+      return "";
+    }
+    function updateFloorDisplay(payload = state.latest) {
+      const shownFloor = displayedMapFloor() || (state.selectedMapId ? "-" : "实时");
+      const robotFloor = currentRobotFloor(payload) || "-";
+      const mismatch = selectedMapFloorMismatchText(payload);
+      const badge = $("mapFloorBadge");
+      if (badge) {
+        badge.textContent = `查看 ${shownFloor} / 真实 ${robotFloor}`;
+        badge.className = `floor-badge ${mismatch ? "warn" : "ok"}`;
+      }
+      const overlay = $("floorOverlay");
+      if (overlay) {
+        overlay.textContent = mismatch || `当前显示 ${shownFloor}`;
+        overlay.className = `floor-overlay ${mismatch ? "warn" : ""}`;
+      }
+    }
     function localizationConfirmedForDisplay(payload = state.latest) {
       const status = payload && payload.localization_status ? payload.localization_status : null;
       return !!(
@@ -424,12 +509,11 @@
     function markBlockedReason(payload = state.latest) {
       if (!state.map) return "还没有地图，等地图加载后再标点";
       if (!state.selectedMapId) return "先选择固定地图；实时 /map 只用于临时观察，不能保存任务点";
-      const selectedMapStatus = (payload && payload.selected_map_status) || state.selectedMapStatus;
-      if (selectedMapStatus && selectedMapStatus.ready === false) {
-        return selectedMapStatus.message || "网页选择地图与 Nav2 当前加载地图不一致，请先切换到正确地图并重定位";
+      const shownFloor = displayedMapFloor();
+      const inputFloor = $("markFloor") ? $("markFloor").value.trim() : "";
+      if (shownFloor && inputFloor && shownFloor !== inputFloor) {
+        return `当前显示 ${shownFloor} 地图，点位楼层填的是 ${inputFloor}；请先确认楼层`;
       }
-      if (!payload || payload.localization_ok !== true) return "先完成重定位，看到定位页显示重定位成功后再标点";
-      if (!hasFreshPose(payload)) return "定位已确认但地图位姿过期，等待 /m20pro_tcp_bridge/map_pose 刷新后再标点";
       return "";
     }
     function updateMarkControls(payload = state.latest) {
@@ -441,9 +525,15 @@
         saveBtn.title = reason || "保存当前固定地图上的点位";
       }
       if (usePoseBtn) {
-        const poseReason = (!payload || !hasFreshPose(payload))
-          ? "先完成重定位，看到定位页显示重定位成功并收到实时位姿后再取当前位姿"
-          : "";
+        const mismatch = selectedMapFloorMismatchText(payload);
+        const selectedMapStatus = (payload && payload.selected_map_status) || state.selectedMapStatus;
+        let poseReason = "";
+        if (mismatch) poseReason = `${mismatch}，不能把实时位姿保存到这张地图`;
+        else if (selectedMapStatus && selectedMapStatus.ready === false) {
+          poseReason = selectedMapStatus.message || "网页选择地图与 Nav2 当前加载地图不一致，请先切换到正确地图并重定位";
+        } else if (!payload || !hasFreshPose(payload)) {
+          poseReason = "先完成重定位，看到定位页显示重定位成功并收到实时位姿后再取当前位姿";
+        }
         usePoseBtn.disabled = !!poseReason || !state.selectedMapId;
         usePoseBtn.title = poseReason || (state.selectedMapId ? "使用当前机器人位姿填入点位" : "先选择固定地图");
       }
@@ -627,7 +717,10 @@
     }
     function taskBelongsToSelectedMap(task) {
       const selected = String(state.selectedMapId || "");
-      return !!selected && String(task && task.map_id || "") === selected;
+      if (!selected || !task) return false;
+      if (String(task.map_id || "") === selected) return true;
+      const mapIds = Array.isArray(task.map_ids) ? task.map_ids.map(item => String(item || "")) : [];
+      return mapIds.includes(selected);
     }
     function taskMapMismatchText(task) {
       if (taskBelongsToSelectedMap(task)) return "";
@@ -645,6 +738,7 @@
     }
     function taskDisplayStatus(taskStatus, readiness, mapMismatchText) {
       if (mapMismatchText) return "旧地图";
+      if (readiness && readiness.ready === true && readiness.multi_floor) return "跨楼层";
       if (taskStatus === "running") return "执行中";
       if (taskStatus === "invalid") return "无效";
       if (readiness && readiness.ready === true) return "可执行";
@@ -750,9 +844,17 @@
         waypoint_label: source.waypoint && source.waypoint.label ? source.waypoint.label : (activeTask && activeTask.last_goal_label) || null,
         goal_attempt_id: source.goal_attempt_id || (activeTask && activeTask.last_goal_attempt_id) || null,
         floor_goal_published_at: source.last_floor_goal_published_at || (activeTask && activeTask.last_floor_goal_published_at) || null,
+        floor_goal_source_floor: source.last_floor_goal_source_floor || (activeTask && activeTask.last_floor_goal_source_floor) || null,
+        floor_goal_target_floor: source.last_floor_goal_target_floor || (activeTask && activeTask.last_floor_goal_target_floor) || null,
+        floor_goal_cross_floor: source.last_floor_goal_cross_floor !== undefined
+          ? source.last_floor_goal_cross_floor
+          : (activeTask && activeTask.last_floor_goal_cross_floor) || false,
         floor_goal_publish_count: source.floor_goal_publish_count !== undefined
           ? source.floor_goal_publish_count
           : (activeTask && activeTask.floor_goal_publish_count) || null,
+        transition_nav_status: source.last_transition_nav_status || (activeTask && activeTask.last_transition_nav_status) || null,
+        transition_nav_label: source.last_transition_nav_label || (activeTask && activeTask.last_transition_nav_label) || null,
+        transition_nav_payload: source.last_transition_nav_payload || (activeTask && activeTask.last_transition_nav_payload) || null,
         nav_goal_status: source.nav_goal_status || (activeTask && activeTask.last_nav_goal_status) || null,
         nav_goal_seq: navFeedback && navFeedback.goal_seq !== undefined
           ? navFeedback.goal_seq
@@ -904,10 +1006,27 @@
       }
       const floorGoalPublishedAt = source.last_floor_goal_published_at || (activeTask && activeTask.last_floor_goal_published_at);
       if (floorGoalPublishedAt) parts.push(`floor_goal已发 ${floorGoalPublishedAt}`);
+      const floorGoalCross = source.last_floor_goal_cross_floor !== undefined
+        ? source.last_floor_goal_cross_floor
+        : (activeTask && activeTask.last_floor_goal_cross_floor);
+      const floorGoalSource = source.last_floor_goal_source_floor || (activeTask && activeTask.last_floor_goal_source_floor);
+      const floorGoalTarget = source.last_floor_goal_target_floor || (activeTask && activeTask.last_floor_goal_target_floor);
+      if (floorGoalCross && floorGoalSource && floorGoalTarget) {
+        parts.push(`跨楼层 ${floorGoalSource}->${floorGoalTarget}`);
+      }
       const floorGoalPublishes = source.floor_goal_publish_count !== undefined
         ? source.floor_goal_publish_count
         : (activeTask && activeTask.floor_goal_publish_count);
       if (Number.isFinite(Number(floorGoalPublishes))) parts.push(`/floor_goal ${Number(floorGoalPublishes)}次`);
+      const transitionStatus = source.last_transition_nav_status || (activeTask && activeTask.last_transition_nav_status);
+      const transitionLabel = source.last_transition_nav_label || (activeTask && activeTask.last_transition_nav_label);
+      const transitionPayload = source.last_transition_nav_payload || (activeTask && activeTask.last_transition_nav_payload) || null;
+      if (transitionLabel) parts.push(`楼梯阶段 ${transitionLabel}`);
+      if (transitionPayload && Number.isFinite(Number(transitionPayload.distance_remaining))) {
+        parts.push(`楼梯剩余 ${fmtNumber(Number(transitionPayload.distance_remaining), 2)}m`);
+      } else if (transitionStatus) {
+        parts.push(`楼梯状态 ${transitionStatus}`);
+      }
       if (navGoalMatch) {
         if (navGoalMatch.nav_goal_seq !== undefined && navGoalMatch.nav_goal_seq !== null && !(navFeedback && navFeedback.goal_seq !== undefined && navFeedback.goal_seq !== null)) {
           parts.push(`Nav2序号 ${navGoalMatch.nav_goal_seq}`);
@@ -1295,6 +1414,7 @@
     function updateMapModeUi() {
       $("mapMode").textContent = state.mapModeLabel || "实时 /map";
       $("cursor").textContent = state.view.panMode ? "平移模式" : "拖拽地图取点和朝向";
+      updateFloorDisplay();
       updateZoomReadout();
     }
     function centerMapOnWorld(x, y) {
@@ -1309,7 +1429,7 @@
     }
     function followRobotIfNeeded(activeTask) {
       const pose = freshPose();
-      if (!state.followRobot || !activeTask || !pose || state.view.panMode) return;
+      if (!state.followRobot || !activeTask || !pose || state.view.panMode || !isViewingRobotFloor(state.latest)) return;
       centerMapOnWorld(pose.x, pose.y);
     }
     function worldToCanvasWithView(x, y, view) {
@@ -1350,15 +1470,19 @@
     function currentLocalizeYaw() {
       return normalizeYaw($("locYaw").value);
     }
-    function setMarkDraft(pose, message) {
+    function setMarkDraft(pose, message, source = "map_click") {
       state.markDraft = {
         x: Number(pose.x),
         y: Number(pose.y),
         yaw: normalizeYaw(pose.yaw)
       };
+      state.markDraftSource = source;
+      const shownFloor = displayedMapFloor();
+      if (source === "map_click" && shownFloor && $("markFloor")) $("markFloor").value = shownFloor;
       $("markXY").value = `${state.markDraft.x.toFixed(3)}, ${state.markDraft.y.toFixed(3)}`;
       $("markYaw").value = state.markDraft.yaw.toFixed(4);
       $("cursor").textContent = message || `x ${state.markDraft.x.toFixed(3)} / y ${state.markDraft.y.toFixed(3)} / 朝向 ${state.markDraft.yaw.toFixed(3)} rad`;
+      updateMarkControls();
       draw();
     }
     function setLocalizeDraft(pose, message) {
@@ -1499,6 +1623,9 @@
         && state.latest.active_waypoint.parsed.waypoint;
       const pose = waypoint && waypoint.pose;
       if (!pose) return;
+      const waypointFloor = waypoint.floor ? String(waypoint.floor).trim() : "";
+      const shownFloor = displayedMapFloor();
+      if (shownFloor && waypointFloor && shownFloor !== waypointFloor) return;
       drawArrow(
         {x: Number(pose.x), y: Number(pose.y), yaw: Number(pose.yaw) || 0},
         {
@@ -1511,6 +1638,7 @@
       );
     }
     function drawNavFeedbackPose() {
+      if (!isViewingRobotFloor()) return;
       const active = state.latest && state.latest.active_task;
       const waypoint = state.latest
         && state.latest.active_waypoint
@@ -1537,6 +1665,8 @@
       const points = state.latest.scan.points || [];
       if (!points.length) return;
       const usingDraft = activeTabName() === "localize" && state.localizeDraft && !localizationConfirmedForDisplay();
+      if (!usingDraft && !isViewingRobotFloor()) return;
+      if (usingDraft && !isViewingRobotFloor()) return;
       const pose = usingDraft ? state.localizeDraft : freshPose();
       if (!pose || !Number.isFinite(Number(pose.x)) || !Number.isFinite(Number(pose.y))) return;
       const yaw = normalizeYaw(pose.yaw || 0);
@@ -1584,7 +1714,9 @@
       ctx.lineWidth = 1;
       ctx.strokeRect(view.ox, view.oy, state.map.width * view.scale, state.map.height * view.scale);
       const latest = state.latest;
-      if (latest) {
+      const canDrawLiveRobotLayer = latest && isViewingRobotFloor(latest);
+      if (!canDrawLiveRobotLayer || !hasFreshPose(latest)) state.robotDisplayPose = null;
+      if (canDrawLiveRobotLayer) {
         drawPath(latest.path);
         drawPoseHistory(latest.pose_history || []);
         drawObstacles(latest.dynamic_obstacles);
@@ -1595,13 +1727,9 @@
       drawNavFeedbackPose();
       drawMarkDraft();
       drawLocalizeDraft();
-      if (latest && hasFreshPose(latest)) {
-        const robotPose = {
-          x: latest.pose.x,
-          y: latest.pose.y,
-          yaw: Number.isFinite(Number(latest.pose.display_yaw)) ? latest.pose.display_yaw : latest.pose.yaw
-        };
-        drawArrow(robotPose);
+      if (canDrawLiveRobotLayer && hasFreshPose(latest)) {
+        const robotPose = stableRobotDisplayPose(latest.pose, latest.active_task || null);
+        if (robotPose) drawArrow(robotPose);
       }
     }
     async function refreshLiveMap(version) {
@@ -1647,10 +1775,13 @@
       state.mapImage = buildMapImage(map);
       state.selectedMapId = mapId;
       state.fileMapVersion = map.version;
+      state.markDraft = null;
+      state.markDraftSource = "map_click";
       const select = $("mapSelect");
       if (select && select.value !== mapId) select.value = mapId;
       $("mapTitle").textContent = map.name || `固定地图 ${mapId}`;
       $("mapMeta").textContent = `${map.floor || "-"} / ${map.width} x ${map.height}, ${map.resolution.toFixed(3)} m/格`;
+      if ($("markFloor") && map.floor) $("markFloor").value = map.floor;
       state.mapModeLabel = map.source === "project_builtin" ? "项目内置地图" : "固定地图";
       updateMapModeUi();
       await loadAnnotations();
@@ -1666,6 +1797,7 @@
       }
       renderTaskReadiness(s.task_readiness || null);
       renderLocalizationStatus(s);
+      updateFloorDisplay(s);
       updateMarkControls(s);
       $("floor").textContent = text(s.floor);
       $("stair").textContent = text(s.stair_status);
@@ -1712,7 +1844,10 @@
         const points = scan.points || [];
         if (points.length) {
           const age = scan.last_update ? Math.max(0, s.node_time - scan.last_update) : null;
-          const mode = activeTabName() === "localize" && state.localizeDraft && !localizationConfirmedForDisplay(s)
+          const floorMismatch = selectedMapFloorMismatchText(s);
+          const mode = floorMismatch
+            ? `${floorMismatch}，暂停叠加`
+            : activeTabName() === "localize" && state.localizeDraft && !localizationConfirmedForDisplay(s)
             ? "红色=待重定位预览"
             : (currentPoseFresh ? "蓝色=当前位姿" : "当前位姿未确认，暂停叠加");
           $("scanOverlayStatus").textContent = `激光轮廓 ${points.length} 点 / ${mode} / ${fmtAge(age)}前`;
@@ -1961,7 +2096,7 @@
           const mapMismatchText = taskMapMismatchText(task);
           const canStart = !active && !isRunning && statusAllowsStart && readiness.ready === true && !mapMismatchText;
           const canDelete = !isRunning && !(payload.active_task && payload.active_task.task_id === task.id);
-          const canCopyEvidence = !mapMismatchText && readiness.ready === true;
+          const canCopyEvidence = !mapMismatchText;
           const statusBlockText = taskStatusBlockText(taskStatus);
           const startLabel = isRunning ? "执行中" : (active ? "先停止当前任务" : (mapMismatchText ? "旧地图任务" : taskStartLabelForStatus(taskStatus, readiness)));
           const readinessText = mapMismatchText || statusBlockText || readiness.message || "等待任务条件检查";
@@ -2211,6 +2346,11 @@
       resetMapView(true);
     });
     $("centerRobotBtn").addEventListener("click", () => {
+      const mismatch = selectedMapFloorMismatchText();
+      if (mismatch) {
+        $("cursor").textContent = `${mismatch}，不居中到其他楼层的实时位姿`;
+        return;
+      }
       const pose = freshPose();
       if (!pose) {
         $("cursor").textContent = "暂无实时机器人位姿，重定位成功且定位正常后才能居中";
@@ -2223,6 +2363,13 @@
       state.followRobot = !state.followRobot;
       $("followRobotBtn").classList.toggle("active-tool", state.followRobot);
       if (state.followRobot) {
+        const mismatch = selectedMapFloorMismatchText();
+        if (mismatch) {
+          state.followRobot = false;
+          $("followRobotBtn").classList.remove("active-tool");
+          $("cursor").textContent = `${mismatch}，不能跟随其他楼层的实时位姿`;
+          return;
+        }
         state.view.panMode = false;
         $("panModeBtn").classList.remove("active-tool");
         const pose = freshPose();
@@ -2347,12 +2494,20 @@
     });
     async function applySelectedMap() {
       const mapId = $("mapSelect").value;
-      const result = await api("POST", "/api/maps/select", {map_id: mapId});
-      setLog("mapsLog", result);
       if (mapId) await loadFileMap(mapId);
       else {
         await loadFileMap("");
         state.liveMapVersion = -1;
+      }
+      $("cursor").textContent = mapId
+        ? `已切换显示地图：${displayedMapFloor() || mapId}`
+        : "已切换到实时 /map";
+      try {
+        const result = await api("POST", "/api/maps/select", {map_id: mapId});
+        setLog("mapsLog", result);
+      } catch (err) {
+        setLog("mapsLog", err);
+        $("cursor").textContent = `已切换前端显示；后端同步失败：${err.message || JSON.stringify(err)}`;
       }
       try {
         updateState(await fetchJson("/api/state"));
@@ -2385,6 +2540,7 @@
       syncManualDefaults(true);
     });
     $("manualPointType").addEventListener("change", () => syncManualDefaults(true));
+    $("markFloor").addEventListener("input", () => updateMarkControls());
     $("saveMarkBtn").addEventListener("click", async () => {
       try {
         const blocked = markBlockedReason();
@@ -2396,6 +2552,7 @@
         const yaw = Number($("markYaw").value);
         const payload = await api("POST", "/api/annotations", {
           map_id: currentAnnotationMapId(),
+          source: state.markDraftSource || "map_click",
           type: $("markType").value,
           floor: $("markFloor").value.trim(),
           label: $("markLabel").value.trim(),
@@ -2420,6 +2577,7 @@
         });
         await loadAnnotations();
         state.markDraft = null;
+        state.markDraftSource = "map_click";
         draw();
         $("markLabel").value = "";
         $("markResultPrefix").value = "";
@@ -2433,6 +2591,12 @@
         updateMarkControls();
         return;
       }
+      const mismatch = selectedMapFloorMismatchText();
+      if (mismatch) {
+        $("cursor").textContent = `${mismatch}，不能使用当前机器人位姿标到这张地图`;
+        updateMarkControls();
+        return;
+      }
       const pose = freshPose();
       if (!pose) {
         $("cursor").textContent = "暂无实时机器人位姿，不能用旧位姿标点";
@@ -2441,6 +2605,7 @@
       $("markXY").value = `${pose.x.toFixed(3)}, ${pose.y.toFixed(3)}`;
       $("markYaw").value = String(pose.yaw.toFixed(4));
       state.markDraft = {x: pose.x, y: pose.y, yaw: normalizeYaw(pose.yaw)};
+      state.markDraftSource = "robot_pose";
       draw();
       if (state.latest.floor) $("markFloor").value = state.latest.floor;
     });

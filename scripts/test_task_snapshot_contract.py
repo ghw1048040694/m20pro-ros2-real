@@ -48,6 +48,9 @@ def active_payload() -> dict:
         "last_floor_goal_annotation_id": "p2",
         "last_floor_goal_label": "点2",
         "last_floor_goal_pose": {"floor": "F20", "x": 1.0, "y": 2.0, "z": 0.0, "yaw": 0.3},
+        "last_floor_goal_source_floor": "F20",
+        "last_floor_goal_target_floor": "F20",
+        "last_floor_goal_cross_floor": False,
         "floor_goal_publish_count": 1,
         "goal_sent_path_version": 8,
         "plan_goal_verified": True,
@@ -57,6 +60,10 @@ def active_payload() -> dict:
         "last_nav_status": "nav_goal_accepted label=floor_goal goal_seq=4",
         "last_nav_feedback": {"distance_remaining": 1.2, "recoveries": 0},
         "last_nav_goal_match": {"matches": True, "nav_goal_seq": 4},
+        "last_transition_nav_status": "nav_goal_feedback label=stair_entry distance_remaining=2.0",
+        "last_transition_nav_payload": {"label": "stair_entry", "distance_remaining": 2.0},
+        "last_transition_nav_goal_status": "accepted",
+        "last_transition_nav_label": "stair_entry",
         "last_robot_pose": {"x": 0.5, "y": 0.6, "yaw": 0.1},
         "last_distance_m": 1.8,
         "runtime_guard": {"ready": True, "code": "ready"},
@@ -113,8 +120,11 @@ def test_runtime_snapshot() -> None:
     assert_equal(snapshot["active_index"], 1, "active index")
     assert_equal(snapshot["last_goal_attempt_id"], "goal_1", "goal attempt")
     assert_equal(snapshot["last_floor_goal_published_at"], "2026-06-27 09:29:00", "floor goal published time")
+    assert_equal(snapshot["last_floor_goal_source_floor"], "F20", "floor goal source")
+    assert_equal(snapshot["last_floor_goal_cross_floor"], False, "floor goal cross-floor flag")
     assert_equal(snapshot["floor_goal_publish_count"], 1, "floor goal publish count")
     assert_equal(snapshot["last_nav_feedback"]["distance_remaining"], 1.2, "nav feedback")
+    assert_equal(snapshot["last_transition_nav_label"], "stair_entry", "transition nav label")
     assert_true("unused_topic" not in snapshot["topics"], "unused topics are omitted")
 
 
@@ -158,7 +168,11 @@ def test_active_waypoint_payload() -> None:
     assert_equal(payload["goal_attempt_id"], "goal_1", "goal attempt")
     assert_equal(payload["goal_send_count"], 2, "goal send count")
     assert_equal(payload["last_floor_goal_published_at"], "2026-06-27 09:29:00", "floor goal published time")
+    assert_equal(payload["last_floor_goal_source_floor"], "F20", "floor goal source")
+    assert_equal(payload["last_floor_goal_cross_floor"], False, "floor goal cross-floor flag")
     assert_equal(payload["floor_goal_publish_count"], 1, "floor goal publish count")
+    assert_equal(payload["last_transition_nav_label"], "stair_entry", "transition nav label")
+    assert_equal(payload["last_transition_nav_payload"]["distance_remaining"], 2.0, "transition nav payload")
     assert_equal(payload["nav_feedback_age_s"], 2.5, "feedback age")
     assert_equal(payload["state_pose_age_s"], 5.0, "state pose age")
     assert_equal(payload["state_pose"]["x"], 0.5, "state pose retained")
@@ -210,7 +224,10 @@ def test_result_snapshot() -> None:
     assert_equal(result["message"], "路径终点不匹配", "message")
     assert_equal(result["last_goal_attempt_id"], "goal_1", "goal attempt")
     assert_equal(result["last_floor_goal_published_at"], "2026-06-27 09:29:00", "floor goal published time")
+    assert_equal(result["last_floor_goal_source_floor"], "F20", "result source floor")
+    assert_equal(result["last_floor_goal_cross_floor"], False, "result cross-floor flag")
     assert_equal(result["floor_goal_publish_count"], 1, "floor goal publish count")
+    assert_equal(result["last_transition_nav_label"], "stair_entry", "result transition label")
     assert_equal(result["plan_goal_verified"], True, "plan verified")
     assert_equal(result["runtime_snapshot"]["last_nav_feedback"]["distance_remaining"], 1.2, "runtime snapshot")
     assert_equal(result["reason"], "path_goal_mismatch", "extra reason")

@@ -247,7 +247,3 @@ recoveries_server:
     max_rotational_vel: 1.10
     min_rotational_vel: 0.35
     rotational_acc_lim: 3.4
-
-robot_state_publisher:
-  ros__parameters:
-    use_sim_time: false

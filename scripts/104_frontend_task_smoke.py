@@ -517,20 +517,13 @@ def assert_smoke(payload: Dict[str, Any], require_blocked: bool) -> None:
     elif payload.get("taskReadiness") and "定位未确认" in str(payload.get("taskReadiness")):
         if "定位页" not in task_next_step or "重定位成功" not in task_next_step:
             failures.append("task next-step summary must point unlocalized operators to final relocalization success")
-    save_mark_button = payload.get("saveMarkButton") or {}
     use_robot_pose_button = payload.get("useRobotPoseButton") or {}
     if map_status_blocked:
-        if save_mark_button.get("disabled") is not True:
-            failures.append("save-mark button must be disabled when selected map differs from Nav2 map")
-        if "Nav2 当前加载地图不一致" not in str(save_mark_button.get("title") or ""):
-            failures.append("disabled save-mark button must mention selected-map/Nav2-map mismatch")
         if use_robot_pose_button.get("disabled") is not True:
             failures.append("use-robot-pose button must be disabled until map and localization are usable")
+        if "Nav2 当前加载地图不一致" not in str(use_robot_pose_button.get("title") or ""):
+            failures.append("disabled use-robot-pose button must mention selected-map/Nav2-map mismatch")
     elif payload.get("taskReadiness") and "定位未确认" in str(payload.get("taskReadiness")):
-        if save_mark_button.get("disabled") is not True:
-            failures.append("save-mark button must be disabled until localization is confirmed")
-        if "重定位成功" not in str(save_mark_button.get("title") or ""):
-            failures.append("disabled save-mark button must mention final relocalization success")
         if use_robot_pose_button.get("disabled") is not True:
             failures.append("use-robot-pose mark button must be disabled until localization is confirmed")
         if "重定位成功" not in str(use_robot_pose_button.get("title") or ""):

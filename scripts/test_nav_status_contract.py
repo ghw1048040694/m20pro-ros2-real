@@ -17,6 +17,7 @@ from m20pro_cloud_bridge.nav_status_contract import (  # noqa: E402
     apply_nav_feedback_state,
     apply_nav_goal_status_state,
     apply_nav_status_message_state,
+    apply_transition_nav_status_state,
     classify_navigation_status,
     friendly_nav_status,
     ignored_nav_status_event_payload,
@@ -28,6 +29,7 @@ from m20pro_cloud_bridge.nav_status_contract import (  # noqa: E402
     nav_success_completion_decision,
     parse_key_value_status,
     should_record_nav_feedback_event,
+    transition_nav_status_event_payload,
 )
 
 
@@ -103,6 +105,11 @@ def test_classify_navigation_status() -> None:
         "succeeded",
         "non-floor success only updates status",
     )
+    transition = classify_navigation_status("nav_goal_accepted label=stair_entry goal_seq=3")
+    assert_equal(transition["action"], "update_transition_status", "stair entry accepted is transition")
+    assert_equal(transition["label"], "stair_entry", "transition label")
+    transition_feedback = classify_navigation_status("nav_goal_feedback label=stair_traverse distance_remaining=1.0")
+    assert_equal(transition_feedback["action"], "update_transition_feedback", "stair traverse feedback is transition")
     assert_equal(
         classify_navigation_status("ignored reason=duplicate_floor_goal")["goal_status"],
         "accepted",
@@ -112,6 +119,11 @@ def test_classify_navigation_status() -> None:
         classify_navigation_status("nav_goal_cancelled label=floor_goal")["goal_status"],
         "interrupted",
         "cancelled interrupts task",
+    )
+    assert_equal(
+        classify_navigation_status("blocked reason=not_at_entry distance=1.2 tolerance=0.8")["goal_status"],
+        "blocked",
+        "blocked stair status fails task",
     )
     assert_equal(
         classify_navigation_status("error nav2 action unavailable")["goal_status"],
@@ -227,6 +239,21 @@ def test_friendly_nav_status() -> None:
         friendly_nav_status("nav_goal_succeeded label=floor_goal"),
         "Nav2 已确认到达当前点位",
         "succeeded text",
+    )
+    assert_equal(
+        friendly_nav_status("nav_goal_feedback label=stair_traverse distance_remaining=1.2"),
+        "正在通过楼梯平台，剩余 1.20 m",
+        "stair traverse feedback text",
+    )
+    assert_equal(
+        friendly_nav_status("switching_map_at_platform source_floor=F20 target_floor=F21"),
+        "跨楼层：楼梯平台到位，正在切换楼层地图",
+        "switching map text",
+    )
+    assert_equal(
+        friendly_nav_status("blocked reason=not_at_entry distance=1.2 tolerance=0.8"),
+        "跨楼层被阻塞：距离楼梯入口 1.20 m，超过 0.80 m",
+        "blocked stair entry text",
     )
     assert_equal(
         friendly_nav_status("error nav2 action unavailable"),
@@ -382,6 +409,29 @@ def test_apply_ignored_nav_status_state() -> None:
     assert_equal(event["operator_payload"]["annotation_id"], "p1", "ignored operator annotation id")
 
 
+def test_transition_nav_status_state() -> None:
+    payload = parse_key_value_status("nav_goal_feedback label=stair_entry goal_seq=4 distance_remaining=0.8")
+    updated = apply_transition_nav_status_state(
+        active(task_id="task_1"),
+        goal_status=None,
+        status_text="nav_goal_feedback label=stair_entry goal_seq=4 distance_remaining=0.8",
+        status_payload=payload,
+        now_text="now",
+    )
+    assert_equal(updated["last_transition_nav_status"], "nav_goal_feedback label=stair_entry goal_seq=4 distance_remaining=0.8", "transition status")
+    assert_equal(updated["last_transition_nav_label"], "stair_entry", "transition label stored")
+    assert_equal(updated["last_transition_nav_payload"]["distance_remaining"], 0.8, "transition payload stored")
+    assert_equal(updated["status_message"], "正在前往楼梯入口，剩余 0.80 m", "transition status friendly")
+
+    event = transition_nav_status_event_payload(
+        updated,
+        status_text="nav_goal_feedback label=stair_entry goal_seq=4 distance_remaining=0.8",
+        status_payload=payload,
+    )
+    assert_equal(event["event"], "cross_floor_nav_status", "transition event")
+    assert_equal(event["extra"]["nav_status_payload"]["label"], "stair_entry", "transition event payload")
+
+
 def main() -> int:
     for test in (
         test_parse_key_value_status,
@@ -395,6 +445,7 @@ def main() -> int:
         test_apply_nav_status_message_state,
         test_apply_nav_feedback_state,
         test_apply_ignored_nav_status_state,
+        test_transition_nav_status_state,
     ):
         test()
         print(f"[OK] {test.__name__}")

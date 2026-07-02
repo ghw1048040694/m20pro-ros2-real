@@ -1,6 +1,6 @@
 # M20Pro map asset manifest.
 #
-# Keep map assets here so navigation, simulation, and future deployment scripts
+# Keep map assets here so navigation, mapping, and deployment scripts
 # all refer to the same PGM/PCD products. Route and inspection semantics remain
 # in inspection_waypoints.yaml.
 

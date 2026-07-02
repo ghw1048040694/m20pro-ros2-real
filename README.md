@@ -61,13 +61,15 @@ colcon build --packages-select m20pro_bringup m20pro_cloud_bridge m20pro_navigat
 source install/setup.bash
 ```
 
-上位机仿真：
+上位机只做 real 代码构建检查：
 
 ```bash
 source /opt/ros/humble/setup.bash
 colcon build --symlink-install
 source install/setup.bash
 ```
+
+说明：本仓库现在按 real-only 维护，模型/URDF/mesh 不放在这里；需要仿真时使用单独的 sim 仓库。
 
 ## 现场主入口
 
@@ -142,12 +144,6 @@ cd /home/user/m20pro_real_ros2_ws
 `m20pro_real_full.sh move` 会在 `/tmp` 生成运行时参数文件，把 `m20pro_tcp_bridge.enable_axis_command` 明确覆盖为 `true`；`shadow` 会覆盖为 `false`。这样不会改动原始 `m20pro_real.yaml`，也能避免 Foxy 中节点专属参数压过 launch 参数的问题。
 
 ## 启动方式
-
-仿真：
-
-```bash
-ros2 launch m20pro_bringup m20pro.launch.py mode:=sim
-```
 
 真机测试推荐用脚本启动。开一个 104 终端，按固定环境顺序进入后执行：
 
@@ -310,9 +306,8 @@ NavMode=1    自主导航
 ## 关键文件
 
 ```text
-src/m20pro_bringup/config/m20pro.yaml                 # 真机/仿真基础参数
+src/m20pro_bringup/config/m20pro_real.yaml            # 104 真机基础参数
 src/m20pro_bringup/config/nav2_params_real.yaml       # 104/Foxy 真机 Nav2 参数
-src/m20pro_bringup/config/nav2_params_sim.yaml        # 上位机仿真 Nav2 参数
 src/m20pro_bringup/config/map_manifest.yaml           # 地图资产总表
 src/m20pro_bringup/config/inspection_waypoints.yaml   # 楼层、楼梯、巡检点模板
 src/m20pro_bringup/maps/                              # PGM 地图
@@ -344,7 +339,8 @@ docs/single_floor_navigation_architecture.md          # 单层导航架构和拆
 | `m20pro_navigation` | TCP 桥、点云融合、楼层管理、目标桥、健康检查 |
 | `m20pro_cloud_bridge` | 网页操作台 |
 | `m20pro_inspection` | YOLOv8/RKNN 巡检检测 |
-| `m20pro_description` | URDF 和 mesh |
+
+说明：real-only 仓库已移除 `m20pro_description` 和 sim 启动链路。真机运行使用 `m20pro_base_link` 主链路，不再依赖 URDF/mesh、`robot_state_publisher` 或零关节发布器；仿真模型资源留在 sim 仓库维护。
 
 ## 常用检查命令
 

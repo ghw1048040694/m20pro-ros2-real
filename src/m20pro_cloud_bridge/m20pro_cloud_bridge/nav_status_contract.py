@@ -30,18 +30,31 @@ def classify_navigation_status(status_text: str) -> Dict[str, Any]:
     if not text:
         return {"action": "ignore", "reason": "empty_status"}
     if text.startswith("nav_goal_accepted"):
+        payload = parse_key_value_status(text)
+        label = str(payload.get("label") or "")
+        if label and label != "floor_goal":
+            return {"action": "update_transition_status", "goal_status": "accepted", "label": label}
         return {"action": "update_goal_status", "goal_status": "accepted"}
     if text.startswith("nav_goal_feedback"):
+        payload = parse_key_value_status(text)
+        label = str(payload.get("label") or "")
+        if label and label != "floor_goal":
+            return {"action": "update_transition_feedback", "label": label}
         return {"action": "update_feedback"}
     if text.startswith("nav_goal_succeeded"):
         payload = parse_key_value_status(text)
         if payload.get("label") == "floor_goal":
             return {"action": "complete_waypoint"}
+        label = str(payload.get("label") or "")
+        if label:
+            return {"action": "update_transition_status", "goal_status": "succeeded", "label": label}
         return {"action": "update_goal_status", "goal_status": "succeeded"}
     if text.startswith("ignored reason=duplicate_floor_goal"):
         return {"action": "update_goal_status", "goal_status": "accepted"}
     if text.startswith("nav_goal_cancelled") or text.startswith("replacing_active_floor_goal"):
         return {"action": "fail", "goal_status": "interrupted"}
+    if text.startswith("blocked "):
+        return {"action": "fail", "goal_status": "blocked"}
     if text.startswith("error "):
         return {"action": "fail", "goal_status": "error"}
     return {"action": "update_message"}
@@ -49,6 +62,37 @@ def classify_navigation_status(status_text: str) -> Dict[str, Any]:
 
 def friendly_nav_status(status_text: str) -> str:
     text = str(status_text or "")
+    payload = parse_key_value_status(text)
+    label = str(payload.get("label") or "")
+    transition_labels = {
+        "stair_entry": "正在前往楼梯入口",
+        "stair_traverse": "正在通过楼梯平台",
+        "stair_exit": "正在离开楼梯区域",
+    }
+    if label in transition_labels:
+        if text.startswith("nav_goal_accepted"):
+            return "%s，Nav2 已接收" % transition_labels[label]
+        if text.startswith("nav_goal_feedback"):
+            distance_remaining = payload.get("distance_remaining")
+            if isinstance(distance_remaining, (int, float)):
+                return "%s，剩余 %.2f m" % (transition_labels[label], float(distance_remaining))
+            return transition_labels[label]
+        if text.startswith("nav_goal_succeeded"):
+            return "%s完成" % transition_labels[label]
+    if text.startswith("navigating_to_stair_entry"):
+        return "跨楼层：正在前往楼梯入口"
+    if text.startswith("started source_floor="):
+        return "跨楼层：已切换楼梯步态，准备通过楼梯"
+    if text.startswith("navigating_to_stair_platform"):
+        return "跨楼层：正在通过楼梯平台"
+    if text.startswith("switching_map_at_platform"):
+        return "跨楼层：楼梯平台到位，正在切换楼层地图"
+    if text.startswith("navigating_from_platform_to_flat"):
+        return "跨楼层：目标楼层地图已切换，正在离开楼梯区域"
+    if text.startswith("navigating_to_floor_goal"):
+        return "跨楼层：已到目标楼层，正在前往任务点"
+    if text.startswith("complete target_floor="):
+        return "跨楼层：楼层切换完成"
     if text.startswith("nav_goal_accepted"):
         return "Nav2 已接收当前点位，正在导航"
     if text.startswith("nav_goal_feedback"):
@@ -76,6 +120,18 @@ def friendly_nav_status(status_text: str) -> str:
         return "已请求平地步态，等待 Nav2 接收目标"
     if text.startswith("stopped reason=before_start_task"):
         return "任务启动前导航会话已复位"
+    if text.startswith("blocked reason=not_at_entry"):
+        payload = parse_key_value_status(text)
+        distance = payload.get("distance")
+        tolerance = payload.get("tolerance")
+        if isinstance(distance, (int, float)) and isinstance(tolerance, (int, float)):
+            return "跨楼层被阻塞：距离楼梯入口 %.2f m，超过 %.2f m" % (
+                float(distance),
+                float(tolerance),
+            )
+        return "跨楼层被阻塞：机器人不在楼梯入口附近"
+    if text.startswith("blocked "):
+        return "跨楼层被阻塞，任务已停止"
     if "nav_goal_failed" in text:
         return "Nav2 当前点位执行失败，请查看状态码和现场障碍"
     if text.startswith("error "):
@@ -232,6 +288,38 @@ def nav_feedback_dispatch_payload(status_text: str) -> Dict[str, Any]:
     return {
         "action": "update_feedback",
         "feedback": feedback,
+    }
+
+
+def apply_transition_nav_status_state(
+    active: Dict[str, Any],
+    *,
+    goal_status: Optional[str],
+    status_text: str,
+    status_payload: Dict[str, Any],
+    now_text: str,
+) -> Dict[str, Any]:
+    updated = dict(active)
+    updated["last_transition_nav_status"] = status_text
+    updated["last_transition_nav_status_at"] = now_text
+    updated["last_transition_nav_payload"] = dict(status_payload)
+    if goal_status:
+        updated["last_transition_nav_goal_status"] = str(goal_status)
+    label = status_payload.get("label")
+    if label:
+        updated["last_transition_nav_label"] = label
+    updated["status_message"] = friendly_nav_status(status_text)
+    return updated
+
+
+def transition_nav_status_event_payload(active: Dict[str, Any], *, status_text: str, status_payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "event": "cross_floor_nav_status",
+        "message": str(active.get("status_message") or friendly_nav_status(status_text) or status_text),
+        "extra": {
+            "nav_status": status_text,
+            "nav_status_payload": dict(status_payload),
+        },
     }
 
 
