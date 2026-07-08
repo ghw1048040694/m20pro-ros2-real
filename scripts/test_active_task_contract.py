@@ -319,8 +319,6 @@ def test_create_active_task_state() -> None:
         task,
         task_map_id="map_a",
         now_text="now",
-        start_readiness={"ready": True},
-        post_reset_navigation_readiness={"ready": True, "navigation": "ok"},
     )
     created = result["active"]
     assert_equal(result["event"], "task_started", "created timeline event")
@@ -337,12 +335,6 @@ def test_create_active_task_state() -> None:
     assert_equal(created["started_at"], "now", "created start time")
     assert_equal(created["last_nav_goal_status"], "idle", "created nav status")
     assert_equal(created["status_message"], "任务已创建，准备下发第一个点位", "created message")
-    assert_equal(created["start_readiness"], {"ready": True}, "created start readiness")
-    assert_equal(
-        created["post_reset_navigation_readiness"],
-        {"ready": True, "navigation": "ok"},
-        "created post-reset readiness",
-    )
 
 
 def test_mark_active_task_terminal_states() -> None:

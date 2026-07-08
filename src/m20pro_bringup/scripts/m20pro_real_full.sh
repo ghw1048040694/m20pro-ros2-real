@@ -59,7 +59,7 @@ cleanup_stale_fastdds_shm() {
 
 cleanup_stale_fastdds_shm
 
-case "${M20PRO_FASTDDS_PROFILE:-project_udp}" in
+case "${M20PRO_FASTDDS_PROFILE:-factory}" in
   project_udp|udp)
     if [[ -f "${PROJECT_FASTDDS}" ]]; then
       export FASTRTPS_DEFAULT_PROFILES_FILE="${PROJECT_FASTDDS}"
@@ -93,10 +93,8 @@ if [[ -n "${FASTRTPS_DEFAULT_PROFILES_FILE:-}" ]]; then
   echo "[m20pro_real_full] FASTRTPS_DEFAULT_PROFILES_FILE=${FASTRTPS_DEFAULT_PROFILES_FILE}" >&2
 fi
 
-"${BRINGUP_LIBEXEC}/m20pro_runtime_snapshot.sh" || true
-
 relay_fastdds_profile_file() {
-  case "${M20PRO_LIDAR_RELAY_FASTDDS_PROFILE:-project_udp}" in
+  case "${M20PRO_LIDAR_RELAY_FASTDDS_PROFILE:-factory}" in
     factory)
       if [[ -f "${FACTORY_FASTDDS}" ]]; then
         echo "${FACTORY_FASTDDS}"
@@ -156,25 +154,59 @@ fi
 LIDAR_RELAY_TOPIC="${M20PRO_LIDAR_RELAY_TOPIC:-/m20pro/lidar_points_relay}"
 LIDAR2_INPUT_TOPIC="${M20PRO_LIDAR2_TOPIC:-/LIDAR/POINTS2}"
 LIDAR2_RELAY_TOPIC="${M20PRO_LIDAR2_RELAY_TOPIC:-/m20pro/lidar_points2_relay}"
+SCAN_SOURCE="${M20PRO_SCAN_SOURCE:-local_fusion}"
+EDGE_SCAN_TOPIC="${M20PRO_EDGE_SCAN_TOPIC:-/scan}"
+SCAN_TOPIC="${M20PRO_SCAN_TOPIC:-/scan}"
+case "${SCAN_SOURCE}" in
+  local_fusion)
+    PERCEPTION_MODE="local_fusion"
+    ENABLE_FUSION="true"
+    ENABLE_LIDAR_POINTS_SUBSCRIPTIONS="true"
+    WEB_CLOUD_TOPIC="${LIDAR_RELAY_TOPIC}"
+    ;;
+  edge_scan)
+    PERCEPTION_MODE="edge_scan"
+    ENABLE_FUSION="false"
+    ENABLE_LIDAR_POINTS_SUBSCRIPTIONS="false"
+    SCAN_TOPIC="${EDGE_SCAN_TOPIC}"
+    WEB_CLOUD_TOPIC=""
+    ;;
+  *)
+    echo "[m20pro_real_full] invalid M20PRO_SCAN_SOURCE=${SCAN_SOURCE}; expected local_fusion or edge_scan" >&2
+    exit 2
+    ;;
+esac
+echo "[m20pro_real_full] scan_source=${SCAN_SOURCE} scan_topic=${SCAN_TOPIC} perception_mode=${PERCEPTION_MODE}" >&2
+
 LIDAR_RELAY_FASTDDS="$(relay_fastdds_profile_file)"
-if [[ -n "${LIDAR_RELAY_FASTDDS}" ]]; then
+if [[ "${SCAN_SOURCE}" == "local_fusion" && -n "${LIDAR_RELAY_FASTDDS}" ]]; then
   echo "[m20pro_real_full] LIDAR relay FASTRTPS_DEFAULT_PROFILES_FILE=${LIDAR_RELAY_FASTDDS}" >&2
 fi
-set +e
-FASTRTPS_DEFAULT_PROFILES_FILE="${LIDAR_RELAY_FASTDDS}" \
-  "${BRINGUP_LIBEXEC}/m20pro_lidar_relay_guard.sh" start
-relay_status="$?"
-set -e
-if [[ "${relay_status}" -ne 0 ]]; then
-  if [[ "${M20PRO_LIDAR_GUARD_MODE:-warn}" == "strict" ]]; then
-    echo "[m20pro_real_full] lidar relay is not ready; strict startup is intentionally skipped." >&2
-    exit "${relay_status}"
+if [[ "${SCAN_SOURCE}" == "local_fusion" ]]; then
+  set +e
+  FASTRTPS_DEFAULT_PROFILES_FILE="${LIDAR_RELAY_FASTDDS}" \
+    "${BRINGUP_LIBEXEC}/m20pro_lidar_relay_guard.sh" start
+  relay_status="$?"
+  set -e
+  if [[ "${relay_status}" -ne 0 ]]; then
+    if [[ "${M20PRO_LIDAR_GUARD_MODE:-warn}" == "strict" ]]; then
+      echo "[m20pro_real_full] lidar relay is not ready; strict startup is intentionally skipped." >&2
+      exit "${relay_status}"
+    fi
+    echo "[m20pro_real_full] lidar relay returned ${relay_status}; continuing so the workstation web frontend stays available." >&2
   fi
-  echo "[m20pro_real_full] lidar relay returned ${relay_status}; continuing so the workstation web frontend stays available." >&2
+else
+  echo "[m20pro_real_full] edge_scan mode: stopping local lidar relays and skipping pointcloud_fusion" >&2
+  FASTRTPS_DEFAULT_PROFILES_FILE="${LIDAR_RELAY_FASTDDS}" \
+    "${BRINGUP_LIBEXEC}/m20pro_lidar_relay_guard.sh" stop || true
+  M20PRO_LIDAR_RELAY_PID_FILE="${M20PRO_LIDAR2_RELAY_PID_FILE:-/tmp/m20pro_lidar_relay2.pid}" \
+    M20PRO_LIDAR_TOPIC="${LIDAR2_INPUT_TOPIC}" \
+    M20PRO_LIDAR_RELAY_TOPIC="${LIDAR2_RELAY_TOPIC}" \
+    "${BRINGUP_LIBEXEC}/m20pro_lidar_relay_guard.sh" stop || true
 fi
 
 BACKUP_CLOUD_TOPIC=""
-if [[ "${M20PRO_ENABLE_LIDAR2_RELAY:-0}" == "1" && -n "${LIDAR2_INPUT_TOPIC}" && -n "${LIDAR2_RELAY_TOPIC}" ]]; then
+if [[ "${SCAN_SOURCE}" == "local_fusion" && "${M20PRO_ENABLE_LIDAR2_RELAY:-0}" == "1" && -n "${LIDAR2_INPUT_TOPIC}" && -n "${LIDAR2_RELAY_TOPIC}" ]]; then
   set +e
   FASTRTPS_DEFAULT_PROFILES_FILE="${LIDAR_RELAY_FASTDDS}" \
     M20PRO_LIDAR_TOPIC="${LIDAR2_INPUT_TOPIC}" \
@@ -210,8 +242,14 @@ COMMON_ARGS=(
   camera_proxy_jpeg_quality:=45
   camera_proxy_ffmpeg_mjpeg_qscale:=5
   camera_proxy_max_width:=480
-  cloud_topic:="${LIDAR_RELAY_TOPIC}"
+  scan_topic:="${SCAN_TOPIC}"
+  perception_mode:="${PERCEPTION_MODE}"
+  fusion:="${ENABLE_FUSION}"
+  enable_lidar_points_subscriptions:="${ENABLE_LIDAR_POINTS_SUBSCRIPTIONS}"
 )
+if [[ -n "${WEB_CLOUD_TOPIC}" ]]; then
+  COMMON_ARGS+=(cloud_topic:="${WEB_CLOUD_TOPIC}")
+fi
 if [[ -n "${BACKUP_CLOUD_TOPIC}" ]]; then
   COMMON_ARGS+=(backup_cloud_topic:="${BACKUP_CLOUD_TOPIC}")
 fi

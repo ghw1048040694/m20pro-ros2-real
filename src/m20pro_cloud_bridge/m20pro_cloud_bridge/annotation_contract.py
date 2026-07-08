@@ -205,11 +205,13 @@ def build_annotation_record(
         "label": str(context.get("label") or "").strip(),
         "area": str(payload.get("area") or payload.get("region") or "").strip(),
         "room": str(payload.get("room") or payload.get("place") or "").strip(),
+        "scan_point": str(payload.get("scan_point") or payload.get("station") or "").strip(),
         "result_file_prefix": str(payload.get("result_file_prefix") or "").strip(),
         "pose": dict(context.get("pose") or {}),
         "dwell_s": max(0.0, float(dwell_s)),
         "manual_point_type": manual_point_type_from_payload(payload_with_context),
         "vendor_navigation": vendor_navigation_from_payload(payload_with_context),
+        "radar": payload.get("radar") if isinstance(payload.get("radar"), dict) else {},
         "camera": str(payload.get("camera") or "").strip(),
         "target_classes": string_list(payload.get("target_classes")),
         "notes": str(payload.get("notes") or "").strip(),
@@ -281,8 +283,11 @@ def normalize_annotation_semantics(item: Dict[str, Any]) -> Dict[str, Any]:
     item["label"] = str(item.get("label") or item.get("name") or item.get("id") or "").strip()
     item["area"] = str(item.get("area") or item.get("region") or "").strip()
     item["room"] = str(item.get("room") or item.get("place") or item.get("location") or "").strip()
+    item["scan_point"] = str(item.get("scan_point") or item.get("station") or "").strip()
     result_prefix = str(item.get("result_file_prefix") or "").strip()
     item["result_file_prefix"] = result_prefix or annotation_result_prefix(item)
+    if not isinstance(item.get("radar"), dict):
+        item["radar"] = {}
 
     if "camera" not in item:
         item["camera"] = ""
@@ -314,14 +319,15 @@ def annotation_semantics_payload(annotation: Dict[str, Any]) -> Dict[str, Any]:
         "label": annotation.get("label"),
         "area": annotation.get("area"),
         "room": annotation.get("room"),
+        "scan_point": annotation.get("scan_point"),
         "result_file_prefix": annotation.get("result_file_prefix"),
         "floor": annotation.get("floor"),
-        "type": annotation.get("type"),
         "manual_point_type": annotation.get("manual_point_type"),
         "manual_point_type_label": MANUAL_POINT_TYPES[annotation["manual_point_type"]]["label"],
         "pose": dict(pose),
         "yaw": float(pose.get("yaw", 0.0) or 0.0),
         "dwell_s": annotation_dwell_s(annotation),
+        "radar": dict(annotation.get("radar") or {}),
         "camera": annotation.get("camera"),
         "target_classes": list(annotation.get("target_classes") or []),
         "vendor_navigation": vendor,

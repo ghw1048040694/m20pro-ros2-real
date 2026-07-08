@@ -35,6 +35,13 @@ class M20TcpBridge(Node):
         self.declare_parameter("vendor_position_offset_y", 0.0)
         self.declare_parameter("vendor_position_offset_z", 0.0)
         self.declare_parameter("max_abs_map_position_m", 10000.0)
+        self.declare_parameter("reject_origin_placeholder_pose", True)
+        self.declare_parameter("origin_placeholder_radius_m", 0.05)
+        self.declare_parameter("pose_jump_reject_m", 0.6)
+        self.declare_parameter("pose_jump_accept_after_s", 1.2)
+        self.declare_parameter("pose_filter_hold_last_good_s", 1.0)
+        self.declare_parameter("pose_relocalization_jump_grace_s", 3.0)
+        self.declare_parameter("pose_relocalization_jump_grace_radius_m", 1.0)
         self.declare_parameter("flatten_odom_z", False)
         self.declare_parameter("odom_z", 0.0)
         self.declare_parameter("publish_tf", True)
@@ -68,6 +75,10 @@ class M20TcpBridge(Node):
         self.last_pose_warning_time = None
         self.last_status_warning_time = None
         self.last_invalid_pose_warning_time = None
+        self.last_good_map_pose = None
+        self.pending_jump_pose = None
+        self.last_relocalization_request_time = None
+        self.last_relocalization_target = None
 
         self.pose_pub = self.create_publisher(PoseStamped, "~/map_pose", 10)
         self.odom_pub = self.create_publisher(Odometry, "/odom", 10)
@@ -256,6 +267,14 @@ class M20TcpBridge(Node):
                 pose.position.x, pose.position.y, pose.position.z, items["Yaw"]
             )
             self.get_logger().info("vendor relocalization reset accepted: %s" % text)
+            self.last_relocalization_request_time = self.get_clock().now()
+            self.last_relocalization_target = {
+                "x": float(pose.position.x),
+                "y": float(pose.position.y),
+                "z": float(pose.position.z),
+                "yaw": float(items["Yaw"]),
+            }
+            self.pending_jump_pose = None
             self._publish_map_pose()
             self._publish_navigation_status()
         else:
@@ -387,6 +406,23 @@ class M20TcpBridge(Node):
             localization_ok.data = False
             self.loc_pub.publish(localization_ok)
             return
+        valid_by_filter, filter_reason = self._map_pose_passes_stability_filter(x, y, z, yaw)
+        if not valid_by_filter:
+            self._warn_throttled(
+                "invalid_pose",
+                "ignored unstable vendor pose: %s Location=%s PosX=%s PosY=%s PosZ=%s Yaw=%s"
+                % (
+                    filter_reason,
+                    items.get("Location"),
+                    items.get("PosX"),
+                    items.get("PosY"),
+                    items.get("PosZ"),
+                    items.get("Yaw"),
+                ),
+                2.0,
+            )
+            self._publish_localization_ok(self._has_recent_good_map_pose())
+            return
         quat = yaw_to_quaternion(yaw)
 
         pose = PoseStamped()
@@ -427,6 +463,80 @@ class M20TcpBridge(Node):
             self.tf_broadcaster.sendTransform([map_to_odom, odom_to_base])
 
         self._publish_localization_ok(location_ok)
+
+    def _map_pose_passes_stability_filter(self, x: float, y: float, z: float, yaw: float):
+        now = self.get_clock().now()
+        last = self.last_good_map_pose
+
+        if last is not None and bool(self.get_parameter("reject_origin_placeholder_pose").value):
+            origin_radius = max(0.0, float(self.get_parameter("origin_placeholder_radius_m").value))
+            last_radius = math.hypot(float(last["x"]), float(last["y"]))
+            if (
+                math.hypot(x, y) <= origin_radius
+                and last_radius > max(0.5, origin_radius * 4.0)
+                and not self._within_relocalization_jump_grace(now, x, y)
+            ):
+                return False, "origin_placeholder_after_good_pose"
+
+        jump_limit = max(0.0, float(self.get_parameter("pose_jump_reject_m").value))
+        if last is not None and jump_limit > 0.0:
+            distance = math.hypot(x - float(last["x"]), y - float(last["y"]))
+            if distance > jump_limit and not self._within_relocalization_jump_grace(now, x, y):
+                accept_after_s = max(0.0, float(self.get_parameter("pose_jump_accept_after_s").value))
+                pending = self.pending_jump_pose
+                if (
+                    pending is not None
+                    and math.hypot(x - float(pending["x"]), y - float(pending["y"])) <= min(0.25, jump_limit * 0.5)
+                ):
+                    first_seen = pending.get("first_seen")
+                    stable_for = (
+                        (now - first_seen).nanoseconds * 1e-9
+                        if first_seen is not None
+                        else 0.0
+                    )
+                    if stable_for < accept_after_s:
+                        return False, "jump_waiting_for_stability distance=%.2f stable_for=%.1fs" % (
+                            distance,
+                            stable_for,
+                        )
+                else:
+                    self.pending_jump_pose = {
+                        "x": x,
+                        "y": y,
+                        "z": z,
+                        "yaw": yaw,
+                        "first_seen": now,
+                    }
+                    return False, "jump_from_last_good distance=%.2f" % distance
+            elif self.pending_jump_pose is not None:
+                self.pending_jump_pose = None
+
+        self.last_good_map_pose = {"x": x, "y": y, "z": z, "yaw": yaw, "stamp": now}
+        self.pending_jump_pose = None
+        return True, ""
+
+    def _has_recent_good_map_pose(self) -> bool:
+        if self.last_good_map_pose is None:
+            return False
+        stamp = self.last_good_map_pose.get("stamp")
+        if stamp is None:
+            return False
+        hold_s = max(0.0, float(self.get_parameter("pose_filter_hold_last_good_s").value))
+        if hold_s <= 0.0:
+            return False
+        return (self.get_clock().now() - stamp).nanoseconds * 1e-9 <= hold_s
+
+    def _within_relocalization_jump_grace(self, now, x: float, y: float) -> bool:
+        if self.last_relocalization_request_time is None or self.last_relocalization_target is None:
+            return False
+        grace_s = max(0.0, float(self.get_parameter("pose_relocalization_jump_grace_s").value))
+        if grace_s <= 0.0:
+            return False
+        if (now - self.last_relocalization_request_time).nanoseconds * 1e-9 > grace_s:
+            return False
+        radius_m = max(0.0, float(self.get_parameter("pose_relocalization_jump_grace_radius_m").value))
+        target = self.last_relocalization_target
+        return math.hypot(x - float(target["x"]), y - float(target["y"])) <= radius_m
 
     def _publish_localization_ok(self, ok: bool) -> None:
         localization_ok = Bool()

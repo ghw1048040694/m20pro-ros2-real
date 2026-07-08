@@ -1,0 +1,16 @@
+[Unit]
+Description=M20Pro 106 edge scan feasibility service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/user/m20pro_real_ros2_ws
+EnvironmentFile=-/etc/m20pro-edge-scan-106.env
+ExecStart=/bin/bash -lc 'source /opt/robot/scripts/setup_ros2.sh && cd /home/user/m20pro_real_ros2_ws && tools/edge_scan_feasibility/run_balanced_demo_on_106.sh /tmp/m20pro_edge_scan_feasibility'
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

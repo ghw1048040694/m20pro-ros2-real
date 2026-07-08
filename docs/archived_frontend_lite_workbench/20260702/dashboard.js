@@ -26,14 +26,21 @@
       },
       followRobot: true,
       preflight: null,
+      taskReadiness: null,
       lastRelocalizationStamp: null,
       relocalizationApiLogUntil: 0,
       activeTaskLogUntil: 0,
       lastTasksRefreshAt: 0,
       lastTasksPayload: null,
       loadingTasks: false,
+      loadingAnnotations: null,
+      lastAnnotationsMapId: null,
+      lastAnnotationsRefreshAt: 0,
+      lastFullStateRefreshAt: 0,
       scanOverlay: true,
       mapModeLabel: "实时 /map",
+      workPointerMode: "localize",
+      autoPreflightStarted: false,
     };
     window.m20proDebug = {
       snapshot() {
@@ -45,21 +52,20 @@
           tasks: state.tasks,
           selectedMapStatus: state.selectedMapStatus,
           lastTasksPayload: state.lastTasksPayload,
+          taskReadiness: state.taskReadiness,
           preflight: state.preflight,
           followRobot: state.followRobot,
           view: state.view
         };
+      },
+      fieldSnapshot() {
+        return typeof buildFieldSnapshot === "function" ? buildFieldSnapshot() : null;
       }
     };
     const manualPointTypeNames = {
       transition: "过渡点",
       task: "任务点",
       charge: "充电点"
-    };
-    const manualPointTypeColors = {
-      transition: "#b45309",
-      task: "#0f6bff",
-      charge: "#15803d"
     };
     const manualTypeByUiType = {
       patrol: "task",
@@ -99,6 +105,10 @@
 	    function $(id) { return document.getElementById(id); }
 	    function text(value) { return value === null || value === undefined || value === "" ? "-" : String(value); }
 	    function fmtNumber(value, digits = 2) { return Number.isFinite(value) ? value.toFixed(digits) : "-"; }
+    function setText(id, value) {
+      const node = $(id);
+      if (node) node.textContent = value;
+    }
 	    function clearVideoFrame(name) {
 	      const img = $(`${name}Video`);
 	      const viewer = cameraViewers[name];
@@ -320,6 +330,9 @@
           status.tcp_2101_recent = status.tcp_2101_age_sec <= 300;
         }
       }
+      if (!status.map_relocalization_required && payload && payload.task_readiness && payload.task_readiness.map_relocalization_required) {
+        status.map_relocalization_required = payload.task_readiness.map_relocalization_required;
+      }
       if (status.factory_localization_ok === undefined && payload && payload.factory_localization_ok !== undefined) {
         status.factory_localization_ok = payload.factory_localization_ok;
       }
@@ -327,6 +340,7 @@
         status.pose_fresh = payload.pose_fresh;
       }
       const confirmed = status.confirmed === true;
+      const taskReady = status.task_ready === true;
       const mapLock = !!status.map_relocalization_required;
       const finalSuccess = confirmed && !mapLock;
       const runningPoseMismatch = finalSuccess && status.pose_near_2101 === false;
@@ -338,7 +352,9 @@
       box.appendChild(verdict);
       const message = document.createElement("div");
       message.className = "localization-message";
-      message.textContent = finalSuccess ? (status.message || "定位已确认") : (status.message || status.code || "定位未确认");
+      message.textContent = finalSuccess
+        ? (taskReady ? "定位已确认，任务页可启动" : (status.message || "定位已确认；任务页暂不可启动"))
+        : (status.message || status.code || "未达到任务启动条件");
       box.appendChild(message);
       const poseAge = Number.isFinite(Number(status.pose_age_sec)) ? fmtAge(Number(status.pose_age_sec)) : "-";
       const poseError = Number.isFinite(Number(status.pose_error_m)) ? Number(status.pose_error_m) : null;
@@ -364,7 +380,8 @@
         ["2101回执", tcpText, tcpState],
         ["原厂定位", factoryOk ? "已确认" : "未确认", factoryOk ? "ok" : "fail"],
         ["地图位姿", poseText, poseState],
-        ["固定地图", mapLock ? "仍需重定位" : "已确认", mapLock ? "warn" : "ok"],
+        ["固定地图", mapLock ? "重定位锁未清除" : "无重定位锁", mapLock ? "warn" : "ok"],
+        ["任务页", taskReady ? "可启动" : "不可启动", taskReady ? "ok" : "fail"]
       ];
       const evidence = document.createElement("div");
       evidence.className = "localization-evidence";
@@ -495,7 +512,6 @@
       return !!(
         status
         && status.confirmed === true
-        && status.pose_fresh !== false
         && !status.map_relocalization_required
       );
     }
@@ -525,7 +541,7 @@
         else if (selectedMapStatus && selectedMapStatus.ready === false) {
           poseReason = selectedMapStatus.message || "网页选择地图与 Nav2 当前加载地图不一致，请先切换到正确地图并重定位";
         } else if (!payload || !hasFreshPose(payload)) {
-          poseReason = "先完成重定位，看到定位页显示重定位成功并收到实时位姿后再取当前位姿";
+          poseReason = "先在作业页重定位区完成重定位，看到重定位成功并收到实时位姿后再取当前位姿";
         }
         usePoseBtn.disabled = !!poseReason || !state.selectedMapId;
         usePoseBtn.title = poseReason || (state.selectedMapId ? "使用当前机器人位姿填入点位" : "先选择固定地图");
@@ -569,8 +585,119 @@
       if (result.ok) return `最近一次基础自检通过${ageText}`;
       return `最近一次基础自检未通过${ageText}`;
     }
+    function preflightTopText(result) {
+      if (!result) return "尚未自检";
+      if (result.running) return "自检中";
+      if (result.ok) return "通过";
+      const failed = Array.isArray(result.items)
+        ? result.items.filter(item => item && item.status === "fail").length
+        : 0;
+      return failed ? `异常${failed}项` : "异常";
+    }
+    function radarPlanFromSelect(value) {
+      if (value === "none") return {enabled: false, scans: []};
+      const scans = [];
+      if (value === "measuring" || value === "both") {
+        scans.push({
+          mode: "measuring",
+          label: "实测实量",
+          result_suffix: "measure",
+          artifact_policy: "auto_result",
+          manual_measure_required: false
+        });
+      }
+      if (value === "modeling" || value === "both") {
+        scans.push({
+          mode: "modeling",
+          label: "点云建模",
+          result_suffix: "cloud",
+          artifact_policy: "manual_import",
+          manual_measure_required: true
+        });
+      }
+      return {enabled: true, scans};
+    }
+    function radarStatusText(record) {
+      const parsed = record && (record.parsed || record.raw);
+      if (!parsed) return "未接入";
+      if (typeof parsed === "string") return parsed.slice(0, 24);
+      const status = String(parsed.status || "").trim();
+      const stateText = String(parsed.state || "").trim();
+      if (status === "failed" || stateText === "error") return "失败";
+      if (parsed.scan_released || status === "scan_complete" || status === "analysis_pending") return "可离开";
+      if (status === "completed" || stateText === "finished") return "已完成";
+      if (status === "starting") return "启动中";
+      if (status === "running") return "扫描中";
+      return status || stateText || "等待数据";
+    }
+    function renderRadarStatus(record) {
+      const summary = $("radarStatus");
+      const detail = $("radarDetail");
+      const topText = radarStatusText(record);
+      setText("radarTopStatus", topText);
+      if (summary) {
+        summary.className = "preflight-summary";
+        if (topText === "失败") summary.classList.add("fail");
+        else if (["扫描中", "启动中", "等待数据", "未接入"].includes(topText)) summary.classList.add("warn");
+        else summary.classList.add("ok");
+        summary.textContent = `昂锐雷达：${topText}`;
+      }
+      if (!detail) return;
+      const parsed = record && (record.parsed || record.raw);
+      if (!parsed) {
+        detail.textContent = "当前 main 分支尚未接入雷达节点；合入 Unre 后这里会显示扫描状态和结果摘要。";
+      } else if (typeof parsed === "string") {
+        detail.textContent = parsed;
+      } else {
+        const active = parsed.active_waypoint || {};
+        const waypoint = active.waypoint || {};
+        const lines = [
+          `状态：${topText}`,
+          `模式：${parsed.scan_label || parsed.scan_mode || "-"}`,
+          `当前点：${[waypoint.floor, waypoint.room, waypoint.scan_point || waypoint.label].filter(Boolean).join(" / ") || "-"}`,
+          parsed.scan_released_at ? `可离开：${parsed.scan_released_at}` : "",
+          parsed.error ? `错误：${parsed.error}` : ""
+        ].filter(Boolean);
+        detail.textContent = lines.join("\n");
+      }
+    }
+    function detectionRecordText(item) {
+      if (!item || typeof item !== "object") return "";
+      const name = item.class_name || item.label || item.name || item.class || item.category || item.id || "目标";
+      const confidence = item.confidence !== undefined ? item.confidence : item.score;
+      const score = Number(confidence);
+      return Number.isFinite(score) ? `${name} ${(score * 100).toFixed(0)}%` : String(name);
+    }
+    function renderDetections(record) {
+      const box = $("detections");
+      if (!box) return;
+      const parsed = record && (record.parsed || record.raw);
+      if (!parsed) {
+        box.textContent = "等待 YOLO 检测数据";
+        return;
+      }
+      if (typeof parsed === "string") {
+        box.textContent = parsed ? `收到检测数据：${parsed.slice(0, 160)}` : "等待 YOLO 检测数据";
+        return;
+      }
+      const detections = Array.isArray(parsed.detections) ? parsed.detections : [];
+      const count = Number.isFinite(Number(parsed.count)) ? Number(parsed.count) : detections.length;
+      const stamp = parsed.stamp || parsed.updated_at || parsed.timestamp || "";
+      const top = detections
+        .slice(0, 5)
+        .map(detectionRecordText)
+        .filter(Boolean);
+      const lines = [
+        `运行状态：${parsed.running === false ? "未运行" : "已接入"}`,
+        `最新识别：${count} 个${top.length ? " / " + top.join("，") : ""}`,
+        parsed.alert || parsed.alarm ? `最近告警：${parsed.alert || parsed.alarm}` : "",
+        stamp ? `更新时间：${stamp}` : ""
+      ].filter(Boolean);
+      box.textContent = lines.join("\n");
+    }
     function renderPreflight(result) {
       state.preflight = result || null;
+      setText("preflightTopStatus", preflightTopText(result));
       const summaries = [$("preflightSummary"), $("taskPreflightSummary")];
       for (const box of summaries) {
         if (!box) continue;
@@ -603,17 +730,95 @@
       }
       if ($("preflightRaw")) $("preflightRaw").textContent = result ? JSON.stringify(result, null, 2) : "等待自检";
     }
+    function renderTaskReadiness(readiness) {
+      state.taskReadiness = readiness || null;
+      const box = $("taskReadinessSummary");
+      if (!box) return;
+      box.className = "preflight-summary";
+      if (!readiness) {
+        box.classList.add("warn");
+        box.textContent = "等待任务链路状态";
+        return;
+      }
+      box.classList.add(readiness.ready ? "ok" : "warn");
+      const age = readiness.pose_age_sec === null || readiness.pose_age_sec === undefined
+        ? ""
+        : ` / 位姿 ${fmtNumber(Number(readiness.pose_age_sec), 1)}s前`;
+      const firstDistance = Number(readiness.first_waypoint_distance_m);
+      const distance = Number.isFinite(firstDistance) ? ` / 首点 ${fmtNumber(firstDistance, 2)}m` : "";
+      const warnDistance = Number(readiness.first_waypoint_distance_warn_m);
+      if (readiness.ready && Number.isFinite(firstDistance) && Number.isFinite(warnDistance) && warnDistance > 0 && firstDistance > warnDistance) {
+        box.classList.remove("ok");
+        box.classList.add("warn");
+      }
+      const displayMessage = readiness.code === "pose_invalid_or_stale" && localizationConfirmedForDisplay()
+        ? "定位已确认，等待地图位姿刷新后再开始任务"
+        : (readiness.message || (readiness.ready ? "任务链路可用" : "任务链路未就绪"));
+      box.textContent = `${displayMessage}${age}${distance}`;
+      renderTaskNextStep();
+    }
+    function taskTopText(payload = state.latest) {
+      if (!payload) return "等待";
+      const active = payload.active_task || null;
+      const waypoint = payload.active_waypoint && payload.active_waypoint.parsed ? payload.active_waypoint.parsed : null;
+      if (active && active.status === "running") {
+        const index = Number(active.index);
+        const total = Array.isArray(active.annotation_ids) ? active.annotation_ids.length : Number(active.total || 0);
+        if (Number.isFinite(index) && total) return `执行 ${index + 1}/${total}`;
+        return "执行中";
+      }
+      if (waypoint && waypoint.phase) return waypoint.phase === "dwelling" ? "停留中" : "导航中";
+      return "空闲";
+    }
+    function perceptionTopText(payload = state.latest) {
+      if (!payload) return "等待";
+      const status = payload.perception_status || {};
+      if (status.ready === false) return "异常";
+      if (status.ready === true) return "正常";
+      const scan = payload.scan || {};
+      const lidar = payload.lidar || payload.lidar_points || {};
+      if (Number(scan.finite_ranges || 0) > 0) return "scan正常";
+      if (Number(lidar.width || 0) > 0 || Number(lidar.point_count || 0) > 0) return "点云正常";
+      return "等待";
+    }
+    function batteryTopText(payload = state.latest) {
+      const pack = payload && payload.battery && payload.battery.primary ? payload.battery.primary : null;
+      if (!pack) return "-";
+      return `${text(pack.level)}%`;
+    }
+    function updateTopStatus(payload = state.latest) {
+      if (!payload) return;
+      setText("perceptionTopStatus", perceptionTopText(payload));
+      setText("taskTopStatus", taskTopText(payload));
+      setText("battery", batteryTopText(payload));
+      renderRadarStatus(payload.radar_inspection || null);
+    }
+    function setWorkPointerMode(mode) {
+      state.workPointerMode = mode === "mark" ? "mark" : "localize";
+      const localizeBtn = $("workModeLocalizeBtn");
+      const markBtn = $("workModeMarkBtn");
+      if (localizeBtn) localizeBtn.classList.toggle("active-tool", state.workPointerMode === "localize");
+      if (markBtn) markBtn.classList.toggle("active-tool", state.workPointerMode === "mark");
+      if ($("cursor")) $("cursor").textContent = state.workPointerMode === "localize"
+        ? "重定位模式：拖拽地图设置红色定位箭头"
+        : "标点模式：拖拽地图设置新点位";
+    }
+    function workLocalizeModeActive() {
+      return activeTabName() === "work" && state.workPointerMode === "localize";
+    }
     function renderTaskNextStep() {
       const box = $("taskNextStepSummary");
       if (!box) return;
+      const readiness = state.taskReadiness || {};
+      const code = readiness.code || "";
       const currentMapTasks = state.tasks.filter(task => taskBelongsToSelectedMap(task));
       const currentMapPoints = state.annotations.length;
       const selectedMapStatus = state.selectedMapStatus || {};
       const perceptionStatus = state.latest && state.latest.perception_status ? state.latest.perception_status : {};
       box.className = "preflight-summary";
-      if (currentMapTasks.length) {
+      if (readiness.ready === true) {
         box.classList.add("ok");
-        box.textContent = "下一步：确认首点和顺序，现场条件无误后人工点击开始任务";
+        box.textContent = "下一步：执行前确认首点、顺序和开跑前验收命令，再人工点击开始任务";
         return;
       }
       box.classList.add("warn");
@@ -626,11 +831,37 @@
         box.textContent = `下一步：${perceptionStatus.message || "先恢复点云 relay 和 /scan 感知链路"}`;
       } else if (selectedMapStatus.ready === false) {
         box.textContent = `下一步：${selectedMapStatus.message || "网页选择地图与 Nav2 当前加载地图不一致，请先切换到正确地图并重定位"}`;
+      } else if (code === "localization_not_confirmed") {
+        box.textContent = "下一步：在作业页重定位区完成重定位，必须看到重定位成功";
+      } else if (code === "pose_invalid_or_stale" && localizationConfirmedForDisplay()) {
+        box.textContent = "下一步：定位已确认，等待地图位姿刷新；蓝色箭头或激光明显不对时再重新定位";
+      } else if (code === "pose_invalid_or_stale") {
+        box.textContent = "下一步：在作业页重定位区完成重定位，必须看到重定位成功";
       } else if (!currentMapPoints) {
-        box.textContent = "下一步：当前地图没有任务点；重定位成功后，到标点页在当前地图保存点位";
-      } else {
+        box.textContent = "下一步：当前地图没有任务点；重定位成功后，在作业页标点区保存点位";
+      } else if (!currentMapTasks.length) {
         box.textContent = "下一步：当前地图还没有任务；勾选当前地图点位并生成任务";
+      } else {
+        box.textContent = `下一步：${readiness.message || "按任务页执行条件处理当前阻塞项"}`;
       }
+    }
+    function taskStartButtonLabel(readiness) {
+      if (!readiness) return "检查中";
+      if (readiness.deferred) return "检查条件";
+      if (readiness.ready) return "开始执行";
+      const code = readiness.code || "";
+      if (code === "localization_not_confirmed") return "先重定位";
+      if (code === "pose_invalid_or_stale") return localizationConfirmedForDisplay() ? "等位姿" : "先重定位";
+      if (code === "selected_map_mismatch" || code === "map_metadata_mismatch" || code === "map_unavailable") return "检查地图";
+      if (code === "wrong_floor" || code === "floor_unknown") return "检查楼层";
+      if (code === "target_out_of_map" || code === "current_pose_out_of_map" || code === "waypoint_out_of_map") return "点位越界";
+      if (code === "waypoint_on_occupied_cell" || code === "waypoint_on_unknown_cell") return "检查点位";
+      if (code === "first_waypoint_too_far") return "首点过远";
+      if (code === "navigation_not_ready") return "等导航";
+      if (code === "perception_scan_unavailable") return "等scan";
+      if (code === "perception_lidar_unavailable") return "等点云";
+      if (code === "no_waypoint" || code === "missing_waypoint" || code === "task_invalid") return "任务无效";
+      return "不可执行";
     }
     function normalizedTaskStatus(status) {
       return String(status || "ready");
@@ -639,12 +870,14 @@
       const normalized = normalizedTaskStatus(status);
       return normalized === "ready" || normalized === "stopped" || normalized === "completed" || normalized === "error";
     }
-    function taskStartLabelForStatus(status) {
+    function taskStartLabelForStatus(status, readiness) {
       const normalized = normalizedTaskStatus(status);
       if (normalized === "error") return "从头重试";
       if (normalized === "invalid") return "任务无效";
       if (normalized === "running") return "执行中";
       if (!taskStatusAllowsStart(normalized)) return "不可执行";
+      if (!readiness || readiness.deferred) return "检查条件";
+      if (!readiness || !readiness.ready) return taskStartButtonLabel(readiness);
       if (normalized === "completed") return "重新执行";
       if (normalized === "stopped") return "从头执行";
       return "开始执行";
@@ -670,13 +903,14 @@
       if (!taskStatusAllowsStart(normalized)) return `任务状态 ${normalized} 不允许启动`;
       return "";
     }
-    function taskDisplayStatus(taskStatus, multiFloor, mapMismatchText) {
+    function taskDisplayStatus(taskStatus, readiness, mapMismatchText) {
       if (mapMismatchText) return "旧地图";
-      if (multiFloor) return "跨楼层";
+      if (!readiness || readiness.deferred) return "待检查";
+      if (readiness && readiness.ready === true && readiness.multi_floor) return "跨楼层";
       if (taskStatus === "running") return "执行中";
       if (taskStatus === "invalid") return "无效";
-      if (taskStatusAllowsStart(taskStatus)) return "可执行";
-      return "不可执行";
+      if (readiness && readiness.ready === true) return "可执行";
+      return "未就绪";
     }
     function taskWaypointText(point, index) {
       if (!point) return `${index + 1}. -`;
@@ -701,20 +935,203 @@
         expected_task_updated_at: task.updated_at || task.created_at || "",
       };
     }
-    function taskStartConfirmText(task, taskNote) {
+    function taskFirstDistanceText(readiness) {
+      const value = readiness && Number(readiness.first_waypoint_distance_m);
+      if (!Number.isFinite(value)) return "";
+      const warn = Number(readiness.first_waypoint_distance_warn_m);
+      const max = Number(readiness.first_waypoint_distance_max_m);
+      const flags = [];
+      if (Number.isFinite(max) && max > 0 && value > max) flags.push("超过上限");
+      else if (Number.isFinite(warn) && warn > 0 && value > warn) flags.push("偏远");
+      return `当前位置到首点 ${fmtNumber(value, 2)}m${flags.length ? `（${flags.join("，")}）` : ""}`;
+    }
+    function shellQuote(value) {
+      return `'${String(value || "").replace(/'/g, `'\"'\"'`)}'`;
+    }
+    function taskWatcherLabel(task) {
+      const taskId = String(task && task.id || "");
+      const suffix = taskId ? taskId.slice(-8) : "";
+      return `field_task${suffix ? `_${suffix}` : ""}`;
+    }
+    function taskWatcherCommand(task) {
+      return `./scripts/104_watch_frontend_task.sh 180 ${shellQuote(taskWatcherLabel(task))}`;
+    }
+    function taskReadyCheckCommand(task) {
+      return `./scripts/104_frontend_task_ready_check.py --task-id ${shellQuote(task && task.id || "")}`;
+    }
+    async function copyTextToClipboard(value) {
+      const text = String(value || "");
+      if (!text) return false;
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+      const area = document.createElement("textarea");
+      area.value = text;
+      area.setAttribute("readonly", "readonly");
+      area.style.position = "fixed";
+      area.style.left = "-9999px";
+      document.body.appendChild(area);
+      area.select();
+      try {
+        return document.execCommand("copy");
+      } finally {
+        document.body.removeChild(area);
+      }
+    }
+    function compactTaskForSnapshot(task) {
+      if (!task) return null;
+      const waypoints = Array.isArray(task.waypoints) ? task.waypoints : [];
+      return {
+        id: task.id || null,
+        name: task.name || null,
+        status: task.status || null,
+        map_id: task.map_id || null,
+        readiness: task.readiness || null,
+        waypoint_count: waypoints.length,
+        first_waypoint: waypoints.length ? {
+          id: waypoints[0].id || null,
+          label: waypoints[0].label || null,
+          floor: waypoints[0].floor || null,
+          pose: waypoints[0].pose || null,
+          dwell_s: waypoints[0].dwell_s,
+        } : null,
+        order: waypoints.map((point, index) => taskWaypointText(point, index)),
+        last_result: task.last_result || null,
+      };
+    }
+    function taskExecutionEvidence(activeTask, activeWaypoint) {
+      const source = activeWaypoint || {};
+      const navFeedback = source.nav_feedback || (activeTask && activeTask.last_nav_feedback) || null;
+      const navGoalMatch = source.nav_goal_match || (activeTask && activeTask.last_nav_goal_match) || null;
+      return {
+        task_id: activeTask ? activeTask.task_id : null,
+        task_name: activeTask ? activeTask.task_name : null,
+        phase: source.phase || (activeTask && activeTask.phase) || null,
+        waypoint_id: source.waypoint && source.waypoint.id ? source.waypoint.id : (activeTask && activeTask.last_goal_annotation_id) || null,
+        waypoint_label: source.waypoint && source.waypoint.label ? source.waypoint.label : (activeTask && activeTask.last_goal_label) || null,
+        goal_attempt_id: source.goal_attempt_id || (activeTask && activeTask.last_goal_attempt_id) || null,
+        floor_goal_published_at: source.last_floor_goal_published_at || (activeTask && activeTask.last_floor_goal_published_at) || null,
+        floor_goal_source_floor: source.last_floor_goal_source_floor || (activeTask && activeTask.last_floor_goal_source_floor) || null,
+        floor_goal_target_floor: source.last_floor_goal_target_floor || (activeTask && activeTask.last_floor_goal_target_floor) || null,
+        floor_goal_cross_floor: source.last_floor_goal_cross_floor !== undefined
+          ? source.last_floor_goal_cross_floor
+          : (activeTask && activeTask.last_floor_goal_cross_floor) || false,
+        floor_goal_publish_count: source.floor_goal_publish_count !== undefined
+          ? source.floor_goal_publish_count
+          : (activeTask && activeTask.floor_goal_publish_count) || null,
+        transition_nav_status: source.last_transition_nav_status || (activeTask && activeTask.last_transition_nav_status) || null,
+        transition_nav_label: source.last_transition_nav_label || (activeTask && activeTask.last_transition_nav_label) || null,
+        transition_nav_payload: source.last_transition_nav_payload || (activeTask && activeTask.last_transition_nav_payload) || null,
+        nav_goal_status: source.nav_goal_status || (activeTask && activeTask.last_nav_goal_status) || null,
+        nav_goal_seq: navFeedback && navFeedback.goal_seq !== undefined
+          ? navFeedback.goal_seq
+          : (navGoalMatch && navGoalMatch.nav_goal_seq !== undefined ? navGoalMatch.nav_goal_seq : null),
+        nav_goal_matches: navGoalMatch && navGoalMatch.matches !== undefined ? navGoalMatch.matches : null,
+        nav_feedback_age_s: source.nav_feedback_age_s !== undefined ? source.nav_feedback_age_s : null,
+        nav_distance_remaining_m: navFeedback && navFeedback.distance_remaining !== undefined ? navFeedback.distance_remaining : null,
+        plan_goal_verified: source.plan_goal_verified !== undefined ? source.plan_goal_verified : (activeTask && activeTask.plan_goal_verified) || null,
+        path_goal_error_m: source.path_goal_error_m !== undefined ? source.path_goal_error_m : null,
+        status_message: source.status_message || (activeTask && activeTask.status_message) || null,
+      };
+    }
+    function buildFieldSnapshot() {
+      const latest = state.latest || {};
+      const lidar = latest.lidar_points || {};
+      const lidarRelay = latest.lidar_relay_status || {};
+      const scan = latest.scan || {};
+      const activeWaypoint = latest.active_waypoint && latest.active_waypoint.parsed ? latest.active_waypoint.parsed : null;
+      const currentMapTasks = state.tasks.filter(task => taskBelongsToSelectedMap(task));
+      const recommendedTask = currentMapTasks.find(task => task && task.readiness && task.readiness.code === "ready")
+        || currentMapTasks[0]
+        || null;
+      return {
+        captured_at: new Date().toISOString(),
+        frontend: {
+          selected_map_id: state.selectedMapId,
+          map_mode_label: state.mapModeLabel,
+          status_text: $("statusText") ? $("statusText").textContent : null,
+        },
+        robot: {
+          floor: latest.floor,
+          localization_ok: latest.localization_ok,
+          pose_fresh: latest.pose_fresh,
+          pose_age_sec: latest.pose_age_sec,
+          pose: latest.pose || null,
+          navigation_status: latest.navigation_status || null,
+          battery: latest.battery && latest.battery.primary ? latest.battery.primary : null,
+        },
+        perception: {
+          status: latest.perception_status || null,
+          scan_finite_ranges: scan.finite_ranges,
+          scan_age_sec: latest.node_time && scan.last_update ? Math.max(0, Number(latest.node_time) - Number(scan.last_update)) : null,
+          lidar_points: (Number(lidar.width || 0) || 0) * Math.max(1, Number(lidar.height || 1) || 1),
+          lidar_source: lidar.source || null,
+          lidar_relay: {
+            output_width: lidarRelay.output_width,
+            output_height: lidarRelay.output_height,
+            output_stride: lidarRelay.output_stride,
+            input_rate_hz: lidarRelay.input_rate_hz,
+            publish_rate_hz: lidarRelay.publish_rate_hz,
+            skip_ratio: lidarRelay.skip_ratio,
+            downsample_method: lidarRelay.downsample_method,
+          },
+        },
+        task_readiness: latest.task_readiness || state.taskReadiness || null,
+        active_task: latest.active_task || null,
+        active_waypoint: activeWaypoint,
+        task_execution_evidence: taskExecutionEvidence(latest.active_task || null, activeWaypoint),
+        last_task_result: latest.last_task_result || null,
+        recommended_task: compactTaskForSnapshot(recommendedTask),
+        task_pose_tracker_text: $("taskPoseTracker") ? $("taskPoseTracker").textContent : null,
+        active_task_summary_text: $("activeTaskSummary") ? $("activeTaskSummary").textContent : null,
+      };
+    }
+    async function copyFieldSnapshot() {
+      const snapshot = buildFieldSnapshot();
+      return copyTextToClipboard(JSON.stringify(snapshot, null, 2));
+    }
+    function taskStartConfirmText(task, readinessText) {
       const waypoints = Array.isArray(task.waypoints) ? task.waypoints : [];
       const first = waypoints.length ? waypoints[0] : null;
       const sequence = waypoints.length
         ? waypoints.map((point, index) => taskWaypointText(point, index)).join(" → ")
         : "无点位";
+      const firstDistanceText = taskFirstDistanceText(task.readiness || {});
       return [
         `确认开始任务：${task.name || task.id}`,
         `首点：${first ? taskWaypointText(first, 0) : "-"}`,
+        firstDistanceText ? `距离：${firstDistanceText}` : null,
         `顺序：${sequence}`,
-        `状态：${taskNote}`,
-        `确认：已完成自检、地图/定位/点云现场检查`,
+        `执行条件：${readinessText || "-"}`,
+        `先验收：${taskReadyCheckCommand(task)}`,
+        `再开记录：${taskWatcherCommand(task)}`,
         "确认后机器狗会立即向首点导航。"
       ].filter(Boolean).join("\n");
+    }
+    function taskLastResultText(task) {
+      const result = task && task.last_result ? task.last_result : null;
+      if (!result) {
+        const timeline = Array.isArray(task && task.last_timeline) ? task.last_timeline : [];
+        const last = timeline.length ? timeline[timeline.length - 1] : null;
+        return last && last.message ? `上次事件：${last.message}` : "";
+      }
+      const parts = [];
+      if (result.status) parts.push(`上次${result.status}`);
+      if (result.message) parts.push(result.message);
+      if (result.reason) parts.push(`原因 ${result.reason}`);
+      const wp = result.waypoint || {};
+      if (wp.label) parts.push(`点位 ${wp.label}`);
+      if (Number.isFinite(Number(result.last_distance_m))) {
+        parts.push(`距离 ${fmtNumber(Number(result.last_distance_m), 2)}m`);
+      } else if (Number.isFinite(Number(result.distance_m))) {
+        parts.push(`距离 ${fmtNumber(Number(result.distance_m), 2)}m`);
+      }
+      if (Number.isFinite(Number(result.path_goal_error_m))) parts.push(`路径差 ${fmtNumber(Number(result.path_goal_error_m), 2)}m`);
+      if (result.last_nav_goal_status) parts.push(`Nav2 ${result.last_nav_goal_status}`);
+      if (result.plan_goal_verified === true) parts.push("路径已校验");
+      if (result.saved_at) parts.push(result.saved_at);
+      return parts.length ? parts.join(" / ") : "";
     }
     function renderActiveTaskSummary(activeTask, waypoint) {
       const box = $("activeTaskSummary");
@@ -827,6 +1244,10 @@
       if (Number.isFinite(Number(stallAge)) && Number(stallAge) > 0) {
         parts.push(`低进展 ${fmtNumber(Number(stallAge), 0)}s`);
       }
+      const runtimeGuard = source.runtime_guard || (activeTask && activeTask.runtime_guard) || null;
+      if (runtimeGuard && runtimeGuard.code) {
+        parts.push(`链路守护 ${runtimeGuard.code}`);
+      }
       const lastProgressAt = source.last_progress_at || (activeTask && activeTask.last_progress_at);
       if (lastProgressAt) parts.push(`最近进展 ${lastProgressAt}`);
       const msg = source.status_message || (activeTask && activeTask.status_message) || "";
@@ -906,6 +1327,8 @@
       if (waypoint && waypoint.phase) phaseParts.push(waypoint.phase === "dwelling" ? "停留中" : "导航中");
       if (waypoint && waypoint.nav_goal_status) phaseParts.push(`Nav2 ${waypoint.nav_goal_status}`);
       if (waypoint && Number.isFinite(Number(waypoint.distance_m))) phaseParts.push(`距离 ${fmtNumber(Number(waypoint.distance_m), 2)}m`);
+      const runtimeGuard = (waypoint && waypoint.runtime_guard) || (activeTask && activeTask.runtime_guard) || null;
+      if (runtimeGuard && runtimeGuard.code) phaseParts.push(`链路 ${runtimeGuard.code}`);
       addRow("任务阶段", phaseParts.length ? phaseParts.join(" / ") : "无活动任务", activeTask || waypoint ? "ok" : "");
       box.innerHTML = rows.join("");
     }
@@ -940,7 +1363,7 @@
         const result = payload.preflight || payload;
         renderPreflight(result);
         if (payload.running || (result && result.running)) await pollPreflightUntilDone();
-        await loadTasks();
+        await loadTasks({fullReadiness: true});
       } catch (err) {
         renderPreflight({
           ok: false,
@@ -969,17 +1392,6 @@
     function asInteger(id, fallback) {
       const value = Number.parseInt($(id).value, 10);
       return Number.isFinite(value) ? value : fallback;
-    }
-    function annotationManualType(item) {
-      return item.manual_point_type || manualTypeByUiType[item.type] || "task";
-    }
-    function annotationTypeLabel(item) {
-      const manualType = annotationManualType(item);
-      return manualPointTypeNames[manualType] || typeNames[item.type] || manualType || "点位";
-    }
-    function annotationTypeColor(item) {
-      const manualType = annotationManualType(item);
-      return manualPointTypeColors[manualType] || typeColors[item.type] || "#0f6bff";
     }
     function syncManualDefaults(force) {
       const manualType = $("manualPointType").value;
@@ -1343,8 +1755,8 @@
       if (!state.annotations || !state.map) return;
       for (const item of state.annotations) {
         const pose = item.pose || {};
-        const color = annotationTypeColor(item);
-        const label = item.label || annotationTypeLabel(item);
+        const color = typeColors[item.type] || "#0f6bff";
+        const label = item.label || typeNames[item.type] || "point";
         drawArrow(
           {x: Number(pose.x), y: Number(pose.y), yaw: Number(pose.yaw) || 0},
           {color, size: 0.72, label}
@@ -1420,7 +1832,7 @@
       if (!state.scanOverlay || !state.map || !state.latest || !state.latest.scan) return;
       const points = state.latest.scan.points || [];
       if (!points.length) return;
-      const usingDraft = activeTabName() === "localize" && state.localizeDraft && !localizationConfirmedForDisplay();
+      const usingDraft = workLocalizeModeActive() && state.localizeDraft && !localizationConfirmedForDisplay();
       if (!usingDraft && !isViewingRobotFloor()) return;
       if (usingDraft && !isViewingRobotFloor()) return;
       const pose = usingDraft ? state.localizeDraft : freshPose();
@@ -1548,12 +1960,15 @@
     function updateState(s) {
       state.latest = s;
       state.selectedMapStatus = s.selected_map_status || null;
+      updateTopStatus(s);
       if (state.localizeDraft && localizationConfirmedForDisplay(s)) {
         state.localizeDraft = null;
       }
+      renderTaskReadiness(s.task_readiness || null);
       renderLocalizationStatus(s);
       updateFloorDisplay(s);
       updateMarkControls(s);
+      updateCreateTaskButton();
       $("floor").textContent = text(s.floor);
       $("stair").textContent = text(s.stair_status);
       const gaitParts = [];
@@ -1602,7 +2017,7 @@
           const floorMismatch = selectedMapFloorMismatchText(s);
           const mode = floorMismatch
             ? `${floorMismatch}，暂停叠加`
-            : activeTabName() === "localize" && state.localizeDraft && !localizationConfirmedForDisplay(s)
+            : workLocalizeModeActive() && state.localizeDraft && !localizationConfirmedForDisplay(s)
             ? "红色=待重定位预览"
             : (currentPoseFresh ? "蓝色=当前位姿" : "当前位姿未确认，暂停叠加");
           $("scanOverlayStatus").textContent = `激光轮廓 ${points.length} 点 / ${mode} / ${fmtAge(age)}前`;
@@ -1615,9 +2030,11 @@
       if (s.battery && s.battery.primary) {
         const pack = s.battery.primary;
         const tempText = Number.isFinite(Number(pack.temperature_c)) ? ` / ${fmtNumber(Number(pack.temperature_c), 1)}℃` : "";
-        $("battery").textContent = `${text(pack.level)}% / ${fmtNumber(Number(pack.voltage_v), 1)}V / ${fmtNumber(Number(pack.current_a), 1)}A${tempText}`;
+        const detailBattery = $("debugBattery");
+        if (detailBattery) detailBattery.textContent = `${text(pack.level)}% / ${fmtNumber(Number(pack.voltage_v), 1)}V / ${fmtNumber(Number(pack.current_a), 1)}A${tempText}`;
       } else {
-        $("battery").textContent = "-";
+        const detailBattery = $("debugBattery");
+        if (detailBattery) detailBattery.textContent = "-";
       }
       $("nav").textContent = JSON.stringify({
         路径点数: s.path ? s.path.points.length : 0,
@@ -1630,9 +2047,15 @@
         原厂导航: s.navigation_status || null,
         更新时间: s.node_time_text
       }, null, 2);
-      const det = s.detections && (s.detections.parsed || s.detections.raw);
-      $("detections").textContent = det ? JSON.stringify(det, null, 2) : "等待数据";
-      $("events").textContent = s.events && s.events.length ? JSON.stringify(s.events.slice(-5), null, 2) : "等待数据";
+      renderDetections(s.detections || null);
+      const eventsBox = $("events");
+      if (eventsBox) {
+        if (s.debug_included === false) {
+          eventsBox.textContent = "调试信息按需刷新，打开“更多”页后自动加载";
+        } else {
+          eventsBox.textContent = s.events && s.events.length ? JSON.stringify(s.events.slice(-5), null, 2) : "等待数据";
+        }
+      }
       if (
         s.relocalization_result
         && s.relocalization_result.last_update !== state.lastRelocalizationStamp
@@ -1642,6 +2065,7 @@
         setLog("localizeLog", {
           "2101原始回执": s.relocalization_result.raw,
           定位结论: s.localization_status ? s.localization_status.message : null,
+          任务页: s.localization_status && s.localization_status.task_ready ? "可启动" : "不可启动",
           更新时间: s.node_time_text
         });
       }
@@ -1662,16 +2086,27 @@
       }
       updateTaskControlButtons(s);
       const table = $("topics");
-      table.innerHTML = "";
-      for (const [name, info] of Object.entries(s.topics || {})) {
-        const tr = document.createElement("tr");
-        const left = document.createElement("td");
-        const right = document.createElement("td");
-        left.textContent = name;
-        right.textContent = info.available ? fmtAge(info.age_sec) : "无数据";
-        tr.appendChild(left);
-        tr.appendChild(right);
-        table.appendChild(tr);
+      if (table) {
+        table.innerHTML = "";
+        if (s.debug_included === false) {
+          const tr = document.createElement("tr");
+          const cell = document.createElement("td");
+          cell.colSpan = 2;
+          cell.textContent = "调试 topic 按需刷新，打开“更多”页后自动加载";
+          tr.appendChild(cell);
+          table.appendChild(tr);
+        } else {
+          for (const [name, info] of Object.entries(s.topics || {})) {
+            const tr = document.createElement("tr");
+            const left = document.createElement("td");
+            const right = document.createElement("td");
+            left.textContent = name;
+            right.textContent = info.available ? fmtAge(info.age_sec) : "无数据";
+            tr.appendChild(left);
+            tr.appendChild(right);
+            table.appendChild(tr);
+          }
+        }
       }
     }
     async function loadMaps() {
@@ -1727,12 +2162,33 @@
         box.appendChild(el);
       }
     }
-    async function loadAnnotations() {
+    async function loadAnnotations(options = {}) {
       const mapId = currentAnnotationMapId();
+      const force = options.force === true;
+      const now = Date.now();
+      if (
+        !force
+        && state.lastAnnotationsMapId === mapId
+        && now - state.lastAnnotationsRefreshAt < 1200
+      ) {
+        renderAnnotations();
+        renderTaskPoints();
+        return;
+      }
+      if (state.loadingAnnotations && !force) return state.loadingAnnotations;
+      state.loadingAnnotations = (async () => {
       const payload = await fetchJson(`/api/annotations${mapId ? `?map_id=${encodeURIComponent(mapId)}` : ""}`);
       state.annotations = payload.annotations || [];
+        state.lastAnnotationsMapId = mapId;
+        state.lastAnnotationsRefreshAt = Date.now();
       renderAnnotations();
       renderTaskPoints();
+      })();
+      try {
+        await state.loadingAnnotations;
+      } finally {
+        state.loadingAnnotations = null;
+      }
     }
     function renderAnnotations() {
       const box = $("annotationList");
@@ -1746,13 +2202,12 @@
         const place = [item.area, item.room, item.result_file_prefix ? `结果:${item.result_file_prefix}` : ""].filter(Boolean).join(" / ");
         const el = document.createElement("div");
         el.className = "item";
-        const typeLabel = annotationTypeLabel(item);
         el.innerHTML = `
           <div class="item-head">
-            <span>${item.label || typeLabel || item.id}</span>
-            <span class="tag">${typeLabel}</span>
+            <span>${item.label || typeNames[item.type] || item.id}</span>
+            <span class="tag">${typeNames[item.type] || item.type}</span>
           </div>
-          <div class="item-meta">${item.floor || "-"} / ${typeLabel} / x ${fmtNumber(Number(pose.x))}, y ${fmtNumber(Number(pose.y))}, 朝向 ${fmtNumber(Number(pose.yaw), 2)} / 停留 ${fmtNumber(Number(item.dwell_s || 0), 1)}s</div>
+          <div class="item-meta">${item.floor || "-"} / ${manualPointTypeNames[item.manual_point_type] || item.manual_point_type || "-"} / x ${fmtNumber(Number(pose.x))}, y ${fmtNumber(Number(pose.y))}, 朝向 ${fmtNumber(Number(pose.yaw), 2)} / 停留 ${fmtNumber(Number(item.dwell_s || 0), 1)}s</div>
           ${place ? `<div class="item-meta">${place}</div>` : ""}
           <div class="actions"><button class="danger" data-delete-mark="${item.id}">删除</button></div>
         `;
@@ -1761,7 +2216,7 @@
       for (const btn of box.querySelectorAll("[data-delete-mark]")) {
         btn.addEventListener("click", async () => {
           await api("DELETE", `/api/annotations?id=${encodeURIComponent(btn.dataset.deleteMark)}`);
-          await loadAnnotations();
+          await loadAnnotations({force: true});
           draw();
         });
       }
@@ -1779,8 +2234,7 @@
         const line = document.createElement("label");
         line.className = "checkline";
         const place = [item.area, item.room].filter(Boolean).join(" / ");
-        const typeLabel = annotationTypeLabel(item);
-        line.innerHTML = `<input type="checkbox" value="${item.id}"><span>${item.floor || "-"} / ${item.label || item.id}${place ? ` / ${place}` : ""} / ${typeLabel} / 朝向 ${fmtNumber(Number((item.pose || {}).yaw), 2)} / 停留 ${fmtNumber(Number(item.dwell_s || 0), 1)}s</span>`;
+        line.innerHTML = `<input type="checkbox" value="${item.id}"><span>${item.floor || "-"} / ${item.label || item.id}${place ? ` / ${place}` : ""} / ${manualPointTypeNames[item.manual_point_type] || item.manual_point_type || typeNames[item.type] || item.type} / 朝向 ${fmtNumber(Number((item.pose || {}).yaw), 2)} / 停留 ${fmtNumber(Number(item.dwell_s || 0), 1)}s</span>`;
         box.appendChild(line);
       }
       for (const input of box.querySelectorAll("input[type='checkbox']")) {
@@ -1814,15 +2268,18 @@
       btn.disabled = false;
       btn.title = "用已勾选的当前地图点位生成任务";
     }
-    async function loadTasks() {
+    async function loadTasks(options = {}) {
       if (state.loadingTasks) return;
+      const fullReadiness = options.fullReadiness !== false;
       state.loadingTasks = true;
       try {
-        const payload = await fetchJson("/api/tasks");
+        const payload = await fetchJson(`/api/tasks?readiness=${fullReadiness ? "full" : "light"}`);
         state.lastTasksRefreshAt = Date.now();
         state.lastTasksPayload = payload;
         if (payload.selected_map_status) state.selectedMapStatus = payload.selected_map_status;
+        if (payload.task_readiness) renderTaskReadiness(payload.task_readiness);
         state.tasks = payload.tasks || [];
+        updateCreateTaskButton();
         renderTaskNextStep();
         const box = $("taskList");
         box.innerHTML = "";
@@ -1845,15 +2302,22 @@
           const activeTask = payload.active_task && payload.active_task.status === "running" ? payload.active_task : null;
           const active = !!activeTask;
           const isRunning = !!(activeTask && activeTask.task_id === task.id);
+          const readiness = task.readiness || (payload.readiness_included === false ? {
+            deferred: true,
+            ready: false,
+            message: "任务列表已轻量刷新；点击检查条件后再启动",
+          } : {});
           const taskStatus = normalizedTaskStatus(task.status);
           const statusAllowsStart = taskStatusAllowsStart(taskStatus);
           const mapMismatchText = taskMapMismatchText(task);
-          const canStart = !active && !isRunning && statusAllowsStart && !mapMismatchText;
+          const canStart = !active && !isRunning && statusAllowsStart && (readiness.ready === true || readiness.deferred === true) && !mapMismatchText;
           const canDelete = !isRunning && !(payload.active_task && payload.active_task.task_id === task.id);
+          const canCopyEvidence = !mapMismatchText;
           const statusBlockText = taskStatusBlockText(taskStatus);
-          const startLabel = isRunning ? "执行中" : (active ? "先停止当前任务" : (mapMismatchText ? "旧地图任务" : taskStartLabelForStatus(taskStatus)));
-          const taskNote = mapMismatchText || statusBlockText || "任务接口已通过；自检和现场确认不在任务按钮重复检查";
-          const displayStatus = taskDisplayStatus(taskStatus, task.multi_floor, mapMismatchText);
+          const startLabel = isRunning ? "执行中" : (active ? "先停止当前任务" : (mapMismatchText ? "旧地图任务" : taskStartLabelForStatus(taskStatus, readiness)));
+          const readinessText = mapMismatchText || statusBlockText || readiness.message || "等待任务条件检查";
+          const displayStatus = taskDisplayStatus(taskStatus, readiness, mapMismatchText);
+          const firstDistanceText = taskFirstDistanceText(readiness);
           const waypointDetails = Array.isArray(task.waypoints) ? task.waypoints : [];
           const waypointOrderText = waypointDetails.length
             ? waypointDetails.map((point, index) => taskWaypointText(point, index)).join(" → ")
@@ -1863,16 +2327,31 @@
           const firstTargetText = firstWaypoint
             ? `首点：${firstWaypoint.floor || "-"} / ${firstWaypoint.label || firstWaypoint.id || "-"} / x ${fmtNumber(Number(firstPose.x), 2)}, y ${fmtNumber(Number(firstPose.y), 2)}, 朝向 ${fmtNumber(Number(firstPose.yaw), 2)}`
             : "首点：-";
+          const readyCheckCommand = taskReadyCheckCommand(task);
+          const watcherCommand = taskWatcherCommand(task);
+          const evidenceCommandHtml = canCopyEvidence ? `
+            <div class="item-meta">开跑前验收：${readyCheckCommand}</div>
+            <div class="item-meta">开跑前记录：${watcherCommand}</div>
+          ` : "";
+          const evidenceButtonHtml = canCopyEvidence ? `
+              <button data-copy-command="${readyCheckCommand}" title="复制任务专属 ready-check 命令">复制验收</button>
+              <button data-copy-command="${watcherCommand}" title="复制任务专属 watcher 命令">复制记录</button>
+          ` : "";
+          const lastResultText = taskLastResultText(task);
           const el = document.createElement("div");
           el.className = "item";
           el.innerHTML = `
             <div class="item-head"><span>${task.name || task.id}</span><span class="tag">${displayStatus}</span></div>
             <div class="item-meta">${(task.annotation_ids || []).length} 个点 / ${task.created_at || ""}${task.updated_at ? ` / 更新 ${task.updated_at}` : ""}</div>
             <div class="item-meta">${firstTargetText}</div>
+            ${firstDistanceText ? `<div class="item-meta">${firstDistanceText}</div>` : ""}
             <div class="item-meta">顺序：${waypointOrderText}</div>
-            <div class="item-meta">${taskNote}</div>
+            <div class="item-meta">执行条件：${readinessText}</div>
+            ${evidenceCommandHtml}
+            ${lastResultText ? `<div class="item-meta">${lastResultText}</div>` : ""}
             <div class="actions">
-              <button class="primary" data-start-task="${task.id}" title="${taskNote}" ${canStart ? "" : "disabled"}>${startLabel}</button>
+              ${evidenceButtonHtml}
+              <button class="primary" data-start-task="${task.id}" title="${readinessText}" ${canStart ? "" : "disabled"}>${startLabel}</button>
               <button data-rename-task="${task.id}">改名</button>
               <button class="danger" data-delete-task="${task.id}" ${canDelete ? "" : "disabled"}>删除</button>
             </div>
@@ -1882,23 +2361,41 @@
         for (const btn of box.querySelectorAll("[data-start-task]")) {
           btn.addEventListener("click", async () => {
             btn.disabled = true;
-            btn.textContent = "确认中...";
+            btn.textContent = "检查中...";
             try {
-              const task = state.tasks.find(item => item.id === btn.dataset.startTask);
+              let task = state.tasks.find(item => item.id === btn.dataset.startTask);
               if (!task) throw {message: "任务列表已变化，请刷新后重试"};
-              const taskNote = taskStatusBlockText(normalizedTaskStatus(task.status)) || "任务接口已通过；自检和现场确认不在任务按钮重复检查";
-              if (!window.confirm(taskStartConfirmText(task, taskNote))) return;
+              if (!task.readiness || task.readiness.deferred) {
+                await loadTasks({fullReadiness: true});
+                task = state.tasks.find(item => item.id === btn.dataset.startTask);
+                if (!task) throw {message: "任务列表已变化，请刷新后重试"};
+                if (!task.readiness || task.readiness.ready !== true) return;
+              }
+              const readiness = task.readiness || {};
+              const readinessText = taskStatusBlockText(normalizedTaskStatus(task.status)) || readiness.message || "等待任务条件检查";
+              if (!window.confirm(taskStartConfirmText(task, readinessText))) return;
               btn.textContent = "启动中...";
               const payload = await api("POST", "/api/tasks/start", taskStartRequest(task));
               state.activeTaskLogUntil = Date.now() + 20000;
               setLog("activeTask", payload.active_task || payload);
-              await loadTasks();
             } catch (err) {
               state.activeTaskLogUntil = Date.now() + 30000;
               setLog("activeTask", err);
             } finally {
-              await loadTasks();
+              await loadTasks({fullReadiness: true});
             }
+          });
+        }
+        for (const btn of box.querySelectorAll("[data-copy-command]")) {
+          btn.addEventListener("click", async () => {
+            const original = btn.textContent;
+            try {
+              const ok = await copyTextToClipboard(btn.dataset.copyCommand || "");
+              btn.textContent = ok ? "已复制" : "复制失败";
+            } catch (err) {
+              btn.textContent = "复制失败";
+            }
+            setTimeout(() => { btn.textContent = original; }, 1200);
           });
         }
         for (const btn of box.querySelectorAll("[data-rename-task]")) {
@@ -1911,7 +2408,7 @@
             if (!trimmed) return;
             try {
               await api("POST", "/api/tasks/update", {task_id: task.id, name: trimmed});
-              await loadTasks();
+              await loadTasks({fullReadiness: true});
             } catch (err) { setLog("activeTask", err); }
           });
         }
@@ -1922,7 +2419,7 @@
             if (!window.confirm(`确认删除任务“${task.name || task.id}”？点位不会被删除。`)) return;
             try {
               await api("DELETE", `/api/tasks?id=${encodeURIComponent(task.id)}`);
-              await loadTasks();
+              await loadTasks({fullReadiness: true});
             } catch (err) { setLog("activeTask", err); }
           });
         }
@@ -1936,15 +2433,16 @@
       const dot = $("statusDot");
       const label = $("statusText");
       try {
-        const stateUrl = activeTabName() === "live" ? "/api/state" : "/api/state?debug=0";
-        const s = await fetchJson(stateUrl);
+        const fullState = activeTabName() === "more" && Date.now() - state.lastFullStateRefreshAt > 3000;
+        const s = await fetchJson(fullState ? "/api/state" : "/api/state?debug=0");
+        if (fullState) state.lastFullStateRefreshAt = Date.now();
         await refreshLiveMap(s.map_version);
         updateState(s);
         dot.className = "dot ok";
         label.textContent = "已连接";
         draw();
-        if (activeTabName() === "tasks" && Date.now() - state.lastTasksRefreshAt > 3000) {
-          loadTasks().catch(console.warn);
+        if (activeTabName() === "work" && Date.now() - state.lastTasksRefreshAt > 6000) {
+          loadTasks({fullReadiness: false}).catch(console.warn);
         }
       } catch (err) {
         dot.className = "dot warn";
@@ -1980,7 +2478,12 @@
       const p = canvasToWorld(evt.clientX, evt.clientY);
       if (!p) return;
       evt.preventDefault();
-      state.markPointer = {id: evt.pointerId, start: p, moved: false, mode: activeTabName() === "localize" ? "localize" : "mark"};
+      const mode = activeTabName() === "work" ? state.workPointerMode : "";
+      if (!mode) {
+        $("cursor").textContent = "切到作业页后再拖拽设置重定位或标点";
+        return;
+      }
+      state.markPointer = {id: evt.pointerId, start: p, moved: false, mode};
       canvas.setPointerCapture(evt.pointerId);
       if (state.markPointer.mode === "localize") {
         setLocalizeDraft(
@@ -2101,6 +2604,8 @@
         if (pose) centerMapOnWorld(pose.x, pose.y);
       }
     });
+    $("workModeLocalizeBtn").addEventListener("click", () => setWorkPointerMode("localize"));
+    $("workModeMarkBtn").addEventListener("click", () => setWorkPointerMode("mark"));
     $("markYaw").addEventListener("input", () => {
       const pose = state.markDraft;
       if (!pose) return;
@@ -2239,7 +2744,7 @@
       } catch (err) {
         console.warn(err);
       }
-      await loadAnnotations();
+      await loadAnnotations({force: true});
       draw();
     }
     $("selectMapBtn").addEventListener("click", async () => {
@@ -2283,7 +2788,9 @@
           label: $("markLabel").value.trim(),
           area: $("markArea").value.trim(),
           room: $("markRoom").value.trim(),
+          scan_point: $("markScanPoint").value.trim(),
           result_file_prefix: $("markResultPrefix").value.trim(),
+          radar: radarPlanFromSelect($("markRadarPlan").value),
           pose: {
             x,
             y,
@@ -2300,12 +2807,13 @@
             NavMode: asInteger("markNavMode", 1)
           }
         });
-        await loadAnnotations();
+        await loadAnnotations({force: true});
         state.markDraft = null;
         state.markDraftSource = "map_click";
         draw();
         $("markLabel").value = "";
         $("markResultPrefix").value = "";
+        $("markScanPoint").value = "";
         $("cursor").textContent = `已保存 ${payload.annotation.label || payload.annotation.id}`;
       } catch (err) { $("cursor").textContent = err.message || JSON.stringify(err); }
     });
@@ -2343,21 +2851,34 @@
           map_id: currentAnnotationMapId(),
           annotation_ids: ids
         });
-        await loadTasks();
-        setLog("activeTask", "任务已生成；启动前确认首点、顺序和现场状态后再开始");
+        await loadTasks({fullReadiness: true});
+        setLog("activeTask", "任务已生成；启动前请先复制并执行该任务卡片里的验收命令");
       } catch (err) { setLog("activeTask", err); }
     });
-	    $("reloadTasksBtn").addEventListener("click", loadTasks);
+	    $("reloadTasksBtn").addEventListener("click", () => loadTasks({fullReadiness: true}));
 	    $("frontVideoBtn").addEventListener("click", () => toggleVideo("front"));
 	    $("rearVideoBtn").addEventListener("click", () => toggleVideo("rear"));
 	    $("runPreflightBtn").addEventListener("click", runPreflight);
     $("refreshPreflightBtn").addEventListener("click", loadPreflight);
     $("taskRunPreflightBtn").addEventListener("click", async () => {
-      document.querySelectorAll("button.tab").forEach(item => item.classList.remove("active"));
-      document.querySelectorAll(".panel").forEach(item => item.classList.remove("active"));
-      document.querySelector('button.tab[data-tab="preflight"]').classList.add("active");
-      $("tab-preflight").classList.add("active");
       await runPreflight();
+    });
+    $("copyFieldSnapshotBtn").addEventListener("click", async () => {
+      const btn = $("copyFieldSnapshotBtn");
+      const oldText = btn.textContent;
+      btn.disabled = true;
+      try {
+        const ok = await copyFieldSnapshot();
+        btn.textContent = ok ? "快照已复制" : "复制失败";
+      } catch (err) {
+        setLog("activeTask", err);
+        btn.textContent = "复制失败";
+      } finally {
+        setTimeout(() => {
+          btn.disabled = false;
+          btn.textContent = oldText;
+        }, 1200);
+      }
     });
     $("stopTaskBtn").addEventListener("click", async () => {
       const btn = $("stopTaskBtn");
@@ -2373,7 +2894,7 @@
       try {
         const payload = await api("POST", "/api/tasks/stop", {reason: "web_manual_stop"});
         setLog("activeTask", payload.message || payload.active_task || "已发送停止指令");
-        await loadTasks();
+        await loadTasks({fullReadiness: true});
       } catch (err) {
         setLog("activeTask", err);
       } finally {
@@ -2392,7 +2913,7 @@
       try {
         const payload = await api("POST", "/api/tasks/stop", {reason: "web_manual_reset"});
         setLog("activeTask", payload.message || payload.active_task || "已复位导航状态");
-        await loadTasks();
+        await loadTasks({fullReadiness: true});
       } catch (err) {
         setLog("activeTask", err);
       } finally {
@@ -2405,5 +2926,18 @@
 	    setVideoActive(null);
 	    updateMapModeUi();
     syncManualDefaults(false);
-    loadMaps().then(loadAnnotations).then(loadPreflight).then(loadTasks).catch(console.warn);
+    setWorkPointerMode("localize");
+    async function autoRunPreflightOnce() {
+      if (state.autoPreflightStarted) return;
+      state.autoPreflightStarted = true;
+      setText("preflightTopStatus", "自检中");
+      try { await runPreflight(); }
+      catch (err) { console.warn(err); }
+    }
+    loadMaps()
+      .then(loadAnnotations)
+      .then(loadPreflight)
+      .then(loadTasks)
+      .then(autoRunPreflightOnce)
+      .catch(console.warn);
     mainLoop();

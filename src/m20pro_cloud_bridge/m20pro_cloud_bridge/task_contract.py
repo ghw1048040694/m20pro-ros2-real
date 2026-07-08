@@ -65,20 +65,10 @@ def readiness_failure(
     return payload
 
 
-def payload_age_sec(payload: Dict[str, Any], now: float) -> Optional[float]:
-    last_update = payload.get("last_update")
-    if last_update is None:
-        return None
-    try:
-        return max(0.0, now - float(last_update))
-    except (TypeError, ValueError):
-        return None
-
-
-def readiness_error_payload(readiness: Dict[str, Any]) -> Dict[str, Any]:
+def validation_error_payload(validation: Dict[str, Any]) -> Dict[str, Any]:
     return {
-        "code": readiness.get("code"),
-        "task_readiness": readiness,
+        "code": validation.get("code"),
+        "validation": validation,
     }
 
 
@@ -117,6 +107,9 @@ def task_waypoint_payload(
     payload["dwell_s"] = annotation.get("dwell_s")
     payload["area"] = annotation.get("area")
     payload["room"] = annotation.get("room")
+    payload["scan_point"] = annotation.get("scan_point")
+    payload["result_file_prefix"] = annotation.get("result_file_prefix")
+    payload["radar"] = annotation.get("radar") if isinstance(annotation.get("radar"), dict) else {}
     return payload
 
 
@@ -164,468 +157,6 @@ def pose_distance_m(a: Optional[Dict[str, Any]], b: Optional[Dict[str, Any]]) ->
         return math.hypot(float(a.get("x")) - float(b.get("x")), float(a.get("y")) - float(b.get("y")))
     except (TypeError, ValueError):
         return None
-
-
-def task_pose_readiness_payload(
-    pose: Dict[str, Any],
-    first_annotation: Optional[Dict[str, Any]],
-    *,
-    task_id: Optional[str],
-    task_map_id: Optional[str],
-    selected_map_id: Optional[str],
-    localization_ok: Any,
-    current_floor: Any,
-    navigation_status: Any,
-    pose_age_sec: Optional[float],
-    pose_timeout_s: float,
-    require_localization_ok: bool,
-    warn_first_waypoint_distance_m: float,
-    max_first_waypoint_distance_m: float,
-    now_text: Optional[NowText] = None,
-) -> Dict[str, Any]:
-    base = {
-        "task_id": task_id,
-        "task_map_id": task_map_id,
-        "selected_map_id": selected_map_id,
-        "localization_ok": localization_ok,
-        "pose_ok": is_plausible_pose_dict(pose),
-        "pose_age_sec": pose_age_sec,
-        "pose_timeout_s": max(0.5, float(pose_timeout_s)),
-        "current_floor": current_floor,
-        "navigation_status": navigation_status,
-        "first_waypoint": readiness_waypoint_payload(first_annotation),
-    }
-    if first_annotation is not None:
-        target_floor = str(first_annotation.get("floor") or "").strip()
-        normalized_current_floor = str(current_floor or "").strip()
-        cross_floor_first_waypoint = bool(
-            normalized_current_floor and target_floor and normalized_current_floor != target_floor
-        )
-        base["target_floor"] = target_floor
-        base["first_waypoint_cross_floor"] = cross_floor_first_waypoint
-        if cross_floor_first_waypoint:
-            base["first_waypoint_distance_skipped"] = "cross_floor"
-        else:
-            first_pose = first_annotation.get("pose") if isinstance(first_annotation.get("pose"), dict) else {}
-            first_distance = pose_distance_m(pose, first_pose)
-            if first_distance is not None:
-                base["first_waypoint_distance_m"] = first_distance
-                base["first_waypoint_distance_warn_m"] = max(0.0, float(warn_first_waypoint_distance_m))
-                base["first_waypoint_distance_max_m"] = max(0.0, float(max_first_waypoint_distance_m))
-    if require_localization_ok and localization_ok is not True:
-        return readiness_failure(
-            "localization_not_confirmed",
-            "定位未确认，先在网页定位页完成重定位，再开始任务",
-            base,
-            now_text=now_text,
-        )
-    if not base["pose_ok"] or pose_age_sec is None or pose_age_sec > base["pose_timeout_s"]:
-        return readiness_failure(
-            "pose_invalid_or_stale",
-            "地图位姿无效或已过期，先重定位并确认机器人位置稳定",
-            {**base, "pose": pose},
-            now_text=now_text,
-        )
-    return readiness_success("任务位姿检查通过", base, now_text=now_text)
-
-
-def battery_readiness_payload(
-    battery: Dict[str, Any],
-    *,
-    required: bool,
-    min_level: int,
-    timeout_s: float,
-    now: float,
-    success_message: str,
-    now_text: Optional[NowText] = None,
-) -> Dict[str, Any]:
-    if not required:
-        return readiness_success("任务电池检查已关闭", {"required": False}, now_text=now_text)
-    primary = battery.get("primary") if isinstance(battery.get("primary"), dict) else None
-    age_s = payload_age_sec(battery, now)
-    base = {
-        "required": True,
-        "min_level": max(0, int(min_level)),
-        "timeout_s": max(1.0, float(timeout_s)),
-        "age_sec": age_s,
-        "battery": primary,
-    }
-    if primary is None:
-        return readiness_failure("battery_missing", "未收到电池数据，不能开始/继续任务", base, now_text=now_text)
-    if age_s is None or age_s > base["timeout_s"]:
-        return readiness_failure(
-            "battery_stale",
-            "电池数据已过期 %.1f 秒，不能开始/继续任务" % (age_s if age_s is not None else -1.0),
-            base,
-            now_text=now_text,
-        )
-    try:
-        level = int(primary.get("level"))
-    except (TypeError, ValueError):
-        level = -1
-    base["level"] = level
-    if level < base["min_level"]:
-        return readiness_failure(
-            "battery_low",
-            "电量 %d%% 低于任务要求 %d%%，请先充电再执行任务" % (level, base["min_level"]),
-            base,
-            now_text=now_text,
-        )
-    return readiness_success(success_message, base, now_text=now_text)
-
-
-def perception_readiness_payload(
-    scan: Dict[str, Any],
-    lidar: Dict[str, Any],
-    *,
-    require_scan: bool,
-    require_lidar: bool,
-    timeout_s: float,
-    min_scan_ranges: int,
-    min_lidar_points: int,
-    now: float,
-    success_message: str,
-    now_text: Optional[NowText] = None,
-) -> Dict[str, Any]:
-    if not require_scan and not require_lidar:
-        return readiness_success("任务感知检查已关闭", {"required": False}, now_text=now_text)
-    bounded_timeout = max(0.5, float(timeout_s))
-    bounded_min_scan = max(1, int(min_scan_ranges))
-    bounded_min_lidar = max(1, int(min_lidar_points))
-    scan_age = payload_age_sec(scan, now)
-    lidar_age = payload_age_sec(lidar, now)
-    finite_ranges = int(scan.get("finite_ranges", 0) or 0)
-    lidar_points = int(lidar.get("width", 0) or 0) * max(1, int(lidar.get("height", 1) or 1))
-    scan_ok = bool(scan_age is not None and scan_age <= bounded_timeout and finite_ranges >= bounded_min_scan)
-    lidar_ok = bool(lidar_age is not None and lidar_age <= bounded_timeout and lidar_points >= bounded_min_lidar)
-    checks = {
-        "scan": {
-            "required": require_scan,
-            "ok": scan_ok,
-            "age_sec": scan_age,
-            "finite_ranges": finite_ranges,
-            "min_finite_ranges": bounded_min_scan,
-            "frame_id": scan.get("frame_id"),
-        },
-        "lidar_points": {
-            "required": require_lidar,
-            "ok": lidar_ok,
-            "age_sec": lidar_age,
-            "points": lidar_points,
-            "min_points": bounded_min_lidar,
-            "source": lidar.get("source"),
-            "frame_id": lidar.get("frame_id"),
-        },
-    }
-    base = {
-        "required": True,
-        "timeout_s": bounded_timeout,
-        "checks": checks,
-    }
-    if require_scan and not scan_ok:
-        return readiness_failure(
-            "perception_scan_unavailable",
-            "任务启动/执行要求新鲜 /scan，但当前有效距离 %d、数据年龄 %s"
-            % (
-                finite_ranges,
-                "%.1fs" % scan_age if scan_age is not None else "未知",
-            ),
-            base,
-            now_text=now_text,
-        )
-    if require_lidar and not lidar_ok:
-        return readiness_failure(
-            "perception_lidar_unavailable",
-            "任务启动/执行要求前端可见点云 relay，但当前点数 %d、数据年龄 %s"
-            % (
-                lidar_points,
-                "%.1fs" % lidar_age if lidar_age is not None else "未知",
-            ),
-            base,
-            now_text=now_text,
-        )
-    return readiness_success(success_message, base, now_text=now_text)
-
-
-def runtime_guard_readiness_payload(
-    *,
-    battery_readiness: Dict[str, Any],
-    perception_readiness: Dict[str, Any],
-    now_text: Optional[NowText] = None,
-) -> Dict[str, Any]:
-    if not battery_readiness.get("ready"):
-        return readiness_failure(
-            str(battery_readiness.get("code") or "battery_not_ready"),
-            str(battery_readiness.get("message") or "电池状态不满足任务运行要求"),
-            {"battery_readiness": battery_readiness},
-            now_text=now_text,
-        )
-    if not perception_readiness.get("ready"):
-        return readiness_failure(
-            str(perception_readiness.get("code") or "perception_not_ready"),
-            str(perception_readiness.get("message") or "感知链路不满足任务运行要求"),
-            {
-                "battery_readiness": battery_readiness,
-                "perception_readiness": perception_readiness,
-            },
-            now_text=now_text,
-        )
-    return readiness_success(
-        "任务运行关键链路可用",
-        {
-            "battery_readiness": battery_readiness,
-            "perception_readiness": perception_readiness,
-        },
-        now_text=now_text,
-    )
-
-
-def task_runtime_readiness_payload(
-    *,
-    map_relocalization_readiness: Optional[Dict[str, Any]],
-    pose_readiness: Dict[str, Any],
-    battery_readiness: Dict[str, Any],
-    perception_readiness: Dict[str, Any],
-    success_message: str,
-    now_text: Optional[NowText] = None,
-) -> Dict[str, Any]:
-    if map_relocalization_readiness is not None:
-        return map_relocalization_readiness
-    base = {
-        key: value
-        for key, value in dict(pose_readiness or {}).items()
-        if key not in ("ready", "code", "message", "updated_at")
-    }
-    if not pose_readiness.get("ready"):
-        return pose_readiness
-    if not battery_readiness.get("ready"):
-        return readiness_failure(
-            str(battery_readiness.get("code") or "battery_not_ready"),
-            str(battery_readiness.get("message") or "电池状态不满足任务启动要求"),
-            {
-                **base,
-                "battery_readiness": battery_readiness,
-            },
-            now_text=now_text,
-        )
-    if not perception_readiness.get("ready"):
-        return readiness_failure(
-            str(perception_readiness.get("code") or "perception_not_ready"),
-            str(perception_readiness.get("message") or "感知链路不满足任务启动要求"),
-            {
-                **base,
-                "battery_readiness": battery_readiness,
-                "perception_readiness": perception_readiness,
-            },
-            now_text=now_text,
-        )
-    return readiness_success(
-        success_message,
-        {
-            **base,
-            "battery_readiness": battery_readiness,
-            "perception_readiness": perception_readiness,
-        },
-        now_text=now_text,
-    )
-
-
-def current_task_readiness_payload(
-    *,
-    active_task: Dict[str, Any],
-    runtime_readiness: Dict[str, Any],
-    nav_readiness: Optional[Dict[str, Any]],
-    require_nav_ready: bool,
-    now_text: Optional[NowText] = None,
-) -> Dict[str, Any]:
-    active = dict(active_task or {})
-    if active.get("status") == "running":
-        return readiness_failure(
-            "task_running",
-            str(active.get("status_message") or "任务正在执行中"),
-            {
-                "task_id": active.get("task_id"),
-                "task_name": active.get("task_name"),
-                "index": active.get("index"),
-                "phase": active.get("phase"),
-                "distance_m": active.get("last_distance_m"),
-                "nav_goal_status": active.get("last_nav_goal_status"),
-                "last_nav_status": active.get("last_nav_status"),
-                "running": True,
-            },
-            now_text=now_text,
-        )
-    runtime = dict(runtime_readiness or {})
-    if runtime.get("ready") and require_nav_ready:
-        nav_ready = dict(nav_readiness or {})
-        if not nav_ready.get("ready"):
-            return readiness_failure(
-                "navigation_not_ready",
-                str(nav_ready.get("message") or "导航链路尚未就绪，请等待 Nav2/costmap 恢复"),
-                {
-                    **runtime,
-                    "navigation_readiness": nav_ready,
-                },
-                now_text=now_text,
-            )
-        return readiness_success(
-            "定位、位姿和导航链路已就绪；具体任务点位请看任务列表的执行条件",
-            {
-                **runtime,
-                "navigation_readiness": nav_ready,
-            },
-            now_text=now_text,
-        )
-    return runtime
-
-
-def runtime_guard_lost_decision(
-    active: Dict[str, Any],
-    guard: Dict[str, Any],
-    *,
-    now_monotonic: float,
-    timeout_s: float,
-) -> Dict[str, Any]:
-    if guard.get("ready"):
-        return {
-            "action": "clear",
-            "reason": "runtime_guard_ready",
-            "clear_keys": [
-                "runtime_guard",
-                "runtime_guard_lost_started_monotonic",
-                "runtime_guard_lost_at",
-                "runtime_guard_lost_age_s",
-            ],
-        }
-
-    try:
-        started = float(active.get("runtime_guard_lost_started_monotonic", 0.0) or 0.0)
-    except (TypeError, ValueError):
-        started = 0.0
-    if started <= 0.0:
-        started = float(now_monotonic)
-    age_s = max(0.0, float(now_monotonic) - started)
-    message = "任务执行中关键链路异常：%s；%.1f 秒内未恢复将停止任务" % (
-        str(guard.get("message") or "未知异常"),
-        float(timeout_s),
-    )
-    base = {
-        "reason": "runtime_guard_lost",
-        "guard": guard,
-        "started_monotonic": started,
-        "age_s": age_s,
-        "timeout_s": float(timeout_s),
-        "wait_code": "runtime_" + str(guard.get("code") or "guard_not_ready"),
-        "message": message,
-    }
-    if age_s < float(timeout_s):
-        return {"action": "wait", **base}
-    return {
-        "action": "fail",
-        **base,
-        "message": "任务执行中关键链路异常超过 %.1f 秒，已停止任务：%s"
-        % (float(timeout_s), str(guard.get("message") or "未知异常")),
-    }
-
-
-def runtime_guard_failure_extra(guard: Dict[str, Any], decision: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "runtime_guard": guard,
-        "runtime_guard_lost_age_s": decision.get("age_s"),
-    }
-
-
-def runtime_guard_waiting_event_payload(
-    active: Dict[str, Any],
-    guard: Dict[str, Any],
-    decision: Dict[str, Any],
-) -> Dict[str, Any]:
-    return {
-        "event": "runtime_guard_waiting",
-        "message": str(
-            active.get("status_message")
-            or decision.get("message")
-            or "任务执行中关键链路异常，等待恢复"
-        ),
-        "extra": {
-            "guard": guard,
-            "age_s": decision.get("age_s"),
-            "timeout_s": decision.get("timeout_s"),
-        },
-    }
-
-
-def apply_runtime_guard_wait_state(
-    active: Dict[str, Any],
-    guard: Dict[str, Any],
-    decision: Dict[str, Any],
-    *,
-    now_text: str,
-    fallback_monotonic: float,
-) -> Dict[str, Any]:
-    updated = dict(active)
-    previous_started = updated.get("runtime_guard_lost_started_monotonic")
-    previous_wait_code = updated.get("last_wait_code")
-    previous_status = updated.get("status_message")
-    wait_code = str(decision.get("wait_code") or "runtime_guard_not_ready")
-    status_message = str(decision.get("message") or "任务执行中关键链路异常")
-    updated["runtime_guard_lost_started_monotonic"] = float(
-        decision.get("started_monotonic") or fallback_monotonic
-    )
-    if "runtime_guard_lost_at" not in updated:
-        updated["runtime_guard_lost_at"] = now_text
-    updated["runtime_guard"] = guard
-    updated["runtime_guard_lost_age_s"] = decision.get("age_s")
-    updated["last_wait_code"] = wait_code
-    updated["last_wait_at"] = now_text
-    updated["status_message"] = status_message
-    should_record_event = (
-        decision.get("action") == "fail"
-        or previous_started in (None, 0, 0.0)
-        or str(previous_wait_code or "") != wait_code
-        or str(previous_status or "") != status_message
-    )
-    return {
-        "active": updated,
-        "changed": updated != active,
-        "should_record_event": should_record_event,
-    }
-
-
-def apply_runtime_guard_clear_state(
-    active: Dict[str, Any],
-    decision: Dict[str, Any],
-) -> Dict[str, Any]:
-    updated = dict(active)
-    changed = False
-    for key in decision.get("clear_keys") or ():
-        if key in updated:
-            updated.pop(key, None)
-            changed = True
-    return {"active": updated, "changed": changed}
-
-
-def map_relocalization_task_readiness_payload(
-    map_relocalization_required: Dict[str, Any],
-    *,
-    task_id: Optional[str],
-    task_map_id: Optional[str],
-    selected_map_id: Optional[str],
-    now_text: Optional[NowText] = None,
-) -> Optional[Dict[str, Any]]:
-    if not map_relocalization_required:
-        return None
-    return readiness_failure(
-        "map_relocalization_required",
-        "Nav2 已加载当前固定地图，请先按开发手册2101完成重定位，再开始标点或任务",
-        {
-            "task_id": task_id,
-            "task_map_id": task_map_id,
-            "selected_map_id": selected_map_id,
-            "map_relocalization_required": dict(map_relocalization_required),
-        },
-        now_text=now_text,
-    )
 
 
 def pose_map_bounds_error(
@@ -766,231 +297,13 @@ def map_metadata_mismatch_error(
     )
 
 
-def task_start_runtime_readiness_payload(
-    first_annotation: Optional[Dict[str, Any]],
-    task_map_id: str,
-    *,
-    task_id: Optional[str],
-    selected_map_id: Optional[str],
-    runtime_readiness: Dict[str, Any],
-    current_floor: Any,
-    live_map: Dict[str, Any],
-    robot_pose: Dict[str, Any],
-    target_map_payload: Dict[str, Any],
-    nav_readiness: Optional[Dict[str, Any]],
-    success_navigation_readiness: Optional[Dict[str, Any]],
-    require_current_floor_known: bool,
-    require_current_floor_match: bool,
-    require_pose_on_map: bool,
-    require_nav_ready: bool,
-    max_first_waypoint_distance_m: float,
-    now_text: Optional[NowText] = None,
-) -> Dict[str, Any]:
-    if first_annotation is None:
-        return readiness_failure(
-            "missing_waypoint",
-            "任务首个点位不存在，请重新生成任务",
-            {"task_id": task_id, "task_map_id": task_map_id, "selected_map_id": selected_map_id},
-            now_text=now_text,
-        )
-    runtime = dict(runtime_readiness or {})
-    if not runtime.get("ready"):
-        return runtime
-
-    target_floor = str(first_annotation.get("floor") or "").strip()
-    if require_current_floor_known and target_floor and not current_floor:
-        return readiness_failure(
-            "floor_unknown",
-            "尚未收到当前楼层，等待 /m20pro/current_floor 后再开始任务",
-            {
-                **runtime,
-                "current_floor": current_floor,
-                "target_floor": target_floor,
-            },
-            now_text=now_text,
-        )
-    if require_current_floor_match and current_floor and target_floor and current_floor != target_floor:
-        return readiness_failure(
-            "wrong_floor",
-            "当前楼层与任务首点楼层不一致，请先切换/确认地图和楼层",
-            {
-                **runtime,
-                "current_floor": current_floor,
-                "target_floor": target_floor,
-            },
-            now_text=now_text,
-        )
-    if require_pose_on_map:
-        pose_error = pose_map_bounds_error(robot_pose, live_map, "机器人当前位置")
-        if pose_error:
-            return readiness_failure(
-                "current_pose_out_of_map",
-                str(pose_error.get("message") or "机器人当前位置不在当前地图范围内"),
-                {**runtime, "detail": pose_error},
-                now_text=now_text,
-            )
-        target_pose = first_annotation.get("pose") if isinstance(first_annotation.get("pose"), dict) else {}
-        target_error = pose_map_bounds_error(target_pose, target_map_payload, "任务首点")
-        if target_error:
-            return readiness_failure(
-                "target_out_of_map",
-                str(target_error.get("message") or "任务首点不在当前地图范围内"),
-                {**runtime, "detail": target_error},
-                now_text=now_text,
-            )
-        if current_floor and target_floor and current_floor == target_floor and task_map_id != "live_map":
-            metadata_error = map_metadata_mismatch_error(live_map, target_map_payload)
-            if metadata_error:
-                return readiness_failure(
-                    "map_metadata_mismatch",
-                    str(metadata_error.get("message") or "网页选择地图与 Nav2 当前加载地图不一致"),
-                    {**runtime, "detail": metadata_error},
-                    now_text=now_text,
-                )
-
-    same_floor_first_waypoint = not (
-        current_floor and target_floor and str(current_floor).strip() != target_floor
-    )
-    first_distance = runtime.get("first_waypoint_distance_m")
-    max_first_distance = max(0.0, float(max_first_waypoint_distance_m))
-    if (
-        same_floor_first_waypoint
-        and isinstance(first_distance, (int, float))
-        and max_first_distance > 0.0
-        and first_distance > max_first_distance
-    ):
-        return readiness_failure(
-            "first_waypoint_too_far",
-            "机器人当前位置距离任务首点 %.2f m，超过 %.2f m；请确认重定位和首点是否属于同一现场后再开始"
-            % (float(first_distance), max_first_distance),
-            {
-                **runtime,
-                "current_floor": current_floor,
-                "target_floor": target_floor,
-                "first_waypoint_distance_m": float(first_distance),
-                "first_waypoint_distance_max_m": max_first_distance,
-            },
-            now_text=now_text,
-        )
-    if not same_floor_first_waypoint:
-        runtime["first_waypoint_distance_skipped"] = "cross_floor"
-        runtime["first_waypoint_cross_floor"] = True
-    if require_nav_ready:
-        nav_ready = dict(nav_readiness or {})
-        if not nav_ready.get("ready"):
-            return readiness_failure(
-                "navigation_not_ready",
-                str(nav_ready.get("message") or "导航链路尚未就绪，请等待 Nav2/costmap 恢复"),
-                {
-                    **runtime,
-                    "navigation_readiness": nav_ready,
-                },
-                now_text=now_text,
-            )
-    return readiness_success(
-        "定位、位姿、地图和任务首点检查通过，可以开始执行",
-        {
-            **runtime,
-            "current_floor": current_floor,
-            "target_floor": target_floor,
-            "floors": runtime.get("floors"),
-            "map_ids": runtime.get("map_ids"),
-            "multi_floor": runtime.get("multi_floor"),
-            "multi_map": runtime.get("multi_map"),
-            "navigation_readiness": success_navigation_readiness if success_navigation_readiness is not None else nav_readiness,
-        },
-        now_text=now_text,
-    )
-
-
-def task_readiness_pre_runtime_payload(
-    *,
-    task_id: str,
-    active_task: Dict[str, Any],
-    static_context: Dict[str, Any],
-    task_validation: Optional[Dict[str, Any]],
-    selected_map_id: Optional[str],
-    now_text: Optional[NowText] = None,
-) -> Dict[str, Any]:
-    task_id = str(task_id or "").strip()
-    active = dict(active_task or {})
-    if active.get("status") == "running":
-        same_task = active.get("task_id") == task_id
-        return {
-            "proceed": False,
-            "readiness": readiness_failure(
-                "task_running",
-                "当前任务正在执行中" if same_task else "已有任务正在执行，请先停止当前任务",
-                {
-                    "task_id": task_id,
-                    "active_task_id": active.get("task_id"),
-                    "running": True,
-                },
-                now_text=now_text,
-            ),
-        }
-
-    context = dict(static_context or {})
-    if not context.get("ok"):
-        readiness = context.get("readiness")
-        if isinstance(readiness, dict):
-            return {"proceed": False, "readiness": readiness}
-        error_payload = dict(context.get("error") or {})
-        return {
-            "proceed": False,
-            "readiness": readiness_failure(
-                str(error_payload.get("code") or "task_static_context_invalid"),
-                str(error_payload.get("message") or "任务静态条件无效"),
-                {key: value for key, value in error_payload.items() if key != "message"},
-                now_text=now_text,
-            ),
-        }
-
-    if task_validation:
-        return {"proceed": False, "readiness": task_validation}
-
-    task_map_id = str(context.get("task_map_id") or "").strip() or "live_map"
-    selected = str(selected_map_id or context.get("selected_map_id") or "").strip() or "live_map"
-    first_annotation = context.get("first_annotation")
-    annotation_map_ids = {
-        str(item.get("map_id") or "").strip()
-        for item in (context.get("annotations") or [])
-        if isinstance(item, dict) and str(item.get("map_id") or "").strip()
-    }
-    task_contains_selected_map = bool(selected and selected in annotation_map_ids)
-    if task_map_id != selected and not task_contains_selected_map:
-        return {
-            "proceed": False,
-            "readiness": readiness_failure(
-                "selected_map_mismatch",
-                "当前地图与任务地图不一致，请先切换到任务对应地图",
-                {
-                    "task_id": task_id,
-                    "task_map_id": task_map_id,
-                    "selected_map_id": selected,
-                    "first_waypoint": readiness_waypoint_payload(first_annotation),
-                },
-                now_text=now_text,
-            ),
-        }
-
-    return {
-        "proceed": True,
-        "task_id": task_id,
-        "task_map_id": task_map_id,
-        "selected_map_id": selected,
-        "first_annotation": first_annotation,
-        "annotations": list(context.get("annotations") or []),
-    }
-
-
 def apply_task_start_pre_runtime_failure_state(
     tasks: Iterable[Dict[str, Any]],
     *,
     task_id: str,
     static_context: Dict[str, Any],
     task_validation: Optional[Dict[str, Any]],
-    readiness: Dict[str, Any],
+    validation: Dict[str, Any],
     now_text_value: str,
 ) -> Dict[str, Any]:
     target_id = str(task_id or "").strip()
@@ -1001,7 +314,7 @@ def apply_task_start_pre_runtime_failure_state(
 
     last_error = str(
         (static_context or {}).get("last_error")
-        or (readiness or {}).get("message")
+        or (validation or {}).get("message")
         or "任务点位无效"
     )
     for task in updated_tasks:
@@ -1210,7 +523,7 @@ def task_create_map_metadata_mismatch_payload(
     now_text: Optional[NowText] = None,
 ) -> Dict[str, Any]:
     message = str(selected_map_status.get("message") or "网页选择地图与 Nav2 当前加载地图不一致")
-    readiness = readiness_failure(
+    validation = readiness_failure(
         "task_create_map_metadata_mismatch",
         message,
         {
@@ -1222,8 +535,8 @@ def task_create_map_metadata_mismatch_payload(
     )
     return {
         "message": message,
-        "readiness": readiness,
-        "error_extra": readiness_error_payload(readiness),
+        "validation": validation,
+        "error_extra": validation_error_payload(validation),
     }
 
 
@@ -1239,7 +552,7 @@ def task_create_static_context(
         return {
             "ok": False,
             "error": contract_error("任务至少需要一个点位", {"code": "task_create_no_waypoint"}),
-            "readiness": readiness_failure(
+            "validation": readiness_failure(
                 "task_create_no_waypoint",
                 "任务至少需要一个点位",
                 now_text=now_text,
@@ -1251,7 +564,7 @@ def task_create_static_context(
         return {
             "ok": False,
             "error": contract_error("任务中存在已删除的点位", {"code": "task_create_missing_waypoint", "missing": missing}),
-            "readiness": readiness_failure(
+            "validation": readiness_failure(
                 "task_create_missing_waypoint",
                 "任务中存在已删除的点位",
                 {"missing": missing},
@@ -1265,7 +578,7 @@ def task_create_static_context(
         return {
             "ok": False,
             "error": order_error,
-            "readiness": readiness_failure(
+            "validation": readiness_failure(
                 str(order_error.get("code") or "waypoint_order_invalid"),
                 str(order_error.get("message") or "任务点位顺序无效"),
                 {key: value for key, value in order_error.items() if key not in ("ok", "message")},
@@ -1282,8 +595,8 @@ def task_create_static_context(
     if map_selection_error:
         return {
             "ok": False,
-            "error": contract_error(str(map_selection_error.get("message") or "任务地图无效"), readiness_error_payload(map_selection_error)),
-            "readiness": map_selection_error,
+            "error": contract_error(str(map_selection_error.get("message") or "任务地图无效"), validation_error_payload(map_selection_error)),
+            "validation": map_selection_error,
         }
 
     return {
@@ -1327,7 +640,7 @@ def task_start_static_context(
         return {
             "ok": False,
             "error": contract_error("任务不存在", base),
-            "readiness": readiness_failure("task_missing", "任务不存在", base, now_text=now_text),
+            "validation": readiness_failure("task_missing", "任务不存在", base, now_text=now_text),
             "mark_task_invalid": False,
         }
 
@@ -1346,7 +659,7 @@ def task_start_static_context(
         return {
             "ok": False,
             "error": contract_error(message, base),
-            "readiness": readiness_failure(code, message, base, now_text=now_text),
+            "validation": readiness_failure(code, message, base, now_text=now_text),
             "mark_task_invalid": False,
         }
 
@@ -1356,7 +669,7 @@ def task_start_static_context(
         return {
             "ok": False,
             "error": contract_error("任务没有点位", base),
-            "readiness": readiness_failure(
+            "validation": readiness_failure(
                 "no_waypoint",
                 "任务没有点位，请先添加点位后重新生成任务",
                 base,
@@ -1371,7 +684,7 @@ def task_start_static_context(
         return {
             "ok": False,
             "error": contract_error("任务中存在已删除的点位，请重新生成任务", base),
-            "readiness": readiness_failure(
+            "validation": readiness_failure(
                 "missing_waypoint",
                 "任务中存在已删除的点位，请重新生成任务",
                 base,
@@ -1384,7 +697,7 @@ def task_start_static_context(
     annotations = [annotations_by_id[item] for item in annotation_ids]
     order_error = validate_task_annotation_order(annotations)
     if order_error:
-        readiness = readiness_failure(
+        validation = readiness_failure(
             str(order_error.get("code") or "waypoint_order_invalid"),
             str(order_error.get("message") or "任务点位顺序无效"),
             {
@@ -1396,7 +709,7 @@ def task_start_static_context(
         return {
             "ok": False,
             "error": order_error,
-            "readiness": readiness,
+            "validation": validation,
             "mark_task_invalid": False,
         }
 

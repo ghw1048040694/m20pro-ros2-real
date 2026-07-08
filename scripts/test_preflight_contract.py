@@ -13,7 +13,6 @@ sys.path.insert(0, str(ROOT / "src/m20pro_cloud_bridge"))
 
 from m20pro_cloud_bridge.preflight_contract import (  # noqa: E402
     preflight_base_topics_item,
-    preflight_battery_item,
     preflight_context,
     preflight_costmap_items,
     preflight_lifecycle_deferred_item,
@@ -95,26 +94,6 @@ def test_perception_chain_failure_is_added() -> None:
     assert_equal(payload["failures"], 1, "perception failure added")
     assert_equal(payload["items"][-1]["key"], "perception_chain", "items input is not mutated")
     assert_equal(payload["summary"], "基础自检未通过：1 项失败", "summary")
-
-
-def test_relocalization_can_still_be_ready_with_noncritical_failure() -> None:
-    payload = preflight_result_payload(
-        [item("battery", "fail", label="电量")],
-        mode="move",
-        site="field",
-        workstation_mode=False,
-        map_ok=True,
-        perception_ok=True,
-        timestamp=100.0,
-        now_text=now_text,
-    )
-    assert_equal(payload["ok"], False, "battery fail blocks preflight")
-    assert_equal(payload["relocalization_ready"], True, "map and perception still allow relocalization debugging")
-    assert_equal(
-        payload["summary"],
-        "基础自检未通过：1 项失败（电量）；地图/点云/scan 可用，仍可先做重定位排查，不要开始移动任务",
-        "summary",
-    )
 
 
 def test_motion_mode_item() -> None:
@@ -370,20 +349,6 @@ def test_costmap_items() -> None:
     assert_equal(malformed[1]["status"], "warn", "malformed global size warns")
 
 
-def test_battery_item() -> None:
-    ok = preflight_battery_item({"primary": {"level": 80}}, min_level=20)
-    assert_equal(ok["status"], "ok", "battery ok")
-    assert_equal(ok["message"], "80% / 最低要求 20%", "battery ok message")
-
-    low = preflight_battery_item({"primary": {"level": 12}}, min_level=20)
-    assert_equal(low["status"], "fail", "battery low fails")
-    assert_equal(low["message"], "12% / 最低要求 20%", "battery low message")
-
-    missing = preflight_battery_item({}, min_level=20)
-    assert_equal(missing["status"], "fail", "missing battery fails")
-    assert_equal(missing["message"], "未收到电池数据", "missing battery message")
-
-
 def test_map_item() -> None:
     ok = preflight_map_item({"width": 100, "height": 100})
     assert_equal(ok["status"], "ok", "map loaded")
@@ -429,14 +394,12 @@ def main() -> int:
         test_ready_field_navigation,
         test_workstation_navigation_deferred,
         test_perception_chain_failure_is_added,
-        test_relocalization_can_still_be_ready_with_noncritical_failure,
         test_motion_mode_item,
         test_preflight_context,
         test_node_and_topic_items,
         test_odom_navigation_status_and_lifecycle_items,
         test_perception_items,
         test_costmap_items,
-        test_battery_item,
         test_map_item,
         test_localization_item,
         test_map_pose_item,

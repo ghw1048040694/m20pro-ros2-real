@@ -50,6 +50,9 @@ def generate_launch_description():
     map_yaml = LaunchConfiguration("map")
     cloud_topic = LaunchConfiguration("cloud_topic")
     backup_cloud_topic = LaunchConfiguration("backup_cloud_topic")
+    scan_topic = LaunchConfiguration("scan_topic")
+    perception_mode = LaunchConfiguration("perception_mode")
+    enable_lidar_points_subscriptions = LaunchConfiguration("enable_lidar_points_subscriptions")
     use_fusion = LaunchConfiguration("fusion")
     enable_nav2 = LaunchConfiguration("enable_nav2")
     enable_floor_manager = LaunchConfiguration("enable_floor_manager")
@@ -106,6 +109,9 @@ def generate_launch_description():
         DeclareLaunchArgument("map", default_value=default_map),
         DeclareLaunchArgument("cloud_topic", default_value="/LIDAR/POINTS"),
         DeclareLaunchArgument("backup_cloud_topic", default_value=""),
+        DeclareLaunchArgument("scan_topic", default_value="/scan"),
+        DeclareLaunchArgument("perception_mode", default_value="local_fusion"),
+        DeclareLaunchArgument("enable_lidar_points_subscriptions", default_value="true"),
         DeclareLaunchArgument("fusion", default_value="true"),
         DeclareLaunchArgument(
             "enable_nav2",
@@ -258,7 +264,7 @@ def generate_launch_description():
                     "backup_cloud_topic": backup_cloud_topic,
                     "front_lidar_topic": "",
                     "rear_lidar_topic": "",
-                    "output_scan_topic": "/scan",
+                    "output_scan_topic": scan_topic,
                     "frame_id": "m20pro_base_link",
                     "min_angle": -3.14159,
                     "max_angle": 3.14159,
@@ -439,8 +445,14 @@ def generate_launch_description():
                     "stair_zones_topic": stair_zones_topic,
                     "lidar_points_topic": cloud_topic,
                     "lidar_points_relay_subscribe_topic": cloud_topic,
+                    "enable_lidar_points_subscriptions": ParameterValue(
+                        enable_lidar_points_subscriptions,
+                        value_type=bool,
+                    ),
                     "enable_lidar_points_relay": False,
                     "lidar_points_relay_topic": "/m20pro/lidar_points_relay",
+                    "scan_topic": scan_topic,
+                    "perception_mode": perception_mode,
                     "enable_camera_proxy": ParameterValue(enable_camera_proxy, value_type=bool),
                     "front_camera_url": front_camera_url,
                     "rear_camera_url": rear_camera_url,
@@ -471,6 +483,7 @@ def generate_launch_description():
             parameters=[
                 {
                     "mode": "real",
+                    "perception_mode": perception_mode,
                     "check_period_s": 5.0,
                     "cloud_topic": cloud_topic,
                     "cloud_reliability": "best_effort",

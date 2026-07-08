@@ -258,30 +258,6 @@ def preflight_costmap_items(
     ]
 
 
-def preflight_battery_item(battery: Dict[str, Any], *, min_level: int) -> Dict[str, Any]:
-    primary = battery.get("primary") if isinstance((battery or {}).get("primary"), dict) else None
-    required_level = max(0, int(min_level))
-    if primary is None:
-        return {
-            "key": "battery",
-            "label": "电量",
-            "status": "fail",
-            "message": "未收到电池数据",
-            "group": "base",
-        }
-    try:
-        level = int(primary.get("level"))
-    except (TypeError, ValueError):
-        level = 0
-    return {
-        "key": "battery",
-        "label": "电量",
-        "status": "ok" if level >= required_level else "fail",
-        "message": f"{level}% / 最低要求 {required_level}%",
-        "group": "base",
-    }
-
-
 def preflight_map_item(map_payload: Dict[str, Any]) -> Dict[str, Any]:
     map_available = isinstance(map_payload, dict) and bool(map_payload)
     return {

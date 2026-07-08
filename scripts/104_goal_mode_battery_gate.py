@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Read-only battery gate for Codex goal-mode work on the real robot.
+"""Read-only battery display probe for Codex goal-mode work on the real robot.
 
 This script only queries the web dashboard /api/state endpoint. It does not
-start tasks, publish ROS goals, change relocalization, or send motion.
+start tasks, publish ROS goals, change relocalization, send motion, or block
+field work through its exit status.
 """
 
 from __future__ import annotations
@@ -38,30 +39,30 @@ def main() -> int:
     try:
         state = fetch_state(args.url, args.timeout)
     except Exception as exc:
-        print(f"[goal_battery_gate] BLOCK: cannot read robot battery from {args.url}: {exc}")
-        return 2
+        print(f"[goal_battery_gate] WARN: cannot read robot battery from {args.url}: {exc}")
+        return 0
 
     battery = state.get("battery") if isinstance(state.get("battery"), dict) else {}
     primary = battery.get("primary") if isinstance(battery.get("primary"), dict) else {}
     level = number(primary.get("level"))
     active_task = state.get("active_task") is not None
-    readiness = state.get("task_readiness") if isinstance(state.get("task_readiness"), dict) else {}
+    localization_status = state.get("localization_status") if isinstance(state.get("localization_status"), dict) else {}
 
     print("[goal_battery_gate] read-only")
     print(f"url={args.url}")
     print(f"battery_level={'-' if level is None else f'{level:.0f}%'}")
     print(f"min_level={args.min_level:.0f}%")
     print(f"active_task={'true' if active_task else 'false'}")
-    print(f"task_readiness={readiness.get('code') or '-'}")
+    print(f"localization_status={localization_status.get('code') or '-'}")
 
     if level is None:
-        print("[goal_battery_gate] BLOCK: battery level unavailable; stop goal-mode field work.")
-        return 2
+        print("[goal_battery_gate] INFO: battery level unavailable; operator should judge from field hardware.")
+        return 0
     if level < args.min_level:
-        print("[goal_battery_gate] BLOCK: battery below threshold; stop goal-mode field work and charge.")
-        return 2
+        print("[goal_battery_gate] INFO: battery below reference level; display only, not a software gate.")
+        return 0
 
-    print("[goal_battery_gate] OK: battery is sufficient for non-destructive goal-mode work.")
+    print("[goal_battery_gate] OK: battery display is available.")
     return 0
 
 

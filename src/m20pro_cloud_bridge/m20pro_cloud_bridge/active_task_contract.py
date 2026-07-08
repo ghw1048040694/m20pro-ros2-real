@@ -185,8 +185,6 @@ def create_active_task_state(
     *,
     task_map_id: str,
     now_text: str,
-    start_readiness: Dict[str, Any],
-    post_reset_navigation_readiness: Dict[str, Any],
 ) -> Dict[str, Any]:
     active = {
         "task_id": task.get("id"),
@@ -205,8 +203,6 @@ def create_active_task_state(
         "phase": "navigating",
         "last_nav_goal_status": "idle",
         "status_message": "任务已创建，准备下发第一个点位",
-        "start_readiness": start_readiness,
-        "post_reset_navigation_readiness": post_reset_navigation_readiness,
     }
     task_id = active.get("task_id")
     annotation_ids = list(active.get("annotation_ids") or [])

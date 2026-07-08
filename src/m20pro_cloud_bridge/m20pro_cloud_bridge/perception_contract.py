@@ -39,6 +39,7 @@ def perception_status_payload(
     scan_timeout_s: float = 2.0,
     lidar_timeout_s: float = 2.0,
     relay_timeout_s: float = 4.0,
+    perception_mode: str = "local_fusion",
     now_text: Optional[NowText] = None,
 ) -> Dict[str, Any]:
     relay = runtime_state.get("lidar_relay_status") if isinstance(runtime_state.get("lidar_relay_status"), dict) else {}
@@ -65,7 +66,21 @@ def perception_status_payload(
         and relay_published > 0
     )
 
-    if input_publishers == 0 and relay_messages <= 0:
+    mode = str(perception_mode or "local_fusion").strip() or "local_fusion"
+    edge_scan_mode = mode == "edge_scan"
+
+    if edge_scan_mode:
+        if not scan_ok:
+            code = "scan_unavailable"
+            message = "edge scan 模式下尚未收到新鲜二维激光；检查 106 edge scan 服务和 DDS 轻量 scan 链路"
+            ready = False
+            severity = "fail"
+        else:
+            code = "perception_ready"
+            message = "edge scan 和 /scan 感知链路已有新鲜数据"
+            ready = True
+            severity = "ok"
+    elif input_publishers == 0 and relay_messages <= 0:
         code = "factory_lidar_points_publisher_missing"
         message = "原厂 /LIDAR/POINTS 当前没有 DDS publisher；rsdriver 到 ROS2 点云端点未建立，relay 和 /scan 不会有数据"
         ready = False
@@ -96,6 +111,7 @@ def perception_status_payload(
         "code": code,
         "message": message,
         "severity": severity,
+        "mode": mode,
         "scan": {
             "ok": scan_ok,
             "age_sec": scan_age,
@@ -110,7 +126,8 @@ def perception_status_payload(
             "frame_id": lidar.get("frame_id"),
         },
         "relay": {
-            "ok": relay_ok,
+            "ok": False if edge_scan_mode else relay_ok,
+            "not_used": edge_scan_mode,
             "age_sec": relay_age,
             "input_topic": relay.get("input_topic"),
             "input_publisher_count": input_publishers,
