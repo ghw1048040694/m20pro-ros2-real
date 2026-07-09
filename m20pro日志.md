@@ -22146,3 +22146,41 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
   - 未验证机器狗实际移动建图；
   - 未验证新地图质量；
   - 未验证从 106 active map 拉取新地图后重新定位和导航。
+
+## 2026-07-09 15:33 CST - 定位周期性消失/漂移根因：106 active map 被建图测试切到 test_field，已恢复 164234
+
+- 用户现象：
+  - 用户感觉定位每隔一段较长时间会消失或漂移。
+- 现场复核：
+  - 104 当前仍选中 `DESK_20260625_164234`;
+  - 104 `/api/state` 显示 `navigation_status=location=1`；
+  - 前端定位结论为 `localization_not_confirmed`；
+  - edge_scan 感知链路仍正常，`perception_status=edge_scan/perception_ready`；
+  - 因此问题不是 scan 断流，而是原厂定位已不确认。
+- 根因确认：
+  - 106 `/var/opt/robot/data/maps/active` 已指向 `/var/opt/robot/data/maps/test_field-20260709-152308`;
+  - 这是用户静态测试建图按钮时创建/保存的测试地图；
+  - 但 104 前端/Nav2 仍使用 `DESK_20260625_164234`；
+  - 106 原厂定位地图与 104 显示/导航地图不一致，会导致定位消失、漂移、激光轮廓不贴图。
+- 已恢复：
+  - 使用官方入口执行：
+    - `sudo drmap apply /var/opt/robot/data/maps/map-20260625-164234`;
+  - 官方命令输出确认：
+    - 删除原导航地图软链接；
+    - 创建 active 软链接指向 `/var/opt/robot/data/maps/map-20260625-164234`;
+    - 重启 `localization` 和 `planner`；
+  - 恢复后 106 active map 为 `/var/opt/robot/data/maps/map-20260625-164234`;
+  - `localization.service`、`planner.service`、`global_planner.service`、`m20pro-edge-scan-106.service` 均为 active。
+- 恢复后状态：
+  - 104 与 106 地图重新一致；
+  - 104 edge_scan 仍为 `perception_ready`;
+  - 但 106 定位重启后仍显示 `location=1`；
+  - 因此需要用户在前端当前 `DESK_20260625_164234` 地图上重新执行一次重定位。
+- 防复发修复：
+  - 旧版前端 `启动 106 建图` 按钮新增确认弹窗；
+  - 旧版前端 `完成/保存建图` 按钮新增确认弹窗；
+  - 避免以后随手测按钮时再次改变 106 active map。
+- 验证：
+  - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js` 通过；
+  - 已把 `dashboard.js` 同步到 104；
+  - 浏览器需强刷后看到新确认弹窗。
