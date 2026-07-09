@@ -21999,3 +21999,43 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
   - `/api/state` 可访问；
   - 当前 `scan_ranges=195`;
   - 当前 `pose_fresh=False`、`localization_ok=False`，表示清理后服务仍在，但机器需要现场重新重定位后才应视为已定位。
+
+## 2026-07-09 14:28 CST - 现场临时切到 106 edge_scan 点云处理链路，供工位重定位测试
+
+- 用户目标：
+  - 先在工位验证新点云链路下能否完成重定位；
+  - 本轮先用现有可回退链路，不引入新的 `/m20pro/scan_edge` Nav2 参数化改造。
+- 106 状态：
+  - 已启动 `m20pro-edge-scan-106.service`;
+  - 服务命令为 `drdds_edge_scan_demo /LIDAR/POINTS /scan ...`;
+  - 日志持续输出 `scan xxx finite_bins≈180-190 frame=m20pro_base_link`；
+  - 说明 106 侧已经从 DrDDS 原始点云生成轻量 `/scan`。
+- 104 状态：
+  - `/etc/default/m20pro-real` 已切换为：
+    - `M20PRO_SCAN_SOURCE=edge_scan`;
+    - `M20PRO_EDGE_SCAN_TOPIC=/scan`;
+    - `M20PRO_SCAN_TOPIC=/scan`;
+    - `M20PRO_FASTDDS_PROFILE=project_udp`。
+  - 已重启 `m20pro-real.service`;
+  - 当前 104 启动参数显示：
+    - `perception_mode:=edge_scan`;
+    - `fusion:=false`;
+    - `enable_lidar_points_subscriptions:=false`;
+  - 104 已不再运行 `m20pro_lidar_relay` 和 `m20pro_pointcloud_fusion`。
+- 验证结果：
+  - `/api/state` 显示：
+    - `perception_status.mode=edge_scan`;
+    - `perception_status.code=perception_ready`;
+    - `scan.frame_id=m20pro_base_link`;
+    - `scan.age_sec≈0.13`;
+    - `scan.finite_ranges≈191`。
+  - 104 `/dev/shm` 当前约 `1.1G/7.7G`，使用率约 `15%`。
+  - 命令行 `ros2 topic echo /scan` 仍可能没有输出，和此前记录的 CLI DDS 发现问题一致；现场测试以 Web/API 服务进程收到的新鲜 scan 为准。
+- 当前定位状态：
+  - 因 104 服务重启，当前 `localization_ok=False`、`pose_fresh=False`;
+  - `map_relocalization_clearance.code=tcp_2101_not_success`;
+  - 这是预期状态，下一步需要用户在前端重新拖箭头执行 2101 重定位。
+- 快速回退：
+  - 104 改回 `M20PRO_SCAN_SOURCE=local_fusion`、`M20PRO_FASTDDS_PROFILE=factory` 后重启 `m20pro-real.service`;
+  - 106 停止 `m20pro-edge-scan-106.service`;
+  - 老链路仍保留，可随时回退。
