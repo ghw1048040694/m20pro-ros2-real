@@ -22249,3 +22249,31 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 注意：
   - 本轮中再次确认 `drmap stop_mapping -h` 不是安全 help，会进入停止建图流程；后续不要用它做环境探测；
   - 这次误触没有改变 106 active map，已复核 active 仍指向 `map-20260625-164234`。
+
+## 2026-07-09 16:20 CST - 新版封存前端同步建图不立即生效文案
+
+- 用户追问新版前端的建图逻辑是否已改。
+- 复核结果：
+  - 新版封存前端位于 `docs/archived_frontend_lite_workbench/20260702`;
+  - 它调用的仍是同一套后端接口：
+    - `/api/mapping/start`;
+    - `/api/mapping/finish`;
+    - `/api/mapping/import_active_map`;
+    - `/api/maps/select`;
+  - 因此底层建图不立即生效、按名称导入、前端切换地图才 apply 到 106 的核心逻辑已经由后端保证；
+  - 但新版封存前端的界面文案和确认弹窗没有同步，容易误导操作员。
+- 已补齐：
+  - `docs/archived_frontend_lite_workbench/20260702/dashboard.js`;
+    - 启动 106 建图前增加确认：
+      - 使用 `-b`，只建图，不立即切换为导航地图；
+    - 完成/保存建图前增加确认：
+      - 保存后先拉取建图结果，再手动切换地图生效；
+  - `docs/archived_frontend_lite_workbench/20260702/dashboard.html`;
+    - “建图 / 拉取 106 地图”改为“建图 / 拉取 106 建图结果”；
+    - 增加说明：默认按手册通过 `drmap -b` 建图，保存后不会立即用于导航。
+- 验证：
+  - `node --check docs/archived_frontend_lite_workbench/20260702/dashboard.js` 通过；
+  - `git diff --check` 通过。
+- 注意：
+  - 新版前端仍是封存/未部署状态；
+  - 本次只同步文案和危险操作确认，不改运行中的 104 旧版前端服务。
