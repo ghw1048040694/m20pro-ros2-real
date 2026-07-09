@@ -22321,3 +22321,34 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
   - 到测试场地后，在前端地图列表选择 `TEST_FIELD_20260709_163256`;
   - 选择后会触发 104 Nav2 load map 和 106 `drmap apply`;
   - 切图后必须重新执行一次网页重定位，成功后再标点/导航。
+
+## 2026-07-09 17:20 CST - 简化 104 前端地图显示名
+
+- 用户要求：
+  - 尾号 `164234` 的工位地图命名太复杂，改成 `F20（带工位）`;
+  - 新加入的测试场地地图改成 `Test Field`。
+- 已修改 104 运行态地图记录：
+  - 文件：
+    - `/home/user/.m20pro_web/maps.json`;
+  - `map_1782442183242_ee7c6b76`:
+    - old name: `DESK_20260625_164234`;
+    - new name: `F20（带工位）`;
+  - `map_1783587590787_a658b6bb`:
+    - old name: `TEST_FIELD_20260709_163256`;
+    - new name: `Test Field`。
+- 处理方式：
+  - 只改前端显示名；
+  - 不改 `map_id`;
+  - 不改 104 归档目录；
+  - 不改 106 原厂地图包路径；
+  - 不改 `factory_apply_path`，因此不会影响前端切图时同步 `drmap apply`。
+- 生效方式：
+  - 运行中的 Web 后端会缓存地图列表；
+  - 修改 `maps.json` 后已重启 `m20pro-real.service` 让前端立即显示新名字。
+- 验证：
+  - `/api/maps` 当前显示：
+    - `F20（带工位）`;
+    - `Test Field`;
+  - 当前 selected map 仍为 `map_1782442183242_ee7c6b76`;
+  - 106 active map 仍为 `/var/opt/robot/data/maps/map-20260625-164234`；
+  - 本次没有切换到测试场地地图。
