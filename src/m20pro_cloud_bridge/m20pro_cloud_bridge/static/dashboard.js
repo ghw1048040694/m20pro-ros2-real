@@ -405,6 +405,7 @@
     }
     function hasFreshPose(payload = state.latest) {
       if (!payload || !payload.pose) return false;
+      if (state.selectedMapId && !localizationConfirmedForDisplay(payload)) return false;
       if (payload.pose_fresh === true) return true;
       if (payload.pose_fresh === false) return false;
       if (payload.localization_ok !== true) return false;
@@ -474,6 +475,27 @@
       if (!robotFloor) return false;
       return shownFloor === robotFloor;
     }
+    function selectedMapRelocalizationText(payload = state.latest) {
+      if (!state.selectedMapId || !payload) return "";
+      const required = payload.map_relocalization_required
+        || (payload.localization_status && payload.localization_status.map_relocalization_required);
+      if (!required) return "";
+      const record = mapRecordById(state.selectedMapId);
+      const name = record ? (record.name || record.id) : "当前地图";
+      return required.message || `${name} 已切换，重新重定位成功前不显示机器狗实时位姿`;
+    }
+    function liveRobotLayerBlockedText(payload = state.latest) {
+      const relocalization = selectedMapRelocalizationText(payload);
+      if (relocalization) return relocalization;
+      const mismatch = selectedMapFloorMismatchText(payload);
+      if (mismatch) return mismatch;
+      if (!hasFreshPose(payload)) return "当前地图位姿未确认";
+      return "";
+    }
+    function canDrawLiveRobotLayer(payload = state.latest) {
+      if (!payload) return false;
+      return !liveRobotLayerBlockedText(payload);
+    }
     function selectedMapFloorMismatchText(payload = state.latest) {
       const shownFloor = displayedMapFloor();
       const robotFloor = currentRobotFloor(payload);
@@ -493,8 +515,9 @@
       }
       const overlay = $("floorOverlay");
       if (overlay) {
-        overlay.textContent = mismatch || `当前显示 ${shownFloor}`;
-        overlay.className = `floor-overlay ${mismatch ? "warn" : ""}`;
+        const relocalization = selectedMapRelocalizationText(payload);
+        overlay.textContent = relocalization || mismatch || `当前显示 ${shownFloor}`;
+        overlay.className = `floor-overlay ${(relocalization || mismatch) ? "warn" : ""}`;
       }
     }
     function localizationConfirmedForDisplay(payload = state.latest) {
@@ -1192,7 +1215,7 @@
     }
     function followRobotIfNeeded(activeTask) {
       const pose = freshPose();
-      if (!state.followRobot || !activeTask || !pose || state.view.panMode || !isViewingRobotFloor(state.latest)) return;
+      if (!state.followRobot || !activeTask || !pose || state.view.panMode || !canDrawLiveRobotLayer(state.latest)) return;
       centerMapOnWorld(pose.x, pose.y);
     }
     function worldToCanvasWithView(x, y, view) {
@@ -1382,7 +1405,7 @@
       );
     }
     function drawNavFeedbackPose() {
-      if (!isViewingRobotFloor()) return;
+      if (!canDrawLiveRobotLayer()) return;
       const active = state.latest && state.latest.active_task;
       const waypoint = state.latest
         && state.latest.active_waypoint
@@ -1409,7 +1432,7 @@
       const points = state.latest.scan.points || [];
       if (!points.length) return;
       const usingDraft = activeTabName() === "localize" && state.localizeDraft && !localizationConfirmedForDisplay();
-      if (!usingDraft && !isViewingRobotFloor()) return;
+      if (!usingDraft && !canDrawLiveRobotLayer()) return;
       if (usingDraft && !isViewingRobotFloor()) return;
       const pose = usingDraft ? state.localizeDraft : freshPose();
       if (!pose || !Number.isFinite(Number(pose.x)) || !Number.isFinite(Number(pose.y))) return;
@@ -1458,9 +1481,9 @@
       ctx.lineWidth = 1;
       ctx.strokeRect(view.ox, view.oy, state.map.width * view.scale, state.map.height * view.scale);
       const latest = state.latest;
-      const canDrawLiveRobotLayer = latest && isViewingRobotFloor(latest);
-      if (!canDrawLiveRobotLayer || !hasFreshPose(latest)) state.robotDisplayPose = null;
-      if (canDrawLiveRobotLayer) {
+      const canDrawLive = canDrawLiveRobotLayer(latest);
+      if (!canDrawLive || !hasFreshPose(latest)) state.robotDisplayPose = null;
+      if (canDrawLive) {
         drawPath(latest.path);
         drawObstacles(latest.dynamic_obstacles);
       }
@@ -1470,7 +1493,7 @@
       drawNavFeedbackPose();
       drawMarkDraft();
       drawLocalizeDraft();
-      if (canDrawLiveRobotLayer && hasFreshPose(latest)) {
+      if (canDrawLive && hasFreshPose(latest)) {
         const robotPose = stableRobotDisplayPose(latest.pose, latest.active_task || null);
         if (robotPose) drawArrow(robotPose);
       }
@@ -1586,9 +1609,9 @@
         const points = scan.points || [];
         if (points.length) {
           const age = scan.last_update ? Math.max(0, s.node_time - scan.last_update) : null;
-          const floorMismatch = selectedMapFloorMismatchText(s);
-          const mode = floorMismatch
-            ? `${floorMismatch}，暂停叠加`
+          const liveBlock = liveRobotLayerBlockedText(s);
+          const mode = liveBlock
+            ? `${liveBlock}，暂停叠加`
             : activeTabName() === "localize" && state.localizeDraft && !localizationConfirmedForDisplay(s)
             ? "红色=待重定位预览"
             : (currentPoseFresh ? "蓝色=当前位姿" : "当前位姿未确认，暂停叠加");

@@ -1,10 +1,45 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-07-08 14:10 CST
+Last updated: 2026-07-09 17:29 CST
 
 This file is maintained by Codex as the local M20 Pro project memory for future ChatGPT review. It records the current architecture, important decisions, recent changes, verification status, and next steps.
 
 Naming note: this file replaced the previous local-only `codex.md`. Going forward, maintain this file, `m20pro日志.md`, after every meaningful project change or field diagnosis.
+
+## 2026-07-09 17:29 CST - 切换固定地图后禁止误显示上一张地图的机器人位姿
+
+- 用户反馈：
+  - 只是把前端显示地图切到 `Test Field`，并没有把机器狗开到测试场地；
+  - 前端仍显示机器狗箭头和激光轮廓；
+  - 这不符合逻辑，因为机器狗仍在工位地图中。
+- 判断：
+  - 后端在切换固定地图后会要求重新重定位；
+  - 但旧版前端绘制机器人层时主要判断“楼层相同 + 位姿新鲜”；
+  - `F20（带工位）` 和 `Test Field` 都可能是 `F20`，因此旧位姿会被错误画到新地图上。
+- 修复：
+  - 旧版正式前端 `src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js` 增加统一显示门槛；
+  - 新版封存前端 `docs/archived_frontend_lite_workbench/20260702/dashboard.js` 同步同一规则；
+  - 当前显示的是固定地图时，必须满足后端定位确认且 `map_relocalization_required` 为空，才允许绘制：
+    - 机器人蓝色箭头；
+    - 机器人实时轨迹；
+    - Nav2 feedback pose；
+    - 动态障碍；
+    - 蓝色实时激光轮廓；
+    - 跟随机器人视角。
+  - 切图后但未重新重定位时，地图上方提示“已切换，重新重定位成功前不显示机器狗实时位姿”，激光轮廓状态显示暂停叠加。
+  - 重定位模式下用户手动拉出的红色激光轮廓预览仍保留，方便对齐；但正式蓝色实时层必须等重定位最终成功。
+- 验证：
+  - 上位机：
+    - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js`;
+    - `node --check docs/archived_frontend_lite_workbench/20260702/dashboard.js`;
+    - `git diff --check`。
+  - 104：
+    - 已同步上述两个 JS 文件；
+    - 已 `colcon build --packages-select m20pro_cloud_bridge --symlink-install`;
+    - 已重启 `m20pro-real.service`，服务为 `active`;
+    - 文件 hash 与上位机一致；
+    - 未主动切换现场地图，避免改变用户测试状态；
+    - 当前 104 仍选中 `F20（带工位）`，`localization_ok=True`，`pose_fresh=True`，`map_relocalization_required=None`。
 
 ## 2026-07-08 14:10 CST - 用户工位手动 `ros2 bag record -a` 包检查
 
