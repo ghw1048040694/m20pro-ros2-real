@@ -1,10 +1,26 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-07-09 17:43 CST
+Last updated: 2026-07-09 17:48 CST
 
 This file is maintained by Codex as the local M20 Pro project memory for future ChatGPT review. It records the current architecture, important decisions, recent changes, verification status, and next steps.
 
 Naming note: this file replaced the previous local-only `codex.md`. Going forward, maintain this file, `m20pro日志.md`, after every meaningful project change or field diagnosis.
+
+## 2026-07-09 17:48 CST - 地图下拉框只显示地图名称
+
+- 用户反馈：
+  - 地图选择下拉框里显示 `F20（带工位） (F20 / 106归档)`、`19楼 (F19 / 项目内置)` 等后缀太啰嗦；
+  - 操作员只需要看到地图名称，不需要在下拉框里区分是否内置/归档。
+- 修复：
+  - 旧版正式前端 `src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js`：
+    - 地图下拉框选项从 `名称 (楼层 / 来源)` 改成只显示 `名称`；
+    - `实时 /map` 选项保留。
+  - 新版封存前端 `docs/archived_frontend_lite_workbench/20260702/dashboard.js` 同步同样规则。
+- 验证/部署：
+  - 上位机 `node --check` 两个 JS 均通过；
+  - 已同步到 104；
+  - 未重启 `m20pro-real.service`，避免扰动现场 Nav2/定位状态；
+  - 104 文件 hash 与上位机一致，服务保持 `active`。
 
 ## 2026-07-09 17:43 CST - 修复重启后 `/planner_server` 缺失自检失败
 

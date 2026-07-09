@@ -1915,8 +1915,7 @@
       for (const map of state.maps) {
         const opt = document.createElement("option");
         opt.value = map.id;
-        const sourceText = map.source === "project_builtin" ? "项目内置" : "106归档";
-        opt.textContent = `${map.name || map.id} (${map.floor || "-"} / ${sourceText})`;
+        opt.textContent = map.name || map.id;
         select.appendChild(opt);
       }
       select.value = selected;
