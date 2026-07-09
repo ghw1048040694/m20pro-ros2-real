@@ -243,11 +243,18 @@ maps_path = os.path.join(data_dir, "maps.json")
 
 try:
     with open(settings_path, "r", encoding="utf-8") as file:
-        selected_map_id = str((json.load(file) or {}).get("selected_map_id") or "").strip()
+        settings = json.load(file) or {}
+        selected_map_id = str(settings.get("selected_map_id") or "").strip()
+        working_map_id = str(settings.get("working_map_id") or "").strip()
 except Exception:
     selected_map_id = ""
+    working_map_id = ""
 
-if not selected_map_id:
+launch_map_ids = []
+for value in (selected_map_id, working_map_id):
+    if value and value not in launch_map_ids:
+        launch_map_ids.append(value)
+if not launch_map_ids:
     sys.exit(0)
 
 try:
@@ -259,19 +266,21 @@ except Exception:
 if not isinstance(records, list):
     records = []
 
-for record in records:
-    if str(record.get("id") or "").strip() != selected_map_id:
-        continue
-    yaml_path = os.path.expandvars(os.path.expanduser(str(record.get("yaml_path") or "").strip()))
-    if yaml_path and os.path.exists(yaml_path):
-        print(yaml_path)
-    break
+for launch_map_id in launch_map_ids:
+    for record in records:
+        if str(record.get("id") or "").strip() != launch_map_id:
+            continue
+        yaml_path = os.path.expandvars(os.path.expanduser(str(record.get("yaml_path") or "").strip()))
+        if yaml_path and os.path.exists(yaml_path):
+            print(yaml_path)
+            sys.exit(0)
+        break
 PY
 }
 
 SELECTED_MAP_YAML="$(selected_map_yaml_for_launch || true)"
 if [[ -n "${SELECTED_MAP_YAML}" ]]; then
-  echo "[m20pro_real_full] initial Nav2 map from selected web map: ${SELECTED_MAP_YAML}" >&2
+  echo "[m20pro_real_full] initial Nav2 map from web working map: ${SELECTED_MAP_YAML}" >&2
 fi
 
 COMMON_ARGS=(

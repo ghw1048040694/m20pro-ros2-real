@@ -89,7 +89,9 @@ from .map_contract import (
 )
 from .map_selection_contract import (
     apply_selected_map_choice_state,
+    effective_map_id_for_display,
     map_relocalization_required_payload,
+    matching_fixed_map_id_for_live_map,
     selected_map_status_payload,
     selected_map_wait_timeout_payload,
 )
@@ -677,7 +679,10 @@ class WebDashboardNode(Node):
         self._annotations = self._load_json("annotations.json", [])
         self._tasks = self._load_json("tasks.json", [])
         self._sessions = self._load_json("mapping_sessions.json", [])
-        self._settings = self._load_json("settings.json", {"selected_map_id": None, "active_task": None})
+        self._settings = self._load_json(
+            "settings.json",
+            {"selected_map_id": None, "working_map_id": None, "active_task": None},
+        )
         self._normalize_runtime_state_on_startup()
         self._mapping_processes: Dict[str, Dict[str, Any]] = {}
         self._camera_workers: Dict[str, _CameraProxyWorker] = {}
@@ -985,15 +990,27 @@ class WebDashboardNode(Node):
 
     def _normalize_runtime_state_on_startup(self) -> None:
         changed = False
-        selected_map_id = self._settings.get("selected_map_id")
-        if selected_map_id and not self._find_map_record_unlocked(str(selected_map_id)):
-            self.get_logger().warning(f"selected map {selected_map_id} no longer exists; falling back to default map")
+        selected_map_id = str(self._settings.get("selected_map_id") or "").strip()
+        working_map_id = str(self._settings.get("working_map_id") or "").strip()
+        if selected_map_id and not self._find_map_record_unlocked(selected_map_id):
+            self.get_logger().warning(f"selected map {selected_map_id} no longer exists; keeping live display mode")
             self._settings["selected_map_id"] = None
+            selected_map_id = ""
             changed = True
-        if not self._settings.get("selected_map_id"):
+        if selected_map_id:
+            if working_map_id != selected_map_id:
+                self._settings["working_map_id"] = selected_map_id
+                working_map_id = selected_map_id
+                changed = True
+        elif working_map_id and not self._find_map_record_unlocked(working_map_id):
+            self.get_logger().warning(f"working map {working_map_id} no longer exists; clearing startup working map")
+            self._settings["working_map_id"] = None
+            working_map_id = ""
+            changed = True
+        if not selected_map_id and not working_map_id:
             default_map_id = self._default_map_id_unlocked()
             if default_map_id:
-                self._settings["selected_map_id"] = default_map_id
+                self._settings["working_map_id"] = default_map_id
                 changed = True
         for item in self._annotations:
             before = json.dumps(item, ensure_ascii=False, sort_keys=True)
@@ -1052,11 +1069,11 @@ class WebDashboardNode(Node):
                 self._save_json("settings.json", self._settings)
 
         with self._data_lock:
-            selected_map_id = str(self._settings.get("selected_map_id") or "").strip()
+            selected_map_id = str(self._working_map_id_unlocked() or "").strip()
             if not selected_map_id:
                 store_startup_sync(
                     startup_map_sync_skipped_payload(
-                        reason="selected_map_missing",
+                        reason="working_map_missing",
                         attempt=attempt,
                         max_attempts=max_attempts,
                         now_text=now_text,
@@ -1627,9 +1644,14 @@ class WebDashboardNode(Node):
         )
         with self._data_lock:
             snapshot["selected_map_id"] = self._settings.get("selected_map_id")
+            snapshot["working_map_id"] = self._settings.get("working_map_id")
             snapshot["active_task"] = self._settings.get("active_task")
             snapshot["map_relocalization_required"] = self._settings.get("map_relocalization_required")
             snapshot["startup_map_sync"] = self._settings.get("startup_map_sync")
+        snapshot["effective_map_id"] = self._effective_map_id(runtime_state=map_status_runtime)
+        self._remember_working_map_id(snapshot["effective_map_id"], reason="state_effective_map")
+        with self._data_lock:
+            snapshot["working_map_id"] = self._settings.get("working_map_id")
         pose = snapshot.get("pose") if isinstance(snapshot.get("pose"), dict) else {}
         pose_age = pose_age_sec(pose, now)
         pose_timeout_s = max(0.5, float(self.get_parameter("task_start_pose_timeout_s").value))
@@ -1729,7 +1751,7 @@ class WebDashboardNode(Node):
         )
         return map_relocalization_clearance_payload(
             map_relocalization_required=lock_payload,
-            selected_map_id=snapshot.get("selected_map_id"),
+            selected_map_id=snapshot.get("effective_map_id") or snapshot.get("selected_map_id"),
             selected_map_status=selected_map_status,
             localization_ok=snapshot.get("localization_ok"),
             factory_localization_ok=factory_localization_ok,
@@ -1761,10 +1783,12 @@ class WebDashboardNode(Node):
         if selected_map_id is None:
             with self._data_lock:
                 selected_map_id = self._settings.get("selected_map_id")
-        selected_map_id = str(selected_map_id or "").strip()
         if runtime_state is None:
             with self._lock:
                 runtime_state = {"map": dict(self._state.get("map") or {})}
+        selected_map_id = str(selected_map_id or "").strip()
+        if not selected_map_id:
+            selected_map_id = str(self._effective_map_id(runtime_state=runtime_state) or "").strip()
         live_map = dict((runtime_state or {}).get("map") or {})
         selected_map = self._map_file_summary(selected_map_id) if selected_map_id else {}
         return selected_map_status_payload(
@@ -1772,6 +1796,78 @@ class WebDashboardNode(Node):
             live_map=live_map,
             selected_map=selected_map,
             now_text=now_text,
+        )
+
+    def _fixed_map_id_matching_live_map(self, runtime_state: Optional[Dict[str, Any]] = None) -> Optional[str]:
+        if runtime_state is None:
+            with self._lock:
+                runtime_state = {"map": dict(self._state.get("map") or {})}
+        live_map = dict((runtime_state or {}).get("map") or {})
+        if not live_map.get("available"):
+            return None
+        with self._data_lock:
+            records = [dict(item) for item in self._all_maps_unlocked()]
+        candidates: List[Dict[str, Any]] = []
+        for record in records:
+            map_id = str(record.get("id") or "").strip()
+            if not map_id:
+                continue
+            selected_map = self._map_file_summary(map_id)
+            candidates.append({**record, "summary": selected_map})
+        return matching_fixed_map_id_for_live_map(live_map, candidates)
+
+    def _working_map_id_unlocked(self) -> Optional[str]:
+        selected = str(self._settings.get("selected_map_id") or "").strip()
+        if selected and self._find_map_record_unlocked(selected):
+            return selected
+        working = str(self._settings.get("working_map_id") or "").strip()
+        if working and self._find_map_record_unlocked(working):
+            return working
+        return None
+
+    def _remember_working_map_id(self, map_id: Optional[str], *, reason: str) -> None:
+        target = str(map_id or "").strip()
+        if not target or target == "live_map":
+            return
+        changed = False
+        with self._data_lock:
+            if self._find_map_record_unlocked(target) is None:
+                return
+            if str(self._settings.get("working_map_id") or "").strip() != target:
+                self._settings["working_map_id"] = target
+                self._save_json("settings.json", self._settings)
+                changed = True
+        if changed:
+            self._append_event("更新工作地图", {"map_id": target, "reason": reason})
+
+    def _effective_map_id(
+        self,
+        requested_map_id: Optional[str] = None,
+        runtime_state: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
+        requested = str(requested_map_id or "").strip()
+        if requested and requested != "live_map":
+            return requested
+        with self._data_lock:
+            selected = str(self._settings.get("selected_map_id") or "").strip()
+            working = str(self._settings.get("working_map_id") or "").strip()
+        live_map = dict((runtime_state or {}).get("map") or {})
+        if runtime_state is None:
+            with self._lock:
+                live_map = dict(self._state.get("map") or {})
+        with self._data_lock:
+            records = [dict(item) for item in self._all_maps_unlocked()]
+        candidates = []
+        for record in records:
+            map_id = str(record.get("id") or "").strip()
+            if not map_id:
+                continue
+            candidates.append({**record, "summary": self._map_file_summary(map_id)})
+        return effective_map_id_for_display(
+            selected_map_id=selected,
+            live_map=live_map,
+            candidates=candidates,
+            working_map_id=working,
         )
 
     def _camera_proxy_status_payload(self) -> Dict[str, Any]:
@@ -1885,11 +1981,15 @@ class WebDashboardNode(Node):
         return {"ok": True, "project": project}
 
     def _maps_payload(self) -> Dict[str, Any]:
+        effective_map_id = self._effective_map_id()
+        self._remember_working_map_id(effective_map_id, reason="maps_effective_map")
         with self._data_lock:
             return {
                 "ok": True,
                 "maps": self._all_maps_unlocked(),
                 "selected_map_id": self._settings.get("selected_map_id"),
+                "working_map_id": self._settings.get("working_map_id"),
+                "effective_map_id": effective_map_id,
             }
 
     def _preflight_payload(self) -> Dict[str, Any]:
@@ -2355,13 +2455,25 @@ class WebDashboardNode(Node):
                 self._state["pose"] = None
                 self._state["pose_history"] = []
                 self._state["path"] = {"version": int(self._state.get("path", {}).get("version", 0) or 0) + 1, "points": []}
+        effective_map_id = self._effective_map_id()
+        self._remember_working_map_id(effective_map_id, reason="select_map_effective_map")
+        with self._data_lock:
+            working_map_id = self._settings.get("working_map_id")
         self._append_event(
-            "切换固定地图",
-            {"map_id": map_id, "nav2_load_map": nav2_load, "factory_apply_map": factory_apply},
+            "切换地图显示",
+            {
+                "selected_map_id": map_id,
+                "working_map_id": working_map_id,
+                "effective_map_id": effective_map_id,
+                "nav2_load_map": nav2_load,
+                "factory_apply_map": factory_apply,
+            },
         )
         return {
             "ok": True,
             "selected_map_id": map_id,
+            "working_map_id": working_map_id,
+            "effective_map_id": effective_map_id,
             "nav2_load_map": nav2_load,
             "factory_apply_map": factory_apply,
             "map_relocalization_required": map_relocalization_required,
@@ -3064,8 +3176,7 @@ class WebDashboardNode(Node):
 
     def _publish_selected_stair_zones(self) -> None:
         try:
-            with self._data_lock:
-                map_id = self._settings.get("selected_map_id")
+            map_id = self._effective_map_id()
             payload = self._stair_zones_payload(map_id)
             zones = payload.get("zones") or []
             if not payload.get("available") and not map_id:
@@ -3087,12 +3198,24 @@ class WebDashboardNode(Node):
             self.get_logger().debug("failed to publish stair zones: %s" % exc)
 
     def _annotations_payload(self, query: Dict[str, List[str]]) -> Dict[str, Any]:
-        map_id = (query.get("map_id") or [None])[0]
+        requested_map_id = (query.get("map_id") or [None])[0]
+        requested_text = str(requested_map_id or "").strip() if requested_map_id is not None else ""
+        if requested_map_id is None:
+            map_id = None
+        else:
+            map_id = self._effective_map_id(requested_text) or requested_text
+        if (not requested_text or requested_text == "live_map") and map_id:
+            self._remember_working_map_id(map_id, reason="annotations_effective_map")
         with self._data_lock:
             annotations = list(self._annotations)
-        return annotation_list_filter_payload(annotations, map_id=map_id)
+        payload = annotation_list_filter_payload(annotations, map_id=map_id)
+        payload["requested_map_id"] = requested_map_id
+        payload["effective_map_id"] = map_id
+        return payload
 
     def _create_annotation(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        with self._lock:
+            runtime_state = {"map": dict(self._state.get("map") or {})}
         context = annotation_create_static_context(
             payload,
             default_label_index=len(self._annotations) + 1,
@@ -3100,16 +3223,20 @@ class WebDashboardNode(Node):
         if not context.get("ok"):
             return self._error(str(context["message"]), {"code": context["code"]})
         map_id = context.get("map_id")
+        if not map_id or map_id == "live_map":
+            map_id = self._effective_map_id(map_id, runtime_state=runtime_state) or map_id
+        if map_id and map_id != "live_map":
+            self._remember_working_map_id(map_id, reason="create_annotation")
         with self._data_lock:
             if map_id and map_id != "live_map" and not self._find_map_record_unlocked(map_id):
                 return self._error("地图不存在")
             if not map_id:
-                map_id = self._settings.get("selected_map_id")
-            if not map_id and self._state.get("map"):
+                map_id = self._effective_map_id(runtime_state=runtime_state)
+            if not map_id and runtime_state.get("map"):
                 map_id = "live_map"
             if not map_id:
                 return self._error("没有可用地图，请等待实时 /map 或先选择固定地图")
-            selected_map_id = self._settings.get("selected_map_id")
+            selected_map_id = self._effective_map_id(runtime_state=runtime_state)
         annotation_source = str(payload.get("source") or "map_click").strip()
         require_live_pose = annotation_source == "robot_pose"
         annotation_readiness = self._annotation_create_readiness_payload(
@@ -3211,11 +3338,15 @@ class WebDashboardNode(Node):
 
     def _tasks_payload(self, query: Optional[Dict[str, List[str]]] = None) -> Dict[str, Any]:
         include_all = self._as_bool((query or {}).get("include_all", [False])[0])
+        requested_map_id = str(((query or {}).get("map_id") or [""])[0] or "").strip()
+        effective_map_id = self._effective_map_id(requested_map_id or None)
+        if (not requested_map_id or requested_map_id == "live_map") and effective_map_id:
+            self._remember_working_map_id(effective_map_id, reason="tasks_effective_map")
         with self._data_lock:
             active_task = self._settings.get("active_task")
             active_running = active_task if isinstance(active_task, dict) and active_task.get("status") == "running" else None
             active_task_id = active_running.get("task_id") if active_running else None
-            selected_map_id = self._settings.get("selected_map_id")
+            selected_map_id = effective_map_id
             map_relocalization_required = self._settings.get("map_relocalization_required")
             stale_result = stop_stale_running_tasks(
                 self._tasks,
@@ -3266,6 +3397,8 @@ class WebDashboardNode(Node):
             "ok": True,
             "tasks": tasks,
             "selected_map_id": selected_map_id,
+            "effective_map_id": effective_map_id,
+            "requested_map_id": requested_map_id or None,
             "selected_map_status": self._selected_map_status_payload(selected_map_id=selected_map_id),
             "map_relocalization_required": map_relocalization_required,
             "include_all": task_list["include_all"],
@@ -3785,9 +3918,10 @@ class WebDashboardNode(Node):
     def _create_task(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self._lock:
             runtime_state = {"map": dict(self._state.get("map") or {})}
+        selected_map_id = self._effective_map_id(runtime_state=runtime_state)
+        self._remember_working_map_id(selected_map_id, reason="create_task")
         with self._data_lock:
             known = {item["id"]: item for item in self._annotations}
-            selected_map_id = self._settings.get("selected_map_id")
             static_context = task_create_static_context(
                 payload,
                 known,
@@ -3833,11 +3967,12 @@ class WebDashboardNode(Node):
 
     def _task_start_pre_runtime_context(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         task_id = str(payload.get("task_id") or "").strip()
+        selected_map_id = self._effective_map_id() or "live_map"
+        self._remember_working_map_id(selected_map_id, reason="start_task")
         with self._data_lock:
             active = dict(self._settings.get("active_task") or {})
             task = self._find_by_id(self._tasks, task_id)
             known = {item.get("id"): item for item in self._annotations if item.get("id")}
-            selected_map_id = self._settings.get("selected_map_id") or "live_map"
             static_context = task_start_static_context(
                 task_id,
                 task,

@@ -22445,3 +22445,87 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
   - 当前 selected map 仍为 `map_1782442183242_ee7c6b76`;
   - 106 active map 仍为 `/var/opt/robot/data/maps/map-20260625-164234`；
   - 本次没有切换到测试场地地图。
+
+## 2026-07-09 18:30 CST - 根治实时 /map 下点位消失和重启回默认图
+
+- 用户现象：
+  - 当地图显示切到“实时 /map”时，如果实时图其实就是当前真实工作地图，之前在 `F20（带工位）` 上保存的巡检点位会消失；
+  - 104 重启后曾回到 `builtin_F20`，导致实时点位只显示内置 F20 的旧点，隐藏 `F20（带工位）` 的 5 个点。
+- 根因：
+  - 旧逻辑把 `selected_map_id` 同时当成“前端显示选择”和“Nav2/任务点归属工作地图”；
+  - 一旦前端选择实时 `/map`，`selected_map_id=None`，后端和启动脚本就失去固定地图身份；
+  - 前端还会在没有 `selected_map_id` 时按楼层自动选回内置 F20，进一步把实时显示模式覆盖掉。
+- 根治改动：
+  - 新增/启用持久字段 `working_map_id`：
+    - `selected_map_id`：只表示前端显式选中的固定地图；
+    - `working_map_id`：表示当前 Nav2/任务/点位真正归属的固定工作地图；
+    - `effective_map_id`：API 根据显式选择、实时 `/map` 元数据匹配、工作地图计算出的当前有效地图；
+  - `map_selection_contract.py`：
+    - 新增 `matching_fixed_map_id_for_live_map`;
+    - 新增 `effective_map_id_for_display`;
+    - 实时 `/map` 只有在宽、高、分辨率、origin 与固定地图一致时，才解析成固定地图；
+    - 若实时图可用但匹配不上任何固定地图，不再拿旧工作地图硬凑，避免错图显示点位；
+    - 切到实时显示不再清除 `map_relocalization_required`，避免“显示模式清掉重定位锁”的假成功。
+  - `web_dashboard_node.py`：
+    - `/api/state`、`/api/maps` 返回 `working_map_id/effective_map_id`;
+    - `/api/annotations?map_id=live_map` 和 `/api/tasks?map_id=live_map` 统一按 `effective_map_id` 过滤；
+    - 保存点位、生成任务、开始任务都使用有效固定地图，不再让实时显示模式导致点位落到 `live_map`;
+    - 启动归一化不再把 `selected_map_id` 塞成默认内置图，而是维护 `working_map_id`;
+    - 楼梯语义区发布也改用有效地图。
+  - `m20pro_real_full.sh`：
+    - 启动 Nav2 时优先读取 `selected_map_id`;
+    - 如果前端处于实时显示模式，则读取 `working_map_id`;
+    - 支持 selected 失效时回退到 working；
+    - 104 断电/重启后不会再因为 `selected_map_id=None` 掉回默认内置 F20。
+  - 旧版前端 `static/dashboard.js`：
+    - 不再因为后端没有 `selected_map_id` 就自动按楼层选择内置 F20；
+    - 点位、任务、按钮可用性改用 `effective_map_id`;
+    - 实时 `/map` 匹配到固定工作地图时，点位/任务列表正常显示。
+  - 新版封存前端 `docs/archived_frontend_lite_workbench/20260702/dashboard.js` 同步同样的地图身份修复。
+- 104 同步与恢复：
+  - 已 rsync 到 104；
+  - 已执行：
+    - `colcon build --packages-select m20pro_cloud_bridge m20pro_bringup --symlink-install`;
+    - 重启 `m20pro-real.service`。
+  - 已把 104 恢复到：
+    - `selected_map_id=null`（前端显示实时 /map）；
+    - `working_map_id=map_1782442183242_ee7c6b76`;
+    - `effective_map_id=map_1782442183242_ee7c6b76`;
+    - 工作地图名称 `F20（带工位）`。
+- 104 验证：
+  - `/api/state.selected_map_status.ready=True`;
+  - live `/map` 元数据为 `423x500, resolution=0.1, origin=(-19.1,-13.4,0)`;
+  - 与 `F20（带工位）` 固定地图一致；
+  - `/api/annotations?map_id=live_map`：
+    - `effective_map_id=map_1782442183242_ee7c6b76`;
+    - 返回 5 个点：`test1/test2/test3/test4/test5`;
+    - 隐藏内置 F20 的 3 个旧点；
+  - `/api/tasks?map_id=live_map`：
+    - `effective_map_id=map_1782442183242_ee7c6b76`;
+    - 返回 2 个该地图任务；
+  - 第二次重启后进程参数确认包含：
+    - `map:=/home/user/m20pro_maps/DESK_20260625_164234/occ_grid.yaml`;
+  - 重启后 `/api/state` 仍保持：
+    - `selected_map_id=null`;
+    - `working_map_id=map_1782442183242_ee7c6b76`;
+    - `effective_map_id=map_1782442183242_ee7c6b76`;
+  - `startup_map_sync` 已更新为 `F20（带工位）`，不是旧的 `builtin_F20`。
+- 当前注意：
+  - 因为刚刚重新加载了 `F20（带工位）`，104 正确保留了 `map_relocalization_required`;
+  - 这不是故障，而是正确行为：需要重新执行网页重定位，收到开发手册 2101 成功和实时位姿证据后才会清除；
+  - 以后“实时 /map”只是显示源，不再代表“没有固定地图”。
+- 验证：
+  - 本地：
+    - `python3 -m py_compile web_dashboard_node.py map_selection_contract.py startup_map_sync_contract.py` 通过；
+    - `node --check static/dashboard.js` 通过；
+    - `node --check docs/archived_frontend_lite_workbench/20260702/dashboard.js` 通过；
+    - `bash -n src/m20pro_bringup/scripts/m20pro_real_full.sh` 通过；
+    - `scripts/test_map_selection_contract.py` 通过；
+    - `scripts/test_annotation_contract.py` 通过；
+    - `scripts/test_task_contract.py` 通过；
+    - `scripts/test_localization_contract.py` 通过；
+    - `scripts/test_preflight_contract.py` 通过。
+  - 104：
+    - `scripts/test_map_selection_contract.py` 通过；
+    - `bash -n src/m20pro_bringup/scripts/m20pro_real_full.sh` 通过；
+    - 104 未安装 `node`，JS 语法以本机 `node --check` 为准。

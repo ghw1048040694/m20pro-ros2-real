@@ -6,6 +6,8 @@
       latest: null,
       liveMapVersion: -1,
       selectedMapId: null,
+      workingMapId: null,
+      effectiveMapId: null,
       fileMapVersion: -1,
       maps: [],
       annotations: [],
@@ -40,6 +42,8 @@
         return {
           latest: state.latest,
           selectedMapId: state.selectedMapId,
+          workingMapId: state.workingMapId,
+          effectiveMapId: state.effectiveMapId,
           maps: state.maps,
           annotations: state.annotations,
           tasks: state.tasks,
@@ -405,7 +409,7 @@
     }
     function hasFreshPose(payload = state.latest) {
       if (!payload || !payload.pose) return false;
-      if (state.selectedMapId && !localizationConfirmedForDisplay(payload)) return false;
+      if (effectiveCurrentMapId() && !localizationConfirmedForDisplay(payload)) return false;
       if (payload.pose_fresh === true) return true;
       if (payload.pose_fresh === false) return false;
       if (payload.localization_ok !== true) return false;
@@ -461,7 +465,7 @@
     }
     function displayedMapFloor() {
       if (state.map && state.map.floor) return String(state.map.floor).trim();
-      const record = mapRecordById(state.selectedMapId);
+      const record = mapRecordById(state.selectedMapId || state.effectiveMapId);
       return record && record.floor ? String(record.floor).trim() : "";
     }
     function currentRobotFloor(payload = state.latest) {
@@ -476,11 +480,12 @@
       return shownFloor === robotFloor;
     }
     function selectedMapRelocalizationText(payload = state.latest) {
-      if (!state.selectedMapId || !payload) return "";
+      const effectiveMapId = effectiveCurrentMapId();
+      if (!effectiveMapId || !payload) return "";
       const required = payload.map_relocalization_required
         || (payload.localization_status && payload.localization_status.map_relocalization_required);
       if (!required) return "";
-      const record = mapRecordById(state.selectedMapId);
+      const record = mapRecordById(effectiveMapId);
       const name = record ? (record.name || record.id) : "当前地图";
       return required.message || `${name} 已切换，重新重定位成功前不显示机器狗实时位姿`;
     }
@@ -531,7 +536,11 @@
     }
     function markBlockedReason(payload = state.latest) {
       if (!state.map) return "还没有地图，等地图加载后再标点";
-      if (!state.selectedMapId) return "先选择固定地图；实时 /map 只用于临时观察，不能保存任务点";
+      if (!effectiveCurrentMapId()) return "当前实时 /map 还没有匹配到固定地图，不能保存任务点";
+      const selectedMapStatus = (payload && payload.selected_map_status) || state.selectedMapStatus;
+      if (selectedMapStatus && selectedMapStatus.ready === false) {
+        return selectedMapStatus.message || "当前地图与 Nav2 实际加载地图不一致，不能保存任务点";
+      }
       const shownFloor = displayedMapFloor();
       const inputFloor = $("markFloor") ? $("markFloor").value.trim() : "";
       if (shownFloor && inputFloor && shownFloor !== inputFloor) {
@@ -557,8 +566,9 @@
         } else if (!payload || !hasFreshPose(payload)) {
           poseReason = "先完成重定位，看到定位页显示重定位成功并收到实时位姿后再取当前位姿";
         }
-        usePoseBtn.disabled = !!poseReason || !state.selectedMapId;
-        usePoseBtn.title = poseReason || (state.selectedMapId ? "使用当前机器人位姿填入点位" : "先选择固定地图");
+        const effectiveMapId = effectiveCurrentMapId();
+        usePoseBtn.disabled = !!poseReason || !effectiveMapId;
+        usePoseBtn.title = poseReason || (effectiveMapId ? "使用当前机器人位姿填入点位" : "等待实时地图匹配固定地图");
       }
     }
     function formatUsageMode(value) {
@@ -680,7 +690,7 @@
       return "开始执行";
     }
     function taskBelongsToSelectedMap(task) {
-      const selected = String(state.selectedMapId || "");
+      const selected = String(effectiveCurrentMapId() || "");
       if (!selected || !task) return false;
       if (String(task.map_id || "") === selected) return true;
       const mapIds = Array.isArray(task.map_ids) ? task.map_ids.map(item => String(item || "")) : [];
@@ -688,8 +698,9 @@
     }
     function taskMapMismatchText(task) {
       if (taskBelongsToSelectedMap(task)) return "";
-      const selected = state.maps.find(item => String(item.id || "") === String(state.selectedMapId || ""));
-      const selectedName = selected ? (selected.name || selected.id) : (state.selectedMapId || "-");
+      const effectiveMapId = effectiveCurrentMapId();
+      const selected = state.maps.find(item => String(item.id || "") === String(effectiveMapId || ""));
+      const selectedName = selected ? (selected.name || selected.id) : (effectiveMapId || "-");
       return `该任务属于 ${task.map_id || "-"}，当前地图是 ${selectedName}；请在当前地图重新标点生成任务`;
     }
     function taskStatusBlockText(status) {
@@ -989,8 +1000,11 @@
         for (const btn of buttons) btn.disabled = false;
       }
     }
+    function effectiveCurrentMapId() {
+      return state.selectedMapId || state.effectiveMapId || state.workingMapId || "";
+    }
     function currentAnnotationMapId() {
-      return state.selectedMapId || "live_map";
+      return effectiveCurrentMapId() || "live_map";
     }
     function asNumber(id, fallback) {
       const value = Number($(id).value);
@@ -1058,20 +1072,6 @@
       } finally {
         clearTimeout(timer);
       }
-    }
-    function mapPreferredByFloor(floor) {
-      if (!state.maps.length) return "";
-      const normalized = String(floor || "").trim();
-      if (normalized) {
-        const byId = state.maps.find(item => item.id === `builtin_${normalized}`);
-        if (byId) return byId.id;
-        const byFloor = state.maps.find(item => item.floor === normalized);
-        if (byFloor) return byFloor.id;
-      }
-      const f20 = state.maps.find(item => item.id === "builtin_F20") || state.maps.find(item => item.floor === "F20");
-      if (f20) return f20.id;
-      const builtin = state.maps.find(item => item.source === "project_builtin");
-      return builtin ? builtin.id : state.maps[0].id;
     }
     function resizeCanvas() {
       const before = getView();
@@ -1558,6 +1558,8 @@
     function updateState(s) {
       state.latest = s;
       state.selectedMapStatus = s.selected_map_status || null;
+      state.workingMapId = s.working_map_id || null;
+      state.effectiveMapId = s.effective_map_id || null;
       if (state.localizeDraft && localizationConfirmedForDisplay(s)) {
         state.localizeDraft = null;
       }
@@ -1697,9 +1699,9 @@
     async function loadMaps() {
       const payload = await fetchJson("/api/maps");
       state.maps = payload.maps || [];
-      const selected = payload.selected_map_id || mapPreferredByFloor(
-        (state.latest && state.latest.floor) || $("locFloor").value || "F20"
-      );
+      state.workingMapId = payload.working_map_id || state.workingMapId || null;
+      state.effectiveMapId = payload.effective_map_id || state.effectiveMapId || null;
+      const selected = payload.selected_map_id || "";
       const select = $("mapSelect");
       select.innerHTML = "";
       const live = document.createElement("option");
@@ -1837,7 +1839,9 @@
       if (state.loadingTasks) return;
       state.loadingTasks = true;
       try {
-        const payload = await fetchJson("/api/tasks");
+        const effectiveMapId = effectiveCurrentMapId();
+        const query = effectiveMapId ? `?map_id=${encodeURIComponent(effectiveMapId)}` : "";
+        const payload = await fetchJson(`/api/tasks${query}`);
         state.lastTasksRefreshAt = Date.now();
         state.lastTasksPayload = payload;
         if (payload.selected_map_status) state.selectedMapStatus = payload.selected_map_status;
