@@ -21962,3 +21962,40 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
   - 已把日志同步到 104；
   - 排除新版前端、106 点云处理、build/install/log/cache/bag 后，上位机与 104 实际文件 dry-run 比对为 0 行差异；
   - 104 直接 `git fetch gitlab` 因 DNS 无法解析 `git.fabu.ai` 失败，所以 104 仍以 rsync 后的实际文件为准。
+
+## 2026-07-09 14:16 CST - 104 老备份和旧 rosbag 已归档到上位机并清理
+
+- 用户目标：
+  - 104 只保留当前有用的运行内容；
+  - 旧备份、旧 rosbag、旧任务诊断日志先转移到上位机，再从 104 清掉。
+- 上位机归档位置：
+  - `/home/fabu/桌面/M20Pro/104_archives/host_104_cleanup_20260709_141223`;
+  - 归档约 `1.9G`；
+  - 已包含旧 `_m20pro_archives`、`m20pro_backups`、旧源码备份压缩包、旧 bags、旧 `task_watch_logs`、旧 colcon `log` 等。
+- 已从 104 删除：
+  - `/home/user/_m20pro_archives`;
+  - `/home/user/m20pro_backups`;
+  - `/home/user/m20pro_real_ros2_ws_src_backup_20260707_175102.tar.gz`;
+  - `/home/user/bags`;
+  - `/home/user/rosbag2_2026_07_08-14_08_40`;
+  - `/home/user/m20pro_real_ros2_ws/rosbag2_2026_07_08-11_33_21`;
+  - `/home/user/m20pro_real_ros2_ws/task_watch_logs`;
+  - `/home/user/m20pro_real_ros2_ws/log`。
+- 明确未动：
+  - `/home/user/m20pro_real_ros2_ws/src`;
+  - `/home/user/m20pro_real_ros2_ws/install`;
+  - `/home/user/m20pro_real_ros2_ws/build`;
+  - `/home/user/m20pro_maps`;
+  - `/home/user/.m20pro_web`;
+  - systemd 服务和当前地图/任务配置。
+- 清理后 104 空间：
+  - 清理前 `/` 约 `18G` 总量，已用 `9.3G`，可用 `8.7G`，使用率 `52%`;
+  - 清理后 `/` 约 `18G` 总量，已用 `7.4G`，可用 `11G`，使用率 `42%`;
+  - `/home/user` 目录当前约 `2.9M`；
+  - `/home/user/m20pro_real_ros2_ws` 当前约 `1.2M`，其中主要保留 `.git`、`src`、`build`、`install`、`docs/scripts/systemd/tools/maps`。
+- 服务状态：
+  - 未重启服务；
+  - `m20pro-real.service` 仍为 `active`;
+  - `/api/state` 可访问；
+  - 当前 `scan_ranges=195`;
+  - 当前 `pose_fresh=False`、`localization_ok=False`，表示清理后服务仍在，但机器需要现场重新重定位后才应视为已定位。
