@@ -21929,3 +21929,36 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 结论：
   - 现场测试以 104 实际文件为准，目前已与上位机同步；
   - 若要让 GitLab 也等价，需要把当前上位机未提交改动整理提交并 push。
+
+## 2026-07-09 14:07 CST - 已把现场修复提交并推送到公司 GitLab
+
+- 已处理用户要求：
+  - GitHub 是个人仓库，不作为公司协作基准；
+  - 本次只推送公司 GitLab remote：`gitlab`。
+- 提交内容：
+  - 旧面板重定位最终结论显示；
+  - 删除绿色历史轨迹主链路残留；
+  - 停止任务按钮始终调用 `/api/tasks/stop`；
+  - 104 导航/定位相关修复；
+  - 新版前端封存稿同步关键旧面板修复；
+  - 相关 contract 测试更新。
+- 安全处理：
+  - 提交前发现日志历史中曾有 root 密码明文提示；
+  - 最新版本已改成“密码通过线下方式提供，不写入仓库”；
+  - 注意：历史提交里如需彻底清除，需要单独安排 Git 历史重写。
+- 已验证：
+  - `node --check` 旧面板和新版封存稿通过；
+  - `python3 -m py_compile` 关键 Python 文件通过；
+  - `scripts/test_active_task_contract.py` 通过；
+  - `scripts/test_nav_status_contract.py` 通过；
+  - `scripts/test_localization_contract.py` 通过；
+  - `scripts/test_task_progress_contract.py` 通过；
+  - `scripts/test_perception_contract.py` 通过。
+- GitLab 状态：
+  - 已提交 `8efa50a fix: sync field navigation and dashboard repairs`;
+  - 已推送到 `gitlab/main`;
+  - `git ls-remote gitlab refs/heads/main` 确认 GitLab main 指向 `8efa50a...`。
+- 104 状态：
+  - 已把日志同步到 104；
+  - 排除新版前端、106 点云处理、build/install/log/cache/bag 后，上位机与 104 实际文件 dry-run 比对为 0 行差异；
+  - 104 直接 `git fetch gitlab` 因 DNS 无法解析 `git.fabu.ai` 失败，所以 104 仍以 rsync 后的实际文件为准。
