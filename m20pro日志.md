@@ -22039,3 +22039,22 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
   - 104 改回 `M20PRO_SCAN_SOURCE=local_fusion`、`M20PRO_FASTDDS_PROFILE=factory` 后重启 `m20pro-real.service`;
   - 106 停止 `m20pro-edge-scan-106.service`;
   - 老链路仍保留，可随时回退。
+
+## 2026-07-09 14:39 CST - 用户工位实测：106 edge_scan 链路下位姿和激光轮廓正常
+
+- 用户实测结论：
+  - 新的 106 点云处理链路在工位中仍然可以正常显示机器人位姿；
+  - 前端激光轮廓也能正常显示。
+- 104 API 复核：
+  - `perception_status.mode=edge_scan`;
+  - `perception_status.code=perception_ready`;
+  - `scan.frame_id=m20pro_base_link`;
+  - `scan.age_sec≈0.30`;
+  - `scan.finite_ranges≈187`;
+  - `localization_ok=True`;
+  - `pose_fresh=True`;
+  - `factory_localization_ok=True`。
+- 当前结论：
+  - edge_scan 链路已通过“工位重定位 + 实时位姿 + 激光轮廓显示”最小验收；
+  - 仍未完成真实单层短任务导航和避障验收；
+  - 下一步应在测试场地录包验证：路径显示、Nav2 costmap、`/cmd_vel`、避障、到点停止和任务点衔接。
