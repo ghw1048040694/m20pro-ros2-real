@@ -22058,3 +22058,36 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
   - edge_scan 链路已通过“工位重定位 + 实时位姿 + 激光轮廓显示”最小验收；
   - 仍未完成真实单层短任务导航和避障验收；
   - 下一步应在测试场地录包验证：路径显示、Nav2 costmap、`/cmd_vel`、避障、到点停止和任务点衔接。
+
+## 2026-07-09 14:53 CST - 104 临时旧地图已归档并清理，只保留当前 164234 地图
+
+- 背景：
+  - 用户追问此前要求删除临时地图但未删除；
+  - 上一轮清理为了避免误删运行资产，刻意未碰 `/home/user/m20pro_maps`；
+  - 本轮确认当前实际使用地图后补做地图清理。
+- 当前使用地图：
+  - 前端当前选中 `map_1782442183242_ee7c6b76`;
+  - 地图名 `DESK_20260625_164234`;
+  - 路径 `/home/user/m20pro_maps/DESK_20260625_164234`;
+  - API 复核 `selected_map.available=True`。
+- 已归档到上位机：
+  - `/home/fabu/桌面/M20Pro/104_archives/host_104_map_cleanup_20260709_145159`;
+  - 归档约 `4.1M`；
+  - 包含旧地图目录和清理前的 `maps.json`。
+- 已从 104 删除的旧临时地图：
+  - `/home/user/m20pro_maps/m20pro_desk_20260622_204142`;
+  - `/home/user/m20pro_maps/m20pro_desk_20260622_204142_be02ac`;
+  - `/home/user/m20pro_maps/DESK_20260622_211614`。
+- 已同步清理前端地图列表：
+  - `/home/user/.m20pro_web/maps.json` 现在只保留 `DESK_20260625_164234`;
+  - 清理前的 `maps.json` 已在上位机归档，104 上不再额外保留 `maps.json.bak_*` 或本次临时备份文件。
+- 引用关系复核：
+  - 现有 `annotations.json` 只引用 `builtin_F20` 和当前 `map_1782442183242_ee7c6b76`;
+  - 现有 `tasks.json` 只引用 `builtin_F20` 和当前 `map_1782442183242_ee7c6b76`;
+  - 删除旧地图不会影响当前任务点和任务。
+- 清理后状态：
+  - `/home/user/m20pro_maps` 只剩 `DESK_20260625_164234`;
+  - `m20pro-real.service` 未重启；
+  - `/api/state` 显示当前地图仍为 `DESK_20260625_164234`;
+  - `perception_status=edge_scan/perception_ready`;
+  - `localization_ok=True`、`pose_fresh=True`。
