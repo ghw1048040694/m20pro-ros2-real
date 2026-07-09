@@ -6,6 +6,14 @@ import math
 from typing import Any, Dict, Optional
 
 
+def _finite_float(value: Any) -> Optional[float]:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
+
+
 def parse_key_value_status(text: str) -> Dict[str, Any]:
     parsed: Dict[str, Any] = {}
     for token in str(text or "").replace(",", " ").split():
@@ -451,6 +459,9 @@ def nav_success_completion_decision(
     active: Dict[str, Any],
     annotation: Optional[Dict[str, Any]],
     status_text: str,
+    *,
+    goal_tolerance_m: float = 0.3,
+    success_slack_m: float = 0.2,
 ) -> Dict[str, Any]:
     status_payload = parse_key_value_status(status_text)
     match = nav_status_matches_active_goal(active, annotation, status_payload)
@@ -498,6 +509,37 @@ def nav_success_completion_decision(
         return {
             "action": "ignore",
             "reason": str(match.get("reason") or "nav_goal_mismatch"),
+            "status_payload": status_payload,
+            "match": match,
+            "event_extra": event_extra,
+        }
+    feedback_distance = _finite_float(active.get("last_nav_distance_remaining_m"))
+    pose_distance = _finite_float(active.get("last_distance_m"))
+    distance_source = "nav_feedback" if feedback_distance is not None else "map_pose"
+    distance_m = feedback_distance if feedback_distance is not None else pose_distance
+    finish_tolerance = max(0.0, float(goal_tolerance_m)) + max(0.0, float(success_slack_m))
+    event_extra.update(
+        {
+            "completion_distance_m": distance_m,
+            "completion_distance_source": distance_source if distance_m is not None else None,
+            "completion_tolerance_m": finish_tolerance,
+        }
+    )
+    if distance_m is None:
+        return {
+            "action": "fail",
+            "reason": "nav_success_without_distance_evidence",
+            "message": "Nav2 返回到达，但没有当前点位距离证据；已停止任务，避免误判到点",
+            "status_payload": status_payload,
+            "match": match,
+            "event_extra": event_extra,
+        }
+    if distance_m > finish_tolerance:
+        return {
+            "action": "fail",
+            "reason": "premature_nav_success",
+            "message": "Nav2 提前返回到达，但当前距离 %.2f m 仍大于 %.2f m；已停止任务，避免继续误跑"
+            % (float(distance_m), float(finish_tolerance)),
             "status_payload": status_payload,
             "match": match,
             "event_extra": event_extra,

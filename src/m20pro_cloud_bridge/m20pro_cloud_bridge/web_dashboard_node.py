@@ -827,7 +827,6 @@ class WebDashboardNode(Node):
         self.declare_parameter("task_waypoint_timeout_s", 180.0)
         self.declare_parameter("task_progress_min_pose_movement_m", 0.08)
         self.declare_parameter("task_progress_min_distance_delta_m", 0.12)
-        self.declare_parameter("task_pose_history_max_points", 180)
         self.declare_parameter("task_timeline_max_events", 80)
         self.declare_parameter("task_start_settle_s", 0.5)
         self.declare_parameter("task_start_pose_timeout_s", 3.0)
@@ -854,7 +853,7 @@ class WebDashboardNode(Node):
         self.declare_parameter("initialpose_topic", "/initialpose")
         self.declare_parameter("initialpose_covariance_xy", 0.25)
         self.declare_parameter("initialpose_covariance_yaw", 0.0685)
-        self.declare_parameter("initialpose_publish_repeats", 10)
+        self.declare_parameter("initialpose_publish_repeats", 1)
         self.declare_parameter("initialpose_publish_interval_s", 0.15)
         self.declare_parameter("relocalization_verify_timeout_s", 8.0)
         self.declare_parameter("relocalization_pose_tolerance_m", 2.0)
@@ -1428,17 +1427,6 @@ class WebDashboardNode(Node):
                 pose["stamp"] = stamp
             pose["last_update"] = time.time()
             self._state["pose"] = pose
-            history = list(self._state.get("pose_history") or [])
-            history.append(
-                {
-                    "x": pose["x"],
-                    "y": pose["y"],
-                    "yaw": pose["yaw"],
-                    "last_update": pose["last_update"],
-                }
-            )
-            max_history = max(10, int(self.get_parameter("task_pose_history_max_points").value))
-            self._state["pose_history"] = history[-max_history:]
             self._mark_topic("pose")
 
     def _on_path(self, msg: RosPath) -> None:
@@ -1669,8 +1657,7 @@ class WebDashboardNode(Node):
         snapshot["pose_age_sec"] = pose_age
         snapshot["pose_timeout_s"] = pose_timeout_s
         snapshot["pose_fresh"] = bool(
-            snapshot.get("factory_localization_ok") is True
-            and is_plausible_pose_dict(pose)
+            is_plausible_pose_dict(pose)
             and pose_age is not None
             and pose_age <= pose_timeout_s
         )
@@ -3443,7 +3430,21 @@ class WebDashboardNode(Node):
             failure = active_annotation_missing_failure(active)
             self._fail_active_task_from_payload(failure, task_id=active.get("task_id"))
             return
-        decision = nav_success_completion_decision(active, annotation, status_text)
+        decision = nav_success_completion_decision(
+            active,
+            annotation,
+            status_text,
+            goal_tolerance_m=float(self.get_parameter("goal_reached_tolerance_m").value),
+        )
+        if decision.get("action") == "fail":
+            extra = decision.get("event_extra") if isinstance(decision.get("event_extra"), dict) else {}
+            extra = {**extra, "reason": decision.get("reason")}
+            self._fail_active_task(
+                active.get("task_id"),
+                str(decision.get("message") or "Nav2 到达状态缺少有效距离确认，已停止任务"),
+                extra,
+            )
+            return
         if decision.get("action") != "complete":
             self._append_event(
                 "忽略非当前任务点 Nav2 成功事件",
@@ -3665,8 +3666,6 @@ class WebDashboardNode(Node):
         with self._data_lock:
             active = dict(self._settings.get("active_task") or {})
             stopped_task_id = active.get("task_id")
-            if not stopped_task_id and not stop_request["is_reset"]:
-                return idle_stop_task_response()
             if stopped_task_id:
                 stopped = stop_task_state(active, reason=reason)
                 active = stopped["active"]
@@ -3691,10 +3690,13 @@ class WebDashboardNode(Node):
             operator_event = str(stopped["operator_event"])
             operator_payload = stopped["operator_payload"]
         else:
+            idle = idle_stop_task_response(reason)
             operator = stop_task_operator_event_payload(task_id=stopped_task_id, reason=reason)
             operator_event = str(operator["operator_event"])
             operator_payload = operator["operator_payload"]
         self._append_event(operator_event, operator_payload)
+        if not stopped_task_id:
+            return idle
         return {
             "ok": True,
             "active_task": None,

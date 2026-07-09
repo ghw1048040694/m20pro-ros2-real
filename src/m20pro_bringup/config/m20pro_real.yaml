@@ -19,7 +19,14 @@ m20pro_tcp_bridge:
     vendor_position_offset_x: 0.0
     vendor_position_offset_y: 0.0
     vendor_position_offset_z: 0.0
-    max_abs_map_position_m: 10000.0
+    max_abs_map_position_m: 1000.0
+    pose_source: "official_tf"
+    enable_tf_pose_fallback: true
+    tf_pose_fallback_topic: "/tf"
+    tf_pose_fallback_map_frame: "map"
+    tf_pose_fallback_base_frame: "base_link"
+    tf_pose_fallback_max_age_s: 1.0
+    tf_pose_fallback_require_location_ok: true
     flatten_odom_z: true
     odom_z: 0.0
     publish_tf: true

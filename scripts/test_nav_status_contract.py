@@ -189,7 +189,7 @@ def test_mismatch_reasons() -> None:
 def test_nav_success_completion_decision() -> None:
     status_text = "nav_goal_succeeded label=floor_goal goal_seq=7 goal_x=1.0 goal_y=2.0 goal_yaw=3.12"
     complete = nav_success_completion_decision(
-        active(last_nav_goal_status="accepted"),
+        active(last_nav_goal_status="accepted", last_nav_distance_remaining_m=0.1),
         annotation(),
         status_text,
     )
@@ -215,13 +215,39 @@ def test_nav_success_completion_decision() -> None:
     assert_equal(wrong_annotation["reason"], "annotation_not_last_goal", "wrong active annotation reason")
 
     wrong_seq = nav_success_completion_decision(
-        active(last_nav_goal_status="accepted"),
+        active(last_nav_goal_status="accepted", last_nav_distance_remaining_m=0.1),
         annotation(),
         "nav_goal_succeeded label=floor_goal goal_seq=8 goal_x=1.0 goal_y=2.0",
     )
     assert_equal(wrong_seq["action"], "ignore", "wrong nav sequence ignored")
     assert_equal(wrong_seq["reason"], "goal_seq_mismatch", "wrong nav sequence reason")
     assert_equal(wrong_seq["event_extra"]["nav_goal_match"]["matches"], False, "ignored event keeps mismatch")
+
+    premature = nav_success_completion_decision(
+        active(last_nav_goal_status="accepted", last_nav_distance_remaining_m=4.58),
+        annotation(),
+        status_text,
+        goal_tolerance_m=0.3,
+    )
+    assert_equal(premature["action"], "fail", "far success fails safely")
+    assert_equal(premature["reason"], "premature_nav_success", "far success reason")
+    assert_equal(
+        premature["event_extra"]["completion_distance_source"],
+        "nav_feedback",
+        "far success keeps distance evidence",
+    )
+
+    no_distance = nav_success_completion_decision(
+        active(last_nav_goal_status="accepted"),
+        annotation(),
+        status_text,
+    )
+    assert_equal(no_distance["action"], "fail", "success without distance evidence fails safely")
+    assert_equal(
+        no_distance["reason"],
+        "nav_success_without_distance_evidence",
+        "missing distance reason",
+    )
 
 
 def test_friendly_nav_status() -> None:

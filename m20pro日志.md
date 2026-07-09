@@ -6063,7 +6063,7 @@ ros2 topic echo /LIDAR/POINTS --no-arr
 ssh user@10.21.31.104
 source /opt/robot/scripts/setup_ros2.sh
 su
-# root password is the single quote character: '
+# root password is provided out-of-band; do not write it into the repo
 # after su, do not source anything else
 ros2 topic list | grep LIDAR
 ros2 topic info -v /LIDAR/POINTS
@@ -21465,3 +21465,467 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
   - 本轮仍是上位机本地改动，未同步 104；
   - 未改 `tcp_bridge_node.py`、未改实际目标下发、未改重定位成功判据；
   - 旧任务 JSON 中可能残留的 `readiness`、`last_result`、`last_timeline` 仍由 web 节点在合适位置 `pop(...)` 清掉，不会继续生成。
+
+## 2026-07-08 16:29 CST - 分析 `nav_issue_20260708_154536`：修复重定位风暴与 Nav2 假成功后继续任务
+
+- 用户现场录包反馈：
+  - 先跑过一次任务，后来开始录包后重定位衔接异常；
+  - 导航看起来到第一个点后就乱，前端不显示第一点到第二点路径，也不显示实时位姿，机器狗最终撞墙。
+- 104 rosbag：
+  - `/home/user/bags/nav_issue_20260708_154536`;
+  - 时长约 85.9 秒，包含 `/scan`、`/cmd_vel`、`/plan`、`/m20pro/floor_goal`、`/m20pro/active_waypoint`、`/m20pro_tcp_bridge/map_pose`、`/m20pro_tcp_bridge/relocalization_result` 等关键话题。
+- 包内关键结论：
+  - `/m20pro/floor_goal` 只下发了两个点：`test2` `(2.399,-0.716)` 和 `test3` `(8.311,-0.044)`，点位本身不是乱的；
+  - `/m20pro_tcp_bridge/map_pose` 只有 20 条，集中在 57.65s 到 62.77s，之后不再持续输出，解释了前端没有实时位姿；
+  - `/m20pro_tcp_bridge/relocalization_result` 有 10199 条，成功/失败高频交替，说明重定位请求被重复打到原厂接口；
+  - 第一个目标在 58.529s 被 Nav2 接收，58.580s 就报 `nav_goal_succeeded`，但反馈距离仍有 4.585m；
+  - `/cmd_vel` 在这个“成功”之后仍连续输出约 4 秒，任务却已经进入第一个点的 `dwelling`，因此状态机和实际控制输出脱节；
+  - 第二个目标下发后 Nav2 仍按过期/断续位姿规划，最终任务因导航错误停止。
+- 104 服务日志进一步确认：
+  - `bt_navigator` 在 15:46:36 打印 `Navigation succeeded`，几毫秒后 `controller_server` 才开始 `Received a goal, begin computing control effort`；
+  - 这次不能再把 Nav2 Action 的 `SUCCEEDED` 单独当作“真到点”；
+  - 当前重启后的 104 仍能看到点云融合 `/scan` 正常，但原厂 1007 位姿当前返回 `Location=1` 和几千米级坐标，所以 `/map_pose` 需要下一次人工重定位恢复。
+- 已做修复：
+  - `web_dashboard_node.py`：
+    - 网页重定位默认发布次数从 10 次降为 1 次；
+    - Nav2 返回 `nav_goal_succeeded` 后，必须结合当前点位距离证据判断；
+    - 如果 Nav2 报成功但剩余距离仍大于 `goal_reached_tolerance_m + 0.2m`，任务直接失败并复位导航，不再进入驻留或下发下一点。
+  - `nav_status_contract.py`：
+    - `nav_success_completion_decision(...)` 增加距离证据；
+    - 优先使用 Nav2 feedback 的 `last_nav_distance_remaining_m`，没有 feedback 时才使用 `/map_pose` 算出的 `last_distance_m`；
+    - 新增 `premature_nav_success` 和 `nav_success_without_distance_evidence` 两类安全失败。
+  - `tcp_bridge_node.py`：
+    - 增加重定位重复请求抑制；
+    - 同一位姿在 1.5 秒内重复发布 `/initialpose` 时，不再重复调用原厂 2101/1；
+    - 避免一次前端操作或外部 DDS 发布者造成重定位风暴。
+- 已验证：
+  - 上位机：
+    - `python3 -m py_compile src/m20pro_navigation/m20pro_navigation/tcp_bridge_node.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/nav_status_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py`;
+    - `python3 scripts/test_nav_status_contract.py`;
+    - `python3 scripts/test_localization_contract.py`;
+    - `python3 scripts/test_active_task_contract.py`;
+    - `python3 scripts/test_task_progress_contract.py`。
+  - 104：
+    - 已同步上述源码和 `scripts/test_nav_status_contract.py`;
+    - 已执行 `colcon build --symlink-install --packages-select m20pro_navigation m20pro_cloud_bridge`;
+    - 已重启 `m20pro-real.service`;
+    - 参数确认：`/m20pro_web_dashboard initialpose_publish_repeats = 1`；
+    - 参数确认：`/m20pro_tcp_bridge relocalization_duplicate_suppression_s = 1.5`；
+    - `/m20pro_tcp_bridge/map_pose` 当前有 publisher，但由于原厂定位当前未恢复，暂时不持续输出有效位姿。
+- 下一次实测重点：
+  - 先在前端完成一次重定位，确认右侧最终结果只给一个明确成功/失败，不再成功失败高频闪；
+  - 重定位成功后确认 `/m20pro_tcp_bridge/map_pose` 持续刷新；
+  - 再跑单楼层短任务；
+  - 如果 Nav2 再次提前成功，前端应该直接报 `premature_nav_success` 并停住，而不是继续执行第二点。
+
+## 2026-07-08 20:15 CST - 根据 `rosbag2_2026_07_08-19_48_04` 根治位姿主链路：real 模式改用官方连续 TF
+
+- 用户再次实测反馈：
+  - 单点导航仍走不准点位；
+  - 现场看点位距离约 1-2m，但系统里仍显示很远。
+- 104 新 rosbag：
+  - `/home/user/bags/rosbag2_2026_07_08-19_48_04`;
+  - 时长约 72s，包含 `/m20pro/floor_goal`、`/m20pro_tcp_bridge/map_pose`、`/tf`、`/plan`、`/cmd_vel`、`/scan`、local/global costmap 和任务状态；
+  - 这是一个有效包，足够定位“为什么走不准”。
+- 关键结论：
+  - 本轮只下发了一个目标：`test2`，目标坐标 `x=2.399, y=-0.716, yaw=0.2509`；
+  - 目标下发前，项目位姿 `/m20pro_tcp_bridge/map_pose` 认为机器人在 `x≈-2.863, y≈0.321`，到目标距离约 `5.36m`；
+  - 因此用户现场看到的 1-2m 与系统内部 5.36m 不一致，本质是位姿/地图坐标链路没有对齐；
+  - 更严重的是：`/m20pro_tcp_bridge/map_pose` 和项目 `/odom` 只持续到约 `16.75s`，而 `/m20pro/floor_goal` 在约 `16.76s` 才发出；
+  - 目标刚发出，Nav2 使用的 `map -> odom -> m20pro_base_link` 位姿链路就断了，后续反馈里的 `pose_x=-2.863, pose_y=0.321` 一直不变；
+  - 服务日志显示 1007 位姿接口在导航时持续返回 `Location=0` 但 `PosX/PosY/PosZ/Yaw=None`，被保护逻辑拒绝发布；
+  - 同一个包里，官方 `/tf` 的 `map -> base_link` 持续完整 72s，共 721 条，并能反映机器人实际移动；
+  - 所以根因不是“任务点下发错”，而是 real 模式把不稳定的 TCP 1007 查询位姿当成了 Nav2 主位姿源。
+- 根治方向：
+  - real 模式主位姿源改为官方连续 TF `map -> base_link`；
+  - `tcp_bridge` 负责把官方 `base_link` 位姿转换成项目统一链路：
+    - `/m20pro_tcp_bridge/map_pose`;
+    - `/odom`;
+    - TF `map -> odom -> m20pro_base_link`;
+  - Nav2、前端和任务状态继续使用项目统一的 `m20pro_base_link`，但其来源不再依赖会断流的 1007 坐标字段。
+- 已改代码：
+  - `tcp_bridge_node.py`：
+    - 新增参数 `pose_source`，real 配置使用 `official_tf`;
+    - 订阅 `/tf`，提取官方 `map -> base_link`;
+    - 当 `pose_source=official_tf` 时，直接用官方 TF 发布 `/m20pro_tcp_bridge/map_pose`、项目 `/odom` 和 `map -> odom -> m20pro_base_link`;
+    - 仍用 `2002/1` 的 `Location=0` 作为定位确认条件，避免未定位时乱发布位姿；
+    - 保留旧 `tcp_1007` / `auto` 兼容模式，但 real 主链路不再依赖 1007。
+  - `m20pro_real.yaml`：
+    - 设置 `pose_source: "official_tf"`;
+    - 官方 TF 输入固定为 `map -> base_link`;
+    - 输出项目 base frame 仍是 `m20pro_base_link`。
+- 已同步并验证：
+  - 上位机：`python3 -m py_compile src/m20pro_navigation/m20pro_navigation/tcp_bridge_node.py` 通过；
+  - 104：已同步 `tcp_bridge_node.py` 和 `m20pro_real.yaml`;
+  - 104：已执行 `colcon build --symlink-install --packages-select m20pro_navigation m20pro_bringup`;
+  - 104：已重启 `m20pro-real.service`;
+  - 104 日志确认持续输出：
+    - `using official TF pose source map->base_link ...`;
+  - 104 `/api/state` 确认：
+    - `localization_ok=true`;
+    - `pose` 新鲜，`pose_age_sec≈0.01s`;
+    - `/scan`、local/global costmap、当前地图均新鲜；
+    - `localization_status.confirmed=true`。
+- 下一次实测重点：
+  - 不要再先测多点任务，先测单点；
+  - 下发前确认前端机器人箭头与真实位置一致；
+  - 下发后重点看 `/plan` 起点是否随机器人真实位姿移动；
+  - 如果仍走偏，下一步就不再查“位姿是否断”，而查地图/重定位坐标是否与现场真实位置一致，以及 DWB 控制和 103 轴控的执行方向是否一致。
+
+## 2026-07-08 20:16 CST - 导航链路后续修复原则：优先根治，不再为了小改动堆补丁
+
+- 用户明确要求：
+  - 不要总追求改动面最小；
+  - 应该追求最根治、最高效的改动；
+  - 前端必须实时显示机器狗真实位姿和真实规划路径；
+  - 导航必须真实到点、停住、驻留，避障必须真实可用。
+- 后续处理原则：
+  - 先从主链路找根因：地图/重定位坐标、实时位姿、规划路径、控制输出、避障代价地图、任务状态机；
+  - 不能只在外围加“成功/失败保护”“兼容判断”“诊断字段”来掩盖核心链路问题；
+  - 如果主位姿源、目标坐标、控制方向、Nav2 反馈、任务状态机之间存在不一致，优先改主链路；
+  - 小改动仍然可以做，但前提是它确实解决根因，而不是让系统看起来暂时不报错；
+  - 每次实测后优先用 rosbag 证明：机器人真实位姿是否连续、路径起点是否正确、目标点是否正确、`cmd_vel` 是否合理、costmap 是否有障碍、任务是否按到点和驻留闭环。
+
+## 2026-07-08 20:30 CST - 修复软急停后停止/复位无效：停止按钮必须能清理 Nav2 残留目标
+
+- 用户现场反馈：
+  - 机器狗走过第一个点后快撞墙，按了软急停；
+  - 之后定位不能正常继续用；
+  - 点击“停止当前任务”也没法恢复。
+- 根因判断：
+  - 旧逻辑把“停止当前任务”过度绑定到前端 `active_task`；
+  - 如果软急停、导航异常或状态机失败后，前端 `active_task` 已经没有了，但 floor_manager/Nav2 仍可能残留活跃目标或 pending goal；
+  - 此时旧 `/api/tasks/stop` 会走 `idle_stop_task_response()` 直接返回“无需停止”，不会发布 `/m20pro/stop_task`，不会取消 Nav2，不会发零速度，不会清 costmap；
+  - 旧前端还会在没有 `active_task/active_waypoint` 时禁用“停止当前任务”按钮，导致现场无法用这个按钮恢复导航链路。
+- 已改代码：
+  - `active_task_contract.py`：
+    - `idle_stop_task_response(reason)` 改为 `reset_navigation=true`；
+    - 无 active task 的 stop 不再表示 no-op，而表示“没有前端任务，但已发送导航取消/复位指令”。
+  - `web_dashboard_node.py`：
+    - `_stop_task(...)` 删除“无 active_task 且不是 reset 就提前返回”的分支；
+    - 无论是否存在前端 active task，都会调用 `_reset_navigation_session(...)`；
+    - 因此都会发布 `/m20pro/stop_task`、发送零速度、清 local/global costmap、清路径显示和 active waypoint。
+  - 旧面板 `dashboard.js/html`：
+    - “停止当前任务”按钮不再因为没有 active task 而禁用；
+    - 没有 active task 时，按钮含义变为“取消可能残留的导航目标并发送零速度”；
+    - 更新静态资源版本号，避免浏览器继续使用旧 JS 缓存。
+- 已验证：
+  - 上位机：
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py`;
+    - `python3 scripts/test_active_task_contract.py`;
+    - `python3 scripts/test_nav_status_contract.py`;
+    - `python3 scripts/test_task_progress_contract.py`;
+    - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js`。
+  - 104：
+    - 已同步上述旧面板/停止链路文件；
+    - 已执行 `colcon build --symlink-install --packages-select m20pro_cloud_bridge`;
+    - 已重启 `m20pro-real.service`；
+    - 服务 active，`web_dashboard`、`tcp_bridge`、`floor_manager`、`controller_server`、`bt_navigator` 均已重新启动；
+    - `/api/state` 返回 `localization_ok=true`、位姿新鲜、`/scan` 有有限距离数据、当前无 active task；
+    - 在无 active task 状态下 POST `/api/tasks/stop`，返回 `reset_navigation=true`；
+    - 104 日志确认 floor_manager 收到 `web_manual_stop`，并清理了 global/local costmap。
+- 注意：
+  - 如果手柄软急停把机器狗本体切到“关节阻尼/软急停”运动状态，导航软件的停止/复位只能清理 Nav2 和前端状态；
+  - 真正恢复可运动状态仍可能需要手柄或原厂运动状态指令把本体切回站立/标准运动模式；
+  - 但软件侧以后不能再因为没有 active task 就让“停止当前任务”失效。
+
+## 2026-07-08 20:43 CST - 修复工位到测试场地途中位姿/轨迹不连续：位姿新鲜度与定位确认解耦
+
+- 用户指出：
+  - 在工位重定位成功后，如果机器狗正常走到测试场地起点，同一张地图内不应该丢失定位；
+  - 前端应该实时显示机器狗从工位到测试场地的位姿和运动轨迹；
+  - 图片里机器狗仍显示在工位，而红框是测试场地起点，这种表现不符合预期。
+- 根因判断：
+  - 之前 real 主位姿源已经从不稳定的 TCP 1007 改成官方连续 TF `map -> base_link`；
+  - 但实现里仍把官方 TF 位姿发布绑定到原厂 `Location=0`；
+  - 只要 `Location` 状态短暂抖动或状态查询延迟，`/m20pro_tcp_bridge/map_pose` 就可能停止发布，前端箭头和轨迹就会停在旧位置；
+  - 前端 `pose_fresh` 也被 `factory_localization_ok` 绑定，导致“位姿实际还在刷新”和“定位确认状态”混成了一个条件。
+- 已改代码：
+  - `tcp_bridge_node.py`：
+    - `pose_source=official_tf` 时，官方 TF 只要新鲜、有限、坐标合理，就继续发布 `/m20pro_tcp_bridge/map_pose`、`/odom` 和项目 TF；
+    - `/m20pro_tcp_bridge/localization_ok` 仍按最近原厂 `Location` 状态发布；
+    - 也就是说：位姿链路保持连续，定位确认仍独立显示/判断。
+  - `web_dashboard_node.py`：
+    - API 的 `pose_fresh` 改为只表示“地图位姿是否新鲜”；
+    - 不再因为 `factory_localization_ok=false` 就把新鲜位姿判成不可用；
+    - 旧面板位姿轨迹缓存从 180 点增加到 900 点，避免从工位走到测试点时轨迹前段太快被挤掉。
+  - 旧面板 `dashboard.js/html`：
+    - 若 `localization_ok=false` 但 `pose_fresh=true`，前端提示改为“地图位姿仍在刷新，但定位状态未确认”；
+    - 这种情况下仍允许地图上显示实时箭头和轨迹；
+    - 更新静态资源版本号，避免浏览器缓存旧 JS。
+- 预期效果：
+  - 同一张地图内，工位重定位成功后正常走到测试场地，前端应该持续看到机器狗箭头移动；
+  - 绿色虚线轨迹应记录最近约 900 个位姿点；
+  - 如果原厂定位状态短暂异常，顶部/状态区可以告警，但箭头不应直接停死在工位；
+  - 如果官方 TF 本身停止或地图坐标真正漂掉，仍会表现为位姿过期/不可信，需要重新定位或录包分析。
+- 已验证：
+  - 上位机：
+    - `python3 -m py_compile src/m20pro_navigation/m20pro_navigation/tcp_bridge_node.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py`;
+    - `python3 scripts/test_localization_contract.py`;
+    - `python3 scripts/test_task_progress_contract.py`;
+    - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js`。
+  - 104：
+    - 已同步 `tcp_bridge_node.py`、`web_dashboard_node.py`、旧面板 `dashboard.js/html`;
+    - 已执行 `colcon build --symlink-install --packages-select m20pro_navigation m20pro_cloud_bridge`;
+    - 已重启 `m20pro-real.service`;
+    - `/api/state` 确认 `localization_ok=true`、`factory_localization_ok=true`、`pose_fresh=true`、`pose_age_sec≈0.06s`;
+    - `pose_history` 已超过旧上限 180，验证 900 点轨迹缓存生效；
+    - 104 日志确认使用官方 TF 位姿源：`using official TF pose source map->base_link`;
+    - `system_check` 报 `M20PRO REAL OK`。
+
+## 2026-07-08 20:52 CST - 复盘 `rosbag2_2026_07_08-20_50_18`：位姿连续性修复有效，但轨迹存在源头抖动
+
+- 用户刚录包位置：
+  - `/home/user/bags/rosbag2_2026_07_08-20_50_18`;
+  - 时长约 88.5 秒，消息总数 7223。
+- 这个包能验证的内容：
+  - `/m20pro_tcp_bridge/map_pose`：1328 条，约 15.03Hz；
+  - `/odom`：1329 条，约 15.03Hz；
+  - 官方 `/tf map -> base_link`：886 条，约 10.02Hz；
+  - `/m20pro_tcp_bridge/localization_ok`：1327 条，全为 true；
+  - `/m20pro_tcp_bridge/navigation_status`：443 条，`location=0` 全程稳定；
+  - `/m20pro/current_floor`：88 条，全为 `F20`。
+- 结论：
+  - 这次修复对“位姿连续发布”有效；
+  - `map_pose` 最大断流间隔约 0.169 秒，没有超过 0.5 秒的断流；
+  - `map_pose` 与官方 TF 基本一致，抽样最近邻平均平面误差约 0.027m；
+  - 前端理论上应该能看到蓝色箭头和轨迹实时变化。
+- 位姿变化数据：
+  - 起点约 `x=-10.914, y=-3.387, yaw=-1.709`;
+  - 终点约 `x=-11.134, y=-3.393, yaw=-1.884`;
+  - 净位移约 0.22m；
+  - 最大偏离起点约 1.08m；
+  - yaw 变化范围约 0.408rad，约 23.4 度。
+- 暴露的新细节：
+  - 虽然活动范围约 1m，但逐帧轨迹累计约 24.36m；
+  - 单步平面跳动中位数约 0.007m，95 分位约 0.081m，99 分位约 0.200m，最大约 0.339m；
+  - 说明官方 TF/定位源自身有小范围抖动；
+  - 这不再是 104 桥接断流，而是上游位姿源的抖动或定位环境噪声。
+- 本包不能验证的内容：
+  - `/cmd_vel`：0 条；
+  - `/plan`：0 条；
+  - `/scan`：0 条；
+  - `/m20pro/floor_goal`：0 条；
+  - 因此本包只能说明实时位姿显示链路有效，不能说明导航、规划、避障是否已经可用。
+
+## 2026-07-08 21:17 CST - 修正前端绿色轨迹：过滤官方 TF 抖动，避免小范围移动显示成几十米累计轨迹
+
+- 用户追问：
+  - 明明只是在工位小范围移动，为什么前面分析会出现约 24m 的累计轨迹。
+- 解释：
+  - 24.36m 是把 `/m20pro_tcp_bridge/map_pose` 每一帧之间的位移直接相加得到的“原始累计长度”；
+  - 这个数会把定位抖动也当作真实运动；
+  - 本包中 `map_pose` 约 15Hz，共 1328 个点，平均每帧平面变化约 1.84cm；
+  - `1.84cm × 1327` 就会累计到约 24m；
+  - 因此 24m 不代表机器狗真的走了 24m，只代表原始定位点在 88 秒里一直有小幅抖动和少量较大跳动。
+- 更合理的读法：
+  - 净位移约 0.22m；
+  - 最大偏离起点约 1.08m；
+  - 这两个数更符合“小范围移动”的现场描述；
+  - 原始逐帧累计长度不能作为现场实际里程。
+- 已改代码：
+  - `web_dashboard_node.py` 的 `pose_history` 不再直接保存每一帧原始位姿；
+  - 蓝色实时箭头仍使用最新位姿，保持实时；
+  - 绿色历史轨迹改为使用低通滤波后的位姿：
+    - `pose_history_filter_alpha=0.08`;
+    - `pose_history_min_distance_m=0.15`;
+    - `pose_history_min_yaw_delta_rad=0.17`;
+    - `pose_history_keepalive_s=5.0`;
+    - `pose_history_reset_distance_m=1.5`;
+  - 切地图、启动同步地图、复位导航会话时同步清空轨迹滤波状态。
+- 离线估算：
+  - 对同一个 bag，原始轨迹为 `1328 点 / 24.36m`;
+  - 用新滤波规则估算约为 `32 点 / 4.3m`;
+  - 仍会保留小范围来回移动，但不会把 15Hz 定位抖动全部画成绿色轨迹。
+- 104 验证：
+  - 已同步 `web_dashboard_node.py`;
+  - 已执行 `colcon build --symlink-install --packages-select m20pro_cloud_bridge`;
+  - 已重启 `m20pro-real.service`;
+  - `/api/state` 显示 `pose_fresh=true`;
+  - 重启后约 8 秒轨迹点数为 1，约 20 秒后轨迹点数为 7，说明绿色轨迹不再按 15Hz 记录所有抖动点。
+
+## 2026-07-09 10:24 CST - 决定主界面取消绿色历史轨迹显示，避免误导现场判断
+
+- 用户反馈：
+  - 绿色轨迹体验很差，bug 较多；
+  - 经常出现好几条绿色轨迹，容易误导现场判断。
+- 处理原则：
+  - 绿色轨迹不是 Nav2 真实规划路径；
+  - 它只是前端根据历史定位点画出来的显示层辅助线；
+  - 在定位源存在抖动、滤波状态重置、地图刷新或小范围来回移动时，它很容易看起来像多条轨迹；
+  - 主界面真正必须保留的是：
+    - 蓝色实时机器狗位姿箭头；
+    - 橙色 Nav2 规划路径；
+    - 任务点/目标点；
+    - 实时激光轮廓。
+- 已在上位机修改：
+  - `dashboard.js`：主地图不再调用 `drawPoseHistory(...)`；
+  - 后端 `pose_history` 数据暂时保留，供调试和后续 rosbag/API 分析；
+  - `dashboard.html` 静态资源版本改为 `20260709-no-pose-trail`，避免浏览器缓存旧 JS。
+- 已验证：
+  - 上位机 `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js` 通过；
+  - 上位机 `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py` 通过。
+- 同步状态：
+  - 104 当前不在线；
+  - `ping 10.21.31.104` 丢包 100%；
+  - `ssh user@10.21.31.104` 超时；
+  - 因此本改动尚未同步到 104，待 104 开机后再同步、构建并重启 `m20pro-real.service`。
+
+## 2026-07-09 10:34 CST - 104 已同步去绿色轨迹；补上官方 TF 位姿启动安全门槛
+
+- 104 同步状态：
+  - 104 已在线；
+  - 已同步旧面板 `dashboard.js/html` 和 `m20pro日志.md`;
+  - 已执行 `colcon build --symlink-install --packages-select m20pro_cloud_bridge`;
+  - 已重启 `m20pro-real.service`;
+  - 104 静态页面版本已是 `20260709-no-pose-trail`;
+  - 104 上 `dashboard.js` 已无主界面 `drawPoseHistory(latest.pose_history...)` 调用。
+- 同步后发现的问题：
+  - 服务重启后，原厂状态为 `location=1`；
+  - 官方 TF 一度给出几千米级坐标；
+  - 之前为了保持“重定位后运动途中位姿不断”，放宽了官方 TF 位姿发布门槛；
+  - 这会导致未定位启动时的假坐标进入前端/API，风险很大。
+- 已立刻修复：
+  - `tcp_bridge_node.py`：
+    - 新增官方 TF 位姿“解锁”逻辑；
+    - 服务启动后，必须先看到最近的 `Location=0`，才允许接受官方 TF 为主位姿源；
+    - 解锁后，如果 `Location` 短暂抖动，仍可继续用官方 TF 保持位姿连续；
+    - 官方 TF 位姿也重新走稳定性过滤，避免大跳直接进入 `/m20pro_tcp_bridge/map_pose`。
+  - `m20pro_real.yaml`：
+    - `max_abs_map_position_m` 从 `10000.0` 收紧到 `1000.0`；
+    - 当前真实地图坐标是十几米量级，几千米坐标明确属于未定位/异常假坐标。
+- 已同步并验证：
+  - 上位机：
+    - `python3 -m py_compile src/m20pro_navigation/m20pro_navigation/tcp_bridge_node.py`;
+    - `python3 scripts/test_localization_contract.py`;
+    - `python3 scripts/test_task_progress_contract.py`。
+  - 104：
+    - 已同步 `tcp_bridge_node.py` 和 `m20pro_real.yaml`;
+    - 已执行 `colcon build --symlink-install --packages-select m20pro_navigation m20pro_bringup`;
+    - 已重启 `m20pro-real.service`;
+    - 当前未定位状态下 `/api/state` 正确显示：
+      - `pose=null`;
+      - `pose_fresh=false`;
+      - `localization_ok=false`;
+      - `navigation_status=location=1 ...`;
+    - 说明几千米假坐标已经被挡住。
+- 当前现场状态：
+  - `/scan` 仍有数据；
+  - 当前未完成定位确认，Nav2/system_check 处于 waiting；
+  - 下一步需要在前端完成一次明确重定位，让 `location=0` 后再测试实时位姿和导航。
+
+## 2026-07-09 11:03 CST - 明确重定位最终结论显示，避免 2101 原始回执误导
+
+- 现场截图判断：
+  - 右侧面板最终标题为“重定位成功”；
+  - 原厂定位为“已确认”；
+  - 地图位姿为“新鲜 / <1s 前”；
+  - 固定地图为“已确认”；
+  - 因此这次系统最终判定是重定位成功。
+- 容易误导的地方：
+  - 面板同时显示了 `2101回执 失败回执 / 24s前`；
+  - 这条是上一条 TCP 2101 原始回执/诊断信息；
+  - 在当前逻辑里，最终能否继续操作以“固定地图已确认 + 原厂定位已确认 + 地图位姿新鲜”为准；
+  - 成功状态下继续突出 2101 失败回执，会让操作员看不清到底成功还是失败。
+- 已在上位机修改旧面板显示层：
+  - `dashboard.js`：标题改为“最终结论：重定位成功/失败”；
+  - 成功时主状态只显示原厂定位、地图位姿、固定地图三项依据；
+  - 失败时才展示 2101 回执作为失败证据；
+  - `localizeLog` 成功时不再直接打印 2101 原始失败回执，改为显示最终结论和判定依据。
+- 注意：
+  - 这次只改 UI 显示层；
+  - 不改重定位发布逻辑；
+  - 不改 Nav2、点云、任务执行链路。
+- 104 同步和验证：
+  - 已同步 `dashboard.js`、`dashboard.html`、`m20pro日志.md`;
+  - 已执行 `colcon build --symlink-install --packages-select m20pro_cloud_bridge`;
+  - 已重启 `m20pro-real.service`;
+  - 104 页面脚本版本为 `20260709-final-localization-verdict`;
+  - `/api/state` 验证：
+    - `pose_fresh=true`;
+    - `localization_ok=true`;
+    - `factory_localization_ok=true`;
+    - `map_relocalization_required=null`;
+    - `scan.finite_ranges≈204`;
+  - 因此 104 当前最终定位状态为“重定位成功：定位已确认”。
+
+## 2026-07-09 11:18 CST - 彻底停用绿色历史轨迹，保留空字段兼容
+
+- 用户追问：
+  - 绿色轨迹是否只是前端不显示；
+  - 是否还存在其他隐形风险。
+- 代码核查结论：
+  - 绿色轨迹不是 Nav2 规划路径；
+  - 不参与重定位；
+  - 不参与任务下发；
+  - 不参与避障或控制；
+  - 之前只是 Web 后端累计 `pose_history`，前端用 `drawPoseHistory(...)` 画成绿色虚线。
+- 已进一步瘦身：
+  - `dashboard.js`：删除未调用的 `drawPoseHistory(...)` 函数；
+  - `web_dashboard_node.py`：停止累计 `pose_history`，删除轨迹滤波参数和滤波函数；
+  - `/api/state` 中仍保留 `pose_history: []`，避免旧前端或外部接口因字段消失而报错。
+- 风险判断：
+  - 主地图只保留蓝色实时机器狗位姿、橙色 Nav2 规划路径、任务点和激光轮廓；
+  - 绿色历史轨迹不会再成为现场判断依据；
+  - 对导航、重定位、点云、任务执行没有控制层影响。
+- 已验证：
+  - `node --check dashboard.js` 通过；
+  - `python3 -m py_compile web_dashboard_node.py` 通过。
+- 104 同步和验证：
+  - 已同步 `dashboard.js`、`web_dashboard_node.py`、`m20pro日志.md`;
+  - 已执行 `colcon build --symlink-install --packages-select m20pro_cloud_bridge`;
+  - 已重启 `m20pro-real.service`;
+  - `/api/state` 验证 `pose_history_len=0`；
+  - `/scan` 仍有数据，`scan.finite_ranges≈200`；
+  - 104 上已搜不到 `drawPoseHistory`、`pose_history_filter`、`task_pose_history`；
+  - 服务重启后当前定位状态为未确认，需要现场重新重定位后再继续导航测试。
+
+## 2026-07-09 11:45 CST - 新版前端布局稿同步旧面板关键修复，但仍不部署到 104
+
+- 背景：
+  - 新版前端目前封存在 `docs/archived_frontend_lite_workbench/20260702/`;
+  - 104 正式运行的仍是旧面板 `src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/`;
+  - 用户要求新版前端也同步修复，因为未来总要启用。
+- 已同步到新版布局稿的旧面板修复：
+  - 重定位状态显示改为“最终结论：重定位成功/失败”；
+  - 成功时主状态只显示原厂定位、地图位姿、固定地图三项依据；
+  - 失败时才显示 2101 原始回执；
+  - `localizeLog` 成功时不再打印旧的 2101 失败回执；
+  - 删除绿色历史轨迹 `drawPoseHistory(...)` 和调用，只保留橙色 Nav2 路径、蓝色实时位姿、任务点、激光轮廓；
+  - 停止任务按钮改为始终可点，无活动任务时也会调用 `/api/tasks/stop`，用于取消残留导航目标并发送零速度；
+  - 任务列表改为轻量 `/api/tasks`，不再请求 `readiness=full/light`;
+  - 删除新版稿中的 task_readiness、watcher、field snapshot、复制验收/复制记录等旧诊断入口。
+- 已更新：
+  - `docs/archived_frontend_lite_workbench/20260702/dashboard.js`;
+  - `docs/archived_frontend_lite_workbench/20260702/dashboard.html`;
+  - `docs/archived_frontend_lite_workbench/20260702/README.md`。
+- 已验证：
+  - `node --check docs/archived_frontend_lite_workbench/20260702/dashboard.js` 通过；
+  - 搜索确认新版稿中已无 `task_readiness`、`renderTaskReadiness`、`taskWatcher`、`copyFieldSnapshot`、`drawPoseHistory`、`pose_history` 等旧残留关键词。
+- 注意：
+  - 本次只维护新版前端封存稿；
+  - 未把新版前端同步为 104 正式界面；
+  - 新版仍缺少昂锐/U360 雷达完整控件和实机验收，不能直接替换旧面板。
+
+## 2026-07-09 11:58 CST - 核查上位机、104 实际文件、GitLab 三者同步状态
+
+- 核查范围：
+  - 上位机：`/home/fabu/桌面/M20Pro/m20pro_real_ros2_ws`;
+  - 104：`/home/user/m20pro_real_ros2_ws`;
+  - 排除：`.git`、`build`、`install`、`log`、`__pycache__`、rosbag/bags、新版前端封存稿 `docs/archived_frontend_lite_workbench/`、106 点云处理 `tools/edge_scan_feasibility/`、`scripts/106_enable_edge_scan_service.sh`。
+- 初次比对结果：
+  - 只剩 `m20pro日志.md` 和 `scripts/test_perception_contract.py` 两处差异；
+  - 其中 `scripts/test_perception_contract.py` 是测试文件差异，不影响 104 运行；
+  - 已同步这两处到 104。
+- 同步后复查：
+  - `rsync -rcn --delete --itemize-changes ...` 输出 0 行；
+  - 因此在上述排除范围之外，上位机与 104 实际文件已经一致。
+- Git 状态风险：
+  - 上位机 `main` 当前提交为 `6a63b68`;
+  - GitLab `main` 也是 `6a63b68`;
+  - 104 工作区 Git HEAD 仍是 `3cf69ed`，但实际文件通过多次 rsync 已覆盖为接近上位机当前工作区；
+  - 上位机和 104 都存在大量未提交改动；
+  - 因此“GitLab 上已提交代码”与“104 实际运行代码”仍然不等价。
+- 结论：
+  - 现场测试以 104 实际文件为准，目前已与上位机同步；
+  - 若要让 GitLab 也等价，需要把当前上位机未提交改动整理提交并 push。

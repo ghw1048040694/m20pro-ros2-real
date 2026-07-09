@@ -286,7 +286,12 @@
     function poseUnavailableText(payload = state.latest) {
       if (!payload) return "等待状态";
       const poseAge = poseAgeSec(payload);
-      if (payload.localization_ok === false) return "未定位，重定位后显示地图位姿";
+      if (payload.localization_ok === false) {
+        if (payload.pose && hasFreshPose(payload)) {
+          return "地图位姿仍在刷新，但定位状态未确认";
+        }
+        return "未定位，重定位后显示地图位姿";
+      }
       if (payload.localization_ok === true && payload.pose && !hasFreshPose(payload)) {
         const ageText = poseAge === null || poseAge === undefined ? "" : `，最后 ${fmtAge(poseAge)}前`;
         return `地图位姿过期${ageText}`;
@@ -334,7 +339,7 @@
       box.innerHTML = "";
       const verdict = document.createElement("div");
       verdict.className = "localization-verdict";
-      verdict.textContent = finalSuccess ? "重定位成功" : "重定位失败";
+      verdict.textContent = finalSuccess ? "最终结论：重定位成功" : "最终结论：重定位失败";
       box.appendChild(verdict);
       const message = document.createElement("div");
       message.className = "localization-message";
@@ -361,11 +366,13 @@
         : (status.pose_ok ? `过期或未确认 / ${poseAge}前` : "缺失或无效");
       const poseState = status.pose_fresh ? "ok" : "warn";
       const rows = [
-        ["2101回执", tcpText, tcpState],
         ["原厂定位", factoryOk ? "已确认" : "未确认", factoryOk ? "ok" : "fail"],
         ["地图位姿", poseText, poseState],
         ["固定地图", mapLock ? "仍需重定位" : "已确认", mapLock ? "warn" : "ok"],
       ];
+      if (!finalSuccess) {
+        rows.unshift(["2101回执", tcpText, tcpState]);
+      }
       const evidence = document.createElement("div");
       evidence.className = "localization-evidence";
       rows.forEach(([label, value, cls]) => {
@@ -842,10 +849,10 @@
       const resetBtn = $("resetTaskSessionBtn");
       const hasActiveTask = !!(payload && (payload.active_task || payload.active_waypoint));
       if (stopBtn) {
-        stopBtn.disabled = !hasActiveTask;
+        stopBtn.disabled = false;
         stopBtn.title = hasActiveTask
           ? "停止当前前端任务"
-          : "当前没有前端任务在执行";
+          : "取消可能残留的导航目标并发送零速度";
       }
       if (resetBtn) {
         resetBtn.disabled = false;
@@ -1302,25 +1309,6 @@
       ctx.stroke();
       ctx.restore();
     }
-    function drawPoseHistory(points) {
-      if (!Array.isArray(points) || points.length < 2 || !state.map) return;
-      const view = getView();
-      ctx.save();
-      ctx.strokeStyle = "#0f766e";
-      ctx.lineWidth = 2;
-      ctx.setLineDash([5, 4]);
-      ctx.beginPath();
-      let started = false;
-      for (const point of points) {
-        if (!Number.isFinite(Number(point.x)) || !Number.isFinite(Number(point.y))) continue;
-        const p = worldToCanvasWithView(point.x, point.y, view);
-        if (!p) continue;
-        if (!started) { ctx.moveTo(p.x, p.y); started = true; }
-        else ctx.lineTo(p.x, p.y);
-      }
-      if (started) ctx.stroke();
-      ctx.restore();
-    }
     function drawObstacles(items) {
       if (!items || items.length === 0 || !state.map) return;
       const view = getView();
@@ -1474,7 +1462,6 @@
       if (!canDrawLiveRobotLayer || !hasFreshPose(latest)) state.robotDisplayPose = null;
       if (canDrawLiveRobotLayer) {
         drawPath(latest.path);
-        drawPoseHistory(latest.pose_history || []);
         drawObstacles(latest.dynamic_obstacles);
       }
       drawScanOverlay();
@@ -1639,11 +1626,21 @@
         && Date.now() > state.relocalizationApiLogUntil
       ) {
         state.lastRelocalizationStamp = s.relocalization_result.last_update;
-        setLog("localizeLog", {
-          "2101原始回执": s.relocalization_result.raw,
-          定位结论: s.localization_status ? s.localization_status.message : null,
-          更新时间: s.node_time_text
-        });
+        const loc = s.localization_status || {};
+        const finalSuccess = loc.confirmed === true && !loc.map_relocalization_required;
+        const logPayload = finalSuccess
+          ? {
+              最终结论: "重定位成功",
+              判定依据: "原厂定位已确认；地图位姿新鲜；固定地图已确认",
+              更新时间: s.node_time_text
+            }
+          : {
+              最终结论: "重定位失败",
+              失败原因: loc.message || loc.code || "定位未确认",
+              "2101原始回执": s.relocalization_result.raw,
+              更新时间: s.node_time_text
+            };
+        setLog("localizeLog", logPayload);
       }
       if (s.active_task || s.active_waypoint) {
         state.activeTaskLogUntil = 0;
@@ -2361,12 +2358,6 @@
     });
     $("stopTaskBtn").addEventListener("click", async () => {
       const btn = $("stopTaskBtn");
-      if (!(state.latest && (state.latest.active_task || state.latest.active_waypoint))) {
-        btn.disabled = true;
-        btn.title = "当前没有前端任务在执行";
-        setLog("activeTask", "当前没有前端任务在执行，无需停止");
-        return;
-      }
       const oldText = btn.textContent;
       btn.disabled = true;
       btn.textContent = "停止中...";

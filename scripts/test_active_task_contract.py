@@ -410,11 +410,16 @@ def test_stop_task_state() -> None:
     assert_equal(reset_operator["operator_payload"], {"task_id": None, "reason": "web_manual_reset"}, "reset operator payload")
 
     idle = idle_stop_task_response()
-    assert_true(idle["ok"], "idle stop is successful noop")
+    assert_true(idle["ok"], "idle stop is successful reset")
     assert_equal(idle["active_task"], None, "idle stop has no active task")
     assert_equal(idle["stopped_task_id"], None, "idle stop has no stopped task")
-    assert_equal(idle["reset_navigation"], False, "idle stop does not reset navigation")
-    assert_equal(idle["message"], "当前没有前端任务在执行，无需停止", "idle stop message")
+    assert_equal(idle["reset_navigation"], True, "idle stop resets residual navigation")
+    assert_equal(idle["reason"], "web_manual_stop", "idle stop reason")
+    assert_equal(idle["message"], "当前没有前端任务在执行，已发送导航取消/复位指令", "idle stop message")
+
+    idle_reset = idle_stop_task_response("web_manual_reset")
+    assert_equal(idle_reset["reset_navigation"], True, "idle reset resets navigation")
+    assert_equal(idle_reset["message"], "已显式复位导航状态", "idle reset message")
 
 
 def test_task_terminal_event_payload() -> None:

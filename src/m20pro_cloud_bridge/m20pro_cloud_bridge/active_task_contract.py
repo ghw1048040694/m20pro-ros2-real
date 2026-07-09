@@ -254,13 +254,15 @@ def stop_task_state(
     }
 
 
-def idle_stop_task_response() -> Dict[str, Any]:
+def idle_stop_task_response(reason: str = "web_manual_stop") -> Dict[str, Any]:
+    is_reset = str(reason or "") == "web_manual_reset"
     return {
         "ok": True,
         "active_task": None,
         "stopped_task_id": None,
-        "reset_navigation": False,
-        "message": "当前没有前端任务在执行，无需停止",
+        "reset_navigation": True,
+        "reason": reason,
+        "message": "已显式复位导航状态" if is_reset else "当前没有前端任务在执行，已发送导航取消/复位指令",
     }
 
 
