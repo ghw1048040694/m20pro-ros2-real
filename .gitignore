@@ -45,7 +45,7 @@ dddmr_navigation/
 
 # Local map editor/export metadata
 **/.optimizers/
-/src/m20pro_bringup/maps/Original_map/occ_grid_id_map.toml
+**/occ_grid_id_map.toml
 
 # Documents that may be copyrighted or private
 *.pdf

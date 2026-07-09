@@ -22277,3 +22277,47 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 注意：
   - 新版前端仍是封存/未部署状态；
   - 本次只同步文案和危险操作确认，不改运行中的 104 旧版前端服务。
+
+## 2026-07-09 17:05 CST - 部署测试场地新地图 TEST_FIELD_20260709_163256
+
+- 用户在上位机 `src/m20pro_bringup/maps` 下放入新地图：
+  - `src/m20pro_bringup/maps/test-20260709-163256`;
+  - 包含 `occ_grid.yaml`、`occ_grid.pgm`、`full_cloud.pcd` 和原厂地图内部数据。
+- 本地处理：
+  - 清理拷贝带来的 AppleDouble 元数据文件 `._*`;
+  - 将 `occ_grid.yaml` 的 image 从绝对路径改为相对路径：
+    - `image: occ_grid.pgm`;
+  - 本地地图包大小约 115MB；
+  - Git 只纳入轻量 2D 栅格资产 `occ_grid.yaml/occ_grid.pgm`，继续忽略 `*.pcd`、`.blocks`、`.sessions`、`.optimizers` 和 `occ_grid_id_map.toml`，避免仓库被原厂关键帧/点云撑大。
+- 已同步到 104：
+  - 源码路径：
+    - `/home/user/m20pro_real_ros2_ws/src/m20pro_bringup/maps/test-20260709-163256`;
+  - 已执行：
+    - `colcon build --packages-select m20pro_bringup --symlink-install`;
+  - install 路径可用：
+    - `/home/user/m20pro_real_ros2_ws/install/m20pro_bringup/share/m20pro_bringup/maps/test-20260709-163256`;
+  - 同时通过导入 API 拉入 104 前端归档：
+    - `/home/user/m20pro_maps/TEST_FIELD_20260709_163256`;
+    - `map_id=map_1783587590787_a658b6bb`;
+    - `floor=F20`;
+    - `source_path=/var/opt/robot/data/maps/test-20260709-163256`;
+    - `factory_apply_path=/var/opt/robot/data/maps/test-20260709-163256`。
+- 已同步到 106：
+  - 原厂地图包路径：
+    - `/var/opt/robot/data/maps/test-20260709-163256`;
+  - 这样后续在前端选择 `TEST_FIELD_20260709_163256` 时，后端可以调用 `drmap apply` 让 106 原厂定位地图同步切过去。
+- 当前状态：
+  - 前端地图列表已经出现 `TEST_FIELD_20260709_163256`;
+  - 当前选中地图仍是 `DESK_20260625_164234`;
+  - 106 active map 仍是 `/var/opt/robot/data/maps/map-20260625-164234`;
+  - 本次没有把机器狗当前定位地图切到测试场地，避免在工位环境造成 104/106 错配。
+- 验证：
+  - 只读打开 `/api/map_file?map_id=map_1783587590787_a658b6bb`;
+  - 返回 `available=True`;
+  - 地图尺寸 `255x212`;
+  - 分辨率 `0.1`;
+  - origin `(-19.1, -10.1, 0.0)`。
+- 使用提醒：
+  - 到测试场地后，在前端地图列表选择 `TEST_FIELD_20260709_163256`;
+  - 选择后会触发 104 Nav2 load map 和 106 `drmap apply`;
+  - 切图后必须重新执行一次网页重定位，成功后再标点/导航。
