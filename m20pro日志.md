@@ -22123,3 +22123,26 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
   - 建图会改变 106 active map；
   - 建完并拉到 104 后必须重新重定位；
   - 如果点击 `完成/保存建图` 后原厂 `drmap stop_mapping` 长时间无响应，应到 106 上查看 `/tmp/m20pro_drmap_mapping_<session_id>.log` 或按原厂流程手动处理。
+
+## 2026-07-09 15:23 CST - 用户工位静态测试：前端建图相关按钮基本可用
+
+- 用户实测：
+  - 用户在工位测试；
+  - 未让机器狗移动；
+  - 仅点击若干前端按钮做静态验证；
+  - 用户反馈几个按钮工作正常。
+- 104 复核：
+  - 当前没有 active task；
+  - `/api/mapping/check_environment` 返回 `ok=true`;
+  - 当前地图仍为 `DESK_20260625_164234`;
+  - `perception_status=edge_scan/perception_ready`;
+  - 建图会话新增 `test_field`，状态为 `saved`，说明建图会话/保存按钮链路至少返回了成功状态。
+- 106 复核：
+  - 未看到 `drmap`/mapping 残留建图进程；
+  - `m20pro-edge-scan-106.service` 仍为 `active`;
+  - 只看到 edge_scan 进程 `drdds_edge_scan_demo /LIDAR/POINTS /scan ...`。
+- 注意：
+  - 本轮只是静态按钮/接口测试；
+  - 未验证机器狗实际移动建图；
+  - 未验证新地图质量；
+  - 未验证从 106 active map 拉取新地图后重新定位和导航。
