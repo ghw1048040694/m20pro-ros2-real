@@ -19,6 +19,12 @@ m20pro日志.md
 docs/single_floor_navigation_architecture.md
 ```
 
+新版前端、甲方前端和外部功能包对接 API 契约放在：
+
+```text
+docs/frontend_api_contract.md
+```
+
 现场执行脚本 Word 放在：
 
 ```text

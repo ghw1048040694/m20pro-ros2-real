@@ -22529,3 +22529,29 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
     - `scripts/test_map_selection_contract.py` 通过；
     - `bash -n src/m20pro_bringup/scripts/m20pro_real_full.sh` 通过；
     - 104 未安装 `node`，JS 语法以本机 `node --check` 为准。
+
+## 2026-07-09 18:50 CST - 新增前端 API 对接契约文档
+
+- 用户要求：
+  - 把当前 API 化接口整理成文档；
+  - 加入 Git；
+  - 后续接口变化要实时维护。
+- 已新增：
+  - `docs/frontend_api_contract.md`。
+- 文档覆盖：
+  - 基本请求/响应约定；
+  - `selected_map_id / working_map_id / effective_map_id` 地图身份模型；
+  - `/api/state`、`/api/maps`、`/api/maps/select`;
+  - `/api/annotations`、`/api/tasks`;
+  - `/api/localization/initialpose`;
+  - `/api/preflight`;
+  - `/api/mapping/*`;
+  - YOLO、视频、项目接口；
+  - 甲方前端推荐调用流程；
+  - 昂锐雷达读取任务点名称、房间、扫描点、结果前缀、雷达模式的推荐字段；
+  - ROS 2 包可订阅 `/m20pro/active_waypoint` 获取当前任务点 JSON。
+- 已更新：
+  - `README.md` 增加 API 文档入口。
+- 维护规则：
+  - 后端新增、删除、修改接口字段时，同步更新 `docs/frontend_api_contract.md`;
+  - 新版前端和甲方前端不要复制后端判断逻辑，尤其不要自己推断实时 `/map` 属于哪张固定地图。
