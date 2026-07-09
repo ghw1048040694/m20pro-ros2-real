@@ -2528,11 +2528,13 @@ class WebDashboardNode(Node):
             "set -e; "
             "echo host=$(hostname); "
             "echo user=$(whoami); "
-            "echo drmap=$(command -v drmap); "
-            f"echo active=$(readlink -f {active_map} || true); "
+            "echo drmap_probe=drmap_mapping_help; "
+            f"echo active_map={active_map}; "
+            f"active_path=$(readlink -f {active_map} || true); "
+            f"echo active_resolved=${{active_path:-{active_map}}}; "
             f"test -d {active_map}; "
             "sudo -n drmap mapping -h >/dev/null; "
-            "sudo -n drmap stop_mapping -h >/dev/null"
+            "echo drmap_mapping_help=ok"
         )
         command = f"{prefix}{json.dumps(remote_probe)}" if prefix else remote_probe
         try:
@@ -2567,11 +2569,14 @@ class WebDashboardNode(Node):
             "output": result.stdout or "",
         }
         if ok:
-            payload["message"] = "106 建图环境可用：SSH、drmap、active map、sudo -n 均通过。"
+            payload["message"] = (
+                "106 建图环境可用：SSH、drmap、active map、启动建图权限均通过。"
+                "完成/保存建图会调用 drmap stop_mapping，但该命令没有安全的 dry-run 检查。"
+            )
         else:
             payload["message"] = (
                 "106 建图环境未通过。常见原因：104 到 106 未配置 SSH 免密，"
-                "或 106 上 sudo drmap 仍需要交互输入密码。"
+                "或 106 上 sudo drmap mapping 仍需要交互输入密码。"
             )
         return payload
 

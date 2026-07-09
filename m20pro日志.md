@@ -22091,3 +22091,35 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
   - `/api/state` 显示当前地图仍为 `DESK_20260625_164234`;
   - `perception_status=edge_scan/perception_ready`;
   - `localization_ok=True`、`pose_fresh=True`。
+
+## 2026-07-09 15:07 CST - 修复前端建图环境检查：104 root 到 106 免密已通，检查按钮通过
+
+- 现场现象：
+  - 用户点击前端 `建图 -> 检查 106 环境` 后提示没有免密；
+  - 该接口由 104 上的 `m20pro-real.service` 调用，而服务以 root 运行，所以需要配置的是 104 root 到 106 user 的 SSH 免密，不只是 104 user。
+- 已处理：
+  - 104 root 已生成/使用专用 SSH key；
+  - 104 root 的 `/root/.ssh/known_hosts` 已加入 `10.21.31.106`;
+  - 106 `user` 的 `~/.ssh/authorized_keys` 已加入 `m20pro-104-root-to-106` 公钥；
+  - 104 root 现在可以 `ssh -o BatchMode=yes user@10.21.31.106`。
+- 修复后端检查逻辑：
+  - 原检查命令包含 `sudo -n drmap stop_mapping -h`;
+  - 实测发现原厂 `drmap stop_mapping -h` 不是安全的纯 help/dry-run，会进入尝试结束建图流程并超时；
+  - 已从检查接口中移除 `stop_mapping -h`;
+  - 现在只检查 SSH、active map 路径、`sudo -n drmap mapping -h`;
+  - 完成/保存建图按钮仍会调用 `drmap stop_mapping`，但不在环境检查中提前探测。
+- 已同步并重启 104：
+  - 更新 `src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py`;
+  - 已重启 `m20pro-real.service`;
+  - 本地 `python3 -m py_compile` 通过；
+  - `./scripts/test_mapping_contract.py` 通过。
+- 最终验证：
+  - `/api/mapping/check_environment` 返回 `ok=true`;
+  - 输出包含 `drmap_mapping_help=ok`;
+  - 104 当前地图仍为 `DESK_20260625_164234`;
+  - `perception_status=edge_scan/perception_ready`;
+  - `localization_ok=True`、`pose_fresh=True`。
+- 注意：
+  - 建图会改变 106 active map；
+  - 建完并拉到 104 后必须重新重定位；
+  - 如果点击 `完成/保存建图` 后原厂 `drmap stop_mapping` 长时间无响应，应到 106 上查看 `/tmp/m20pro_drmap_mapping_<session_id>.log` 或按原厂流程手动处理。
