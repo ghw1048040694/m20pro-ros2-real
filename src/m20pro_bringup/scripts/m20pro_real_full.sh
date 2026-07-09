@@ -157,6 +157,8 @@ LIDAR2_RELAY_TOPIC="${M20PRO_LIDAR2_RELAY_TOPIC:-/m20pro/lidar_points2_relay}"
 SCAN_SOURCE="${M20PRO_SCAN_SOURCE:-local_fusion}"
 EDGE_SCAN_TOPIC="${M20PRO_EDGE_SCAN_TOPIC:-/scan}"
 SCAN_TOPIC="${M20PRO_SCAN_TOPIC:-/scan}"
+WEB_DASHBOARD_DATA_DIR="${M20PRO_WEB_DASHBOARD_DATA_DIR:-/home/user/.m20pro_web}"
+WEB_DASHBOARD_MAP_ARCHIVE_DIR="${M20PRO_WEB_DASHBOARD_MAP_ARCHIVE_DIR:-/home/user/m20pro_maps}"
 case "${SCAN_SOURCE}" in
   local_fusion)
     PERCEPTION_MODE="local_fusion"
@@ -229,13 +231,56 @@ if [[ "${SCAN_SOURCE}" == "local_fusion" && "${M20PRO_ENABLE_LIDAR2_RELAY:-0}" =
   fi
 fi
 
+selected_map_yaml_for_launch() {
+  python3 - "${WEB_DASHBOARD_DATA_DIR}" <<'PY'
+import json
+import os
+import sys
+
+data_dir = sys.argv[1]
+settings_path = os.path.join(data_dir, "settings.json")
+maps_path = os.path.join(data_dir, "maps.json")
+
+try:
+    with open(settings_path, "r", encoding="utf-8") as file:
+        selected_map_id = str((json.load(file) or {}).get("selected_map_id") or "").strip()
+except Exception:
+    selected_map_id = ""
+
+if not selected_map_id:
+    sys.exit(0)
+
+try:
+    with open(maps_path, "r", encoding="utf-8") as file:
+        records = json.load(file) or []
+except Exception:
+    records = []
+
+if not isinstance(records, list):
+    records = []
+
+for record in records:
+    if str(record.get("id") or "").strip() != selected_map_id:
+        continue
+    yaml_path = os.path.expandvars(os.path.expanduser(str(record.get("yaml_path") or "").strip()))
+    if yaml_path and os.path.exists(yaml_path):
+        print(yaml_path)
+    break
+PY
+}
+
+SELECTED_MAP_YAML="$(selected_map_yaml_for_launch || true)"
+if [[ -n "${SELECTED_MAP_YAML}" ]]; then
+  echo "[m20pro_real_full] initial Nav2 map from selected web map: ${SELECTED_MAP_YAML}" >&2
+fi
+
 COMMON_ARGS=(
   mode:=real
   rviz:=false
   enable_web_dashboard:=true
   enable_initialpose_relocalization:=true
-  web_dashboard_data_dir:=/home/user/.m20pro_web
-  web_dashboard_map_archive_dir:=/home/user/m20pro_maps
+  web_dashboard_data_dir:="${WEB_DASHBOARD_DATA_DIR}"
+  web_dashboard_map_archive_dir:="${WEB_DASHBOARD_MAP_ARCHIVE_DIR}"
   enable_camera_proxy:=true
   camera_proxy_backend:=ffmpeg_mjpeg
   camera_proxy_fps:=10.0
@@ -247,6 +292,9 @@ COMMON_ARGS=(
   fusion:="${ENABLE_FUSION}"
   enable_lidar_points_subscriptions:="${ENABLE_LIDAR_POINTS_SUBSCRIPTIONS}"
 )
+if [[ -n "${SELECTED_MAP_YAML}" ]]; then
+  COMMON_ARGS+=(map:="${SELECTED_MAP_YAML}")
+fi
 if [[ -n "${WEB_CLOUD_TOPIC}" ]]; then
   COMMON_ARGS+=(cloud_topic:="${WEB_CLOUD_TOPIC}")
 fi

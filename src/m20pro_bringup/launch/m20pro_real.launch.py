@@ -453,6 +453,7 @@ def generate_launch_description():
                     "lidar_points_relay_topic": "/m20pro/lidar_points_relay",
                     "scan_topic": scan_topic,
                     "perception_mode": perception_mode,
+                    "startup_sync_selected_map_delay_s": 6.0,
                     "enable_camera_proxy": ParameterValue(enable_camera_proxy, value_type=bool),
                     "front_camera_url": front_camera_url,
                     "rear_camera_url": rear_camera_url,

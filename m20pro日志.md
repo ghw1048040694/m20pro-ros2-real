@@ -1,10 +1,52 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-07-09 17:29 CST
+Last updated: 2026-07-09 17:43 CST
 
 This file is maintained by Codex as the local M20 Pro project memory for future ChatGPT review. It records the current architecture, important decisions, recent changes, verification status, and next steps.
 
 Naming note: this file replaced the previous local-only `codex.md`. Going forward, maintain this file, `m20pro日志.md`, after every meaningful project change or field diagnosis.
+
+## 2026-07-09 17:43 CST - 修复重启后 `/planner_server` 缺失自检失败
+
+- 用户刷新前端后看到自检失败：
+  - `核心节点`：缺少 `/planner_server`;
+  - 但 `106 边缘激光`、`二维激光`、`原厂里程计`、`地图位姿` 都是通过。
+- 判断：
+  - 这不是点云链路故障；
+  - 104 上 `edge_scan` 和 `/scan` 新鲜，有效距离约 200；
+  - `planner_server` 进程实际存在，但 Nav2 lifecycle 卡在 `Configuring planner_server`；
+  - 日志显示服务启动时 Nav2 正在配置 `planner_server`，同时 web 后端启动同步固定地图，调用 `/map_server/load_map` 把默认 F20 换成 `F20（带工位）`；
+  - 两个动作抢 `/map` 时序，导致 planner/global_costmap 没完成配置。
+- 修复：
+  - `src/m20pro_bringup/scripts/m20pro_real_full.sh`
+    - 启动时读取 `/home/user/.m20pro_web/settings.json` 的 `selected_map_id`;
+    - 再从 `/home/user/.m20pro_web/maps.json` 找到对应 `yaml_path`;
+    - 如果该 yaml 存在，直接给 `ros2 launch` 传 `map:=...`;
+    - 这样 Nav2 map_server 一开始就加载前端选中的固定地图，不再启动后半路 load_map。
+  - `src/m20pro_bringup/launch/m20pro_real.launch.py`
+    - web 后端 `startup_sync_selected_map_delay_s` 从默认 `1.5s` 调整为 `6.0s`;
+    - 让启动同步变成确认/兜底，而不是和 Nav2 lifecycle 抢启动。
+- 104 验证：
+  - 已同步并 build `m20pro_bringup`;
+  - 已重启 `m20pro-real.service`;
+  - 启动命令已带：
+    - `map:=/home/user/m20pro_maps/DESK_20260625_164234/occ_grid.yaml`;
+  - 日志确认：
+    - `planner_server: Configuring`;
+    - `Planner Server has GridBased planners available`;
+    - `Activating planner_server`;
+    - `Managed nodes are active`;
+    - `Nav2 lifecycle startup request accepted`。
+  - 手动触发 `/api/preflight/run` 后确认：
+    - `核心节点` 全部在线；
+    - `106 边缘激光` 正常；
+    - `/scan` 正常；
+    - `local_costmap`、`global_costmap` 均有数据；
+    - `/controller_server`、`/planner_server`、`/bt_navigator` lifecycle 均为 `active`;
+    - 自检摘要：`基础自检通过，导航已就绪`。
+- 注意：
+  - 当前 `map_relocalization_required` 仍存在，因为固定地图已被选择/同步过；
+  - 这属于前端固定地图保护逻辑：重新按 2101 重定位成功前，不应显示机器人箭头和蓝色实时激光，也不应开始正式任务。
 
 ## 2026-07-09 17:29 CST - 切换固定地图后禁止误显示上一张地图的机器人位姿
 
