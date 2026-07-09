@@ -184,11 +184,11 @@
               <button id="finishMappingBtn">完成/保存建图</button>
             </div>
             <div class="small" style="margin-top:8px;">
-              默认按《M20 Pro 软件使用手册》通过 106 的 drmap 建图；需要 104 能免密 SSH 到 106，且 sudo drmap 不要求交互输入密码。
+              默认按《M20 Pro 软件使用手册》通过 106 的 drmap -b 建图；保存后不会立即用于导航，需要拉取后手动切换地图生效。
             </div>
           </div>
           <div class="section">
-            <h2>拉取 106 当前地图</h2>
+            <h2>拉取 106 建图结果</h2>
             <div class="row">
               <label>地图楼层</label>
               <input id="importFloor" value="F20" />

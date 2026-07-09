@@ -2196,12 +2196,12 @@
       } catch (err) { setLog("mappingLog", err); }
     });
     $("startMappingBtn").addEventListener("click", async () => {
-      if (!window.confirm("启动 106 真实建图会改变原厂建图状态。确认现在开始建图？")) return;
+      if (!window.confirm("启动 106 真实建图；本流程使用 -b，只建图，不立即切换为导航地图。确认现在开始？")) return;
       try { setLog("mappingLog", await api("POST", "/api/mapping/start", {session_id: state.sessionId})); }
       catch (err) { setLog("mappingLog", err); }
     });
     $("finishMappingBtn").addEventListener("click", async () => {
-      if (!window.confirm("完成/保存建图会调用 106 drmap stop_mapping，并可能切换 active map。确认保存？")) return;
+      if (!window.confirm("完成/保存建图会调用 106 drmap stop_mapping；保存后请先拉取建图结果，再手动切换地图生效。确认保存？")) return;
       try { setLog("mappingLog", await api("POST", "/api/mapping/finish", {session_id: state.sessionId})); }
       catch (err) { setLog("mappingLog", err); }
     });

@@ -57,7 +57,7 @@ def generate_launch_description():
             "factory_mapping_start_command",
             default_value=(
                 "ssh -o BatchMode=yes -o ConnectTimeout=8 {factory_user}@{factory_host} "
-                "\"nohup sudo -n drmap mapping -s -n {map_name} > "
+                "\"nohup sudo -n drmap mapping -b -s -n {map_name} > "
                 "/tmp/m20pro_drmap_mapping_{session_id}.log 2>&1 &\""
             ),
             description="Shell command template for starting drmap mapping on 106.",

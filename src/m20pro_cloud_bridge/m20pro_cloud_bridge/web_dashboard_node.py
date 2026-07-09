@@ -2,6 +2,7 @@ import json
 import math
 import os
 import select
+import shlex
 import shutil
 import socket
 import subprocess
@@ -805,7 +806,7 @@ class WebDashboardNode(Node):
         self.declare_parameter(
             "factory_mapping_start_command",
             'ssh -o BatchMode=yes -o ConnectTimeout=8 {factory_user}@{factory_host} '
-            '"nohup sudo -n drmap mapping -s -n {map_name} > /tmp/m20pro_drmap_mapping_{session_id}.log 2>&1 &"',
+            '"nohup sudo -n drmap mapping -b -s -n {map_name} > /tmp/m20pro_drmap_mapping_{session_id}.log 2>&1 &"',
         )
         self.declare_parameter(
             "factory_mapping_finish_command",
@@ -2321,6 +2322,20 @@ class WebDashboardNode(Node):
                 "skipped": True,
                 "message": "已切换到实时 /map 观察；未调用 Nav2 load_map",
             }
+        factory_apply = self._apply_selected_map_to_factory(record) if map_id and record else {
+            "ok": True,
+            "skipped": True,
+            "message": "未选择固定地图；未调用 106 drmap apply",
+        }
+        if not factory_apply.get("ok"):
+            return self._error(
+                str(factory_apply.get("message") or "106 原厂地图切换失败"),
+                {
+                    "code": "factory_map_apply_failed",
+                    "nav2_load_map": nav2_load,
+                    "factory_apply_map": factory_apply,
+                },
+            )
         with self._data_lock:
             result = apply_selected_map_choice_state(
                 self._settings,
@@ -2340,11 +2355,15 @@ class WebDashboardNode(Node):
                 self._state["pose"] = None
                 self._state["pose_history"] = []
                 self._state["path"] = {"version": int(self._state.get("path", {}).get("version", 0) or 0) + 1, "points": []}
-        self._append_event("切换固定地图", {"map_id": map_id, "nav2_load_map": nav2_load})
+        self._append_event(
+            "切换固定地图",
+            {"map_id": map_id, "nav2_load_map": nav2_load, "factory_apply_map": factory_apply},
+        )
         return {
             "ok": True,
             "selected_map_id": map_id,
             "nav2_load_map": nav2_load,
+            "factory_apply_map": factory_apply,
             "map_relocalization_required": map_relocalization_required,
         }
 
@@ -2580,6 +2599,247 @@ class WebDashboardNode(Node):
             )
         return payload
 
+    def _run_factory_shell(
+        self,
+        shell_command: str,
+        *,
+        factory_host: str,
+        factory_user: str,
+        timeout: float,
+    ) -> Dict[str, Any]:
+        if factory_host in ("", "localhost", "127.0.0.1"):
+            command: Any = shell_command
+            command_text = shell_command
+            use_shell = True
+        else:
+            command = [
+                "ssh",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=8",
+                f"{factory_user}@{factory_host}",
+                shell_command,
+            ]
+            command_text = " ".join(shlex.quote(str(item)) for item in command)
+            use_shell = False
+        try:
+            result = subprocess.run(
+                command,
+                shell=use_shell,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=timeout,
+                check=False,
+            )
+        except Exception as exc:
+            return {"ok": False, "command": command_text, "output": "", "message": str(exc)}
+        return {
+            "ok": result.returncode == 0,
+            "command": command_text,
+            "returncode": result.returncode,
+            "output": result.stdout or "",
+        }
+
+    def _resolve_factory_map_path(
+        self,
+        source: str,
+        *,
+        factory_host: str,
+        factory_user: str,
+        timeout: float,
+    ) -> Dict[str, Any]:
+        source = str(source or "").strip()
+        if not source:
+            return self._error("106 地图路径为空")
+        if factory_host in ("", "localhost", "127.0.0.1"):
+            path = FsPath(source).expanduser()
+            resolved = path.resolve(strict=False)
+            if not resolved.is_dir():
+                return self._error("地图目录不存在", {"source": source, "resolved_source": str(resolved)})
+            return {
+                "ok": True,
+                "source_path": str(resolved),
+                "source_reason": "explicit_or_active",
+                "command": f"readlink -f {source}",
+                "output": str(resolved),
+            }
+        quoted_source = shlex.quote(source)
+        probe = (
+            f"target={quoted_source}; "
+            'resolved=$(readlink -f "$target" 2>/dev/null || true); '
+            'if [ -n "$resolved" ]; then target="$resolved"; fi; '
+            'test -d "$target"; '
+            'printf "%s\\n" "$target"'
+        )
+        result = self._run_factory_shell(
+            probe,
+            factory_host=factory_host,
+            factory_user=factory_user,
+            timeout=timeout,
+        )
+        if not result.get("ok"):
+            return self._error(
+                "106 地图目录不存在或无法访问",
+                {"source": source, "command": result.get("command"), "output": result.get("output")},
+            )
+        resolved = (str(result.get("output") or "").splitlines() or [source])[-1].strip() or source
+        return {
+            "ok": True,
+            "source_path": resolved,
+            "source_reason": "explicit_or_active",
+            "command": result.get("command"),
+            "output": result.get("output"),
+        }
+
+    def _find_latest_factory_map_package(
+        self,
+        map_name: str,
+        *,
+        factory_host: str,
+        factory_user: str,
+        timeout: float,
+    ) -> Dict[str, Any]:
+        base = "/var/opt/robot/data/maps"
+        name = sanitize_name(str(map_name or ""), "")
+        if not name:
+            return self._error("建图名称为空，无法按名称查找 106 地图包")
+        if factory_host in ("", "localhost", "127.0.0.1"):
+            base_path = FsPath(base)
+            matches = [
+                item
+                for item in base_path.iterdir()
+                if item.is_dir() and item.name.startswith(f"{name}-")
+            ] if base_path.is_dir() else []
+            if not matches:
+                return self._error("没有找到同名 106 地图包", {"factory_map_name": name, "base": base})
+            latest = max(matches, key=lambda item: item.stat().st_mtime)
+            return {
+                "ok": True,
+                "source_path": str(latest),
+                "source_reason": "latest_named_map_package",
+                "factory_map_name": name,
+                "command": f"find {base} -name {name}-*",
+                "output": str(latest),
+            }
+        probe = (
+            f"base={shlex.quote(base)}; "
+            f"name={shlex.quote(name)}; "
+            'find "$base" -maxdepth 1 -mindepth 1 -type d -name "$name-*" '
+            '-printf "%T@ %p\\n" | sort -nr | head -n 1 | cut -d" " -f2-'
+        )
+        result = self._run_factory_shell(
+            probe,
+            factory_host=factory_host,
+            factory_user=factory_user,
+            timeout=timeout,
+        )
+        source_path = (str(result.get("output") or "").splitlines() or [""])[-1].strip()
+        if not result.get("ok") or not source_path:
+            return self._error(
+                "没有找到同名 106 地图包",
+                {
+                    "factory_map_name": name,
+                    "base": base,
+                    "command": result.get("command"),
+                    "output": result.get("output"),
+                },
+            )
+        return {
+            "ok": True,
+            "source_path": source_path,
+            "source_reason": "latest_named_map_package",
+            "factory_map_name": name,
+            "command": result.get("command"),
+            "output": result.get("output"),
+        }
+
+    def _resolve_factory_import_source(
+        self,
+        payload: Dict[str, Any],
+        session: Optional[Dict[str, Any]],
+        *,
+        factory_host: str,
+        factory_user: str,
+        timeout: float,
+    ) -> Dict[str, Any]:
+        explicit_source = str(payload.get("source") or "").strip()
+        if explicit_source:
+            return self._resolve_factory_map_path(
+                explicit_source,
+                factory_host=factory_host,
+                factory_user=factory_user,
+                timeout=timeout,
+            )
+        factory_map_name = str(
+            payload.get("factory_map_name")
+            or (session or {}).get("map_name")
+            or payload.get("map_name")
+            or ""
+        ).strip()
+        if factory_map_name:
+            return self._find_latest_factory_map_package(
+                factory_map_name,
+                factory_host=factory_host,
+                factory_user=factory_user,
+                timeout=timeout,
+            )
+        return self._resolve_factory_map_path(
+            str(self.get_parameter("factory_active_map").value),
+            factory_host=factory_host,
+            factory_user=factory_user,
+            timeout=timeout,
+        )
+
+    def _apply_selected_map_to_factory(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        source_path = str(
+            record.get("factory_apply_path")
+            or record.get("source_path")
+            or ""
+        ).strip()
+        base = "/var/opt/robot/data/maps/"
+        if not source_path:
+            return {"ok": True, "skipped": True, "message": "地图记录没有 106 原厂路径；未调用 drmap apply"}
+        if source_path == "/var/opt/robot/data/maps/active":
+            return {"ok": True, "skipped": True, "message": "地图记录只指向 active 软链接；未盲目 apply"}
+        if not source_path.startswith(base):
+            return {"ok": True, "skipped": True, "message": "地图不是 106 原厂地图包；未调用 drmap apply", "source_path": source_path}
+        factory_host = str(self.get_parameter("factory_host").value).strip()
+        factory_user = str(self.get_parameter("factory_user").value).strip()
+        timeout = min(120.0, max(10.0, float(self.get_parameter("map_import_timeout_s").value)))
+        command = f"sudo -n drmap apply {shlex.quote(source_path)}"
+        result = self._run_factory_shell(
+            command,
+            factory_host=factory_host,
+            factory_user=factory_user,
+            timeout=timeout,
+        )
+        if not result.get("ok"):
+            return {
+                "ok": False,
+                "message": "106 drmap apply 失败，地图未完整切换",
+                "source_path": source_path,
+                "command": result.get("command"),
+                "output": result.get("output"),
+                "returncode": result.get("returncode"),
+            }
+        return {
+            "ok": True,
+            "source_path": source_path,
+            "command": result.get("command"),
+            "output": result.get("output"),
+            "message": "106 原厂 active 地图已切换",
+        }
+
+    def _cleanup_failed_map_import(self, dest: FsPath) -> Dict[str, Any]:
+        try:
+            if dest.exists():
+                shutil.rmtree(dest)
+            return {"ok": True, "removed": str(dest)}
+        except Exception as exc:
+            return {"ok": False, "path": str(dest), "error": str(exc)}
+
     def _import_active_map(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         session_id = payload.get("session_id")
         session = self._find_session(str(session_id).strip() if session_id else None)
@@ -2587,16 +2847,25 @@ class WebDashboardNode(Node):
         if not floor:
             return self._error("请指定地图楼层")
 
-        source = str(payload.get("source") or self.get_parameter("factory_active_map").value).strip()
         factory_host = str(payload.get("factory_host") or self.get_parameter("factory_host").value).strip()
         factory_user = str(payload.get("factory_user") or self.get_parameter("factory_user").value).strip()
         stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
-        default_name = f"{floor}_{stamp}"
+        default_name = str((session or {}).get("map_name") or "").strip() or f"{floor}_{stamp}"
         map_name = sanitize_name(str(payload.get("map_name") or ""), default_name)
         dest = self.map_archive_dir / map_name
         if dest.exists():
             dest = self.map_archive_dir / f"{map_name}_{random_suffix(6)}"
         timeout = float(self.get_parameter("map_import_timeout_s").value)
+        source_result = self._resolve_factory_import_source(
+            payload,
+            session,
+            factory_host=factory_host,
+            factory_user=factory_user,
+            timeout=min(30.0, timeout),
+        )
+        if not source_result.get("ok"):
+            return source_result
+        source = str(source_result.get("source_path") or "").strip()
 
         try:
             if factory_host in ("", "localhost", "127.0.0.1"):
@@ -2625,15 +2894,30 @@ class WebDashboardNode(Node):
 
         yaml_path = find_map_yaml(dest)
         if yaml_path is None:
+            cleanup = self._cleanup_failed_map_import(dest)
             return self._error(
-                "地图已拉取，但没有找到 occ_grid.yaml/map.yaml/jueying.yaml",
-                {"directory": str(dest), "command": command_text, "output": command_output},
+                "地图包已拉取，但没有生成可供前端/Nav2使用的栅格 yaml；请确认 106 建图已成功保存完成",
+                {
+                    "directory": str(dest),
+                    "source_path": source,
+                    "source_resolution": source_result,
+                    "command": command_text,
+                    "output": command_output,
+                    "cleanup": cleanup,
+                },
             )
         image_repair = ensure_map_yaml_uses_local_image(yaml_path)
         if not image_repair.get("ok"):
+            cleanup = self._cleanup_failed_map_import(dest)
             return self._error(
                 "地图已拉取，但栅格图文件不可用",
-                {"directory": str(dest), "yaml_path": str(yaml_path), "image_repair": image_repair},
+                {
+                    "directory": str(dest),
+                    "source_path": source,
+                    "yaml_path": str(yaml_path),
+                    "image_repair": image_repair,
+                    "cleanup": cleanup,
+                },
             )
 
         session_payload = session or {}
@@ -2650,21 +2934,30 @@ class WebDashboardNode(Node):
             source_path=source,
             created_at=now_text(),
         )
+        map_record["factory_apply_path"] = source
+        map_record["factory_source_reason"] = source_result.get("source_reason")
+        if source_result.get("factory_map_name"):
+            map_record["factory_map_name"] = source_result.get("factory_map_name")
         map_record["derived"] = self._generate_map_derived(map_record, dest, yaml_path, floor)
         with self._data_lock:
             self._maps.append(map_record)
-            self._settings["selected_map_id"] = map_record["id"]
             if session:
                 session["status"] = "imported"
                 session["updated_at"] = now_text()
             self._save_json("maps.json", self._maps)
-            self._save_json("settings.json", self._settings)
             self._save_json("mapping_sessions.json", self._sessions)
-        self._append_event("从 106 拉取地图完成", {"map_id": map_record["id"], "floor": floor})
+            selected_map_id = self._settings.get("selected_map_id")
+        self._append_event(
+            "从 106 拉取地图完成",
+            {"map_id": map_record["id"], "floor": floor, "source_path": source},
+        )
         return {
             "ok": True,
             "map": map_record,
-            "selected_map_id": map_record["id"],
+            "imported_map_id": map_record["id"],
+            "selected_map_id": selected_map_id,
+            "source_path": source,
+            "source_resolution": source_result,
             "command": command_text,
             "output": command_output,
             "image_repair": image_repair,

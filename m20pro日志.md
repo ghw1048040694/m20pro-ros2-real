@@ -22184,3 +22184,68 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
   - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js` 通过；
   - 已把 `dashboard.js` 同步到 104；
   - 浏览器需强刷后看到新确认弹窗。
+
+## 2026-07-09 16:05 CST - 建图流程根治修复：建图不立即生效，前端切换地图才 apply 到 106
+
+- 用户要求：
+  - 参考《山猫 M20 Pro 软件使用手册》；
+  - 建图保存后不要立即影响当前导航/定位地图；
+  - 新地图只有在前端切换/设为当前地图时才生效；
+  - 刚刚建好的 `test_field` 没有出现在前端地图列表，需要查明原因。
+- 手册依据：
+  - 手册写明默认 `sudo drmap mapping` 建图完成后会激活该地图用于定位导航；
+  - 手册写明 `sudo drmap mapping -b` 表示建图完成后无需立即激活；
+  - 因此本工程 Web 建图默认命令必须使用 `-b`，不能继续用旧的 `drmap mapping -s -n`。
+- 代码修复：
+  - `web_dashboard_node.py` 默认建图启动命令改为：
+    - `drmap mapping -b -s -n {map_name}`;
+  - 三个 launch 默认参数同步改为 `-b -s -n`：
+    - `m20pro.launch.py`;
+    - `m20pro_real.launch.py`;
+    - `m20pro_web_dashboard.launch.py`;
+  - `/api/mapping/import_active_map` 不再盲目拉取 `/var/opt/robot/data/maps/active`;
+  - 如果有建图任务名或 payload 里的 `factory_map_name/map_name`，会在 106 `/var/opt/robot/data/maps` 下查找最新 `{map_name}-*` 地图包；
+  - 导入地图记录保存真实 106 地图包路径：
+    - `source_path=/var/opt/robot/data/maps/<name>-<timestamp>`;
+    - `factory_apply_path=...`;
+    - `factory_source_reason=latest_named_map_package`;
+  - 导入只归档到 104，不再自动改 `selected_map_id`，避免“导入”变相触发“启用”；
+  - `/api/maps/select` 在 104 Nav2 加载成功后，如果地图记录有真实 106 地图包路径，会调用：
+    - `sudo -n drmap apply <source_path>`;
+  - 旧地图记录如果只写着 `/var/opt/robot/data/maps/active`，不会盲目 apply，避免切错图。
+- 前端修复：
+  - 建图按钮提示改为“使用 -b，只建图，不立即切换为导航地图”；
+  - 完成/保存按钮提示改为“保存后先拉取建图结果，再手动切换地图生效”；
+  - “拉取 106 当前地图”标题改为“拉取 106 建图结果”。
+- `test_field` 复核结论：
+  - 106 上存在目录：
+    - `/var/opt/robot/data/maps/test_field-20260709-152308`;
+  - 但该目录没有 `occ_grid.yaml`、`map.yaml`、`jueying.yaml`、PGM 或 PCD；
+  - `poses.txt` 为 0 字节，地图包实际没有生成可供前端/Nav2使用的 2D 栅格地图；
+  - 因此前端不显示 `test_field` 是正确行为：它不是可用地图，而是一次未成功保存出栅格结果的原厂地图包残留。
+- 导入失败保护：
+  - 如果地图包已 scp 到 104 但找不到可用 yaml，接口会返回明确错误：
+    - `地图包已拉取，但没有生成可供前端/Nav2使用的栅格 yaml`;
+  - 同时自动清理失败导入目录，避免 `/home/user/m20pro_maps` 继续变乱。
+- 104 同步和验证：
+  - 已 rsync 到 104；
+  - 已在 104 执行：
+    - `colcon build --packages-select m20pro_cloud_bridge m20pro_bringup --symlink-install`;
+    - 重启 `m20pro-real.service`;
+  - 安装目录确认三个 launch 均为 `drmap mapping -b -s -n`;
+  - `/api/maps` 当前仍只有内置 `F19/F20/F21` 和 `DESK_20260625_164234`；
+  - `test_field` 没有进入 maps.json；
+  - 已清理 104 上失败导入残留：
+    - `/home/user/m20pro_maps/test_field`;
+    - `/home/user/m20pro_maps/test_field_074be5`;
+  - 106 active map 仍为：
+    - `/var/opt/robot/data/maps/map-20260625-164234`;
+  - `localization.service`、`planner.service`、`global_planner.service` 均为 active。
+- 本地验证：
+  - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py` 通过；
+  - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js` 通过；
+  - `scripts/test_mapping_contract.py` 通过；
+  - `scripts/test_map_contract.py` 通过。
+- 注意：
+  - 本轮中再次确认 `drmap stop_mapping -h` 不是安全 help，会进入停止建图流程；后续不要用它做环境探测；
+  - 这次误触没有改变 106 active map，已复核 active 仍指向 `map-20260625-164234`。
