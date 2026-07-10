@@ -10,6 +10,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
 from sensor_msgs.msg import LaserScan, PointCloud2
+from std_msgs.msg import String
 from tf2_ros import Buffer, TransformListener
 from visualization_msgs.msg import MarkerArray
 
@@ -20,6 +21,7 @@ class SystemCheckNode(Node):
     def __init__(self) -> None:
         super().__init__("m20pro_system_check")
         self.declare_parameter("mode", "real")
+        self.declare_parameter("perception_mode", "local_fusion")
         self.declare_parameter("startup_grace_s", 8.0)
         self.declare_parameter("check_period_s", 2.0)
         self.declare_parameter("cloud_topic", "/cloud_nav")
@@ -266,12 +268,13 @@ class SystemCheckNode(Node):
 
         expected = [
             "m20pro_tcp_bridge",
-            "m20pro_pointcloud_fusion",
             "map_server",
             "controller_server",
             "planner_server",
             "bt_navigator",
         ]
+        if str(self.get_parameter("perception_mode").value) != "edge_scan":
+            expected.insert(1, "m20pro_pointcloud_fusion")
         if self._bool("require_floor_manager"):
             expected.append("m20pro_floor_manager")
         return expected

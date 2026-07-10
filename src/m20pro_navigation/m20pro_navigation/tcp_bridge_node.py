@@ -1,4 +1,5 @@
 import math
+import time
 from typing import Optional
 
 import rclpy
@@ -6,6 +7,7 @@ from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, TransformS
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from std_msgs.msg import Bool, String
+from tf2_msgs.msg import TFMessage
 from tf2_ros import TransformBroadcaster
 
 from .geometry import quaternion_to_yaw, yaw_to_quaternion
@@ -35,6 +37,20 @@ class M20TcpBridge(Node):
         self.declare_parameter("vendor_position_offset_y", 0.0)
         self.declare_parameter("vendor_position_offset_z", 0.0)
         self.declare_parameter("max_abs_map_position_m", 10000.0)
+        self.declare_parameter("pose_source", "tcp_1007")
+        self.declare_parameter("reject_origin_placeholder_pose", True)
+        self.declare_parameter("origin_placeholder_radius_m", 0.05)
+        self.declare_parameter("pose_jump_reject_m", 0.6)
+        self.declare_parameter("pose_jump_accept_after_s", 1.2)
+        self.declare_parameter("pose_filter_hold_last_good_s", 1.0)
+        self.declare_parameter("pose_relocalization_jump_grace_s", 3.0)
+        self.declare_parameter("pose_relocalization_jump_grace_radius_m", 1.0)
+        self.declare_parameter("enable_tf_pose_fallback", True)
+        self.declare_parameter("tf_pose_fallback_topic", "/tf")
+        self.declare_parameter("tf_pose_fallback_map_frame", "map")
+        self.declare_parameter("tf_pose_fallback_base_frame", "base_link")
+        self.declare_parameter("tf_pose_fallback_max_age_s", 1.0)
+        self.declare_parameter("tf_pose_fallback_require_location_ok", True)
         self.declare_parameter("flatten_odom_z", False)
         self.declare_parameter("odom_z", 0.0)
         self.declare_parameter("publish_tf", True)
@@ -52,6 +68,9 @@ class M20TcpBridge(Node):
         self.declare_parameter("initialpose_topic", "/initialpose")
         self.declare_parameter("initialpose_3d_topic", "/m20pro/initialpose_3d")
         self.declare_parameter("relocalization_response_timeout_s", 2.0)
+        self.declare_parameter("relocalization_duplicate_suppression_s", 1.5)
+        self.declare_parameter("relocalization_duplicate_tolerance_m", 0.05)
+        self.declare_parameter("relocalization_duplicate_yaw_tolerance_rad", 0.05)
         self.declare_parameter("send_heartbeat", False)
 
         self.client = M20TcpClient(
@@ -68,6 +87,16 @@ class M20TcpBridge(Node):
         self.last_pose_warning_time = None
         self.last_status_warning_time = None
         self.last_invalid_pose_warning_time = None
+        self.last_good_map_pose = None
+        self.pending_jump_pose = None
+        self.last_relocalization_request_time = None
+        self.last_relocalization_target = None
+        self.last_relocalization_attempt_monotonic = 0.0
+        self.last_relocalization_attempt_target = None
+        self.last_tf_pose_fallback = None
+        self.last_navigation_location_ok = None
+        self.last_navigation_status_time = None
+        self.official_tf_pose_unlocked = False
 
         self.pose_pub = self.create_publisher(PoseStamped, "~/map_pose", 10)
         self.odom_pub = self.create_publisher(Odometry, "/odom", 10)
@@ -93,6 +122,13 @@ class M20TcpBridge(Node):
                 str(self.get_parameter("usage_mode_command_topic").value),
                 self._on_usage_mode_command,
                 10,
+            )
+        if bool(self.get_parameter("enable_tf_pose_fallback").value):
+            self.create_subscription(
+                TFMessage,
+                str(self.get_parameter("tf_pose_fallback_topic").value),
+                self._on_tf_pose_fallback,
+                50,
             )
         if bool(self.get_parameter("enable_native_goal_bridge").value):
             self.create_subscription(PoseStamped, "/goal_pose", self._on_goal_pose, 10)
@@ -216,6 +252,31 @@ class M20TcpBridge(Node):
         """Forward a z-aware initial pose to the vendor localization reset API."""
         self._send_relocalization_pose(msg.header.frame_id, msg.pose)
 
+    def _on_tf_pose_fallback(self, msg: TFMessage) -> None:
+        map_frame = str(self.get_parameter("tf_pose_fallback_map_frame").value)
+        base_frame = str(self.get_parameter("tf_pose_fallback_base_frame").value)
+        for transform in msg.transforms:
+            if transform.header.frame_id != map_frame or transform.child_frame_id != base_frame:
+                continue
+            translation = transform.transform.translation
+            rotation = transform.transform.rotation
+            yaw = quaternion_to_yaw(rotation)
+            values = (translation.x, translation.y, translation.z, yaw)
+            if not all(math.isfinite(float(value)) for value in values):
+                continue
+            self.last_tf_pose_fallback = {
+                "x": float(translation.x),
+                "y": float(translation.y),
+                "z": float(translation.z),
+                "yaw": float(yaw),
+                "stamp": self.get_clock().now(),
+                "source_frame": map_frame,
+                "source_child_frame": base_frame,
+            }
+            if self._pose_source() == "official_tf":
+                self._publish_official_tf_pose("official_tf")
+            return
+
     def _send_relocalization_pose(self, frame_id: str, pose: object) -> None:
         if not self._ensure_connected():
             self._publish_relocalization_result("failed: tcp connection unavailable")
@@ -240,6 +301,17 @@ class M20TcpBridge(Node):
             "PosZ": vendor_z,
             "Yaw": float(yaw),
         }
+        duplicate = self._duplicate_relocalization_request(items)
+        if duplicate:
+            self._warn_throttled(
+                "relocalization_duplicate",
+                "ignored duplicate relocalization request: x=%.3f y=%.3f z=%.3f yaw=%.3f"
+                % (items["PosX"], items["PosY"], items["PosZ"], items["Yaw"]),
+                1.0,
+            )
+            return
+        self.last_relocalization_attempt_monotonic = time.monotonic()
+        self.last_relocalization_attempt_target = dict(items)
         timeout_s = max(0.1, float(self.get_parameter("relocalization_response_timeout_s").value))
         try:
             response = self.client.request(2101, 1, items, response_timeout=timeout_s)
@@ -256,6 +328,14 @@ class M20TcpBridge(Node):
                 pose.position.x, pose.position.y, pose.position.z, items["Yaw"]
             )
             self.get_logger().info("vendor relocalization reset accepted: %s" % text)
+            self.last_relocalization_request_time = self.get_clock().now()
+            self.last_relocalization_target = {
+                "x": float(pose.position.x),
+                "y": float(pose.position.y),
+                "z": float(pose.position.z),
+                "yaw": float(items["Yaw"]),
+            }
+            self.pending_jump_pose = None
             self._publish_map_pose()
             self._publish_navigation_status()
         else:
@@ -275,6 +355,31 @@ class M20TcpBridge(Node):
         msg = String()
         msg.data = text
         self.relocalization_pub.publish(msg)
+
+    def _duplicate_relocalization_request(self, items: dict) -> bool:
+        last = self.last_relocalization_attempt_target
+        if not isinstance(last, dict):
+            return False
+        window_s = max(0.0, float(self.get_parameter("relocalization_duplicate_suppression_s").value))
+        if window_s <= 0.0:
+            return False
+        if time.monotonic() - float(self.last_relocalization_attempt_monotonic or 0.0) > window_s:
+            return False
+        pos_tolerance = max(0.0, float(self.get_parameter("relocalization_duplicate_tolerance_m").value))
+        yaw_tolerance = max(
+            0.0,
+            float(self.get_parameter("relocalization_duplicate_yaw_tolerance_rad").value),
+        )
+        try:
+            distance = math.sqrt(
+                (float(items["PosX"]) - float(last["PosX"])) ** 2
+                + (float(items["PosY"]) - float(last["PosY"])) ** 2
+                + (float(items["PosZ"]) - float(last["PosZ"])) ** 2
+            )
+            yaw_error = abs(self._wrap_angle(float(items["Yaw"]) - float(last["Yaw"])))
+        except (KeyError, TypeError, ValueError):
+            return False
+        return distance <= pos_tolerance and yaw_error <= yaw_tolerance
 
     def _send_axis_command(self) -> None:
         timeout_s = max(0.0, float(self.get_parameter("cmd_vel_timeout_s").value))
@@ -339,29 +444,54 @@ class M20TcpBridge(Node):
                 self.client.request(100, 100, {}, wait_response=False)
             except OSError:
                 return
-        self._publish_map_pose()
         self._publish_navigation_status()
+        self._publish_map_pose()
 
     def _publish_map_pose(self) -> None:
+        pose_source = self._pose_source()
+        if pose_source == "official_tf":
+            if not self._publish_official_tf_pose("official_tf_primary"):
+                self._publish_localization_ok(False)
+            return
+        items = {}
         try:
             items = patrol_items(self.client.request(1007, 2, {}, response_timeout=1.0))
         except Exception as exc:
             self._warn_throttled("pose", "map pose query failed: %s" % exc, 5.0)
+            if pose_source == "auto" and self._publish_tf_pose_fallback("vendor_query_failed", items):
+                return
             self._publish_localization_ok(False)
             return
         if not items:
+            if pose_source == "auto" and self._publish_tf_pose_fallback("vendor_pose_empty", items):
+                return
             self._publish_localization_ok(False)
             return
-        now = self.get_clock().now().to_msg()
-        map_frame = str(self.get_parameter("map_frame").value)
-        odom_frame = str(self.get_parameter("odom_frame").value)
-        base_frame = str(self.get_parameter("base_frame").value)
-        x = float(items.get("PosX", 0.0))
-        y = float(items.get("PosY", 0.0))
-        z = float(items.get("PosZ", 0.0))
-        x, y, z = self._vendor_position_to_ros(x, y, z)
-        yaw = float(items.get("Yaw", 0.0))
-        location_ok = int(items.get("Location", 1)) == 0
+
+        vendor_pose = self._vendor_pose_from_items(items)
+        if not vendor_pose["ok"]:
+            if pose_source == "auto" and self._publish_tf_pose_fallback(str(vendor_pose["reason"]), items):
+                return
+            self._warn_throttled(
+                "invalid_pose",
+                "ignored invalid or unlocalized vendor pose: %s Location=%s PosX=%s PosY=%s PosZ=%s Yaw=%s"
+                % (
+                    vendor_pose["reason"],
+                    items.get("Location"),
+                    items.get("PosX"),
+                    items.get("PosY"),
+                    items.get("PosZ"),
+                    items.get("Yaw"),
+                ),
+                5.0,
+            )
+            self._publish_localization_ok(False)
+            return
+
+        x = float(vendor_pose["x"])
+        y = float(vendor_pose["y"])
+        z = float(vendor_pose["z"])
+        yaw = float(vendor_pose["yaw"])
         max_abs_position = max(1.0, float(self.get_parameter("max_abs_map_position_m").value))
         pose_values_finite = all(math.isfinite(value) for value in (x, y, z, yaw))
         pose_values_plausible = (
@@ -370,10 +500,12 @@ class M20TcpBridge(Node):
             and abs(y) <= max_abs_position
             and abs(z) <= max_abs_position
         )
-        if not location_ok or not pose_values_plausible:
+        if not pose_values_plausible:
+            if pose_source == "auto" and self._publish_tf_pose_fallback("vendor_pose_implausible", items):
+                return
             self._warn_throttled(
                 "invalid_pose",
-                "ignored invalid or unlocalized vendor pose: Location=%s PosX=%s PosY=%s PosZ=%s Yaw=%s"
+                "ignored invalid vendor pose: Location=%s PosX=%s PosY=%s PosZ=%s Yaw=%s"
                 % (
                     items.get("Location"),
                     items.get("PosX"),
@@ -387,6 +519,238 @@ class M20TcpBridge(Node):
             localization_ok.data = False
             self.loc_pub.publish(localization_ok)
             return
+        valid_by_filter, filter_reason = self._map_pose_passes_stability_filter(x, y, z, yaw)
+        if not valid_by_filter:
+            if pose_source == "auto" and self._publish_tf_pose_fallback(filter_reason, items):
+                return
+            self._warn_throttled(
+                "invalid_pose",
+                "ignored unstable vendor pose: %s Location=%s PosX=%s PosY=%s PosZ=%s Yaw=%s"
+                % (
+                    filter_reason,
+                    items.get("Location"),
+                    items.get("PosX"),
+                    items.get("PosY"),
+                    items.get("PosZ"),
+                    items.get("Yaw"),
+                ),
+                2.0,
+            )
+            self._publish_localization_ok(self._has_recent_good_map_pose())
+            return
+        self._publish_map_pose_values(x, y, z, yaw)
+
+    def _pose_source(self) -> str:
+        value = str(self.get_parameter("pose_source").value or "").strip().lower()
+        if value in ("official_tf", "tf", "factory_tf"):
+            return "official_tf"
+        if value in ("auto", "tf_fallback"):
+            return "auto"
+        return "tcp_1007"
+
+    def _vendor_pose_from_items(self, items: dict) -> dict:
+        try:
+            location_ok = int(items.get("Location", 1)) == 0
+        except (TypeError, ValueError):
+            location_ok = False
+        if not location_ok:
+            return {"ok": False, "reason": "location_not_ok"}
+        required = ("PosX", "PosY", "PosZ", "Yaw")
+        missing = [key for key in required if key not in items or items.get(key) is None]
+        if missing:
+            return {"ok": False, "reason": "missing_pose_fields:%s" % ",".join(missing)}
+        try:
+            x = float(items["PosX"])
+            y = float(items["PosY"])
+            z = float(items["PosZ"])
+            yaw = float(items["Yaw"])
+        except (TypeError, ValueError):
+            return {"ok": False, "reason": "non_numeric_pose_fields"}
+        x, y, z = self._vendor_position_to_ros(x, y, z)
+        if not all(math.isfinite(value) for value in (x, y, z, yaw)):
+            return {"ok": False, "reason": "non_finite_pose_fields"}
+        return {"ok": True, "x": x, "y": y, "z": z, "yaw": yaw}
+
+    def _publish_tf_pose_fallback(self, reason: str, vendor_items: dict) -> bool:
+        fallback = self._tf_pose_fallback_payload(vendor_items)
+        if fallback is None:
+            return False
+        self._warn_throttled(
+            "pose_fallback",
+            "using TF pose fallback %s->%s because %s; x=%.3f y=%.3f z=%.3f yaw=%.3f"
+            % (
+                fallback["source_frame"],
+                fallback["source_child_frame"],
+                reason,
+                fallback["x"],
+                fallback["y"],
+                fallback["z"],
+                fallback["yaw"],
+            ),
+            2.0,
+        )
+        self.last_good_map_pose = {
+            "x": fallback["x"],
+            "y": fallback["y"],
+            "z": fallback["z"],
+            "yaw": fallback["yaw"],
+            "stamp": self.get_clock().now(),
+        }
+        self.pending_jump_pose = None
+        self._publish_map_pose_values(
+            fallback["x"],
+            fallback["y"],
+            fallback["z"],
+            fallback["yaw"],
+        )
+        return True
+
+    def _publish_official_tf_pose(self, reason: str) -> bool:
+        fallback = self._tf_pose_fallback_payload({}, require_location_ok=False)
+        if fallback is None:
+            self._warn_throttled(
+                "pose_fallback",
+                "official TF pose source is not ready; waiting for fresh %s->%s"
+                % (
+                    self.get_parameter("tf_pose_fallback_map_frame").value,
+                    self.get_parameter("tf_pose_fallback_base_frame").value,
+                ),
+                2.0,
+            )
+            return False
+        location_ok = self._recent_navigation_location_ok()
+        if not self.official_tf_pose_unlocked:
+            if not location_ok:
+                self._warn_throttled(
+                    "pose_fallback",
+                    "official TF pose source has fresh data but is locked until Location=0; x=%.3f y=%.3f z=%.3f"
+                    % (fallback["x"], fallback["y"], fallback["z"]),
+                    2.0,
+                )
+                return False
+            self.official_tf_pose_unlocked = True
+
+        valid_by_filter, filter_reason = self._map_pose_passes_stability_filter(
+            fallback["x"],
+            fallback["y"],
+            fallback["z"],
+            fallback["yaw"],
+        )
+        if not valid_by_filter:
+            self._warn_throttled(
+                "pose_fallback",
+                "ignored unstable official TF pose: %s x=%.3f y=%.3f z=%.3f yaw=%.3f"
+                % (
+                    filter_reason,
+                    fallback["x"],
+                    fallback["y"],
+                    fallback["z"],
+                    fallback["yaw"],
+                ),
+                2.0,
+            )
+            self._publish_localization_ok(location_ok)
+            return False
+        self.last_good_map_pose = {
+            "x": fallback["x"],
+            "y": fallback["y"],
+            "z": fallback["z"],
+            "yaw": fallback["yaw"],
+            "stamp": self.get_clock().now(),
+        }
+        self.pending_jump_pose = None
+        self._publish_map_pose_values(
+            fallback["x"],
+            fallback["y"],
+            fallback["z"],
+            fallback["yaw"],
+            localization_ok=location_ok,
+        )
+        self._info_throttled(
+            "pose_fallback",
+            "using official TF pose source %s->%s reason=%s; x=%.3f y=%.3f z=%.3f yaw=%.3f"
+            % (
+                fallback["source_frame"],
+                fallback["source_child_frame"],
+                reason,
+                fallback["x"],
+                fallback["y"],
+                fallback["z"],
+                fallback["yaw"],
+            ),
+            30.0,
+        )
+        return True
+
+    def _tf_pose_fallback_payload(self, vendor_items: dict, require_location_ok: Optional[bool] = None):
+        if not bool(self.get_parameter("enable_tf_pose_fallback").value):
+            return None
+        fallback = self.last_tf_pose_fallback
+        if not isinstance(fallback, dict):
+            return None
+        stamp = fallback.get("stamp")
+        if stamp is None:
+            return None
+        max_age_s = max(0.0, float(self.get_parameter("tf_pose_fallback_max_age_s").value))
+        if max_age_s > 0.0 and (self.get_clock().now() - stamp).nanoseconds * 1e-9 > max_age_s:
+            return None
+        if require_location_ok is None:
+            require_location_ok = bool(self.get_parameter("tf_pose_fallback_require_location_ok").value)
+        if bool(require_location_ok):
+            location_ok = False
+            try:
+                location_ok = int(vendor_items.get("Location", 1)) == 0
+            except (TypeError, ValueError, AttributeError):
+                location_ok = False
+            if not location_ok and self.last_navigation_location_ok is True:
+                status_stamp = self.last_navigation_status_time
+                if status_stamp is not None:
+                    location_ok = (self.get_clock().now() - status_stamp).nanoseconds * 1e-9 <= 2.0
+            if not location_ok:
+                return None
+        x = float(fallback["x"])
+        y = float(fallback["y"])
+        z = float(fallback["z"])
+        yaw = float(fallback["yaw"])
+        max_abs_position = max(1.0, float(self.get_parameter("max_abs_map_position_m").value))
+        if (
+            not all(math.isfinite(value) for value in (x, y, z, yaw))
+            or abs(x) > max_abs_position
+            or abs(y) > max_abs_position
+            or abs(z) > max_abs_position
+        ):
+            return None
+        return {
+            "x": x,
+            "y": y,
+            "z": z,
+            "yaw": yaw,
+            "source_frame": str(fallback.get("source_frame") or ""),
+            "source_child_frame": str(fallback.get("source_child_frame") or ""),
+        }
+
+    def _recent_navigation_location_ok(self) -> bool:
+        if self.last_navigation_location_ok is not True:
+            return False
+        status_stamp = self.last_navigation_status_time
+        if status_stamp is None:
+            return False
+        age_s = (self.get_clock().now() - status_stamp).nanoseconds * 1e-9
+        return age_s <= 2.0
+
+    def _publish_map_pose_values(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        yaw: float,
+        *,
+        localization_ok: bool = True,
+    ) -> None:
+        now = self.get_clock().now().to_msg()
+        map_frame = str(self.get_parameter("map_frame").value)
+        odom_frame = str(self.get_parameter("odom_frame").value)
+        base_frame = str(self.get_parameter("base_frame").value)
         quat = yaw_to_quaternion(yaw)
 
         pose = PoseStamped()
@@ -426,7 +790,81 @@ class M20TcpBridge(Node):
             odom_to_base.transform.rotation = quat
             self.tf_broadcaster.sendTransform([map_to_odom, odom_to_base])
 
-        self._publish_localization_ok(location_ok)
+        self._publish_localization_ok(bool(localization_ok))
+
+    def _map_pose_passes_stability_filter(self, x: float, y: float, z: float, yaw: float):
+        now = self.get_clock().now()
+        last = self.last_good_map_pose
+
+        if last is not None and bool(self.get_parameter("reject_origin_placeholder_pose").value):
+            origin_radius = max(0.0, float(self.get_parameter("origin_placeholder_radius_m").value))
+            last_radius = math.hypot(float(last["x"]), float(last["y"]))
+            if (
+                math.hypot(x, y) <= origin_radius
+                and last_radius > max(0.5, origin_radius * 4.0)
+                and not self._within_relocalization_jump_grace(now, x, y)
+            ):
+                return False, "origin_placeholder_after_good_pose"
+
+        jump_limit = max(0.0, float(self.get_parameter("pose_jump_reject_m").value))
+        if last is not None and jump_limit > 0.0:
+            distance = math.hypot(x - float(last["x"]), y - float(last["y"]))
+            if distance > jump_limit and not self._within_relocalization_jump_grace(now, x, y):
+                accept_after_s = max(0.0, float(self.get_parameter("pose_jump_accept_after_s").value))
+                pending = self.pending_jump_pose
+                if (
+                    pending is not None
+                    and math.hypot(x - float(pending["x"]), y - float(pending["y"])) <= min(0.25, jump_limit * 0.5)
+                ):
+                    first_seen = pending.get("first_seen")
+                    stable_for = (
+                        (now - first_seen).nanoseconds * 1e-9
+                        if first_seen is not None
+                        else 0.0
+                    )
+                    if stable_for < accept_after_s:
+                        return False, "jump_waiting_for_stability distance=%.2f stable_for=%.1fs" % (
+                            distance,
+                            stable_for,
+                        )
+                else:
+                    self.pending_jump_pose = {
+                        "x": x,
+                        "y": y,
+                        "z": z,
+                        "yaw": yaw,
+                        "first_seen": now,
+                    }
+                    return False, "jump_from_last_good distance=%.2f" % distance
+            elif self.pending_jump_pose is not None:
+                self.pending_jump_pose = None
+
+        self.last_good_map_pose = {"x": x, "y": y, "z": z, "yaw": yaw, "stamp": now}
+        self.pending_jump_pose = None
+        return True, ""
+
+    def _has_recent_good_map_pose(self) -> bool:
+        if self.last_good_map_pose is None:
+            return False
+        stamp = self.last_good_map_pose.get("stamp")
+        if stamp is None:
+            return False
+        hold_s = max(0.0, float(self.get_parameter("pose_filter_hold_last_good_s").value))
+        if hold_s <= 0.0:
+            return False
+        return (self.get_clock().now() - stamp).nanoseconds * 1e-9 <= hold_s
+
+    def _within_relocalization_jump_grace(self, now, x: float, y: float) -> bool:
+        if self.last_relocalization_request_time is None or self.last_relocalization_target is None:
+            return False
+        grace_s = max(0.0, float(self.get_parameter("pose_relocalization_jump_grace_s").value))
+        if grace_s <= 0.0:
+            return False
+        if (now - self.last_relocalization_request_time).nanoseconds * 1e-9 > grace_s:
+            return False
+        radius_m = max(0.0, float(self.get_parameter("pose_relocalization_jump_grace_radius_m").value))
+        target = self.last_relocalization_target
+        return math.hypot(x - float(target["x"]), y - float(target["y"])) <= radius_m
 
     def _publish_localization_ok(self, ok: bool) -> None:
         localization_ok = Bool()
@@ -444,6 +882,12 @@ class M20TcpBridge(Node):
         obs = Bool()
         obs.data = int(items.get("ObsState", 0)) == 1
         self.obs_pub.publish(obs)
+        try:
+            self.last_navigation_location_ok = int(items.get("Location", 1)) == 0
+            self.last_navigation_status_time = self.get_clock().now()
+        except (TypeError, ValueError):
+            self.last_navigation_location_ok = False
+            self.last_navigation_status_time = self.get_clock().now()
         # Keep localization_ok owned by _publish_map_pose(): it requires a fresh,
         # plausible map pose and avoids this status poll racing that decision.
         status = String()
@@ -478,6 +922,22 @@ class M20TcpBridge(Node):
         if last is None or (now - last).nanoseconds * 1e-9 >= period_s:
             setattr(self, attr, now)
             self.get_logger().warning(message)
+
+    def _info_throttled(self, key: str, message: str, period_s: float) -> None:
+        attr = "last_%s_info_time" % key
+        now = self.get_clock().now()
+        last = getattr(self, attr, None)
+        if last is None or (now - last).nanoseconds * 1e-9 >= period_s:
+            setattr(self, attr, now)
+            self.get_logger().info(message)
+
+    @staticmethod
+    def _wrap_angle(value: float) -> float:
+        while value > math.pi:
+            value -= math.tau
+        while value <= -math.pi:
+            value += math.tau
+        return value
 
     def _ros_position_to_vendor(self, x: float, y: float, z: float):
         scale = float(self.get_parameter("vendor_position_scale").value)

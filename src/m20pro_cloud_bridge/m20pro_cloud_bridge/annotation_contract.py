@@ -72,12 +72,12 @@ def string_list(value: Any) -> List[str]:
 
 
 def radar_scan_plan_from_payload(payload: Any) -> Dict[str, Any]:
-    if isinstance(payload, dict):
-        enabled = payload.get("enabled", True)
-        raw_scans = payload.get("scans")
-    else:
-        enabled = True
-        raw_scans = None
+    if not isinstance(payload, dict) or not payload:
+        return {}
+    if "enabled" not in payload and "scans" not in payload:
+        return {}
+    enabled = payload.get("enabled", True)
+    raw_scans = payload.get("scans")
     if isinstance(enabled, str):
         enabled = enabled.strip().lower() not in ("0", "false", "no", "off", "disabled")
     scans: List[Dict[str, Any]] = []
@@ -360,6 +360,8 @@ def normalize_annotation_semantics(item: Dict[str, Any]) -> Dict[str, Any]:
     item["radar"] = radar_scan_plan_from_payload(item.get("radar"))
     result_prefix = str(item.get("result_file_prefix") or "").strip()
     item["result_file_prefix"] = result_prefix or annotation_result_prefix(item)
+    if not isinstance(item.get("radar"), dict):
+        item["radar"] = {}
 
     if "camera" not in item:
         item["camera"] = ""
@@ -399,7 +401,6 @@ def annotation_semantics_payload(annotation: Dict[str, Any]) -> Dict[str, Any]:
         "scan_point": annotation.get("scan_point"),
         "result_file_prefix": annotation.get("result_file_prefix"),
         "floor": annotation.get("floor"),
-        "type": annotation.get("type"),
         "manual_point_type": annotation.get("manual_point_type"),
         "manual_point_type_label": MANUAL_POINT_TYPES[annotation["manual_point_type"]]["label"],
         "pose": dict(pose),

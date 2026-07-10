@@ -188,11 +188,11 @@
               <button id="finishMappingBtn">完成/保存建图</button>
             </div>
             <div class="small" style="margin-top:8px;">
-              默认按《M20 Pro 软件使用手册》通过 106 的 drmap 建图；需要 104 能免密 SSH 到 106，且 sudo drmap 不要求交互输入密码。
+              默认按《M20 Pro 软件使用手册》通过 106 的 drmap -b 建图；保存后不会立即用于导航，需要拉取后手动切换地图生效。
             </div>
           </div>
           <div class="section">
-            <h2>拉取 106 当前地图</h2>
+            <h2>拉取 106 建图结果</h2>
             <div class="row">
               <label>地图楼层</label>
               <input id="importFloor" value="F20" />
@@ -379,7 +379,6 @@
           <div class="section">
             <h2>作业前状态</h2>
             <div id="taskPreflightSummary" class="preflight-summary">尚未自检</div>
-            <div id="taskReadinessSummary" class="preflight-summary warn" style="margin-top:8px;">等待任务链路状态</div>
             <div id="taskNextStepSummary" class="preflight-summary warn" style="margin-top:8px;">等待下一步判断</div>
             <div class="actions">
               <button id="taskRunPreflightBtn">开机基础自检</button>
@@ -407,7 +406,6 @@
             <div id="activeTaskSummary" class="preflight-summary">无任务</div>
             <div id="activeTask" class="mono">无任务</div>
             <div class="actions">
-              <button id="copyFieldSnapshotBtn" title="复制当前前端/任务/位姿/点云状态，便于现场留档">复制现场快照</button>
               <button class="danger" id="stopTaskBtn">停止当前任务</button>
               <button id="resetTaskSessionBtn">复位导航状态</button>
             </div>
@@ -417,7 +415,7 @@
     </aside>
   </main>
 
-  <script src="/static/dashboard.js?v=20260701-floor-display"></script>
+  <script src="/static/dashboard.js?v=20260709-final-localization-verdict"></script>
 
 </body>
 </html>

@@ -101,6 +101,16 @@ def test_tick_gate_decisions() -> None:
     )
     assert_equal(lost["code"], "localization_lost", "localization loss code")
 
+    factory_localized = active_task_tick_gate_decision(
+        pose={"x": 0.0, "y": 0.0, "yaw": 0.0},
+        annotation=annotation(),
+        current_floor="F20",
+        localization_ok=True,
+        pose_age=0.2,
+        pose_timeout_s=2.0,
+    )
+    assert_equal(factory_localized["action"], "pass", "effective factory localization keeps task running")
+
     stale = active_task_tick_gate_decision(
         pose={"x": 0.0, "y": 0.0, "yaw": 0.0},
         annotation=annotation(),

@@ -228,8 +228,8 @@ echo "mode=${MODE} timeout=${TIMEOUT_S}s web=${WEB_URL}"
 if [[ -n "${FASTRTPS_DEFAULT_PROFILES_FILE:-}" ]]; then
   echo "ros_cli_fastdds=${FASTRTPS_DEFAULT_PROFILES_FILE}"
 fi
-echo "基础自检用于确认全量系统、网页、感知链路、电量和原厂状态链路。"
-echo "当前默认按自动场地判断处理：未重定位时 Nav2/costmap 可延后确认；点云、/scan、地图、网页和电量不能因为在工位而缺失。"
+echo "基础自检用于确认全量系统、网页、感知链路和原厂状态链路。"
+echo "当前默认按自动场地判断处理：未重定位时 Nav2/costmap 可延后确认；电量只显示给操作员参考，不作为软件自检或任务启动条件。"
 echo
 
 wait_for_cmd "ROS graph available" timeout 5 ros2 node list || true

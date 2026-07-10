@@ -69,8 +69,13 @@ def scan(**extra) -> dict:
     return payload
 
 
-def status(runtime_state: dict, now: float = 100.0) -> dict:
-    return perception_status_payload(runtime_state, now=now, now_text=fixed_now_text)
+def status(runtime_state: dict, now: float = 100.0, perception_mode: str = "local_fusion") -> dict:
+    return perception_status_payload(
+        runtime_state,
+        now=now,
+        now_text=fixed_now_text,
+        perception_mode=perception_mode,
+    )
 
 
 def test_factory_lidar_publisher_missing() -> None:
@@ -141,6 +146,51 @@ def test_perception_ready() -> None:
     assert_equal(payload["scan"]["finite_ranges"], 360, "scan ranges")
 
 
+def test_default_mode_still_requires_relay() -> None:
+    payload = status(
+        {
+            "lidar_relay_status": {},
+            "lidar_points": {},
+            "scan": scan(),
+        }
+    )
+    assert_equal(payload["ready"], False, "default mode not ready without relay")
+    assert_equal(payload["code"], "lidar_relay_no_samples", "default mode relay code")
+    assert_equal(payload["mode"], "local_fusion", "default mode")
+
+
+def test_edge_scan_mode_uses_scan_as_hard_condition() -> None:
+    payload = status(
+        {
+            "lidar_relay_status": {},
+            "lidar_points": {},
+            "scan": scan(finite_ranges=240),
+        },
+        perception_mode="edge_scan",
+    )
+    assert_equal(payload["ready"], True, "edge scan ready with fresh scan")
+    assert_equal(payload["code"], "perception_ready", "edge scan ready code")
+    assert_equal(payload["mode"], "edge_scan", "edge scan mode")
+    assert_equal(payload["relay"]["not_used"], True, "relay not used")
+    assert_equal(payload["relay"]["ok"], False, "relay not required")
+    assert_equal(payload["lidar_points"]["ok"], False, "relay pointcloud not required")
+    assert_equal(payload["scan"]["finite_ranges"], 240, "edge scan ranges")
+
+
+def test_edge_scan_mode_fails_when_scan_is_missing() -> None:
+    payload = status(
+        {
+            "lidar_relay_status": relay(),
+            "lidar_points": lidar(),
+            "scan": scan(finite_ranges=0),
+        },
+        perception_mode="edge_scan",
+    )
+    assert_equal(payload["ready"], False, "edge scan not ready without scan")
+    assert_equal(payload["code"], "scan_unavailable", "edge scan missing scan code")
+    assert_equal(payload["relay"]["not_used"], True, "relay ignored in edge scan mode")
+
+
 def main() -> int:
     for test in (
         test_factory_lidar_publisher_missing,
@@ -148,6 +198,9 @@ def main() -> int:
         test_relay_output_unavailable,
         test_scan_unavailable,
         test_perception_ready,
+        test_default_mode_still_requires_relay,
+        test_edge_scan_mode_uses_scan_as_hard_condition,
+        test_edge_scan_mode_fails_when_scan_is_missing,
     ):
         test()
         print(f"[OK] {test.__name__}")

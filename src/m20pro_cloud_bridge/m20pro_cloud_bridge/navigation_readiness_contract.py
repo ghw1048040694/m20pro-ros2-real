@@ -1,4 +1,4 @@
-"""Pure navigation readiness helpers for task start checks."""
+"""Pure navigation readiness helpers for relocalization and diagnostics."""
 
 from __future__ import annotations
 
@@ -150,7 +150,7 @@ def should_check_navigation_readiness(
 
 def navigation_readiness_disabled_payload(*, now_text: NowText) -> Dict[str, Any]:
     return readiness_success(
-        "任务启动前不要求 Nav2 readiness",
+        "当前不要求检查 Nav2 readiness",
         {"required": False},
         now_text=now_text,
     )

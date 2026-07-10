@@ -4,6 +4,7 @@ import json
 import math
 import os
 import select
+import shlex
 import shutil
 import socket
 import subprocess
@@ -90,7 +91,9 @@ from .map_contract import (
 )
 from .map_selection_contract import (
     apply_selected_map_choice_state,
+    effective_map_id_for_display,
     map_relocalization_required_payload,
+    matching_fixed_map_id_for_live_map,
     selected_map_status_payload,
     selected_map_wait_timeout_payload,
 )
@@ -119,16 +122,12 @@ from .nav_status_contract import (
     transition_nav_status_event_payload,
 )
 from .navigation_readiness_contract import (
-    navigation_readiness_disabled_payload,
     navigation_readiness_payload,
-    navigation_readiness_wait_timeout_payload,
-    should_check_navigation_readiness,
 )
 from .pcd_derived import process_imported_map
 from .perception_contract import perception_status_payload
 from .preflight_contract import (
     preflight_base_topics_item,
-    preflight_battery_item,
     preflight_context,
     preflight_costmap_items,
     preflight_localization_item,
@@ -161,66 +160,35 @@ from .task_contract import (
     apply_task_start_pre_runtime_failure_state,
     apply_task_delete,
     apply_task_name_update,
-    apply_runtime_guard_clear_state,
-    apply_runtime_guard_wait_state,
-    battery_readiness_payload,
     build_task_create_record,
-    current_task_readiness_payload as contract_current_task_readiness_payload,
     is_finite_pose_dict,
     is_plausible_pose_dict,
     map_metadata_mismatch_error,
-    map_relocalization_task_readiness_payload,
-    perception_readiness_payload,
-    readiness_error_payload,
-    runtime_guard_failure_extra,
-    runtime_guard_lost_decision,
-    runtime_guard_readiness_payload,
-    runtime_guard_waiting_event_payload,
     normalize_startup_task_runtime_state,
     validate_task_annotations_for_map as contract_validate_task_annotations_for_map,
     stop_stale_running_tasks,
     task_create_map_metadata_mismatch_payload,
     task_list_filter_payload,
     task_create_static_context,
-    task_runtime_readiness_payload,
-    task_readiness_pre_runtime_payload,
-    task_start_runtime_readiness_payload,
     task_start_static_context,
-    task_pose_readiness_payload,
     task_waypoint_payload,
+    validation_error_payload,
     validate_task_annotation_order,
     validate_task_start_expectations,
-)
-from .task_plan_contract import (
-    apply_plan_goal_verified_state,
-    plan_goal_verified_event_payload,
-    task_plan_match_decision,
 )
 from .task_progress_contract import (
     active_task_pre_dispatch_decision,
     apply_localization_lost_start_state,
-    apply_stall_warning_state,
-    goal_accept_timeout_decision,
     localization_lost_failure_extra,
     localization_lost_start_event_payload,
     localization_lost_timeout_decision,
     near_goal_wait_decision,
-    near_goal_timeout_decision,
     prepare_near_goal_wait_update,
-    stall_failure_extra,
-    stall_warning_event_payload,
-    task_stall_decision,
-    timeout_failure_extra,
     update_active_task_progress_state,
-    waypoint_timeout_decision,
 )
-from .task_snapshot_contract import (
-    apply_task_result_to_tasks,
+from .active_waypoint_contract import (
     build_active_waypoint_payload,
     build_idle_waypoint_payload,
-    build_task_result_snapshot,
-    build_task_runtime_snapshot,
-    last_task_result_payload,
     pose_age_sec,
 )
 from .web_runtime_contract import (
@@ -713,7 +681,10 @@ class WebDashboardNode(Node):
         self._annotations = self._load_json("annotations.json", [])
         self._tasks = self._load_json("tasks.json", [])
         self._sessions = self._load_json("mapping_sessions.json", [])
-        self._settings = self._load_json("settings.json", {"selected_map_id": None, "active_task": None})
+        self._settings = self._load_json(
+            "settings.json",
+            {"selected_map_id": None, "working_map_id": None, "active_task": None},
+        )
         self._normalize_runtime_state_on_startup()
         self._mapping_processes: Dict[str, Dict[str, Any]] = {}
         self._camera_workers: Dict[str, _CameraProxyWorker] = {}
@@ -721,14 +692,14 @@ class WebDashboardNode(Node):
         self._preflight_lock = threading.Lock()
         self._preflight_run_lock = threading.Lock()
         self._preflight_running: Optional[Dict[str, Any]] = None
-        self._nav_readiness_cache_lock = threading.Lock()
-        self._nav_readiness_cache: Optional[Dict[str, Any]] = None
-        self._nav_readiness_cache_at = 0.0
         self._map_file_cache_lock = threading.Lock()
         self._map_file_cache: Dict[str, Dict[str, Any]] = {}
         self._map_file_summary_cache: Dict[str, Dict[str, Any]] = {}
         self._lidar_points_topic = str(self.get_parameter("lidar_points_topic").value)
         self._lidar_points_relay_subscribe_topic = str(self.get_parameter("lidar_points_relay_subscribe_topic").value)
+        self._enable_lidar_points_subscriptions = bool(
+            self.get_parameter("enable_lidar_points_subscriptions").value
+        )
         self._last_scan_overlay_update = 0.0
         self._last_scan_overlay_points: List[Dict[str, float]] = []
         self._startup_map_sync_timer = None
@@ -844,7 +815,7 @@ class WebDashboardNode(Node):
         self.declare_parameter(
             "factory_mapping_start_command",
             'ssh -o BatchMode=yes -o ConnectTimeout=8 {factory_user}@{factory_host} '
-            '"nohup sudo -n drmap mapping -s -n {map_name} > /tmp/m20pro_drmap_mapping_{session_id}.log 2>&1 &"',
+            '"nohup sudo -n drmap mapping -b -s -n {map_name} > /tmp/m20pro_drmap_mapping_{session_id}.log 2>&1 &"',
         )
         self.declare_parameter(
             "factory_mapping_finish_command",
@@ -862,45 +833,18 @@ class WebDashboardNode(Node):
         self.declare_parameter("stair_zones_topic", "/m20pro/stair_zones")
         self.declare_parameter("goal_reached_tolerance_m", 0.3)
         self.declare_parameter("task_goal_resend_interval_s", 5.0)
-        self.declare_parameter("task_localization_lost_timeout_s", 5.0)
         self.declare_parameter("task_goal_accept_timeout_s", 12.0)
         self.declare_parameter("task_waypoint_timeout_s", 180.0)
-        self.declare_parameter("task_near_goal_timeout_s", 10.0)
-        self.declare_parameter("task_stall_warn_timeout_s", 18.0)
-        self.declare_parameter("task_stall_stop_timeout_s", 45.0)
-        self.declare_parameter("task_stall_min_pose_movement_m", 0.08)
-        self.declare_parameter("task_stall_min_distance_delta_m", 0.12)
-        self.declare_parameter("task_pose_history_max_points", 180)
+        self.declare_parameter("task_progress_min_pose_movement_m", 0.08)
+        self.declare_parameter("task_progress_min_distance_delta_m", 0.12)
         self.declare_parameter("task_timeline_max_events", 80)
         self.declare_parameter("task_start_settle_s", 0.5)
         self.declare_parameter("task_start_pose_timeout_s", 3.0)
-        self.declare_parameter("task_start_require_localization_ok", True)
-        self.declare_parameter("task_start_require_pose_on_map", True)
-        self.declare_parameter("task_start_warn_first_waypoint_distance_m", 8.0)
-        self.declare_parameter("task_start_max_first_waypoint_distance_m", 25.0)
-        self.declare_parameter("task_start_require_current_floor_known", True)
-        self.declare_parameter("task_start_require_current_floor_match", False)
-        self.declare_parameter("task_start_require_nav_ready", True)
-        self.declare_parameter("task_start_require_battery_ok", True)
-        self.declare_parameter("task_start_min_battery_level", 25)
-        self.declare_parameter("task_runtime_require_battery_ok", True)
-        self.declare_parameter("task_runtime_min_battery_level", 20)
-        self.declare_parameter("task_battery_timeout_s", 10.0)
-        self.declare_parameter("task_start_require_scan_ok", True)
-        self.declare_parameter("task_start_require_lidar_points_ok", True)
-        self.declare_parameter("task_start_min_scan_finite_ranges", 20)
-        self.declare_parameter("task_start_min_lidar_points", 1)
-        self.declare_parameter("task_start_perception_timeout_s", 3.0)
-        self.declare_parameter("task_runtime_require_perception_ok", True)
-        self.declare_parameter("task_runtime_guard_lost_timeout_s", 5.0)
-        self.declare_parameter("task_start_costmap_timeout_s", 3.0)
-        self.declare_parameter("task_nav_readiness_cache_s", 2.0)
-        self.declare_parameter("task_start_nav_ready_after_reset_timeout_s", 10.0)
-        self.declare_parameter("task_start_nav_ready_poll_s", 0.25)
-        self.declare_parameter("task_nav_feedback_pose_timeout_s", 3.0)
-        self.declare_parameter("task_plan_match_required", True)
-        self.declare_parameter("task_plan_match_timeout_s", 8.0)
-        self.declare_parameter("task_plan_goal_tolerance_m", 0.8)
+        self.declare_parameter("task_runtime_localization_lost_stop_s", 2.0)
+        self.declare_parameter("task_runtime_scan_lost_stop_s", 2.0)
+        self.declare_parameter("task_runtime_scan_timeout_s", 1.0)
+        self.declare_parameter("task_runtime_scan_min_finite_ranges", 20)
+        self.declare_parameter("relocalization_nav_timeout_s", 3.0)
         self.declare_parameter("task_stop_zero_cmd_samples", 10)
         self.declare_parameter(
             "task_clear_costmap_services",
@@ -919,7 +863,7 @@ class WebDashboardNode(Node):
         self.declare_parameter("initialpose_topic", "/initialpose")
         self.declare_parameter("initialpose_covariance_xy", 0.25)
         self.declare_parameter("initialpose_covariance_yaw", 0.0685)
-        self.declare_parameter("initialpose_publish_repeats", 10)
+        self.declare_parameter("initialpose_publish_repeats", 1)
         self.declare_parameter("initialpose_publish_interval_s", 0.15)
         self.declare_parameter("relocalization_verify_timeout_s", 8.0)
         self.declare_parameter("relocalization_pose_tolerance_m", 2.0)
@@ -935,9 +879,11 @@ class WebDashboardNode(Node):
         self.declare_parameter("lidar_points_topic", "/LIDAR/POINTS")
         self.declare_parameter("lidar_points_relay_subscribe_topic", "/m20pro/lidar_points_relay")
         self.declare_parameter("lidar_relay_status_topic", "/m20pro/lidar_relay/status")
+        self.declare_parameter("enable_lidar_points_subscriptions", True)
         self.declare_parameter("enable_lidar_points_relay", False)
         self.declare_parameter("lidar_points_relay_topic", "/m20pro/lidar_points_relay")
         self.declare_parameter("scan_topic", "/scan")
+        self.declare_parameter("perception_mode", "local_fusion")
         self.declare_parameter("scan_overlay_max_points", 720)
         self.declare_parameter("scan_overlay_update_min_interval_s", 0.1)
         self.declare_parameter("scan_overlay_min_range_m", 0.05)
@@ -986,9 +932,9 @@ class WebDashboardNode(Node):
         self.declare_parameter("camera_proxy_frame_timeout_s", 2.0)
         self.declare_parameter("max_path_points", 800)
         self.declare_parameter("max_events", 30)
+        self.declare_parameter("api_slow_log_threshold_s", 1.0)
         self.declare_parameter("preflight_topic_timeout_s", 5.0)
         self.declare_parameter("preflight_settle_wait_s", 6.0)
-        self.declare_parameter("preflight_min_battery_level", 20)
 
     def _topic(self, name: str) -> str:
         return str(self.get_parameter(name).value)
@@ -1055,15 +1001,27 @@ class WebDashboardNode(Node):
 
     def _normalize_runtime_state_on_startup(self) -> None:
         changed = False
-        selected_map_id = self._settings.get("selected_map_id")
-        if selected_map_id and not self._find_map_record_unlocked(str(selected_map_id)):
-            self.get_logger().warning(f"selected map {selected_map_id} no longer exists; falling back to default map")
+        selected_map_id = str(self._settings.get("selected_map_id") or "").strip()
+        working_map_id = str(self._settings.get("working_map_id") or "").strip()
+        if selected_map_id and not self._find_map_record_unlocked(selected_map_id):
+            self.get_logger().warning(f"selected map {selected_map_id} no longer exists; keeping live display mode")
             self._settings["selected_map_id"] = None
+            selected_map_id = ""
             changed = True
-        if not self._settings.get("selected_map_id"):
+        if selected_map_id:
+            if working_map_id != selected_map_id:
+                self._settings["working_map_id"] = selected_map_id
+                working_map_id = selected_map_id
+                changed = True
+        elif working_map_id and not self._find_map_record_unlocked(working_map_id):
+            self.get_logger().warning(f"working map {working_map_id} no longer exists; clearing startup working map")
+            self._settings["working_map_id"] = None
+            working_map_id = ""
+            changed = True
+        if not selected_map_id and not working_map_id:
             default_map_id = self._default_map_id_unlocked()
             if default_map_id:
-                self._settings["selected_map_id"] = default_map_id
+                self._settings["working_map_id"] = default_map_id
                 changed = True
         for item in self._annotations:
             before = json.dumps(item, ensure_ascii=False, sort_keys=True)
@@ -1122,11 +1080,11 @@ class WebDashboardNode(Node):
                 self._save_json("settings.json", self._settings)
 
         with self._data_lock:
-            selected_map_id = str(self._settings.get("selected_map_id") or "").strip()
+            selected_map_id = str(self._working_map_id_unlocked() or "").strip()
             if not selected_map_id:
                 store_startup_sync(
                     startup_map_sync_skipped_payload(
-                        reason="selected_map_missing",
+                        reason="working_map_missing",
                         attempt=attempt,
                         max_attempts=max_attempts,
                         now_text=now_text,
@@ -1236,21 +1194,27 @@ class WebDashboardNode(Node):
             self.create_subscription(BatteryData, self._topic("battery_topic"), self._on_battery, 10)
         else:
             self.get_logger().warning("drdds.msg.BatteryData is unavailable; battery display is disabled")
-        self.create_subscription(PointCloud2, self._topic("lidar_points_topic"), self._on_lidar_points, cloud_qos)
+        if self._enable_lidar_points_subscriptions and self._topic("lidar_points_topic"):
+            self.create_subscription(PointCloud2, self._topic("lidar_points_topic"), self._on_lidar_points, cloud_qos)
         relay_subscribe_topic = self._topic("lidar_points_relay_subscribe_topic")
-        if relay_subscribe_topic and relay_subscribe_topic != self._topic("lidar_points_topic"):
+        if (
+            self._enable_lidar_points_subscriptions
+            and relay_subscribe_topic
+            and relay_subscribe_topic != self._topic("lidar_points_topic")
+        ):
             self.create_subscription(
                 PointCloud2,
                 relay_subscribe_topic,
                 self._on_lidar_points_relay,
                 cloud_qos,
             )
-        self.create_subscription(
-            String,
-            self._topic("lidar_relay_status_topic"),
-            self._on_lidar_relay_status,
-            10,
-        )
+        if self._enable_lidar_points_subscriptions and self._topic("lidar_relay_status_topic"):
+            self.create_subscription(
+                String,
+                self._topic("lidar_relay_status_topic"),
+                self._on_lidar_relay_status,
+                10,
+            )
         self.create_subscription(LaserScan, self._topic("scan_topic"), self._on_scan, scan_qos)
         self.create_subscription(Odometry, self._topic("odom_topic"), self._on_odom, 10)
         self.create_subscription(PoseStamped, self._topic("pose_topic"), self._on_pose, 20)
@@ -1510,17 +1474,6 @@ class WebDashboardNode(Node):
                 pose["stamp"] = stamp
             pose["last_update"] = time.time()
             self._state["pose"] = pose
-            history = list(self._state.get("pose_history") or [])
-            history.append(
-                {
-                    "x": pose["x"],
-                    "y": pose["y"],
-                    "yaw": pose["yaw"],
-                    "last_update": pose["last_update"],
-                }
-            )
-            max_history = max(10, int(self.get_parameter("task_pose_history_max_points").value))
-            self._state["pose_history"] = history[-max_history:]
             self._mark_topic("pose")
 
     def _on_path(self, msg: RosPath) -> None:
@@ -1687,6 +1640,22 @@ class WebDashboardNode(Node):
             }
             self._mark_topic("relocalization_result")
 
+    def _factory_localization_ok(self, state: Dict[str, Any]) -> bool:
+        if state.get("localization_ok") is True:
+            return True
+        nav_status_parsed = (
+            state.get("navigation_status_parsed")
+            if isinstance(state.get("navigation_status_parsed"), dict)
+            else {}
+        )
+        if not nav_status_parsed and state.get("navigation_status") is not None:
+            nav_status_parsed = parse_key_value_status(str(state.get("navigation_status") or ""))
+        location = nav_status_parsed.get("location")
+        try:
+            return float(location) == 0.0
+        except (TypeError, ValueError):
+            return False
+
     def _on_event(self, msg: String) -> None:
         max_events = int(self.get_parameter("max_events").value)
         event = {
@@ -1710,7 +1679,7 @@ class WebDashboardNode(Node):
             }
             self._mark_topic("annotated_image")
 
-    def _snapshot(self) -> Dict[str, Any]:
+    def _snapshot(self, include_debug: bool = True) -> Dict[str, Any]:
         now = time.time()
         with self._lock:
             snapshot = dict(self._state)
@@ -1736,17 +1705,27 @@ class WebDashboardNode(Node):
             }
             map_status_runtime = {"map": dict(self._state.get("map") or {})}
             snapshot.pop("map", None)
-        snapshot["perception_status"] = perception_status_payload(snapshot, now=now, now_text=now_text)
+        snapshot["perception_status"] = perception_status_payload(
+            snapshot,
+            now=now,
+            now_text=now_text,
+            perception_mode=str(self.get_parameter("perception_mode").value),
+        )
         with self._data_lock:
             snapshot["selected_map_id"] = self._settings.get("selected_map_id")
+            snapshot["working_map_id"] = self._settings.get("working_map_id")
             snapshot["active_task"] = self._settings.get("active_task")
-            snapshot["last_task_result"] = self._last_task_result_unlocked()
             snapshot["map_relocalization_required"] = self._settings.get("map_relocalization_required")
             snapshot["startup_map_sync"] = self._settings.get("startup_map_sync")
+        snapshot["effective_map_id"] = self._effective_map_id(runtime_state=map_status_runtime)
+        self._remember_working_map_id(snapshot["effective_map_id"], reason="state_effective_map")
+        with self._data_lock:
+            snapshot["working_map_id"] = self._settings.get("working_map_id")
         pose = snapshot.get("pose") if isinstance(snapshot.get("pose"), dict) else {}
         pose_age = pose_age_sec(pose, now)
         pose_timeout_s = max(0.5, float(self.get_parameter("task_start_pose_timeout_s").value))
         snapshot["selected_map_status"] = self._selected_map_status_payload(map_status_runtime)
+        snapshot["factory_localization_ok"] = self._factory_localization_ok(snapshot)
         clearance = self._map_relocalization_clearance_payload(
             snapshot=snapshot,
             selected_map_status=snapshot["selected_map_status"],
@@ -1760,27 +1739,17 @@ class WebDashboardNode(Node):
             self._clear_map_relocalization_required(clearance)
             snapshot["map_relocalization_required"] = None
             snapshot["localization_ok"] = True
+            snapshot["factory_localization_ok"] = True
         elif snapshot.get("map_relocalization_required"):
             snapshot["factory_localization_ok"] = bool(clearance.get("factory_localization_ok"))
             snapshot["localization_ok"] = False
         with self._preflight_lock:
             snapshot["preflight"] = self._preflight_with_age_unlocked()
-        nav_readiness = (
-            self._cached_navigation_readiness_payload()
-            if self._should_check_navigation_readiness(runtime_state=snapshot)
-            else None
-        )
-        task_readiness = self._current_task_readiness_payload(
-            nav_readiness=nav_readiness,
-            runtime_state=snapshot,
-            now=now,
-        )
-        snapshot["task_readiness"] = task_readiness
+        nav_readiness = None
         snapshot["pose_age_sec"] = pose_age
         snapshot["pose_timeout_s"] = pose_timeout_s
         snapshot["pose_fresh"] = bool(
-            snapshot.get("localization_ok") is True
-            and is_plausible_pose_dict(pose)
+            is_plausible_pose_dict(pose)
             and pose_age is not None
             and pose_age <= pose_timeout_s
         )
@@ -1790,8 +1759,6 @@ class WebDashboardNode(Node):
             pose_age_sec=pose_age,
             pose_timeout_s=pose_timeout_s,
             navigation_status=snapshot.get("navigation_status"),
-            task_readiness=task_readiness,
-            navigation_readiness=nav_readiness,
             factory_localization_ok=snapshot.get("factory_localization_ok"),
             relocalization_result=snapshot.get("relocalization_result"),
             map_relocalization_required=snapshot.get("map_relocalization_required"),
@@ -1811,6 +1778,10 @@ class WebDashboardNode(Node):
         for value in snapshot["topics"].values():
             last_update = value.get("last_update")
             value["age_sec"] = None if last_update is None else max(0.0, now - float(last_update))
+        snapshot["debug_included"] = bool(include_debug)
+        if not include_debug:
+            snapshot["events"] = []
+            snapshot["topics"] = {}
         return snapshot
 
     def _map_relocalization_lock_loaded_time(self, lock_payload: Any) -> Optional[float]:
@@ -1849,7 +1820,7 @@ class WebDashboardNode(Node):
         )
         return map_relocalization_clearance_payload(
             map_relocalization_required=lock_payload,
-            selected_map_id=snapshot.get("selected_map_id"),
+            selected_map_id=snapshot.get("effective_map_id") or snapshot.get("selected_map_id"),
             selected_map_status=selected_map_status,
             localization_ok=snapshot.get("localization_ok"),
             factory_localization_ok=factory_localization_ok,
@@ -1870,7 +1841,7 @@ class WebDashboardNode(Node):
                 return
             self._settings.pop("map_relocalization_required", None)
             self._save_json("settings.json", self._settings)
-        self._append_event("固定地图重定位锁已自动清除", clearance)
+        self._append_event("固定地图重定位要求已自动清除", clearance)
 
     def _selected_map_status_payload(
         self,
@@ -1881,10 +1852,12 @@ class WebDashboardNode(Node):
         if selected_map_id is None:
             with self._data_lock:
                 selected_map_id = self._settings.get("selected_map_id")
-        selected_map_id = str(selected_map_id or "").strip()
         if runtime_state is None:
             with self._lock:
                 runtime_state = {"map": dict(self._state.get("map") or {})}
+        selected_map_id = str(selected_map_id or "").strip()
+        if not selected_map_id:
+            selected_map_id = str(self._effective_map_id(runtime_state=runtime_state) or "").strip()
         live_map = dict((runtime_state or {}).get("map") or {})
         selected_map = self._map_file_summary(selected_map_id) if selected_map_id else {}
         return selected_map_status_payload(
@@ -1892,6 +1865,78 @@ class WebDashboardNode(Node):
             live_map=live_map,
             selected_map=selected_map,
             now_text=now_text,
+        )
+
+    def _fixed_map_id_matching_live_map(self, runtime_state: Optional[Dict[str, Any]] = None) -> Optional[str]:
+        if runtime_state is None:
+            with self._lock:
+                runtime_state = {"map": dict(self._state.get("map") or {})}
+        live_map = dict((runtime_state or {}).get("map") or {})
+        if not live_map.get("available"):
+            return None
+        with self._data_lock:
+            records = [dict(item) for item in self._all_maps_unlocked()]
+        candidates: List[Dict[str, Any]] = []
+        for record in records:
+            map_id = str(record.get("id") or "").strip()
+            if not map_id:
+                continue
+            selected_map = self._map_file_summary(map_id)
+            candidates.append({**record, "summary": selected_map})
+        return matching_fixed_map_id_for_live_map(live_map, candidates)
+
+    def _working_map_id_unlocked(self) -> Optional[str]:
+        selected = str(self._settings.get("selected_map_id") or "").strip()
+        if selected and self._find_map_record_unlocked(selected):
+            return selected
+        working = str(self._settings.get("working_map_id") or "").strip()
+        if working and self._find_map_record_unlocked(working):
+            return working
+        return None
+
+    def _remember_working_map_id(self, map_id: Optional[str], *, reason: str) -> None:
+        target = str(map_id or "").strip()
+        if not target or target == "live_map":
+            return
+        changed = False
+        with self._data_lock:
+            if self._find_map_record_unlocked(target) is None:
+                return
+            if str(self._settings.get("working_map_id") or "").strip() != target:
+                self._settings["working_map_id"] = target
+                self._save_json("settings.json", self._settings)
+                changed = True
+        if changed:
+            self._append_event("更新工作地图", {"map_id": target, "reason": reason})
+
+    def _effective_map_id(
+        self,
+        requested_map_id: Optional[str] = None,
+        runtime_state: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
+        requested = str(requested_map_id or "").strip()
+        if requested and requested != "live_map":
+            return requested
+        with self._data_lock:
+            selected = str(self._settings.get("selected_map_id") or "").strip()
+            working = str(self._settings.get("working_map_id") or "").strip()
+        live_map = dict((runtime_state or {}).get("map") or {})
+        if runtime_state is None:
+            with self._lock:
+                live_map = dict(self._state.get("map") or {})
+        with self._data_lock:
+            records = [dict(item) for item in self._all_maps_unlocked()]
+        candidates = []
+        for record in records:
+            map_id = str(record.get("id") or "").strip()
+            if not map_id:
+                continue
+            candidates.append({**record, "summary": self._map_file_summary(map_id)})
+        return effective_map_id_for_display(
+            selected_map_id=selected,
+            live_map=live_map,
+            candidates=candidates,
+            working_map_id=working,
         )
 
     def _camera_proxy_status_payload(self) -> Dict[str, Any]:
@@ -1974,12 +2019,19 @@ class WebDashboardNode(Node):
             }
         return payload
 
+    def _slow_log_threshold_s(self) -> float:
+        return max(0.0, float(self.get_parameter("api_slow_log_threshold_s").value))
+
+    def _log_slow_operation(self, label: str, elapsed_s: float, detail: str = "") -> None:
+        threshold_s = self._slow_log_threshold_s()
+        if threshold_s <= 0.0 or elapsed_s < threshold_s:
+            return
+        suffix = f" {detail}" if detail else ""
+        self.get_logger().warning("slow web operation: %s took %.3fs%s" % (label, elapsed_s, suffix))
+
     def _projects_payload(self) -> Dict[str, Any]:
         with self._data_lock:
             return {"ok": True, "projects": list(self._projects)}
-
-    def _last_task_result_unlocked(self) -> Optional[Dict[str, Any]]:
-        return last_task_result_payload(self._tasks)
 
     def _create_project(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         name = str(payload.get("name") or payload.get("project_name") or "").strip()
@@ -1998,11 +2050,15 @@ class WebDashboardNode(Node):
         return {"ok": True, "project": project}
 
     def _maps_payload(self) -> Dict[str, Any]:
+        effective_map_id = self._effective_map_id()
+        self._remember_working_map_id(effective_map_id, reason="maps_effective_map")
         with self._data_lock:
             return {
                 "ok": True,
                 "maps": self._all_maps_unlocked(),
                 "selected_map_id": self._settings.get("selected_map_id"),
+                "working_map_id": self._settings.get("working_map_id"),
+                "effective_map_id": effective_map_id,
             }
 
     def _preflight_payload(self) -> Dict[str, Any]:
@@ -2152,9 +2208,10 @@ class WebDashboardNode(Node):
         items: List[Dict[str, Any]] = []
 
         node_names = set(self.get_node_names())
+        perception_mode = str(self.get_parameter("perception_mode").value or "local_fusion")
+        edge_scan_mode = perception_mode == "edge_scan"
         required_nodes = [
             "m20pro_tcp_bridge",
-            "m20pro_pointcloud_fusion",
             "m20pro_web_dashboard",
             "map_server",
             "controller_server",
@@ -2163,14 +2220,17 @@ class WebDashboardNode(Node):
             "m20pro_nav2_startup_gate",
             "m20pro_floor_manager",
         ]
+        if not edge_scan_mode:
+            required_nodes.insert(1, "m20pro_pointcloud_fusion")
         items.append(preflight_node_item(list(node_names), required_nodes))
 
         topic_names = {name for name, _types in self.get_topic_names_and_types()}
         base_topics = [
-            self._topic("lidar_points_topic"),
             self._topic("navigation_status_topic"),
             self._topic("map_topic"),
         ]
+        if not edge_scan_mode:
+            base_topics.insert(0, self._topic("lidar_points_topic"))
         navigation_topics = [
             self._topic("scan_topic"),
             self._topic("odom_topic"),
@@ -2190,7 +2250,6 @@ class WebDashboardNode(Node):
                     "scan",
                     "odom",
                     "pose",
-                    "battery",
                     "localization_ok",
                     "navigation_status",
                     "map",
@@ -2228,6 +2287,20 @@ class WebDashboardNode(Node):
             scan_age_text=fmt_age_text(scan_age) if scan_age is not None else "",
             finite_ranges=finite_ranges,
         )
+        if edge_scan_mode:
+            scan_ready = bool(scan_ok and finite_ranges > 0)
+            for item in perception["items"]:
+                if item.get("key") == "lidar_points":
+                    item["key"] = "edge_scan"
+                    item["label"] = "106 边缘激光"
+                    item["status"] = "ok" if scan_ready else "fail"
+                    item["message"] = (
+                        f"edge scan 已输出 /scan，有效距离 {finite_ranges} / "
+                        f"{fmt_age_text(scan_age) if scan_age is not None else '未知'}"
+                        if scan_ready
+                        else "edge scan 尚未输出可用 /scan；检查 106 m20pro-edge-scan-106.service"
+                    )
+            perception["perception_ok"] = scan_ready
         items.extend(perception["items"])
         perception_ok = bool(perception["perception_ok"])
 
@@ -2278,10 +2351,6 @@ class WebDashboardNode(Node):
             )
         )
 
-        battery = current_state.get("battery")
-        min_level = int(self.get_parameter("preflight_min_battery_level").value)
-        items.append(preflight_battery_item(battery if isinstance(battery, dict) else {}, min_level=min_level))
-
         if context["defer_nav2_startup_checks"]:
             items.append(preflight_lifecycle_deferred_item())
         else:
@@ -2319,7 +2388,6 @@ class WebDashboardNode(Node):
             with self._lock:
                 lidar = dict(self._state.get("lidar_points") or {})
                 scan = dict(self._state.get("scan") or {})
-                battery = dict(self._state.get("battery") or {})
                 navigation_status = self._state.get("navigation_status")
                 map_seen = isinstance(self._state.get("map"), dict)
             lidar_ok = (
@@ -2330,8 +2398,7 @@ class WebDashboardNode(Node):
                 int(scan.get("finite_ranges", 0) or 0) > 0
                 and now - float(scan.get("last_update", 0.0) or 0.0) <= 2.0
             )
-            battery_ok = now - float(battery.get("last_update", 0.0) or 0.0) <= 5.0
-            if map_seen and (lidar_ok or scan_ok) and battery_ok and navigation_status:
+            if map_seen and (lidar_ok or scan_ok) and navigation_status:
                 return
             time.sleep(0.1)
 
@@ -2424,6 +2491,20 @@ class WebDashboardNode(Node):
                 "skipped": True,
                 "message": "已切换到实时 /map 观察；未调用 Nav2 load_map",
             }
+        factory_apply = self._apply_selected_map_to_factory(record) if map_id and record else {
+            "ok": True,
+            "skipped": True,
+            "message": "未选择固定地图；未调用 106 drmap apply",
+        }
+        if not factory_apply.get("ok"):
+            return self._error(
+                str(factory_apply.get("message") or "106 原厂地图切换失败"),
+                {
+                    "code": "factory_map_apply_failed",
+                    "nav2_load_map": nav2_load,
+                    "factory_apply_map": factory_apply,
+                },
+            )
         with self._data_lock:
             result = apply_selected_map_choice_state(
                 self._settings,
@@ -2443,11 +2524,27 @@ class WebDashboardNode(Node):
                 self._state["pose"] = None
                 self._state["pose_history"] = []
                 self._state["path"] = {"version": int(self._state.get("path", {}).get("version", 0) or 0) + 1, "points": []}
-        self._append_event("切换固定地图", {"map_id": map_id, "nav2_load_map": nav2_load})
+        effective_map_id = self._effective_map_id()
+        self._remember_working_map_id(effective_map_id, reason="select_map_effective_map")
+        with self._data_lock:
+            working_map_id = self._settings.get("working_map_id")
+        self._append_event(
+            "切换地图显示",
+            {
+                "selected_map_id": map_id,
+                "working_map_id": working_map_id,
+                "effective_map_id": effective_map_id,
+                "nav2_load_map": nav2_load,
+                "factory_apply_map": factory_apply,
+            },
+        )
         return {
             "ok": True,
             "selected_map_id": map_id,
+            "working_map_id": working_map_id,
+            "effective_map_id": effective_map_id,
             "nav2_load_map": nav2_load,
+            "factory_apply_map": factory_apply,
             "map_relocalization_required": map_relocalization_required,
         }
 
@@ -2631,11 +2728,13 @@ class WebDashboardNode(Node):
             "set -e; "
             "echo host=$(hostname); "
             "echo user=$(whoami); "
-            "echo drmap=$(command -v drmap); "
-            f"echo active=$(readlink -f {active_map} || true); "
+            "echo drmap_probe=drmap_mapping_help; "
+            f"echo active_map={active_map}; "
+            f"active_path=$(readlink -f {active_map} || true); "
+            f"echo active_resolved=${{active_path:-{active_map}}}; "
             f"test -d {active_map}; "
             "sudo -n drmap mapping -h >/dev/null; "
-            "sudo -n drmap stop_mapping -h >/dev/null"
+            "echo drmap_mapping_help=ok"
         )
         command = f"{prefix}{json.dumps(remote_probe)}" if prefix else remote_probe
         try:
@@ -2670,13 +2769,257 @@ class WebDashboardNode(Node):
             "output": result.stdout or "",
         }
         if ok:
-            payload["message"] = "106 建图环境可用：SSH、drmap、active map、sudo -n 均通过。"
+            payload["message"] = (
+                "106 建图环境可用：SSH、drmap、active map、启动建图权限均通过。"
+                "完成/保存建图会调用 drmap stop_mapping，但该命令没有安全的 dry-run 检查。"
+            )
         else:
             payload["message"] = (
                 "106 建图环境未通过。常见原因：104 到 106 未配置 SSH 免密，"
-                "或 106 上 sudo drmap 仍需要交互输入密码。"
+                "或 106 上 sudo drmap mapping 仍需要交互输入密码。"
             )
         return payload
+
+    def _run_factory_shell(
+        self,
+        shell_command: str,
+        *,
+        factory_host: str,
+        factory_user: str,
+        timeout: float,
+    ) -> Dict[str, Any]:
+        if factory_host in ("", "localhost", "127.0.0.1"):
+            command: Any = shell_command
+            command_text = shell_command
+            use_shell = True
+        else:
+            command = [
+                "ssh",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=8",
+                f"{factory_user}@{factory_host}",
+                shell_command,
+            ]
+            command_text = " ".join(shlex.quote(str(item)) for item in command)
+            use_shell = False
+        try:
+            result = subprocess.run(
+                command,
+                shell=use_shell,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=timeout,
+                check=False,
+            )
+        except Exception as exc:
+            return {"ok": False, "command": command_text, "output": "", "message": str(exc)}
+        return {
+            "ok": result.returncode == 0,
+            "command": command_text,
+            "returncode": result.returncode,
+            "output": result.stdout or "",
+        }
+
+    def _resolve_factory_map_path(
+        self,
+        source: str,
+        *,
+        factory_host: str,
+        factory_user: str,
+        timeout: float,
+    ) -> Dict[str, Any]:
+        source = str(source or "").strip()
+        if not source:
+            return self._error("106 地图路径为空")
+        if factory_host in ("", "localhost", "127.0.0.1"):
+            path = FsPath(source).expanduser()
+            resolved = path.resolve(strict=False)
+            if not resolved.is_dir():
+                return self._error("地图目录不存在", {"source": source, "resolved_source": str(resolved)})
+            return {
+                "ok": True,
+                "source_path": str(resolved),
+                "source_reason": "explicit_or_active",
+                "command": f"readlink -f {source}",
+                "output": str(resolved),
+            }
+        quoted_source = shlex.quote(source)
+        probe = (
+            f"target={quoted_source}; "
+            'resolved=$(readlink -f "$target" 2>/dev/null || true); '
+            'if [ -n "$resolved" ]; then target="$resolved"; fi; '
+            'test -d "$target"; '
+            'printf "%s\\n" "$target"'
+        )
+        result = self._run_factory_shell(
+            probe,
+            factory_host=factory_host,
+            factory_user=factory_user,
+            timeout=timeout,
+        )
+        if not result.get("ok"):
+            return self._error(
+                "106 地图目录不存在或无法访问",
+                {"source": source, "command": result.get("command"), "output": result.get("output")},
+            )
+        resolved = (str(result.get("output") or "").splitlines() or [source])[-1].strip() or source
+        return {
+            "ok": True,
+            "source_path": resolved,
+            "source_reason": "explicit_or_active",
+            "command": result.get("command"),
+            "output": result.get("output"),
+        }
+
+    def _find_latest_factory_map_package(
+        self,
+        map_name: str,
+        *,
+        factory_host: str,
+        factory_user: str,
+        timeout: float,
+    ) -> Dict[str, Any]:
+        base = "/var/opt/robot/data/maps"
+        name = sanitize_name(str(map_name or ""), "")
+        if not name:
+            return self._error("建图名称为空，无法按名称查找 106 地图包")
+        if factory_host in ("", "localhost", "127.0.0.1"):
+            base_path = FsPath(base)
+            matches = [
+                item
+                for item in base_path.iterdir()
+                if item.is_dir() and item.name.startswith(f"{name}-")
+            ] if base_path.is_dir() else []
+            if not matches:
+                return self._error("没有找到同名 106 地图包", {"factory_map_name": name, "base": base})
+            latest = max(matches, key=lambda item: item.stat().st_mtime)
+            return {
+                "ok": True,
+                "source_path": str(latest),
+                "source_reason": "latest_named_map_package",
+                "factory_map_name": name,
+                "command": f"find {base} -name {name}-*",
+                "output": str(latest),
+            }
+        probe = (
+            f"base={shlex.quote(base)}; "
+            f"name={shlex.quote(name)}; "
+            'find "$base" -maxdepth 1 -mindepth 1 -type d -name "$name-*" '
+            '-printf "%T@ %p\\n" | sort -nr | head -n 1 | cut -d" " -f2-'
+        )
+        result = self._run_factory_shell(
+            probe,
+            factory_host=factory_host,
+            factory_user=factory_user,
+            timeout=timeout,
+        )
+        source_path = (str(result.get("output") or "").splitlines() or [""])[-1].strip()
+        if not result.get("ok") or not source_path:
+            return self._error(
+                "没有找到同名 106 地图包",
+                {
+                    "factory_map_name": name,
+                    "base": base,
+                    "command": result.get("command"),
+                    "output": result.get("output"),
+                },
+            )
+        return {
+            "ok": True,
+            "source_path": source_path,
+            "source_reason": "latest_named_map_package",
+            "factory_map_name": name,
+            "command": result.get("command"),
+            "output": result.get("output"),
+        }
+
+    def _resolve_factory_import_source(
+        self,
+        payload: Dict[str, Any],
+        session: Optional[Dict[str, Any]],
+        *,
+        factory_host: str,
+        factory_user: str,
+        timeout: float,
+    ) -> Dict[str, Any]:
+        explicit_source = str(payload.get("source") or "").strip()
+        if explicit_source:
+            return self._resolve_factory_map_path(
+                explicit_source,
+                factory_host=factory_host,
+                factory_user=factory_user,
+                timeout=timeout,
+            )
+        factory_map_name = str(
+            payload.get("factory_map_name")
+            or (session or {}).get("map_name")
+            or payload.get("map_name")
+            or ""
+        ).strip()
+        if factory_map_name:
+            return self._find_latest_factory_map_package(
+                factory_map_name,
+                factory_host=factory_host,
+                factory_user=factory_user,
+                timeout=timeout,
+            )
+        return self._resolve_factory_map_path(
+            str(self.get_parameter("factory_active_map").value),
+            factory_host=factory_host,
+            factory_user=factory_user,
+            timeout=timeout,
+        )
+
+    def _apply_selected_map_to_factory(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        source_path = str(
+            record.get("factory_apply_path")
+            or record.get("source_path")
+            or ""
+        ).strip()
+        base = "/var/opt/robot/data/maps/"
+        if not source_path:
+            return {"ok": True, "skipped": True, "message": "地图记录没有 106 原厂路径；未调用 drmap apply"}
+        if source_path == "/var/opt/robot/data/maps/active":
+            return {"ok": True, "skipped": True, "message": "地图记录只指向 active 软链接；未盲目 apply"}
+        if not source_path.startswith(base):
+            return {"ok": True, "skipped": True, "message": "地图不是 106 原厂地图包；未调用 drmap apply", "source_path": source_path}
+        factory_host = str(self.get_parameter("factory_host").value).strip()
+        factory_user = str(self.get_parameter("factory_user").value).strip()
+        timeout = min(120.0, max(10.0, float(self.get_parameter("map_import_timeout_s").value)))
+        command = f"sudo -n drmap apply {shlex.quote(source_path)}"
+        result = self._run_factory_shell(
+            command,
+            factory_host=factory_host,
+            factory_user=factory_user,
+            timeout=timeout,
+        )
+        if not result.get("ok"):
+            return {
+                "ok": False,
+                "message": "106 drmap apply 失败，地图未完整切换",
+                "source_path": source_path,
+                "command": result.get("command"),
+                "output": result.get("output"),
+                "returncode": result.get("returncode"),
+            }
+        return {
+            "ok": True,
+            "source_path": source_path,
+            "command": result.get("command"),
+            "output": result.get("output"),
+            "message": "106 原厂 active 地图已切换",
+        }
+
+    def _cleanup_failed_map_import(self, dest: FsPath) -> Dict[str, Any]:
+        try:
+            if dest.exists():
+                shutil.rmtree(dest)
+            return {"ok": True, "removed": str(dest)}
+        except Exception as exc:
+            return {"ok": False, "path": str(dest), "error": str(exc)}
 
     def _import_active_map(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         session_id = payload.get("session_id")
@@ -2685,16 +3028,25 @@ class WebDashboardNode(Node):
         if not floor:
             return self._error("请指定地图楼层")
 
-        source = str(payload.get("source") or self.get_parameter("factory_active_map").value).strip()
         factory_host = str(payload.get("factory_host") or self.get_parameter("factory_host").value).strip()
         factory_user = str(payload.get("factory_user") or self.get_parameter("factory_user").value).strip()
         stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
-        default_name = f"{floor}_{stamp}"
+        default_name = str((session or {}).get("map_name") or "").strip() or f"{floor}_{stamp}"
         map_name = sanitize_name(str(payload.get("map_name") or ""), default_name)
         dest = self.map_archive_dir / map_name
         if dest.exists():
             dest = self.map_archive_dir / f"{map_name}_{random_suffix(6)}"
         timeout = float(self.get_parameter("map_import_timeout_s").value)
+        source_result = self._resolve_factory_import_source(
+            payload,
+            session,
+            factory_host=factory_host,
+            factory_user=factory_user,
+            timeout=min(30.0, timeout),
+        )
+        if not source_result.get("ok"):
+            return source_result
+        source = str(source_result.get("source_path") or "").strip()
 
         try:
             if factory_host in ("", "localhost", "127.0.0.1"):
@@ -2723,15 +3075,30 @@ class WebDashboardNode(Node):
 
         yaml_path = find_map_yaml(dest)
         if yaml_path is None:
+            cleanup = self._cleanup_failed_map_import(dest)
             return self._error(
-                "地图已拉取，但没有找到 occ_grid.yaml/map.yaml/jueying.yaml",
-                {"directory": str(dest), "command": command_text, "output": command_output},
+                "地图包已拉取，但没有生成可供前端/Nav2使用的栅格 yaml；请确认 106 建图已成功保存完成",
+                {
+                    "directory": str(dest),
+                    "source_path": source,
+                    "source_resolution": source_result,
+                    "command": command_text,
+                    "output": command_output,
+                    "cleanup": cleanup,
+                },
             )
         image_repair = ensure_map_yaml_uses_local_image(yaml_path)
         if not image_repair.get("ok"):
+            cleanup = self._cleanup_failed_map_import(dest)
             return self._error(
                 "地图已拉取，但栅格图文件不可用",
-                {"directory": str(dest), "yaml_path": str(yaml_path), "image_repair": image_repair},
+                {
+                    "directory": str(dest),
+                    "source_path": source,
+                    "yaml_path": str(yaml_path),
+                    "image_repair": image_repair,
+                    "cleanup": cleanup,
+                },
             )
 
         session_payload = session or {}
@@ -2748,21 +3115,30 @@ class WebDashboardNode(Node):
             source_path=source,
             created_at=now_text(),
         )
+        map_record["factory_apply_path"] = source
+        map_record["factory_source_reason"] = source_result.get("source_reason")
+        if source_result.get("factory_map_name"):
+            map_record["factory_map_name"] = source_result.get("factory_map_name")
         map_record["derived"] = self._generate_map_derived(map_record, dest, yaml_path, floor)
         with self._data_lock:
             self._maps.append(map_record)
-            self._settings["selected_map_id"] = map_record["id"]
             if session:
                 session["status"] = "imported"
                 session["updated_at"] = now_text()
             self._save_json("maps.json", self._maps)
-            self._save_json("settings.json", self._settings)
             self._save_json("mapping_sessions.json", self._sessions)
-        self._append_event("从 106 拉取地图完成", {"map_id": map_record["id"], "floor": floor})
+            selected_map_id = self._settings.get("selected_map_id")
+        self._append_event(
+            "从 106 拉取地图完成",
+            {"map_id": map_record["id"], "floor": floor, "source_path": source},
+        )
         return {
             "ok": True,
             "map": map_record,
-            "selected_map_id": map_record["id"],
+            "imported_map_id": map_record["id"],
+            "selected_map_id": selected_map_id,
+            "source_path": source,
+            "source_resolution": source_result,
             "command": command_text,
             "output": command_output,
             "image_repair": image_repair,
@@ -2869,8 +3245,7 @@ class WebDashboardNode(Node):
 
     def _publish_selected_stair_zones(self) -> None:
         try:
-            with self._data_lock:
-                map_id = self._settings.get("selected_map_id")
+            map_id = self._effective_map_id()
             payload = self._stair_zones_payload(map_id)
             zones = payload.get("zones") or []
             if not payload.get("available") and not map_id:
@@ -2892,12 +3267,24 @@ class WebDashboardNode(Node):
             self.get_logger().debug("failed to publish stair zones: %s" % exc)
 
     def _annotations_payload(self, query: Dict[str, List[str]]) -> Dict[str, Any]:
-        map_id = (query.get("map_id") or [None])[0]
+        requested_map_id = (query.get("map_id") or [None])[0]
+        requested_text = str(requested_map_id or "").strip() if requested_map_id is not None else ""
+        if requested_map_id is None:
+            map_id = None
+        else:
+            map_id = self._effective_map_id(requested_text) or requested_text
+        if (not requested_text or requested_text == "live_map") and map_id:
+            self._remember_working_map_id(map_id, reason="annotations_effective_map")
         with self._data_lock:
             annotations = list(self._annotations)
-        return annotation_list_filter_payload(annotations, map_id=map_id)
+        payload = annotation_list_filter_payload(annotations, map_id=map_id)
+        payload["requested_map_id"] = requested_map_id
+        payload["effective_map_id"] = map_id
+        return payload
 
     def _create_annotation(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        with self._lock:
+            runtime_state = {"map": dict(self._state.get("map") or {})}
         context = annotation_create_static_context(
             payload,
             default_label_index=len(self._annotations) + 1,
@@ -2905,16 +3292,20 @@ class WebDashboardNode(Node):
         if not context.get("ok"):
             return self._error(str(context["message"]), {"code": context["code"]})
         map_id = context.get("map_id")
+        if not map_id or map_id == "live_map":
+            map_id = self._effective_map_id(map_id, runtime_state=runtime_state) or map_id
+        if map_id and map_id != "live_map":
+            self._remember_working_map_id(map_id, reason="create_annotation")
         with self._data_lock:
             if map_id and map_id != "live_map" and not self._find_map_record_unlocked(map_id):
                 return self._error("地图不存在")
             if not map_id:
-                map_id = self._settings.get("selected_map_id")
-            if not map_id and self._state.get("map"):
+                map_id = self._effective_map_id(runtime_state=runtime_state)
+            if not map_id and runtime_state.get("map"):
                 map_id = "live_map"
             if not map_id:
                 return self._error("没有可用地图，请等待实时 /map 或先选择固定地图")
-            selected_map_id = self._settings.get("selected_map_id")
+            selected_map_id = self._effective_map_id(runtime_state=runtime_state)
         annotation_source = str(payload.get("source") or "map_click").strip()
         require_live_pose = annotation_source == "robot_pose"
         annotation_readiness = self._annotation_create_readiness_payload(
@@ -2925,7 +3316,7 @@ class WebDashboardNode(Node):
         if not annotation_readiness.get("ready"):
             return self._error(
                 str(annotation_readiness["message"]),
-                readiness_error_payload(annotation_readiness),
+                validation_error_payload(annotation_readiness),
             )
         if map_id and map_id != "live_map":
             target_map_payload = self._map_file_snapshot(map_id)
@@ -2947,7 +3338,14 @@ class WebDashboardNode(Node):
         with self._data_lock:
             self._annotations.append(item)
             self._save_json("annotations.json", self._annotations)
-        self._append_event("保存地图点位", {"annotation_id": item["id"], "floor": item["floor"], "type": item["type"]})
+        self._append_event(
+            "保存地图点位",
+            {
+                "annotation_id": item["id"],
+                "floor": item["floor"],
+                "manual_point_type": item.get("manual_point_type"),
+            },
+        )
         return {"ok": True, "annotation": item}
 
     def _annotation_create_readiness_payload(
@@ -3009,11 +3407,15 @@ class WebDashboardNode(Node):
 
     def _tasks_payload(self, query: Optional[Dict[str, List[str]]] = None) -> Dict[str, Any]:
         include_all = self._as_bool((query or {}).get("include_all", [False])[0])
+        requested_map_id = str(((query or {}).get("map_id") or [""])[0] or "").strip()
+        effective_map_id = self._effective_map_id(requested_map_id or None)
+        if (not requested_map_id or requested_map_id == "live_map") and effective_map_id:
+            self._remember_working_map_id(effective_map_id, reason="tasks_effective_map")
         with self._data_lock:
             active_task = self._settings.get("active_task")
             active_running = active_task if isinstance(active_task, dict) and active_task.get("status") == "running" else None
             active_task_id = active_running.get("task_id") if active_running else None
-            selected_map_id = self._settings.get("selected_map_id")
+            selected_map_id = effective_map_id
             map_relocalization_required = self._settings.get("map_relocalization_required")
             stale_result = stop_stale_running_tasks(
                 self._tasks,
@@ -3038,8 +3440,6 @@ class WebDashboardNode(Node):
         tasks = list(task_list["tasks"])
         with self._preflight_lock:
             preflight = self._preflight_with_age_unlocked()
-        map_cache: Dict[str, Dict[str, Any]] = {}
-        nav_readiness = self._cached_navigation_readiness_payload() if self._should_check_navigation_readiness() else None
         for task in tasks:
             task["waypoints"] = [
                 task_waypoint_payload(str(annotation_id), known_annotations.get(str(annotation_id)), index)
@@ -3061,7 +3461,7 @@ class WebDashboardNode(Node):
                 }
             )
             task["multi_floor"] = len(task["floors"]) > 1
-            task["readiness"] = self._task_readiness_for_task(task, map_cache, nav_readiness=nav_readiness)
+            task.pop("readiness", None)
             task["radar_results"] = self._radar_jobs_for_task(str(task.get("id") or ""))
         return {
             "ok": True,
@@ -3069,12 +3469,13 @@ class WebDashboardNode(Node):
             "hidden_task_count": task_list["hidden_task_count"],
             "total_task_count": task_list["total_task_count"],
             "selected_map_id": selected_map_id,
+            "effective_map_id": effective_map_id,
+            "requested_map_id": requested_map_id or None,
             "selected_map_status": self._selected_map_status_payload(selected_map_id=selected_map_id),
             "map_relocalization_required": map_relocalization_required,
             "include_all": task_list["include_all"],
             "active_task": active_task,
             "preflight": preflight,
-            "task_readiness": self._current_task_readiness_payload(nav_readiness=nav_readiness),
             "last_preflight_ok": bool(preflight and preflight.get("ok")),
         }
 
@@ -3366,81 +3767,6 @@ class WebDashboardNode(Node):
                 )
         return output.getvalue().encode("utf-8-sig")
 
-    def _current_task_readiness_payload(
-        self,
-        nav_readiness: Optional[Dict[str, Any]] = None,
-        runtime_state: Optional[Dict[str, Any]] = None,
-        now: Optional[float] = None,
-    ) -> Dict[str, Any]:
-        with self._data_lock:
-            active = dict(self._settings.get("active_task") or {})
-            selected_map_id = self._settings.get("selected_map_id")
-        runtime = self._task_runtime_readiness_payload(
-            None,
-            selected_map_id or "live_map",
-            selected_map_id=selected_map_id,
-            success_message="定位和地图位姿已就绪；具体任务点位请看任务列表的执行条件",
-            runtime_state=runtime_state,
-            now=now,
-        )
-        require_nav_ready = bool(self.get_parameter("task_start_require_nav_ready").value)
-        resolved_nav_readiness = nav_readiness
-        if runtime.get("ready") and require_nav_ready and resolved_nav_readiness is None:
-            resolved_nav_readiness = self._cached_navigation_readiness_payload()
-        return contract_current_task_readiness_payload(
-            active_task=active,
-            runtime_readiness=runtime,
-            nav_readiness=resolved_nav_readiness,
-            require_nav_ready=require_nav_ready,
-            now_text=now_text,
-        )
-
-    def _task_readiness_for_task(
-        self,
-        task: Dict[str, Any],
-        map_cache: Optional[Dict[str, Dict[str, Any]]] = None,
-        nav_readiness: Optional[Dict[str, Any]] = None,
-        runtime_state: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        task_id = str(task.get("id") or "").strip()
-        with self._data_lock:
-            active = dict(self._settings.get("active_task") or {})
-            selected_map_id = self._settings.get("selected_map_id") or "live_map"
-            known = {item.get("id"): dict(item) for item in self._annotations if item.get("id")}
-        static_context = task_start_static_context(
-            task_id,
-            task,
-            known,
-            selected_map_id=selected_map_id,
-            now_text=now_text,
-        )
-        task_validation = None
-        if static_context.get("ok"):
-            task_validation = self._validate_task_annotations_for_map(
-                list(static_context.get("annotations") or []),
-                str(static_context["task_map_id"]),
-                map_cache=map_cache,
-            )
-        precheck = task_readiness_pre_runtime_payload(
-            task_id=task_id,
-            active_task=active,
-            static_context=static_context,
-            task_validation=task_validation,
-            selected_map_id=selected_map_id,
-            now_text=now_text,
-        )
-        if not precheck.get("proceed"):
-            return dict(precheck.get("readiness") or {})
-        return self._task_start_readiness_payload(
-            precheck.get("first_annotation"),
-            str(precheck.get("task_map_id") or "live_map"),
-            task_id=task_id,
-            selected_map_id=str(precheck.get("selected_map_id") or selected_map_id or "live_map"),
-            map_cache=map_cache,
-            nav_readiness=nav_readiness,
-            runtime_state=runtime_state,
-        )
-
     def _validate_task_annotations_for_map(
         self,
         annotations: List[Optional[Dict[str, Any]]],
@@ -3474,310 +3800,13 @@ class WebDashboardNode(Node):
             now_text=now_text,
         )
 
-    def _task_runtime_readiness_payload(
-        self,
-        first_annotation: Optional[Dict[str, Any]],
-        task_map_id: Optional[str],
-        task_id: Optional[str] = None,
-        selected_map_id: Optional[str] = None,
-        success_message: str = "任务链路可用",
-        runtime_state: Optional[Dict[str, Any]] = None,
-        now: Optional[float] = None,
-    ) -> Dict[str, Any]:
-        if runtime_state is None:
-            with self._lock:
-                runtime_state = {
-                    "pose": dict(self._state.get("pose") or {}),
-                    "localization_ok": self._state.get("localization_ok"),
-                    "floor": self._state.get("floor"),
-                    "navigation_status": self._state.get("navigation_status"),
-                }
-        with self._data_lock:
-            map_relocalization_required = self._settings.get("map_relocalization_required")
-        map_relocalization_readiness = map_relocalization_task_readiness_payload(
-            map_relocalization_required or {},
-            task_id=task_id,
-            task_map_id=task_map_id,
-            selected_map_id=selected_map_id,
-            now_text=now_text,
-        )
-        pose = dict(runtime_state.get("pose") or {})
-        localization_ok = runtime_state.get("localization_ok")
-        current_floor = runtime_state.get("floor")
-        navigation_status = runtime_state.get("navigation_status")
-        now_time = time.time() if now is None else float(now)
-        pose_age = pose_age_sec(pose, now_time)
-        pose_timeout_s = max(0.5, float(self.get_parameter("task_start_pose_timeout_s").value))
-        pose_readiness = task_pose_readiness_payload(
-            pose,
-            first_annotation,
-            task_id=task_id,
-            task_map_id=task_map_id,
-            selected_map_id=selected_map_id,
-            localization_ok=localization_ok,
-            current_floor=current_floor,
-            navigation_status=navigation_status,
-            pose_age_sec=pose_age,
-            pose_timeout_s=pose_timeout_s,
-            require_localization_ok=bool(self.get_parameter("task_start_require_localization_ok").value),
-            warn_first_waypoint_distance_m=max(
-                0.0,
-                float(self.get_parameter("task_start_warn_first_waypoint_distance_m").value),
-            ),
-            max_first_waypoint_distance_m=max(
-                0.0,
-                float(self.get_parameter("task_start_max_first_waypoint_distance_m").value),
-            ),
-            now_text=now_text,
-        )
-        battery_readiness = self._task_battery_readiness_payload(
-            min_level_param="task_start_min_battery_level",
-            require_param="task_start_require_battery_ok",
-            success_message="任务启动电池状态可用",
-        )
-        perception_readiness = self._task_perception_readiness_payload(
-            success_message="任务启动感知链路可用",
-        )
-        return task_runtime_readiness_payload(
-            map_relocalization_readiness=map_relocalization_readiness,
-            pose_readiness=pose_readiness,
-            battery_readiness=battery_readiness,
-            perception_readiness=perception_readiness,
-            success_message=success_message,
-            now_text=now_text,
-        )
-
-    def _task_battery_readiness_payload(
-        self,
-        min_level_param: str,
-        require_param: str,
-        success_message: str,
-    ) -> Dict[str, Any]:
-        now = time.time()
-        timeout_s = max(1.0, float(self.get_parameter("task_battery_timeout_s").value))
-        min_level = max(0, int(self.get_parameter(min_level_param).value))
-        with self._lock:
-            battery = dict(self._state.get("battery") or {})
-        return battery_readiness_payload(
-            battery,
-            required=bool(self.get_parameter(require_param).value),
-            min_level=min_level,
-            timeout_s=timeout_s,
-            now=now,
-            success_message=success_message,
-            now_text=now_text,
-        )
-
-    def _task_runtime_guard_payload(self) -> Dict[str, Any]:
-        battery_readiness = self._task_battery_readiness_payload(
-            min_level_param="task_runtime_min_battery_level",
-            require_param="task_runtime_require_battery_ok",
-            success_message="任务运行电池状态可用",
-        )
-        if bool(self.get_parameter("task_runtime_require_perception_ok").value):
-            perception_readiness = self._task_perception_readiness_payload(
-                success_message="任务运行感知链路可用",
-            )
-        else:
-            perception_readiness = self._task_perception_readiness_payload(
-                success_message="任务运行感知链路可用",
-                require_scan=False,
-                require_lidar=False,
-            )
-        return runtime_guard_readiness_payload(
-            battery_readiness=battery_readiness,
-            perception_readiness=perception_readiness,
-            now_text=now_text,
-        )
-
-    def _stop_task_if_runtime_guard_lost(
-        self,
-        active: Dict[str, Any],
-        guard: Dict[str, Any],
-    ) -> bool:
-        timeout_s = max(0.5, float(self.get_parameter("task_runtime_guard_lost_timeout_s").value))
-        decision = runtime_guard_lost_decision(
-            active,
-            guard,
-            now_monotonic=time.monotonic(),
-            timeout_s=timeout_s,
-        )
-        if decision.get("action") == "clear":
-            with self._data_lock:
-                current = dict(self._settings.get("active_task") or {})
-                if current.get("status") == "running" and current.get("task_id") == active.get("task_id"):
-                    result = apply_runtime_guard_clear_state(current, decision)
-                    current = result["active"]
-                    if result.get("changed"):
-                        self._settings["active_task"] = current
-                        self._save_json("settings.json", self._settings)
-            return False
-
-        with self._data_lock:
-            current = dict(self._settings.get("active_task") or {})
-            if current.get("status") != "running" or current.get("task_id") != active.get("task_id"):
-                return True
-            result = apply_runtime_guard_wait_state(
-                current,
-                guard,
-                decision,
-                now_text=now_text(),
-                fallback_monotonic=time.monotonic(),
-            )
-            current = result["active"]
-            if result.get("should_record_event"):
-                event_payload = runtime_guard_waiting_event_payload(current, guard, decision)
-                self._append_active_task_timeline_event(
-                    current,
-                    event_payload["event"],
-                    event_payload["message"],
-                    event_payload["extra"],
-                )
-            if result.get("changed"):
-                self._settings["active_task"] = current
-                self._save_json("settings.json", self._settings)
-        if decision.get("action") != "fail":
-            return True
-        self._fail_active_task_from_payload(
-            decision,
-            "任务执行中关键链路异常，已停止任务",
-            task_id=active.get("task_id"),
-            extra=runtime_guard_failure_extra(guard, decision),
-        )
-        return True
-
-    def _task_perception_readiness_payload(
-        self,
-        success_message: str,
-        require_scan: Optional[bool] = None,
-        require_lidar: Optional[bool] = None,
-    ) -> Dict[str, Any]:
-        if require_scan is None:
-            require_scan = bool(self.get_parameter("task_start_require_scan_ok").value)
-        if require_lidar is None:
-            require_lidar = bool(self.get_parameter("task_start_require_lidar_points_ok").value)
-        now = time.time()
-        timeout_s = max(0.5, float(self.get_parameter("task_start_perception_timeout_s").value))
-        min_scan_ranges = max(1, int(self.get_parameter("task_start_min_scan_finite_ranges").value))
-        min_lidar_points = max(1, int(self.get_parameter("task_start_min_lidar_points").value))
-        with self._lock:
-            scan = dict(self._state.get("scan") or {})
-            lidar = dict(self._state.get("lidar_points") or {})
-        return perception_readiness_payload(
-            scan,
-            lidar,
-            require_scan=require_scan,
-            require_lidar=require_lidar,
-            timeout_s=timeout_s,
-            min_scan_ranges=min_scan_ranges,
-            min_lidar_points=min_lidar_points,
-            now=now,
-            success_message=success_message,
-            now_text=now_text,
-        )
-
-    def _task_start_readiness_payload(
-        self,
-        first_annotation: Optional[Dict[str, Any]],
-        task_map_id: str,
-        task_id: Optional[str] = None,
-        selected_map_id: Optional[str] = None,
-        map_cache: Optional[Dict[str, Dict[str, Any]]] = None,
-        nav_readiness: Optional[Dict[str, Any]] = None,
-        runtime_state: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        runtime = self._task_runtime_readiness_payload(
-            first_annotation,
-            task_map_id,
-            task_id=task_id,
-            selected_map_id=selected_map_id,
-            success_message="定位、位姿、地图和任务首点检查通过，可以开始执行",
-            runtime_state=runtime_state,
-        )
-        if not runtime.get("ready"):
-            return runtime
-        with self._data_lock:
-            task_record = self._find_by_id(self._tasks, task_id)
-            known_annotations = {
-                str(item.get("id")): dict(item)
-                for item in self._annotations
-                if item.get("id")
-            }
-        if task_record:
-            annotation_ids = [str(item) for item in (task_record.get("annotation_ids") or [])]
-            floors = sorted(
-                {
-                    str(known_annotations.get(annotation_id, {}).get("floor") or "")
-                    for annotation_id in annotation_ids
-                    if str(known_annotations.get(annotation_id, {}).get("floor") or "")
-                }
-            )
-            map_ids = sorted(
-                {
-                    str(known_annotations.get(annotation_id, {}).get("map_id") or "")
-                    for annotation_id in annotation_ids
-                    if str(known_annotations.get(annotation_id, {}).get("map_id") or "")
-                }
-            )
-            runtime = {
-                **runtime,
-                "floors": floors,
-                "map_ids": map_ids,
-                "multi_floor": len(floors) > 1,
-                "multi_map": len(map_ids) > 1,
-            }
-        if runtime_state is None:
-            with self._lock:
-                runtime_state = {
-                    "floor": self._state.get("floor"),
-                    "map": dict(self._state.get("map") or {}),
-                    "pose": dict(self._state.get("pose") or {}),
-                }
-        current_floor = runtime_state.get("floor")
-        live_map = dict(runtime_state.get("map") or {})
-        pose = dict(runtime_state.get("pose") or {})
-        target_map_payload = live_map
-        target_map_id = str(task_map_id or "").strip()
-        if isinstance(first_annotation, dict):
-            annotation_map_id = str(first_annotation.get("map_id") or "").strip()
-            if annotation_map_id:
-                target_map_id = annotation_map_id
-        if target_map_id and target_map_id != "live_map":
-            target_map_payload = self._map_file_snapshot_cached(target_map_id, map_cache)
-        required_nav_ready = bool(self.get_parameter("task_start_require_nav_ready").value)
-        resolved_nav_readiness = nav_readiness
-        if required_nav_ready and resolved_nav_readiness is None:
-            resolved_nav_readiness = self._navigation_readiness_payload(check_lifecycle=False)
-        return task_start_runtime_readiness_payload(
-            first_annotation,
-            task_map_id,
-            task_id=task_id,
-            selected_map_id=selected_map_id,
-            runtime_readiness=runtime,
-            current_floor=current_floor,
-            live_map=live_map,
-            robot_pose=pose,
-            target_map_payload=target_map_payload,
-            nav_readiness=resolved_nav_readiness,
-            success_navigation_readiness=self._navigation_readiness_payload(check_lifecycle=False),
-            require_current_floor_known=bool(self.get_parameter("task_start_require_current_floor_known").value),
-            require_current_floor_match=bool(self.get_parameter("task_start_require_current_floor_match").value),
-            require_pose_on_map=bool(self.get_parameter("task_start_require_pose_on_map").value),
-            require_nav_ready=required_nav_ready,
-            max_first_waypoint_distance_m=max(
-                0.0,
-                float(self.get_parameter("task_start_max_first_waypoint_distance_m").value),
-            ),
-            now_text=now_text,
-        )
-
     def _navigation_readiness_payload(
         self,
         check_lifecycle: bool = True,
         min_update_time: Optional[float] = None,
     ) -> Dict[str, Any]:
         now = time.time()
-        timeout_s = max(0.5, float(self.get_parameter("task_start_costmap_timeout_s").value))
+        timeout_s = max(0.5, float(self.get_parameter("relocalization_nav_timeout_s").value))
         with self._lock:
             scan = dict(self._state.get("scan") or {})
             local_costmap = dict(self._state.get("local_costmap") or {})
@@ -3797,83 +3826,6 @@ class WebDashboardNode(Node):
             now=now,
             min_update_time=min_update_time,
             now_text=now_text,
-        )
-
-    def _cached_navigation_readiness_payload(self) -> Dict[str, Any]:
-        ttl_s = max(0.1, float(self.get_parameter("task_nav_readiness_cache_s").value))
-        now = time.monotonic()
-        with self._nav_readiness_cache_lock:
-            cached = dict(self._nav_readiness_cache or {})
-            age_s = now - self._nav_readiness_cache_at if self._nav_readiness_cache_at else None
-            if cached and age_s is not None and age_s <= ttl_s:
-                cached["cache_age_sec"] = max(0.0, age_s)
-                cached["cached"] = True
-                return cached
-
-        payload = self._navigation_readiness_payload(check_lifecycle=False)
-        with self._nav_readiness_cache_lock:
-            self._nav_readiness_cache = dict(payload)
-            self._nav_readiness_cache_at = time.monotonic()
-        payload["cache_age_sec"] = 0.0
-        payload["cached"] = False
-        return payload
-
-    def _invalidate_navigation_readiness_cache(self) -> None:
-        with self._nav_readiness_cache_lock:
-            self._nav_readiness_cache = None
-            self._nav_readiness_cache_at = 0.0
-
-    def _wait_for_navigation_ready_after_reset(
-        self,
-        min_update_time: Optional[float] = None,
-    ) -> Dict[str, Any]:
-        if not bool(self.get_parameter("task_start_require_nav_ready").value):
-            return navigation_readiness_disabled_payload(now_text=now_text)
-        timeout_s = max(
-            0.5,
-            float(self.get_parameter("task_start_nav_ready_after_reset_timeout_s").value),
-        )
-        poll_s = max(
-            0.05,
-            min(1.0, float(self.get_parameter("task_start_nav_ready_poll_s").value)),
-        )
-        deadline = time.monotonic() + timeout_s
-        last_ready: Dict[str, Any] = {}
-        while True:
-            last_ready = self._navigation_readiness_payload(
-                check_lifecycle=False,
-                min_update_time=min_update_time,
-            )
-            if last_ready.get("ready"):
-                self._invalidate_navigation_readiness_cache()
-                return last_ready
-            if time.monotonic() >= deadline:
-                return navigation_readiness_wait_timeout_payload(
-                    last_ready=last_ready,
-                    timeout_s=timeout_s,
-                    min_update_time=min_update_time,
-                    now_text=now_text,
-                )
-            time.sleep(poll_s)
-
-    def _should_check_navigation_readiness(self, runtime_state: Optional[Dict[str, Any]] = None) -> bool:
-        if runtime_state is None:
-            with self._lock:
-                runtime_state = {
-                    "pose": dict(self._state.get("pose") or {}),
-                    "localization_ok": self._state.get("localization_ok"),
-                }
-        pose = dict(runtime_state.get("pose") or {})
-        localization_ok = runtime_state.get("localization_ok")
-        pose_age = pose_age_sec(pose, time.time())
-        pose_timeout_s = max(0.5, float(self.get_parameter("task_start_pose_timeout_s").value))
-        return should_check_navigation_readiness(
-            require_nav_ready=bool(self.get_parameter("task_start_require_nav_ready").value),
-            require_localization_ok=bool(self.get_parameter("task_start_require_localization_ok").value),
-            localization_ok=localization_ok,
-            pose_is_plausible=is_plausible_pose_dict(pose),
-            pose_age_sec=pose_age,
-            pose_timeout_s=pose_timeout_s,
         )
 
     def _map_file_snapshot_cached(
@@ -3945,10 +3897,24 @@ class WebDashboardNode(Node):
         self._publish_zero_cmd(samples=zero_samples)
         if clear_costmaps:
             self._clear_task_costmaps(reason)
-            self._invalidate_navigation_readiness_cache()
         if publish_idle:
             self._publish_idle_waypoint(reason)
+        self._clear_navigation_display_state(reason)
         self._append_event("复位导航会话", {"reason": reason, "clear_costmaps": clear_costmaps})
+
+    def _clear_navigation_display_state(self, reason: str) -> None:
+        with self._lock:
+            current_version = int(self._state.get("path", {}).get("version", 0) or 0)
+            self._state["path"] = {
+                "version": current_version + 1,
+                "points": [],
+                "point_count": 0,
+                "raw_point_count": 0,
+                "last_point": None,
+                "cleared_reason": reason,
+                "last_update": time.time(),
+            }
+            self._state["pose_history"] = []
 
     def _publish_zero_cmd(self, samples: int = 1) -> None:
         count = max(1, int(samples))
@@ -4003,71 +3969,27 @@ class WebDashboardNode(Node):
             extra=extra,
         )
 
-    def _task_result_snapshot_unlocked(
-        self,
-        active: Dict[str, Any],
-        status: str,
-        message: Optional[str] = None,
-        extra: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        annotation = self._active_annotation(active)
-        waypoint = annotation_semantics_payload(annotation) if annotation is not None else None
-        runtime_snapshot = self._task_runtime_snapshot_unlocked(active)
-        return build_task_result_snapshot(
-            active,
-            status=status,
-            waypoint=waypoint,
-            runtime_snapshot=runtime_snapshot,
-            now_text=now_text(),
-            message=message,
-            extra=extra,
-        )
-
-    def _task_runtime_snapshot_unlocked(self, active: Dict[str, Any]) -> Dict[str, Any]:
-        with self._lock:
-            state = {
-                "floor": self._state.get("floor"),
-                "localization_ok": self._state.get("localization_ok"),
-                "navigation_status": self._state.get("navigation_status"),
-                "pose": dict(self._state.get("pose") or {}),
-                "path": dict(self._state.get("path") or {}),
-                "scan": dict(self._state.get("scan") or {}),
-                "lidar_points": dict(self._state.get("lidar_points") or {}),
-                "lidar_relay_status": dict(self._state.get("lidar_relay_status") or {}),
-                "topics": {
-                    key: dict(value)
-                    for key, value in self._state.get("topics", {}).items()
-                    if isinstance(value, dict)
-                },
-            }
-        return build_task_runtime_snapshot(
-            active,
-            state,
-            camera_proxy_status=self._camera_proxy_status_payload(),
-        )
-
-    def _persist_task_result_unlocked(
+    def _update_task_terminal_state_unlocked(
         self,
         task_id: Optional[str],
         active: Dict[str, Any],
         status: str,
         message: Optional[str] = None,
         extra: Optional[Dict[str, Any]] = None,
-    ) -> Optional[Dict[str, Any]]:
-        result = self._task_result_snapshot_unlocked(active, status, message, extra)
-        update = apply_task_result_to_tasks(
-            self._tasks,
-            task_id=task_id,
-            active=active,
-            status=status,
-            result=result,
-            message=message,
-            now_text=now_text(),
-        )
-        if not update.get("changed"):
-            return None
-        self._tasks = list(update["tasks"])
-        return result
+    ) -> bool:
+        target_id = str(task_id or active.get("task_id") or "").strip()
+        if not target_id:
+            return False
+        for task in self._tasks:
+            if str(task.get("id") or "") != target_id:
+                continue
+            task["status"] = status
+            task["last_error"] = message if status == "error" else ""
+            task["updated_at"] = now_text()
+            task.pop("last_result", None)
+            task.pop("last_timeline", None)
+            return True
+        return False
 
     def _handle_navigation_status_for_task(self, status_text: str) -> None:
         status_text = str(status_text or "").strip()
@@ -4117,7 +4039,7 @@ class WebDashboardNode(Node):
                 dict(failed["event_extra"]),
             )
             self._settings["active_task"] = active
-            self._persist_task_result_unlocked(
+            self._update_task_terminal_state_unlocked(
                 task_id,
                 active,
                 str(failed["result_status"]),
@@ -4297,7 +4219,21 @@ class WebDashboardNode(Node):
             failure = active_annotation_missing_failure(active)
             self._fail_active_task_from_payload(failure, task_id=active.get("task_id"))
             return
-        decision = nav_success_completion_decision(active, annotation, status_text)
+        decision = nav_success_completion_decision(
+            active,
+            annotation,
+            status_text,
+            goal_tolerance_m=float(self.get_parameter("goal_reached_tolerance_m").value),
+        )
+        if decision.get("action") == "fail":
+            extra = decision.get("event_extra") if isinstance(decision.get("event_extra"), dict) else {}
+            extra = {**extra, "reason": decision.get("reason")}
+            self._fail_active_task(
+                active.get("task_id"),
+                str(decision.get("message") or "Nav2 到达状态缺少有效距离确认，已停止任务"),
+                extra,
+            )
+            return
         if decision.get("action") != "complete":
             self._append_event(
                 "忽略非当前任务点 Nav2 成功事件",
@@ -4340,9 +4276,10 @@ class WebDashboardNode(Node):
     def _create_task(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self._lock:
             runtime_state = {"map": dict(self._state.get("map") or {})}
+        selected_map_id = self._effective_map_id(runtime_state=runtime_state)
+        self._remember_working_map_id(selected_map_id, reason="create_task")
         with self._data_lock:
             known = {item["id"]: item for item in self._annotations}
-            selected_map_id = self._settings.get("selected_map_id")
             static_context = task_create_static_context(
                 payload,
                 known,
@@ -4375,7 +4312,7 @@ class WebDashboardNode(Node):
             if readiness:
                 return self._error(
                     str(readiness["message"]),
-                    readiness_error_payload(readiness),
+                    validation_error_payload(readiness),
                 )
             task = build_task_create_record(
                 static_context,
@@ -4388,11 +4325,12 @@ class WebDashboardNode(Node):
 
     def _task_start_pre_runtime_context(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         task_id = str(payload.get("task_id") or "").strip()
+        selected_map_id = self._effective_map_id() or "live_map"
+        self._remember_working_map_id(selected_map_id, reason="start_task")
         with self._data_lock:
             active = dict(self._settings.get("active_task") or {})
             task = self._find_by_id(self._tasks, task_id)
             known = {item.get("id"): item for item in self._annotations if item.get("id")}
-            selected_map_id = self._settings.get("selected_map_id") or "live_map"
             static_context = task_start_static_context(
                 task_id,
                 task,
@@ -4406,34 +4344,56 @@ class WebDashboardNode(Node):
                     list(static_context.get("annotations") or []),
                     str(static_context["task_map_id"]),
                 )
-            precheck = task_readiness_pre_runtime_payload(
-                task_id=task_id,
-                active_task=active,
-                static_context=static_context,
-                task_validation=task_validation,
-                selected_map_id=selected_map_id,
-                now_text=now_text,
-            )
-            if not precheck.get("proceed"):
-                readiness = dict(precheck.get("readiness") or {})
+            if active.get("status") == "running":
+                return self._error(
+                    "当前任务正在执行中" if active.get("task_id") == task_id else "已有任务正在执行，请先停止当前任务",
+                    {
+                        "code": "task_running",
+                        "task_id": task_id,
+                        "active_task_id": active.get("task_id"),
+                    },
+                )
+            if not static_context.get("ok") or task_validation:
+                validation = dict(task_validation or static_context.get("validation") or {})
+                if not validation:
+                    error_payload = dict(static_context.get("error") or {})
+                    validation = {
+                        "code": str(error_payload.get("code") or "task_static_context_invalid"),
+                        "message": str(error_payload.get("message") or "任务静态条件无效"),
+                    }
                 failure_state = apply_task_start_pre_runtime_failure_state(
                     self._tasks,
                     task_id=task_id,
                     static_context=static_context,
                     task_validation=task_validation,
-                    readiness=readiness,
+                    validation=validation,
                     now_text_value=now_text(),
                 )
                 if failure_state.get("changed"):
                     self._tasks = list(failure_state["tasks"])
                     self._save_json("tasks.json", self._tasks)
                 return self._error(
-                    str(readiness["message"]),
-                    readiness_error_payload(readiness),
+                    str(validation.get("message") or "任务静态条件无效"),
+                    validation_error_payload(validation),
                 )
-            task_map_id = str(precheck.get("task_map_id") or "live_map")
-            selected_map_id = str(precheck.get("selected_map_id") or selected_map_id or "live_map")
-            first_annotation = precheck.get("first_annotation")
+            task_map_id = str(static_context.get("task_map_id") or "live_map")
+            selected_map_id = str(selected_map_id or "live_map")
+            annotation_map_ids = {
+                str(item.get("map_id") or "").strip()
+                for item in (static_context.get("annotations") or [])
+                if isinstance(item, dict) and str(item.get("map_id") or "").strip()
+            }
+            if task_map_id != selected_map_id and selected_map_id not in annotation_map_ids:
+                return self._error(
+                    "当前地图与任务地图不一致，请先切换到任务对应地图",
+                    {
+                        "code": "selected_map_mismatch",
+                        "task_id": task_id,
+                        "task_map_id": task_map_id,
+                        "selected_map_id": selected_map_id,
+                    },
+                )
+            first_annotation = static_context.get("first_annotation")
             expectation_error = validate_task_start_expectations(
                 payload,
                 task,
@@ -4455,83 +4415,21 @@ class WebDashboardNode(Node):
         context = self._task_start_pre_runtime_context(payload)
         if not context.get("ok"):
             return context
-        task_id = str(context.get("task_id") or "")
-        task_map_id = str(context.get("task_map_id") or "live_map")
-        selected_map_id = str(context.get("selected_map_id") or "live_map")
-        first_annotation = context.get("first_annotation")
-        readiness = self._task_start_readiness_payload(
-            first_annotation,
-            task_map_id,
-            task_id=task_id,
-            selected_map_id=selected_map_id,
-        )
-        if not readiness.get("ready"):
-            return self._error(
-                str(readiness["message"]),
-                readiness_error_payload(readiness),
-            )
-        reset_started_at = time.time()
         self._reset_navigation_session("before_start_task", clear_costmaps=True)
         settle_s = max(0.0, float(self.get_parameter("task_start_settle_s").value))
         if settle_s > 0.0:
             time.sleep(min(settle_s, 2.0))
-        post_reset_readiness = self._wait_for_navigation_ready_after_reset(min_update_time=reset_started_at)
-        if not post_reset_readiness.get("ready"):
-            self._append_event(
-                "任务启动复位后导航未恢复",
-                {"task_id": task_id, "readiness": post_reset_readiness},
-            )
-            return self._error(
-                str(post_reset_readiness["message"]),
-                readiness_error_payload(post_reset_readiness),
-            )
-        post_reset_task_ready = self._task_start_readiness_payload(
-            first_annotation,
-            task_map_id,
-            task_id=task_id,
-            selected_map_id=selected_map_id,
-            nav_readiness=post_reset_readiness,
-        )
-        if not post_reset_task_ready.get("ready"):
-            self._append_event(
-                "任务启动复位后位姿/任务条件失效",
-                {"task_id": task_id, "readiness": post_reset_task_ready},
-            )
-            return self._error(
-                str(post_reset_task_ready["message"]),
-                readiness_error_payload(post_reset_task_ready),
-            )
         context = self._task_start_pre_runtime_context(payload)
         if not context.get("ok"):
             return context
         task = context.get("task")
         task_id = str(context.get("task_id") or "")
         task_map_id = str(context.get("task_map_id") or "live_map")
-        selected_map_id = str(context.get("selected_map_id") or "live_map")
-        first_annotation = context.get("first_annotation")
         with self._data_lock:
-            final_readiness = self._task_start_readiness_payload(
-                first_annotation,
-                task_map_id,
-                task_id=task_id,
-                selected_map_id=selected_map_id,
-                nav_readiness=post_reset_readiness,
-            )
-            if not final_readiness.get("ready"):
-                self._append_event(
-                    "任务下发前最终条件失效",
-                    {"task_id": task_id, "readiness": final_readiness},
-                )
-                return self._error(
-                    str(final_readiness["message"]),
-                    readiness_error_payload(final_readiness),
-                )
             created = create_active_task_state(
                 task,
                 task_map_id=task_map_id,
                 now_text=now_text(),
-                start_readiness=final_readiness,
-                post_reset_navigation_readiness=post_reset_readiness,
             )
             active = created["active"]
             self._append_active_task_timeline_event(
@@ -4559,8 +4457,6 @@ class WebDashboardNode(Node):
         with self._data_lock:
             active = dict(self._settings.get("active_task") or {})
             stopped_task_id = active.get("task_id")
-            if not stopped_task_id and not stop_request["is_reset"]:
-                return idle_stop_task_response()
             if stopped_task_id:
                 stopped = stop_task_state(active, reason=reason)
                 active = stopped["active"]
@@ -4570,7 +4466,7 @@ class WebDashboardNode(Node):
                     str(stopped["message"]),
                     dict(stopped["event_extra"]),
                 )
-                self._persist_task_result_unlocked(
+                self._update_task_terminal_state_unlocked(
                     stopped_task_id,
                     active,
                     str(stopped["result_status"]),
@@ -4585,10 +4481,13 @@ class WebDashboardNode(Node):
             operator_event = str(stopped["operator_event"])
             operator_payload = stopped["operator_payload"]
         else:
+            idle = idle_stop_task_response(reason)
             operator = stop_task_operator_event_payload(task_id=stopped_task_id, reason=reason)
             operator_event = str(operator["operator_event"])
             operator_payload = operator["operator_payload"]
         self._append_event(operator_event, operator_payload)
+        if not stopped_task_id:
+            return idle
         return {
             "ok": True,
             "active_task": None,
@@ -4646,20 +4545,13 @@ class WebDashboardNode(Node):
             with self._data_lock:
                 self._settings.pop("map_relocalization_required", None)
                 self._save_json("settings.json", self._settings)
-        task_readiness = self._current_task_readiness_payload(
-            nav_readiness=verification.get("navigation_readiness")
-            if isinstance(verification.get("navigation_readiness"), dict)
-            else None
-        )
         status = relocalization_response_payload(
             verification,
-            task_readiness,
             now_text=now_text,
         )
         result = initialpose_api_response_payload(
             localization_status=status,
             verification=verification,
-            task_readiness=task_readiness,
             topic=self.get_parameter("initialpose_topic").value,
             publish_repeats=repeats,
             frame_id=frame_id,
@@ -4698,7 +4590,7 @@ class WebDashboardNode(Node):
             with self._lock:
                 relocalization = dict(self._state.get("relocalization_result") or {})
                 pose = dict(self._state.get("pose") or {})
-                localization = self._state.get("localization_ok")
+                localization = self._factory_localization_ok(self._state)
                 scan = dict(self._state.get("scan") or {})
                 local_costmap = dict(self._state.get("local_costmap") or {})
                 global_costmap = dict(self._state.get("global_costmap") or {})
@@ -4776,8 +4668,31 @@ class WebDashboardNode(Node):
         with self._lock:
             pose = dict(self._state.get("pose") or {})
             current_floor = self._state.get("floor")
-            localization_ok = self._state.get("localization_ok")
+            localization_ok = self._factory_localization_ok(self._state)
             navigation_status = self._state.get("navigation_status")
+            scan = dict(self._state.get("scan") or {})
+        scan_guard = self._active_task_scan_guard(scan)
+        if not scan_guard.get("ok"):
+            if self._handle_active_task_runtime_loss(
+                active,
+                reason=str(scan_guard.get("reason") or "scan_unavailable"),
+                message=str(scan_guard.get("message") or "任务执行中 /scan 不可用"),
+                timeout_s=float(self.get_parameter("task_runtime_scan_lost_stop_s").value),
+                extra={
+                    "scan_age_s": scan_guard.get("age_s"),
+                    "finite_ranges": scan_guard.get("finite_ranges"),
+                    "frame_id": scan_guard.get("frame_id"),
+                },
+            ):
+                return
+            with self._data_lock:
+                active = dict(self._settings.get("active_task") or active)
+            self._mark_active_task_waiting(
+                active,
+                str(scan_guard.get("reason") or "scan_unavailable"),
+                str(scan_guard.get("message") or "任务执行中 /scan 不可用"),
+            )
+            return
         pose_age = pose_age_sec(pose, time.time())
         pose_timeout_s = max(0.5, float(self.get_parameter("task_start_pose_timeout_s").value))
         pre_dispatch = active_task_pre_dispatch_decision(
@@ -4790,6 +4705,7 @@ class WebDashboardNode(Node):
             pose_timeout_s=pose_timeout_s,
         )
         if pre_dispatch.get("action") == "pass_cross_floor":
+            self._clear_active_task_runtime_loss(active)
             self._mark_active_task_waiting(
                 active,
                 str(pre_dispatch["code"]),
@@ -4798,14 +4714,27 @@ class WebDashboardNode(Node):
             self._dispatch_active_goal(force=False)
             return
         if pre_dispatch.get("action") == "wait_and_monitor_localization":
+            if self._handle_active_task_runtime_loss(
+                active,
+                reason=str(pre_dispatch.get("reason") or pre_dispatch.get("code") or "localization_lost"),
+                message=str(pre_dispatch.get("message") or "任务执行中定位/位姿暂时丢失"),
+                timeout_s=float(self.get_parameter("task_runtime_localization_lost_stop_s").value),
+                extra={
+                    "pose_age_s": pre_dispatch.get("pose_age_s"),
+                    "pose_timeout_s": pre_dispatch.get("pose_timeout_s"),
+                },
+            ):
+                return
+            with self._data_lock:
+                active = dict(self._settings.get("active_task") or active)
             self._mark_active_task_waiting(
                 active,
                 str(pre_dispatch["code"]),
                 str(pre_dispatch["message"]),
             )
-            self._stop_task_if_localization_lost(active, str(pre_dispatch["reason"]))
             return
         if pre_dispatch.get("action") == "wait":
+            self._clear_active_task_runtime_loss(active)
             self._mark_active_task_waiting(
                 active,
                 str(pre_dispatch["code"]),
@@ -4813,27 +4742,19 @@ class WebDashboardNode(Node):
             )
             return
         if pre_dispatch.get("action") == "fail":
-            self._fail_active_task_from_payload(
-                pre_dispatch,
-                task_id=active.get("task_id"),
+            self._clear_active_task_runtime_loss(active)
+            self._mark_active_task_waiting(
+                active,
+                str(pre_dispatch.get("code") or "task_waiting"),
+                str(pre_dispatch.get("message") or "任务等待现场状态恢复"),
             )
             return
+        self._clear_active_task_runtime_loss(active)
         distance = float(pre_dispatch.get("distance_m"))
-        runtime_guard = self._task_runtime_guard_payload()
-        if self._stop_task_if_runtime_guard_lost(active, runtime_guard):
-            return
         self._update_active_task_progress(active, annotation, pose, distance, navigation_status)
         with self._data_lock:
             active = dict(self._settings.get("active_task") or {})
         if active.get("status") != "running":
-            return
-        if self._stop_task_if_waypoint_timed_out(active, annotation, distance):
-            return
-        if self._stop_task_if_goal_accept_timed_out(active, annotation):
-            return
-        if self._stop_task_if_plan_mismatched(active, annotation):
-            return
-        if self._stop_task_if_stalled(active, annotation, distance):
             return
         near_goal_decision = near_goal_wait_decision(
             active,
@@ -4859,10 +4780,144 @@ class WebDashboardNode(Node):
                 str(near_goal_decision["reason"]),
                 str(near_goal_decision["message"]),
             )
-            if self._stop_task_if_near_goal_timed_out(active, annotation, distance):
-                return
             return
         self._dispatch_active_goal(force=False)
+
+    def _active_task_scan_guard(self, scan: Dict[str, Any]) -> Dict[str, Any]:
+        timeout_s = max(0.2, float(self.get_parameter("task_runtime_scan_timeout_s").value))
+        min_finite = max(1, int(self.get_parameter("task_runtime_scan_min_finite_ranges").value))
+        last_update = scan.get("last_update")
+        age_s = None
+        if last_update is not None:
+            try:
+                age_s = max(0.0, time.time() - float(last_update))
+            except (TypeError, ValueError):
+                age_s = None
+        finite_ranges = int(scan.get("finite_ranges", 0) or 0)
+        if age_s is None:
+            return {
+                "ok": False,
+                "reason": "scan_unavailable",
+                "message": "任务执行中没有收到 /scan，已暂停；若 2 秒内不恢复将自动停止任务",
+                "age_s": None,
+                "finite_ranges": finite_ranges,
+                "frame_id": scan.get("frame_id"),
+            }
+        if age_s > timeout_s:
+            return {
+                "ok": False,
+                "reason": "scan_stale",
+                "message": "任务执行中 /scan 已过期 %.1f 秒，已暂停；若 2 秒内不恢复将自动停止任务" % age_s,
+                "age_s": age_s,
+                "finite_ranges": finite_ranges,
+                "frame_id": scan.get("frame_id"),
+            }
+        if finite_ranges < min_finite:
+            return {
+                "ok": False,
+                "reason": "scan_sparse",
+                "message": "任务执行中 /scan 有效点过少 %d/%d，已暂停；若 2 秒内不恢复将自动停止任务"
+                % (finite_ranges, min_finite),
+                "age_s": age_s,
+                "finite_ranges": finite_ranges,
+                "frame_id": scan.get("frame_id"),
+            }
+        return {
+            "ok": True,
+            "age_s": age_s,
+            "finite_ranges": finite_ranges,
+            "frame_id": scan.get("frame_id"),
+        }
+
+    def _handle_active_task_runtime_loss(
+        self,
+        active: Dict[str, Any],
+        *,
+        reason: str,
+        message: str,
+        timeout_s: float,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        now_monotonic = time.monotonic()
+        task_id = active.get("task_id")
+        failure_payload = None
+        with self._data_lock:
+            current = dict(self._settings.get("active_task") or {})
+            if current.get("status") != "running" or current.get("task_id") != task_id:
+                return True
+            timer_source = dict(current)
+            if str(timer_source.get("localization_lost_reason") or "") != str(reason):
+                timer_source.pop("localization_lost_started_monotonic", None)
+            decision = localization_lost_timeout_decision(
+                timer_source,
+                reason=reason,
+                now_monotonic=now_monotonic,
+                timeout_s=max(0.5, float(timeout_s)),
+            )
+            action = str(decision.get("action") or "")
+            if action == "fail":
+                failure_extra = localization_lost_failure_extra(decision)
+                failure_extra.update(
+                    {
+                        "reason": reason,
+                        "message": message,
+                    }
+                )
+                if extra:
+                    failure_extra.update(extra)
+                failure_payload = {
+                    "task_id": task_id,
+                    "message": str(decision.get("message") or message),
+                    "extra": failure_extra,
+                }
+            elif action == "start_timer":
+                result = apply_localization_lost_start_state(
+                    current,
+                    decision,
+                    fallback_monotonic=now_monotonic,
+                )
+                updated = result["active"]
+                updated["localization_lost_reason"] = reason
+                updated["status_message"] = message
+                event = localization_lost_start_event_payload(updated, decision)
+                if result.get("changed") or current.get("localization_lost_reason") != reason:
+                    self._append_active_task_timeline_event(
+                        updated,
+                        str(event["event"]),
+                        str(event["message"]),
+                        dict(event["extra"]),
+                    )
+                    self._settings["active_task"] = updated
+                    self._save_json("settings.json", self._settings)
+            elif action == "wait":
+                updated = dict(current)
+                updated["localization_lost_reason"] = reason
+                updated["status_message"] = message
+                self._settings["active_task"] = updated
+                self._save_json("settings.json", self._settings)
+        if failure_payload is not None:
+            self._fail_active_task(
+                failure_payload["task_id"],
+                failure_payload["message"],
+                failure_payload["extra"],
+            )
+            return True
+        return False
+
+    def _clear_active_task_runtime_loss(self, active: Dict[str, Any]) -> None:
+        task_id = active.get("task_id")
+        with self._data_lock:
+            current = dict(self._settings.get("active_task") or {})
+            if current.get("status") != "running" or current.get("task_id") != task_id:
+                return
+            changed = False
+            for key in ("localization_lost_started_monotonic", "localization_lost_reason"):
+                if key in current:
+                    current.pop(key, None)
+                    changed = True
+            if changed:
+                self._settings["active_task"] = current
+                self._save_json("settings.json", self._settings)
 
     def _active_waypoint_waiting_cross_floor(
         self,
@@ -5010,59 +5065,12 @@ class WebDashboardNode(Node):
                 now_monotonic=now_monotonic,
                 now_text=now_text(),
                 goal_tolerance_m=float(self.get_parameter("goal_reached_tolerance_m").value),
-                min_pose_movement_m=max(0.0, float(self.get_parameter("task_stall_min_pose_movement_m").value)),
-                min_distance_delta_m=max(0.0, float(self.get_parameter("task_stall_min_distance_delta_m").value)),
+                min_pose_movement_m=max(0.0, float(self.get_parameter("task_progress_min_pose_movement_m").value)),
+                min_distance_delta_m=max(0.0, float(self.get_parameter("task_progress_min_distance_delta_m").value)),
             )
             current = result["active"]
             self._settings["active_task"] = current
             self._save_json("settings.json", self._settings)
-
-    def _stop_task_if_stalled(
-        self,
-        active: Dict[str, Any],
-        annotation: Dict[str, Any],
-        distance: float,
-    ) -> bool:
-        warn_timeout = max(1.0, float(self.get_parameter("task_stall_warn_timeout_s").value))
-        stop_timeout = max(warn_timeout + 1.0, float(self.get_parameter("task_stall_stop_timeout_s").value))
-        decision = task_stall_decision(
-            active,
-            distance=distance,
-            now_monotonic=time.monotonic(),
-            warn_timeout_s=warn_timeout,
-            stop_timeout_s=stop_timeout,
-        )
-        if decision.get("action") == "fail":
-            self._fail_active_task_from_payload(
-                decision,
-                task_id=active.get("task_id"),
-                extra=stall_failure_extra(annotation),
-            )
-            return True
-        if decision.get("action") == "warn":
-            operator_event_payload = None
-            with self._data_lock:
-                current = dict(self._settings.get("active_task") or {})
-                if current.get("status") == "running" and current.get("task_id") == active.get("task_id"):
-                    current = apply_stall_warning_state(current, decision)
-                    event_payload = stall_warning_event_payload(current, annotation, decision)
-                    self._append_active_task_timeline_event(
-                        current,
-                        str(event_payload["timeline_event"]),
-                        str(event_payload["timeline_message"]),
-                        event_payload.get("timeline_extra") if isinstance(event_payload.get("timeline_extra"), dict) else {},
-                    )
-                    self._settings["active_task"] = current
-                    self._save_json("settings.json", self._settings)
-                    operator_event_payload = event_payload
-            if operator_event_payload:
-                self._append_event(
-                    str(operator_event_payload["operator_event"]),
-                    operator_event_payload.get("operator_payload")
-                    if isinstance(operator_event_payload.get("operator_payload"), dict)
-                    else {},
-                )
-        return False
 
     def _mark_active_task_waiting(
         self,
@@ -5091,151 +5099,6 @@ class WebDashboardNode(Node):
             if result.get("changed"):
                 self._settings["active_task"] = current
                 self._save_json("settings.json", self._settings)
-
-    def _stop_task_if_localization_lost(self, active: Dict[str, Any], reason: str) -> None:
-        timeout_s = max(0.5, float(self.get_parameter("task_localization_lost_timeout_s").value))
-        now_monotonic = time.monotonic()
-        decision = localization_lost_timeout_decision(
-            active,
-            reason=reason,
-            now_monotonic=now_monotonic,
-            timeout_s=timeout_s,
-        )
-        if decision.get("action") == "start_timer":
-            with self._data_lock:
-                current = dict(self._settings.get("active_task") or {})
-                if current.get("status") == "running" and current.get("task_id") == active.get("task_id"):
-                    result = apply_localization_lost_start_state(
-                        current,
-                        decision,
-                        fallback_monotonic=now_monotonic,
-                    )
-                    current = result["active"]
-                    if result.get("changed"):
-                        event_payload = localization_lost_start_event_payload(current, decision)
-                        self._append_active_task_timeline_event(
-                            current,
-                            str(event_payload["event"]),
-                            str(event_payload["message"]),
-                            event_payload.get("extra") if isinstance(event_payload.get("extra"), dict) else {},
-                        )
-                        self._settings["active_task"] = current
-                        self._save_json("settings.json", self._settings)
-            return
-        if decision.get("action") != "fail":
-            return
-        self._fail_active_task_from_payload(
-            decision,
-            task_id=active.get("task_id"),
-            extra=localization_lost_failure_extra(decision),
-        )
-
-    def _stop_task_if_goal_accept_timed_out(
-        self,
-        active: Dict[str, Any],
-        annotation: Dict[str, Any],
-    ) -> bool:
-        timeout_s = max(1.0, float(self.get_parameter("task_goal_accept_timeout_s").value))
-        decision = goal_accept_timeout_decision(
-            active,
-            annotation,
-            now_monotonic=time.monotonic(),
-            timeout_s=timeout_s,
-        )
-        if decision.get("action") != "fail":
-            return False
-        self._fail_active_task_from_payload(
-            decision,
-            task_id=active.get("task_id"),
-        )
-        return True
-
-    def _stop_task_if_plan_mismatched(
-        self,
-        active: Dict[str, Any],
-        annotation: Dict[str, Any],
-    ) -> bool:
-        timeout_s = max(1.0, float(self.get_parameter("task_plan_match_timeout_s").value))
-        tolerance_m = max(0.1, float(self.get_parameter("task_plan_goal_tolerance_m").value))
-        with self._lock:
-            path = dict(self._state.get("path") or {})
-        decision = task_plan_match_decision(
-            active,
-            annotation,
-            path,
-            required=bool(self.get_parameter("task_plan_match_required").value),
-            now_monotonic=time.monotonic(),
-            timeout_s=timeout_s,
-            tolerance_m=tolerance_m,
-        )
-        if decision.get("action") == "verify":
-            if active.get("plan_goal_verified") is not True:
-                with self._data_lock:
-                    current = dict(self._settings.get("active_task") or {})
-                    if current.get("status") == "running" and current.get("task_id") == active.get("task_id"):
-                        current = apply_plan_goal_verified_state(current, decision)
-                        event_payload = plan_goal_verified_event_payload(current, annotation, decision)
-                        self._append_active_task_timeline_event(
-                            current,
-                            str(event_payload["event"]),
-                            str(event_payload["message"]),
-                            event_payload.get("extra") if isinstance(event_payload.get("extra"), dict) else {},
-                        )
-                        self._settings["active_task"] = current
-                        self._save_json("settings.json", self._settings)
-            return False
-        if decision.get("action") == "fail":
-            self._fail_active_task_from_payload(
-                decision,
-                task_id=active.get("task_id"),
-            )
-            return True
-        return False
-
-    def _stop_task_if_waypoint_timed_out(
-        self,
-        active: Dict[str, Any],
-        annotation: Dict[str, Any],
-        distance: float,
-    ) -> bool:
-        timeout_s = max(5.0, float(self.get_parameter("task_waypoint_timeout_s").value))
-        decision = waypoint_timeout_decision(
-            active,
-            distance=distance,
-            now_monotonic=time.monotonic(),
-            timeout_s=timeout_s,
-        )
-        if decision.get("action") != "fail":
-            return False
-        self._fail_active_task_from_payload(
-            decision,
-            task_id=active.get("task_id"),
-            extra=timeout_failure_extra(annotation, decision),
-        )
-        return True
-
-    def _stop_task_if_near_goal_timed_out(
-        self,
-        active: Dict[str, Any],
-        annotation: Dict[str, Any],
-        distance: float,
-    ) -> bool:
-        timeout_s = max(1.0, float(self.get_parameter("task_near_goal_timeout_s").value))
-        decision = near_goal_timeout_decision(
-            active,
-            distance=distance,
-            now_monotonic=time.monotonic(),
-            goal_tolerance_m=float(self.get_parameter("goal_reached_tolerance_m").value),
-            timeout_s=timeout_s,
-        )
-        if decision.get("action") != "fail":
-            return False
-        self._fail_active_task_from_payload(
-            decision,
-            task_id=active.get("task_id"),
-            extra=timeout_failure_extra(annotation, decision),
-        )
-        return True
 
     def _fail_active_task_from_payload(
         self,
@@ -5278,7 +5141,7 @@ class WebDashboardNode(Node):
                 str(failed["message"]),
                 dict(failed["event_extra"]),
             )
-            self._persist_task_result_unlocked(
+            self._update_task_terminal_state_unlocked(
                 task_id,
                 active,
                 str(failed["result_status"]),
@@ -5309,7 +5172,7 @@ class WebDashboardNode(Node):
             )
             if result.get("completed"):
                 completed_task_id = result.get("task_id") or active.get("task_id")
-                self._persist_task_result_unlocked(
+                self._update_task_terminal_state_unlocked(
                     completed_task_id,
                     active,
                     str(result["result_status"]),
@@ -5547,14 +5410,10 @@ class WebDashboardNode(Node):
         active: Dict[str, Any],
         phase: str,
     ) -> None:
-        with self._lock:
-            path_snapshot = dict(self._state.get("path") or {})
-            state_pose = dict(self._state.get("pose") or {})
         now_time = time.time()
         payload = build_active_waypoint_payload(
             active,
             annotation,
-            {"path": path_snapshot, "pose": state_pose},
             phase=phase,
             now_text=now_text(),
             now_time=now_time,
@@ -5644,14 +5503,35 @@ class WebDashboardNode(Node):
         if record is None:
             return {"available": False, "message": "map not selected"}
         yaml_path = FsPath(self._resolve_path(str(record.get("yaml_path") or "")))
+        fingerprint = map_file_fingerprint(yaml_path)
+        if fingerprint is None:
+            return {"available": False, "map_id": map_id, "message": f"map yaml not found: {yaml_path}"}
+        cache_key = self._map_cache_key(map_id, yaml_path)
+        with self._map_file_cache_lock:
+            cached = self._map_file_cache.get(cache_key)
+            if cached and cached.get("fingerprint") == fingerprint:
+                return dict(cached["payload"])
+        started = time.monotonic()
         try:
-            return load_map_file_payload(record, yaml_path)
+            payload = load_map_file_payload(record, yaml_path)
         except Exception as exc:
-            return {
+            payload = {
                 "available": False,
                 "map_id": map_id,
                 "message": str(exc),
             }
+        elapsed_s = time.monotonic() - started
+        self._log_slow_operation(
+            "load_map_file_payload",
+            elapsed_s,
+            "map_id=%s yaml=%s" % (str(map_id or ""), str(yaml_path)),
+        )
+        with self._map_file_cache_lock:
+            self._map_file_cache[cache_key] = {
+                "fingerprint": fingerprint,
+                "payload": dict(payload),
+            }
+        return payload
 
     def _serve_mjpeg(self, camera_name: str, handler: BaseHTTPRequestHandler) -> None:
         if not self._as_bool(self.get_parameter("enable_camera_proxy").value):
@@ -5802,113 +5682,126 @@ class WebDashboardNode(Node):
                 self._send_common_headers("application/json; charset=utf-8", 0)
 
             def do_GET(self) -> None:
+                started = time.monotonic()
                 parsed = urlparse(self.path)
                 query = parse_qs(parsed.query)
-                if parsed.path == "/":
-                    self._send_bytes(_load_dashboard_html(), "text/html; charset=utf-8")
-                elif parsed.path in DASHBOARD_STATIC_FILES:
-                    static_payload = _load_dashboard_static(parsed.path)
-                    if static_payload is None:
+                try:
+                    if parsed.path == "/":
+                        self._send_bytes(_load_dashboard_html(), "text/html; charset=utf-8")
+                    elif parsed.path in DASHBOARD_STATIC_FILES:
+                        static_payload = _load_dashboard_static(parsed.path)
+                        if static_payload is None:
+                            self.send_error(HTTPStatus.NOT_FOUND)
+                        else:
+                            payload, content_type = static_payload
+                            self._send_bytes(payload, content_type)
+                    elif parsed.path == "/api/state":
+                        include_debug = node._as_bool((query.get("debug") or ["1"])[0])
+                        self._send_json(node._snapshot(include_debug=include_debug))
+                    elif parsed.path == "/api/map":
+                        self._send_json(node._map_snapshot())
+                    elif parsed.path == "/api/map_file":
+                        map_id = (query.get("map_id") or [None])[0]
+                        self._send_json(node._map_file_snapshot(map_id))
+                    elif parsed.path == "/api/projects":
+                        self._send_json(node._projects_payload())
+                    elif parsed.path == "/api/maps":
+                        self._send_json(node._maps_payload())
+                    elif parsed.path == "/api/annotations":
+                        self._send_json(node._annotations_payload(query))
+                    elif parsed.path == "/api/tasks":
+                        self._send_json(node._tasks_payload(query))
+                    elif parsed.path == "/api/preflight":
+                        self._send_json(node._preflight_payload())
+                    elif parsed.path == "/api/radar/task_export":
+                        task_id = (query.get("task_id") or [""])[0]
+                        export_format = (query.get("format") or ["json"])[0]
+                        if export_format == "csv":
+                            payload = node._radar_task_export_csv(task_id)
+                            filename = f"radar_{sanitize_name(task_id, 'task')}.csv"
+                            self._send_bytes(
+                                payload,
+                                "text/csv; charset=utf-8",
+                                extra_headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+                            )
+                        else:
+                            filename = f"radar_{sanitize_name(task_id, 'task')}.json"
+                            self._send_json(
+                                node._radar_task_export_payload(task_id),
+                                extra_headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+                            )
+                    elif parsed.path in ("/camera/front.mjpg", "/camera/rear.mjpg"):
+                        camera_name = "front" if parsed.path == "/camera/front.mjpg" else "rear"
+                        node._serve_mjpeg(camera_name, self)
+                    elif parsed.path in ("/camera/front.jpg", "/camera/rear.jpg"):
+                        camera_name = "front" if parsed.path == "/camera/front.jpg" else "rear"
+                        node._serve_jpeg_snapshot(camera_name, self)
+                    elif parsed.path == "/healthz":
+                        self._send_json({"ok": True})
+                    else:
                         self.send_error(HTTPStatus.NOT_FOUND)
-                    else:
-                        payload, content_type = static_payload
-                        self._send_bytes(payload, content_type)
-                elif parsed.path == "/api/state":
-                    self._send_json(node._snapshot())
-                elif parsed.path == "/api/map":
-                    self._send_json(node._map_snapshot())
-                elif parsed.path == "/api/map_file":
-                    map_id = (query.get("map_id") or [None])[0]
-                    self._send_json(node._map_file_snapshot(map_id))
-                elif parsed.path == "/api/projects":
-                    self._send_json(node._projects_payload())
-                elif parsed.path == "/api/maps":
-                    self._send_json(node._maps_payload())
-                elif parsed.path == "/api/annotations":
-                    self._send_json(node._annotations_payload(query))
-                elif parsed.path == "/api/tasks":
-                    self._send_json(node._tasks_payload(query))
-                elif parsed.path == "/api/preflight":
-                    self._send_json(node._preflight_payload())
-                elif parsed.path == "/api/radar/task_export":
-                    task_id = (query.get("task_id") or [""])[0]
-                    export_format = (query.get("format") or ["json"])[0]
-                    if export_format == "csv":
-                        payload = node._radar_task_export_csv(task_id)
-                        filename = f"radar_{sanitize_name(task_id, 'task')}.csv"
-                        self._send_bytes(
-                            payload,
-                            "text/csv; charset=utf-8",
-                            extra_headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-                        )
-                    else:
-                        filename = f"radar_{sanitize_name(task_id, 'task')}.json"
-                        self._send_json(
-                            node._radar_task_export_payload(task_id),
-                            extra_headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-                        )
-                elif parsed.path in ("/camera/front.mjpg", "/camera/rear.mjpg"):
-                    camera_name = "front" if parsed.path == "/camera/front.mjpg" else "rear"
-                    node._serve_mjpeg(camera_name, self)
-                elif parsed.path in ("/camera/front.jpg", "/camera/rear.jpg"):
-                    camera_name = "front" if parsed.path == "/camera/front.jpg" else "rear"
-                    node._serve_jpeg_snapshot(camera_name, self)
-                elif parsed.path == "/healthz":
-                    self._send_json({"ok": True})
-                else:
-                    self.send_error(HTTPStatus.NOT_FOUND)
+                finally:
+                    node._log_slow_operation("GET %s" % parsed.path, time.monotonic() - started)
 
             def do_POST(self) -> None:
+                started = time.monotonic()
                 parsed = urlparse(self.path)
                 payload = self._read_json_body()
-                if parsed.path == "/api/projects":
-                    self._send_api(node._create_project(payload))
-                elif parsed.path == "/api/maps/select":
-                    self._send_api(node._select_map(payload))
-                elif parsed.path == "/api/mapping/session":
-                    self._send_api(node._create_mapping_session(payload))
-                elif parsed.path == "/api/mapping/check_environment":
-                    self._send_api(node._check_mapping_environment())
-                elif parsed.path == "/api/mapping/start":
-                    self._send_api(node._mapping_command("factory_mapping_start_command", payload.get("session_id")))
-                elif parsed.path == "/api/mapping/finish":
-                    self._send_api(node._mapping_command("factory_mapping_finish_command", payload.get("session_id")))
-                elif parsed.path == "/api/mapping/cancel":
-                    self._send_api(node._mapping_command("factory_mapping_cancel_command", payload.get("session_id")))
-                elif parsed.path == "/api/mapping/import_active_map":
-                    self._send_api(node._import_active_map(payload))
-                elif parsed.path == "/api/annotations":
-                    self._send_api(node._create_annotation(payload))
-                elif parsed.path == "/api/tasks":
-                    self._send_api(node._create_task(payload))
-                elif parsed.path == "/api/tasks/update":
-                    self._send_api(node._update_task(payload))
-                elif parsed.path == "/api/tasks/start":
-                    self._send_api(node._start_task(payload))
-                elif parsed.path == "/api/tasks/stop":
-                    self._send_api(node._stop_task(payload))
-                elif parsed.path == "/api/preflight/run":
-                    self._send_api(node._run_preflight(payload))
-                elif parsed.path == "/api/localization/initialpose":
-                    self._send_api(node._publish_initialpose(payload))
-                elif parsed.path == "/api/radar/artifact":
-                    self._send_api(node._radar_record_artifact(payload))
-                elif parsed.path == "/api/radar/manual_measurement":
-                    self._send_api(node._radar_save_manual_measurement(payload))
-                else:
-                    self.send_error(HTTPStatus.NOT_FOUND)
+                try:
+                    if parsed.path == "/api/projects":
+                        self._send_api(node._create_project(payload))
+                    elif parsed.path == "/api/maps/select":
+                        self._send_api(node._select_map(payload))
+                    elif parsed.path == "/api/mapping/session":
+                        self._send_api(node._create_mapping_session(payload))
+                    elif parsed.path == "/api/mapping/check_environment":
+                        self._send_api(node._check_mapping_environment())
+                    elif parsed.path == "/api/mapping/start":
+                        self._send_api(node._mapping_command("factory_mapping_start_command", payload.get("session_id")))
+                    elif parsed.path == "/api/mapping/finish":
+                        self._send_api(node._mapping_command("factory_mapping_finish_command", payload.get("session_id")))
+                    elif parsed.path == "/api/mapping/cancel":
+                        self._send_api(node._mapping_command("factory_mapping_cancel_command", payload.get("session_id")))
+                    elif parsed.path == "/api/mapping/import_active_map":
+                        self._send_api(node._import_active_map(payload))
+                    elif parsed.path == "/api/annotations":
+                        self._send_api(node._create_annotation(payload))
+                    elif parsed.path == "/api/tasks":
+                        self._send_api(node._create_task(payload))
+                    elif parsed.path == "/api/tasks/update":
+                        self._send_api(node._update_task(payload))
+                    elif parsed.path == "/api/tasks/start":
+                        self._send_api(node._start_task(payload))
+                    elif parsed.path == "/api/tasks/stop":
+                        self._send_api(node._stop_task(payload))
+                    elif parsed.path == "/api/preflight/run":
+                        self._send_api(node._run_preflight(payload))
+                    elif parsed.path == "/api/localization/initialpose":
+                        self._send_api(node._publish_initialpose(payload))
+                    elif parsed.path == "/api/radar/artifact":
+                        self._send_api(node._radar_record_artifact(payload))
+                    elif parsed.path == "/api/radar/manual_measurement":
+                        self._send_api(node._radar_save_manual_measurement(payload))
+                    else:
+                        self.send_error(HTTPStatus.NOT_FOUND)
+                finally:
+                    node._log_slow_operation("POST %s" % parsed.path, time.monotonic() - started)
 
             def do_DELETE(self) -> None:
+                started = time.monotonic()
                 parsed = urlparse(self.path)
                 query = parse_qs(parsed.query)
-                if parsed.path == "/api/annotations":
-                    annotation_id = (query.get("id") or [""])[0]
-                    self._send_api(node._delete_annotation(annotation_id))
-                elif parsed.path == "/api/tasks":
-                    task_id = (query.get("id") or [""])[0]
-                    self._send_api(node._delete_task(task_id))
-                else:
-                    self.send_error(HTTPStatus.NOT_FOUND)
+                try:
+                    if parsed.path == "/api/annotations":
+                        annotation_id = (query.get("id") or [""])[0]
+                        self._send_api(node._delete_annotation(annotation_id))
+                    elif parsed.path == "/api/tasks":
+                        task_id = (query.get("id") or [""])[0]
+                        self._send_api(node._delete_task(task_id))
+                    else:
+                        self.send_error(HTTPStatus.NOT_FOUND)
+                finally:
+                    node._log_slow_operation("DELETE %s" % parsed.path, time.monotonic() - started)
 
             def log_message(self, fmt: str, *args: Any) -> None:
                 node.get_logger().debug(fmt % args)

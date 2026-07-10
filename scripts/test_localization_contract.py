@@ -69,12 +69,11 @@ def test_localization_status_requires_fresh_map_pose() -> None:
         pose=sample_pose(),
         pose_age_sec=0.4,
         pose_timeout_s=3.0,
-        task_readiness={"ready": True, "code": "ready", "message": "任务可启动"},
         now_text=lambda: "fixed-time",
     )
     assert_equal(status["confirmed"], True, "fresh localized pose is confirmed")
-    assert_equal(status["task_ready"], True, "task readiness is copied")
-    assert_equal(status["code"], "localized_ready", "ready code")
+    assert_true("task_ready" not in status, "localization status does not include task readiness")
+    assert_equal(status["code"], "localized_confirmed", "ready code")
     assert_equal(status["updated_at"], "fixed-time", "timestamp")
 
     stale = localization_status_payload(
@@ -82,7 +81,6 @@ def test_localization_status_requires_fresh_map_pose() -> None:
         pose=sample_pose(),
         pose_age_sec=9.0,
         pose_timeout_s=3.0,
-        task_readiness={"ready": True, "code": "ready", "message": "任务可启动"},
     )
     assert_equal(stale["confirmed"], False, "stale pose is not confirmed")
     assert_equal(stale["code"], "pose_stale", "stale code")
@@ -97,7 +95,7 @@ def test_localization_status_requires_fresh_map_pose() -> None:
     assert_equal(missing_pose["code"], "pose_missing_or_invalid", "missing pose code")
 
 
-def test_localization_status_rejects_scaled_tcp_pose_mismatch() -> None:
+def test_localization_status_reports_motion_away_from_tcp_pose_as_confirmed() -> None:
     status = localization_status_payload(
         localization_ok=True,
         pose={"x": -0.011, "y": -0.003, "z": 0.0, "yaw": -1.55},
@@ -107,19 +105,36 @@ def test_localization_status_rejects_scaled_tcp_pose_mismatch() -> None:
             "last_update": 100.0,
             "raw": "success: x=-10.923 y=-3.264 z=0.000 yaw=-1.549",
         },
-        task_readiness={"ready": True, "code": "ready", "message": "任务可启动"},
         now_time=101.0,
     )
-    assert_equal(status["confirmed"], False, "scaled pose mismatch is not confirmed")
-    assert_equal(status["code"], "pose_not_near_tcp_2101", "scaled pose mismatch code")
-    assert_true(status["pose_error_m"] > 10.0, "scaled pose mismatch distance is visible")
-    assert_true("坐标单位" in status["message"], "operator sees coordinate-unit hint")
+    assert_equal(status["confirmed"], True, "moving away from the relocalization pose stays confirmed")
+    assert_equal(status["code"], "localized_confirmed", "localization remains confirmed")
+    assert_equal(status["pose_near_2101"], False, "distance from the last 2101 pose remains diagnostic")
+    assert_true(status["pose_error_m"] > 10.0, "movement distance from 2101 pose is visible")
 
     consistent = pose_tcp_2101_consistency_payload(
         {"x": -10.9, "y": -3.3, "z": 0.0, "yaw": -1.55},
         "success: x=-10.923 y=-3.264 z=0.000 yaw=-1.549",
     )
     assert_equal(consistent["pose_near_2101"], True, "meter-scale pose matches 2101")
+
+
+def test_localization_status_uses_factory_status_when_localization_topic_disagrees() -> None:
+    status = localization_status_payload(
+        localization_ok=False,
+        factory_localization_ok=True,
+        pose=sample_pose(),
+        pose_age_sec=0.2,
+        pose_timeout_s=3.0,
+        relocalization_result={
+            "last_update": 100.0,
+            "raw": "success: x=1.000 y=2.000 z=0.000 yaw=0.100",
+        },
+        now_time=101.0,
+    )
+    assert_equal(status["confirmed"], True, "recent 2101 plus factory status keeps relocalization confirmed")
+    assert_equal(status["code"], "localized_confirmed", "topic disagreement does not make relocalization fail")
+    assert_true("状态源不一致" in status["message"], "operator sees the source disagreement")
 
 
 def test_relocalization_sample_evidence() -> None:
@@ -286,25 +301,6 @@ def test_map_relocalization_clearance_uses_strong_current_evidence() -> None:
     assert_equal(manual_without_2101["code"], "tcp_2101_not_success", "manual lock keeps 2101 gate")
 
 
-def test_localization_status_reports_task_page_blocker() -> None:
-    status = localization_status_payload(
-        localization_ok=True,
-        pose=sample_pose(),
-        pose_age_sec=0.2,
-        pose_timeout_s=3.0,
-        task_readiness={
-            "ready": False,
-            "code": "navigation_not_ready",
-            "message": "代价地图尚未恢复",
-        },
-    )
-    assert_equal(status["confirmed"], True, "localization can be confirmed while task is blocked")
-    assert_equal(status["task_ready"], False, "task blocker is copied")
-    assert_equal(status["code"], "localized_task_not_ready", "task blocker code")
-    assert_true(status["message"].startswith("重定位成功"), "localization success is separate from task blockers")
-    assert_true("代价地图尚未恢复" in status["message"], "task blocker message is visible")
-
-
 def test_localization_status_explains_success_reply_but_map_lock() -> None:
     status = localization_status_payload(
         localization_ok=False,
@@ -320,11 +316,6 @@ def test_localization_status_explains_success_reply_but_map_lock() -> None:
             "reason": "startup_sync",
             "message": "启动后已把当前固定地图同步到 Nav2，必须重新按开发手册2101定位",
         },
-        task_readiness={
-            "ready": False,
-            "code": "map_relocalization_required",
-            "message": "Nav2 已加载当前固定地图，请先按开发手册2101完成重定位",
-        },
         now_time=100.0,
     )
     assert_equal(status["confirmed"], False, "map relocalization lock still blocks confirmation")
@@ -334,40 +325,35 @@ def test_localization_status_explains_success_reply_but_map_lock() -> None:
     assert_equal(status["pose_fresh"], True, "fresh pose evidence remains visible")
     assert_true(status["message"].startswith("重定位失败"), "partial success is reported as final failure")
     assert_true("已收到 2101 回执" in status["message"], "2101 reply is only explanatory evidence")
-    assert_true("重定位锁" in status["message"], "map lock blocker is explained")
+    assert_true("重定位要求" in status["message"], "map relocalization requirement is explained")
 
 
 def test_relocalization_response_separates_sent_from_confirmed() -> None:
     failed = relocalization_response_payload(
         {"factory_pose_accepted": False, "navigation_ready": False, "message": "未看到地图位姿更新"},
-        {"ready": False, "code": "localization_not_confirmed", "message": "定位未确认"},
         now_text=lambda: "fixed-time",
     )
     assert_equal(failed["confirmed"], False, "published initialpose is not treated as confirmed")
     assert_equal(failed["code"], "localization_not_confirmed", "unconfirmed code")
 
-    blocked = relocalization_response_payload(
+    confirmed = relocalization_response_payload(
         {"factory_pose_accepted": True, "navigation_ready": False, "message": "定位已确认"},
-        {"ready": False, "code": "navigation_not_ready", "message": "代价地图尚未恢复"},
     )
-    assert_equal(blocked["confirmed"], True, "factory accepted pose is confirmed")
-    assert_equal(blocked["task_ready"], False, "task readiness remains blocked")
-    assert_equal(blocked["code"], "localized_task_not_ready", "blocked code")
-    assert_true(blocked["message"].startswith("重定位成功"), "task blocker does not change localization success")
-    assert_true("代价地图尚未恢复" in blocked["message"], "blocked reason is visible")
+    assert_equal(confirmed["confirmed"], True, "factory accepted pose is confirmed")
+    assert_equal(confirmed["code"], "localized_confirmed", "confirmed code")
+    assert_true("task_ready" not in confirmed, "relocalization response does not include task readiness")
+    assert_true("task_readiness" not in confirmed, "relocalization response does not include task readiness payload")
 
 
 def test_initialpose_api_response_payload() -> None:
     response = initialpose_api_response_payload(
         localization_status={
             "confirmed": True,
-            "task_ready": False,
             "navigation_ready": False,
-            "code": "localized_task_not_ready",
-            "message": "重定位成功：定位已确认；但任务页暂不可启动：代价地图尚未恢复",
+            "code": "localized_confirmed",
+            "message": "重定位成功",
         },
         verification={"factory_pose_accepted": True, "navigation_ready": False},
-        task_readiness={"ready": False, "code": "navigation_not_ready"},
         topic="/initialpose",
         publish_repeats="10",
         frame_id="map",
@@ -376,9 +362,10 @@ def test_initialpose_api_response_payload() -> None:
     )
     assert_equal(response["ok"], True, "initialpose API request was accepted for publishing")
     assert_equal(response["confirmed"], True, "confirmed comes from localization status")
-    assert_equal(response["task_ready"], False, "task readiness remains separate")
+    assert_true("task_ready" not in response, "initialpose API does not include task readiness")
+    assert_true("task_readiness" not in response, "initialpose API does not include task readiness payload")
     assert_equal(response["navigation_ready"], False, "navigation readiness remains separate")
-    assert_equal(response["code"], "localized_task_not_ready", "status code is copied")
+    assert_equal(response["code"], "localized_confirmed", "status code is copied")
     assert_equal(response["topic"], "/initialpose", "topic is copied")
     assert_equal(response["publish_repeats"], 10, "publish repeats normalized")
     assert_equal(response["frame_id"], "map", "frame is copied")
@@ -440,14 +427,14 @@ def main() -> int:
     print("[OK] test_parse_initialpose_request")
     test_localization_status_requires_fresh_map_pose()
     print("[OK] test_localization_status_requires_fresh_map_pose")
-    test_localization_status_rejects_scaled_tcp_pose_mismatch()
-    print("[OK] test_localization_status_rejects_scaled_tcp_pose_mismatch")
+    test_localization_status_reports_motion_away_from_tcp_pose_as_confirmed()
+    print("[OK] test_localization_status_reports_motion_away_from_tcp_pose_as_confirmed")
+    test_localization_status_uses_factory_status_when_localization_topic_disagrees()
+    print("[OK] test_localization_status_uses_factory_status_when_localization_topic_disagrees")
     test_relocalization_sample_evidence()
     print("[OK] test_relocalization_sample_evidence")
     test_map_relocalization_clearance_uses_strong_current_evidence()
     print("[OK] test_map_relocalization_clearance_uses_strong_current_evidence")
-    test_localization_status_reports_task_page_blocker()
-    print("[OK] test_localization_status_reports_task_page_blocker")
     test_localization_status_explains_success_reply_but_map_lock()
     print("[OK] test_localization_status_explains_success_reply_but_map_lock")
     test_relocalization_response_separates_sent_from_confirmed()

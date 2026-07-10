@@ -1,10 +1,1385 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-07-01 20:54 CST
+Last updated: 2026-07-09 17:48 CST
 
 This file is maintained by Codex as the local M20 Pro project memory for future ChatGPT review. It records the current architecture, important decisions, recent changes, verification status, and next steps.
 
 Naming note: this file replaced the previous local-only `codex.md`. Going forward, maintain this file, `m20pro日志.md`, after every meaningful project change or field diagnosis.
+
+## 2026-07-09 17:48 CST - 地图下拉框只显示地图名称
+
+- 用户反馈：
+  - 地图选择下拉框里显示 `F20（带工位） (F20 / 106归档)`、`19楼 (F19 / 项目内置)` 等后缀太啰嗦；
+  - 操作员只需要看到地图名称，不需要在下拉框里区分是否内置/归档。
+- 修复：
+  - 旧版正式前端 `src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js`：
+    - 地图下拉框选项从 `名称 (楼层 / 来源)` 改成只显示 `名称`；
+    - `实时 /map` 选项保留。
+  - 新版封存前端 `docs/archived_frontend_lite_workbench/20260702/dashboard.js` 同步同样规则。
+- 验证/部署：
+  - 上位机 `node --check` 两个 JS 均通过；
+  - 已同步到 104；
+  - 未重启 `m20pro-real.service`，避免扰动现场 Nav2/定位状态；
+  - 104 文件 hash 与上位机一致，服务保持 `active`。
+
+## 2026-07-09 17:43 CST - 修复重启后 `/planner_server` 缺失自检失败
+
+- 用户刷新前端后看到自检失败：
+  - `核心节点`：缺少 `/planner_server`;
+  - 但 `106 边缘激光`、`二维激光`、`原厂里程计`、`地图位姿` 都是通过。
+- 判断：
+  - 这不是点云链路故障；
+  - 104 上 `edge_scan` 和 `/scan` 新鲜，有效距离约 200；
+  - `planner_server` 进程实际存在，但 Nav2 lifecycle 卡在 `Configuring planner_server`；
+  - 日志显示服务启动时 Nav2 正在配置 `planner_server`，同时 web 后端启动同步固定地图，调用 `/map_server/load_map` 把默认 F20 换成 `F20（带工位）`；
+  - 两个动作抢 `/map` 时序，导致 planner/global_costmap 没完成配置。
+- 修复：
+  - `src/m20pro_bringup/scripts/m20pro_real_full.sh`
+    - 启动时读取 `/home/user/.m20pro_web/settings.json` 的 `selected_map_id`;
+    - 再从 `/home/user/.m20pro_web/maps.json` 找到对应 `yaml_path`;
+    - 如果该 yaml 存在，直接给 `ros2 launch` 传 `map:=...`;
+    - 这样 Nav2 map_server 一开始就加载前端选中的固定地图，不再启动后半路 load_map。
+  - `src/m20pro_bringup/launch/m20pro_real.launch.py`
+    - web 后端 `startup_sync_selected_map_delay_s` 从默认 `1.5s` 调整为 `6.0s`;
+    - 让启动同步变成确认/兜底，而不是和 Nav2 lifecycle 抢启动。
+- 104 验证：
+  - 已同步并 build `m20pro_bringup`;
+  - 已重启 `m20pro-real.service`;
+  - 启动命令已带：
+    - `map:=/home/user/m20pro_maps/DESK_20260625_164234/occ_grid.yaml`;
+  - 日志确认：
+    - `planner_server: Configuring`;
+    - `Planner Server has GridBased planners available`;
+    - `Activating planner_server`;
+    - `Managed nodes are active`;
+    - `Nav2 lifecycle startup request accepted`。
+  - 手动触发 `/api/preflight/run` 后确认：
+    - `核心节点` 全部在线；
+    - `106 边缘激光` 正常；
+    - `/scan` 正常；
+    - `local_costmap`、`global_costmap` 均有数据；
+    - `/controller_server`、`/planner_server`、`/bt_navigator` lifecycle 均为 `active`;
+    - 自检摘要：`基础自检通过，导航已就绪`。
+- 注意：
+  - 当前 `map_relocalization_required` 仍存在，因为固定地图已被选择/同步过；
+  - 这属于前端固定地图保护逻辑：重新按 2101 重定位成功前，不应显示机器人箭头和蓝色实时激光，也不应开始正式任务。
+
+## 2026-07-09 17:29 CST - 切换固定地图后禁止误显示上一张地图的机器人位姿
+
+- 用户反馈：
+  - 只是把前端显示地图切到 `Test Field`，并没有把机器狗开到测试场地；
+  - 前端仍显示机器狗箭头和激光轮廓；
+  - 这不符合逻辑，因为机器狗仍在工位地图中。
+- 判断：
+  - 后端在切换固定地图后会要求重新重定位；
+  - 但旧版前端绘制机器人层时主要判断“楼层相同 + 位姿新鲜”；
+  - `F20（带工位）` 和 `Test Field` 都可能是 `F20`，因此旧位姿会被错误画到新地图上。
+- 修复：
+  - 旧版正式前端 `src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js` 增加统一显示门槛；
+  - 新版封存前端 `docs/archived_frontend_lite_workbench/20260702/dashboard.js` 同步同一规则；
+  - 当前显示的是固定地图时，必须满足后端定位确认且 `map_relocalization_required` 为空，才允许绘制：
+    - 机器人蓝色箭头；
+    - 机器人实时轨迹；
+    - Nav2 feedback pose；
+    - 动态障碍；
+    - 蓝色实时激光轮廓；
+    - 跟随机器人视角。
+  - 切图后但未重新重定位时，地图上方提示“已切换，重新重定位成功前不显示机器狗实时位姿”，激光轮廓状态显示暂停叠加。
+  - 重定位模式下用户手动拉出的红色激光轮廓预览仍保留，方便对齐；但正式蓝色实时层必须等重定位最终成功。
+- 验证：
+  - 上位机：
+    - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js`;
+    - `node --check docs/archived_frontend_lite_workbench/20260702/dashboard.js`;
+    - `git diff --check`。
+  - 104：
+    - 已同步上述两个 JS 文件；
+    - 已 `colcon build --packages-select m20pro_cloud_bridge --symlink-install`;
+    - 已重启 `m20pro-real.service`，服务为 `active`;
+    - 文件 hash 与上位机一致；
+    - 未主动切换现场地图，避免改变用户测试状态；
+    - 当前 104 仍选中 `F20（带工位）`，`localization_ok=True`，`pose_fresh=True`，`map_relocalization_required=None`。
+
+## 2026-07-08 14:10 CST - 用户工位手动 `ros2 bag record -a` 包检查
+
+- 用户在 104 工位环境手动执行 `ros2 bag record -a` 并要求检查。
+- 找到新包：
+  - `/home/user/rosbag2_2026_07_08-14_08_40`;
+  - 大小约 `3.7MiB`;
+  - 时长约 `15.65s`;
+  - 总消息数 `9361`。
+- 该包不是空包，但录到的主要是原厂/底层话题：
+  - `/LIDAR/IMU201`: `2960`;
+  - `/LIDAR/IMU202`: `2954`;
+  - `/IMU`: `2943`;
+  - `/ODOM`: `151`;
+  - `/LOCATION_STATUS/MATCHING_ERROR`: `151`;
+  - `/tf`: `150`;
+  - `/LOCATION_STATUS`: `30`;
+  - `/GRID_MAP`: `1`;
+  - `/CPU_106`: `8`。
+- 缺少导航复盘关键话题：
+  - 没有 `/scan`;
+  - 没有 `/cmd_vel`;
+  - 没有 `/plan`;
+  - 没有 `/m20pro_tcp_bridge/map_pose`;
+  - 没有 `/m20pro_tcp_bridge/localization_ok`;
+  - 没有 `/m20pro_tcp_bridge/navigation_status`;
+  - 没有 `/m20pro/floor_goal`、`/m20pro/stair_status`、`/m20pro/active_waypoint`。
+- 同场对照实验：
+  - 在 104 上 `ros2 daemon stop` 后，`ros2 bag record -a` 能看到更多项目栈话题；
+  - 但 Foxy 的 `record -a` 会碰到 `/grid_map` 的 `grid_map_msgs/msg/GridMap`，而 104 当前环境没有 `grid_map_msgs` 包；
+  - 因此 `record -a` 直接报错 `package 'grid_map_msgs' not found`，测试包为 `0` 条消息。
+- 结论：
+  - 直接 `ros2 bag record -a` 当前不适合作为导航事故复盘流程；
+  - 不停 daemon 时，`-a` 可能只录到原厂底层话题，漏掉本工程导航栈；
+  - 停 daemon 后，`-a` 会看到项目栈，但又可能被缺失消息包的话题卡死；
+  - 后续仍坚持使用标准 `ros2 bag record`，但建议明确列出导航复盘需要的话题，而不是用 `-a` 全量录制。
+
+## 2026-07-08 11:46 CST - 104 rosbag 空间清理
+
+- 用户要求检查 104 剩余空间，必要时删除旧包。
+- 清理前：
+  - 104 根分区 `/home/user` 所在 overlayroot：`18G` 总量，`16G` 已用，`2.5G` 可用，使用率 `87%`;
+  - `/home/user/bags` 总占用约 `7.7G`。
+- 删除内容：
+  - `/home/user/bags/m20_real_nav_20260611_153008`：
+    - 占用约 `6.5G`;
+    - 104 上 `metadata.yaml` 为 `0` 字节，历史检查显示无有效 message 计数；
+    - 上位机 `/home/fabu/bags/m20pro_104_debug_20260706/m20_real_nav_20260611_153008` 中已有一份本地副本；
+  - 空/无效小包：
+    - `/home/user/bags/rosbag2_2026_07_03-15_16_42`;
+    - `/home/user/bags/rosbag2_2026_07_03-15_28_08`;
+    - `/home/user/bags/rosbag2_2026_07_08-10_48_33`;
+  - 本轮录包探针产生的小包：
+    - `/home/user/bags/direct_record_probe_20260708_113558`;
+    - `/home/user/bags/qos_record_probe_20260708_114039`;
+    - `/home/user/bags/direct_ros2_record_probe_20260708_114540`。
+- 保留内容：
+  - `/home/user/bags/m20_test_20260703_153157`;
+  - 该包约 `1.3G`，是此前导航失败复盘使用的有效事故包。
+- 清理后：
+  - 104 根分区可用空间提升到 `8.9G`;
+  - 使用率降到 `51%`;
+  - `/home/user/bags` 仅剩约 `1.3G`。
+
+## 2026-07-08 11:20 CST - 导航撞墙/原地转圈复盘：包为空，先回退 edge_scan，并加任务中硬保护
+
+- 用户实测问题：
+  - 两次重定位之间前端显示会来回闪烁；
+  - 下发任务后机器狗能朝任务点走，但继续走后撞墙；
+  - 扶起来后任务仍在执行，机器狗原地转圈；
+  - 随后用户重启机器狗。
+- 本次用户新录包：
+  - 路径：`/home/fabu/bags/edge_scan_nav_issue_20260708/rosbag2_2026_07_08-10_48_33`;
+  - `ros2 bag info` 显示 `Messages: 0`;
+  - `metadata.yaml` 中所有 topic 的 `message_count` 均为 0；
+  - 结论：这个包只能证明录包链路失效，不能复盘撞墙瞬间的 `/scan`、TF、`/cmd_vel` 或 Nav2 状态。
+- 参考旧大包：
+  - 路径：`/home/fabu/bags/m20pro_nav_issue_20260703/m20_test_20260703_153157/m20_test_20260703_153157_0.db3`;
+  - 有 1369486 条消息；
+  - `/scan` 正常：约 10Hz，frame=`m20pro_base_link`，有效 bins 平均约 199，时间戳 age 均值约 0.136s；
+  - `/m20pro_tcp_bridge/map_pose` 曾出现大量约 0.65-0.70m 的快速双峰跳变；
+  - 这能解释“两个定位结果之间闪烁/跳动”的一种来源：原厂 1007 位姿可能在两个候选姿态间来回跳。
+- 当场状态核查：
+  - 机器狗重启后，104 仍被 `/etc/default/m20pro-real` 配成 `M20PRO_SCAN_SOURCE=edge_scan`;
+  - 但 106 的 `m20pro-edge-scan-106.service` 是 `inactive`，因为此前特意没有开机自启；
+  - 104 Web API 当时显示 `perception_status.code=scan_unavailable`;
+  - 结论：重启后的 104 不能继续按 edge_scan 模式导航。
+- 先做安全回退：
+  - 104 `/etc/default/m20pro-real` 已改回：
+    - `M20PRO_SCAN_SOURCE=local_fusion`;
+    - 保持 `M20PRO_FASTDDS_PROFILE=project_udp`;
+    - 保持 `M20PRO_LIDAR_RELAY_FASTDDS_PROFILE=factory`;
+  - 已重启 `m20pro-real.service`;
+  - 104 当前链路恢复为：
+    - `/LIDAR/POINTS -> m20pro_lidar_relay -> /m20pro/lidar_points_relay -> m20pro_pointcloud_fusion -> /scan -> Nav2/Web`;
+  - Web API 验证：
+    - `perception_status.code=perception_ready`;
+    - `mode=local_fusion`;
+    - `/scan` 新鲜，frame=`m20pro_base_link`，有效 bins 约 168-178；
+    - relay 新鲜，输入 publisher=2，输入约 10Hz，输出约 3.8Hz；
+    - `/dev/shm` 约 2.1G/7.7G，27%。
+- 已同步到 104 的代码修复：
+  - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py`;
+  - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_progress_contract.py`;
+  - `src/m20pro_bringup/scripts/m20pro_record_real.sh`;
+  - 104 已 `colcon build --packages-select m20pro_cloud_bridge m20pro_bringup --symlink-install`。
+- 新增运行时硬保护：
+  - 任务执行中如果 `/scan` 不存在、过期或有效点过少，会先暂停并记录状态；
+  - 持续超过 `task_runtime_scan_lost_stop_s=2.0` 秒，自动失败任务、发布停止/零速度、清理导航会话；
+  - 任务执行中如果定位/位姿丢失，持续超过 `task_runtime_localization_lost_stop_s=2.0` 秒，同样自动停止任务；
+  - 目的：避免出现“前端已经显示定位/感知不可信，但机器狗任务还在继续发速度、撞墙后扶起还原地转圈”的状态。
+- 录包脚本修复状态：
+  - `m20pro_record_real.sh` 默认改成轻量事故包：
+    - 先验证 `/scan` 有样本，否则不录；
+    - 默认只录 `/scan`、TF、地图、costmap、plan、`/cmd_vel`、任务状态、定位状态、Nav 状态、电池/故障等关键轻量话题；
+    - 原始点云必须显式设置 `M20PRO_RECORD_INCLUDE_RAW_LIDAR=1` 才录；
+  - 现场 smoke 结果：
+    - 脚本成功阻止再次生成空包；
+    - 但新开的 CLI/rosbag 参与者仍看不到服务内 `/scan`，即使命令行使用服务同款 FastDDS profile；
+    - Web 服务进程能持续收到 `/scan`，说明服务链路可用，问题在临时 CLI DDS 发现/录包链路；
+    - 后续需要单独做“可靠录包服务/同 launch recorder/CLI 发现修复”，不能再把普通命令行 rosbag 当作已可靠证据链。
+- 当前判断：
+  - edge_scan 链路暂时不能作为导航正式链路；它降低 SHM 有价值，但这次实测已经暴露撞墙风险，必须先做静态对齐和短距离对比包，再考虑恢复；
+  - 当前导航测试请以 `local_fusion` 链路为准；
+  - 104 已处于可重定位待测状态：启动后固定地图已同步，仍需用户重新网页重定位。
+- 已验证：
+  - 本地：
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_progress_contract.py src/m20pro_navigation/m20pro_navigation/tcp_bridge_node.py`;
+    - `bash -n src/m20pro_bringup/scripts/m20pro_record_real.sh src/m20pro_bringup/scripts/m20pro_real_full.sh scripts/104_enable_autostart.sh`;
+    - `python3 scripts/test_task_progress_contract.py`;
+    - `python3 scripts/test_active_task_contract.py`;
+    - `python3 scripts/test_localization_contract.py`;
+    - `python3 scripts/test_perception_contract.py`;
+    - `python3 scripts/test_task_contract.py`;
+    - `python3 scripts/test_navigation_readiness_contract.py`;
+    - `python3 scripts/test_preflight_contract.py`;
+    - `python3 scripts/test_active_waypoint_contract.py`。
+  - 104：
+    - targeted rsync 未全量同步前端；
+    - `colcon build --packages-select m20pro_cloud_bridge m20pro_bringup --symlink-install`;
+    - `m20pro-real.service` active；
+    - Web API perception ready；
+    - `/dev/shm` 约 27%。
+
+## 2026-07-08 10:40 CST - 新 edge scan 实机链路已做出并部署，104 不再跑 relay/fusion
+
+- 用户要求：
+  - 既然 106 DrDDS edge scan 可行，就按新链路做出来，给实机测试。
+- 目标链路：
+  - `106 DrDDS /LIDAR/POINTS -> 106 m20pro-edge-scan-106.service -> /scan -> 104 Nav2/Web`;
+  - 104 不再订阅 raw `/LIDAR/POINTS`;
+  - 104 不再跑 `m20pro_lidar_relay`;
+  - 104 不再跑 `m20pro_pointcloud_fusion`;
+  - Nav2 继续使用 `/scan`，因此不改 Nav2 参数文件。
+- 本地实现：
+  - `src/m20pro_bringup/scripts/m20pro_real_full.sh`：
+    - 新增 `M20PRO_SCAN_SOURCE=local_fusion|edge_scan`;
+    - 默认仍为 `local_fusion`;
+    - `edge_scan` 时停止本地 lidar relay、跳过 pointcloud_fusion；
+    - 传入 `fusion:=false`;
+    - 传入 `perception_mode:=edge_scan`;
+    - 传入 `enable_lidar_points_subscriptions:=false`;
+    - 使用 `M20PRO_EDGE_SCAN_TOPIC=/scan`;
+    - 修复一次空 `cloud_topic:=` 启动失败：edge 模式下不再传空 launch arg。
+  - `src/m20pro_bringup/launch/m20pro_real.launch.py`：
+    - 新增/使用 `scan_topic`;
+    - 新增/使用 `perception_mode`;
+    - 新增 `enable_lidar_points_subscriptions`;
+    - 传 `perception_mode` 给 `m20pro_system_check`。
+  - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py`：
+    - edge 模式下不订阅 PointCloud2 raw/relay；
+    - preflight 不再要求 raw 点云 topic 或 `m20pro_pointcloud_fusion`;
+    - edge 模式下自检显示“106 边缘激光”，不再把未缓存原始点云作为 warn。
+  - `src/m20pro_navigation/m20pro_navigation/system_check_node.py`：
+    - 新增 `perception_mode`;
+    - edge 模式下 expected nodes 不再包含 `m20pro_pointcloud_fusion`;
+    - 补入 `std_msgs.msg.String` import。
+  - `systemd/m20pro-real.default` 和 `scripts/104_enable_autostart.sh`：
+    - 增加 `M20PRO_SCAN_SOURCE`;
+    - 增加 `M20PRO_EDGE_SCAN_TOPIC`;
+    - 增加 `M20PRO_SCAN_TOPIC`。
+  - 新增：
+    - `scripts/106_enable_edge_scan_service.sh`;
+    - `tools/edge_scan_feasibility/service/m20pro-edge-scan-106.env.edge_scan`;
+    - `tools/edge_scan_feasibility/REAL_CHAIN_STATUS.md`。
+- 本地验证：
+  - `bash -n` 通过；
+  - `python3 -m py_compile` 通过；
+  - `python3 scripts/test_perception_contract.py` 通过；
+  - `python3 scripts/test_preflight_contract.py` 通过；
+  - `tools/edge_scan_feasibility/audit_artifacts.py` 通过。
+- 104 部署：
+  - 覆盖前已备份到：
+    - `/home/user/m20pro_backups/edge_scan_switch_20260708_101653`;
+  - 只同步了链路相关文件，没有同步新版前端静态页面；
+  - 在 104 root 环境 build：
+    - `m20pro_bringup`;
+    - `m20pro_cloud_bridge`;
+    - 后续补丁 build `m20pro_navigation`。
+- 106 部署：
+  - 106 原本没有完整 `/home/user/m20pro_real_ros2_ws`;
+  - 只同步最小目录：
+    - `tools/edge_scan_feasibility`;
+    - `scripts/106_enable_edge_scan_service.sh`;
+  - 安装 service：
+    - `/etc/systemd/system/m20pro-edge-scan-106.service`;
+    - `/etc/m20pro-edge-scan-106.env`;
+  - service 为 disabled，不开机自启；
+  - 当前手动启动并保持运行：
+    - `m20pro-edge-scan-106.service active`;
+    - 命令为 `drdds_edge_scan_demo /LIDAR/POINTS /scan 0 0 0 rt -0.05 0.55 4 12000 m20pro_base_link 0.0174533 10.0 0.2`;
+    - 日志持续输出 `scan xxxx finite_bins≈180-200 frame=m20pro_base_link`;
+    - 106 `/dev/shm≈2.4G/7.7G`, `31%`。
+- 104 当前实机状态：
+  - `/etc/default/m20pro-real`：
+    - `M20PRO_SCAN_SOURCE=edge_scan`;
+    - `M20PRO_EDGE_SCAN_TOPIC=/scan`;
+    - `M20PRO_FASTDDS_PROFILE=project_udp`;
+  - `m20pro-real.service=active`;
+  - launch 参数中明确：
+    - `scan_topic:=/scan`;
+    - `perception_mode:=edge_scan`;
+    - `fusion:=false`;
+    - `enable_lidar_points_subscriptions:=false`;
+  - 进程列表中没有：
+    - `m20pro_lidar_relay`;
+    - `m20pro_pointcloud_fusion`;
+  - `/api/state`：
+    - `perception_status.code=perception_ready`;
+    - `perception_status.mode=edge_scan`;
+    - `scan.frame_id=m20pro_base_link`;
+    - `scan.age_sec≈0.25`;
+    - `scan.finite_ranges≈180-190`;
+    - `relay.not_used=true`;
+    - `lidar_points.points=0`，这是 edge 模式预期状态。
+  - `/api/preflight`：
+    - `ok=True`;
+    - `summary=基础自检通过，当前在工位，导航待到测试场地重定位后确认`;
+    - `edge_scan ok: edge scan 已输出 /scan`;
+    - `scan ok`;
+    - 当前未重定位，所以 navigation_ready 为 False 是预期。
+  - 104 `/dev/shm` 最终稳定在约：
+    - `1.1G/7.7G`, `15%`;
+    - 对比旧链路常见 `7.2G/7.7G`, `94%`，下降非常明显。
+- 中间问题和处理：
+  - 第一次 104 edge 启动失败：
+    - 原因：传了空 launch 参数 `cloud_topic:=`;
+    - 处理：edge 模式不再传空 `cloud_topic`;
+    - 重新 build 后正常。
+  - 仅切 edge_scan 但仍用 factory FastDDS 时：
+    - 104 启动后可用，但普通 ROS2/Nav2 进程仍打开大量 500MB SHM；
+    - `/dev/shm` 约 `88%`;
+    - 处理：因为 104 已不再订阅 raw 大点云，改用 `M20PRO_FASTDDS_PROFILE=project_udp`;
+    - 最终 `/dev/shm` 降到约 `15%`。
+  - 使用 `ros2 topic info/hz` 这类 CLI 会额外创建 DDS participant/SHM，验证时优先看 Web API 和服务日志。
+- 当前给用户实测的状态：
+  - 104/106 均保持 edge scan 新链路运行；
+  - 用户可以打开 `http://10.21.31.104:8080`；
+  - 先执行重定位；
+  - 看实时激光轮廓是否贴合地图；
+  - 再跑一个短单层任务。
+- 回退方式见：
+  - `tools/edge_scan_feasibility/REAL_CHAIN_STATUS.md`。
+
+## 2026-07-07 22:50 CST - 106 DrDDS edge scan 短时现场复核成功，正式链路未切换
+
+- 本轮目标：
+  - 在不切换 104 正式 `/scan`、不动 Nav2、不停 104 relay/fusion 的前提下；
+  - 复核“106 普通 ROS2 入口不可靠，但 106 DrDDS 原生入口可用”；
+  - 再短时验证 106 旁路 `/m20pro/scan_edge_exp` 能被 104 收到。
+- 104 初始状态：
+  - `http://10.21.31.104:8080/healthz` 返回 `{"ok":true}`;
+  - `/api/state.perception_status.code=perception_ready`;
+  - `/scan` 新鲜，`frame_id=m20pro_base_link`;
+  - relay 仍为旧链路：`input_topic=/LIDAR/POINTS`, `input_rate_hz≈10.57`, `publish_rate_hz≈3.94`;
+  - `active_task=None`;
+  - 电池接口显示 primary level 从约 89% 到最终约 86%；
+  - 104 `/dev/shm` 仍约 `7.2G/7.7G`, `94%`，这是后续要解决的压力点。
+- 106 环境：
+  - 用交互 SSH 进入：`source /opt/robot/scripts/setup_ros2.sh -> su`;
+  - setup 脚本检测并优先选择 `eth0=10.21.33.106`;
+  - 106 同时存在 `eth0=10.21.33.106/24` 和 `eth1=10.21.31.106/24`;
+  - `FASTRTPS_DEFAULT_PROFILES_FILE=/opt/robot/fastdds.xml`;
+  - `multicast-relay.service=active`;
+  - 初始 `/dev/shm` 约 `2.1G/7.7G`, `27%`;
+  - 106 上没有 `/home/user/m20pro_real_ros2_ws`，也没有上次 `/tmp` probe 残留。
+- 106 诊断对照：
+  - `drddsctl list` 本轮 5 秒 timeout，无端点输出；不将其作为“无点云”判据；
+  - `ros2 topic info -v /LIDAR/POINTS` 能看到 `Publisher count: 2`;
+  - `ros2 topic echo /LIDAR/POINTS --no-arr` 6 秒 timeout，无样本；
+  - 结论：普通 ROS2/rclpy 入口仍是“图可见、样本不可靠”。
+- 临时传输/编译：
+  - 从上位机把 `tools/edge_scan_feasibility` 打包为 `/tmp/edge_scan_feasibility_live.tar.gz`;
+  - scp 到 106 `/tmp`;
+  - 在 106 解包到 `/tmp/m20pro_edge_live_src`;
+  - 编译到 `/tmp/m20pro_edge_live_bin`;
+  - 没有安装 systemd，没有写 `/etc`，没有改正式服务。
+- 106 DrDDS probe：
+  - 命令：`/tmp/m20pro_edge_live_bin/drdds_lidar_probe /LIDAR/POINTS 0 0 rt 8`;
+  - 结果：
+    - `samples=62`;
+    - `rate_hz=10.1844`;
+    - `frame=lidar_link`;
+    - 点数随现场变化，样例宽度包括 `68225`、`22641`、`45389`;
+  - 结论：106 原厂 DrDDS 点云入口可稳定拿到样本。
+- 106 edge scan demo：
+  - 命令形态：
+    - `DURATION_S=45 OUTPUT_TOPIC=/m20pro/scan_edge_exp run_balanced_demo_on_106.sh`;
+  - demo 只发布 `/m20pro/scan_edge_exp`，不发布 `/scan`;
+  - 106 结果：
+    - `clouds=435`;
+    - `scans=143`;
+    - `rate_hz=3.32899`;
+    - 最终 `finite_bins=202`;
+    - `frame=m20pro_base_link`;
+  - 104 侧 25 秒只读对比：
+    - `/scan`: `rate_hz=3.680`, `finite_mean=202.46`, `age_mean=0.144`, `frame=m20pro_base_link`;
+    - `/m20pro/scan_edge_exp`: `rate_hz=3.375`, `finite_mean=190.18`, `age_mean=0.157`, `frame=m20pro_base_link`;
+    - finite mean 差距约 6%，短时表现接近正式 `/scan`。
+- 清理和恢复：
+  - 106 demo 正常退出，`DEMO_RC=0`;
+  - 106 无 `drdds_lidar_probe` / `drdds_edge_scan_demo` 残留进程；
+  - 已删除 106 临时目录和文件：
+    - `/tmp/m20pro_edge_live_src`;
+    - `/tmp/m20pro_edge_live_bin`;
+    - `/tmp/edge_scan_feasibility_live.tar.gz`;
+    - `/tmp/m20pro_edge_live_demo.log`;
+  - 106 `/dev/shm` 回到约 `2.1G/7.7G`, `27%`;
+  - 已删除 104 临时 `/tmp/m20pro_compare_scan_topics.py`;
+  - 104 `ros2 topic list` 最终只剩正式 `/scan`，`/m20pro/scan_edge_exp` 已消失；
+  - 104 `/api/state` 最终仍 `perception_ready`，无 active task。
+- 更新文档：
+  - `tools/edge_scan_feasibility/DECISION_REPORT_CN.md` 补入本轮短时复核结果；
+  - `tools/edge_scan_feasibility/FEASIBILITY_REPORT.md` 补入本轮短时复核结果。
+- 本地复核：
+  - `tools/edge_scan_feasibility/audit_artifacts.py` 通过；
+  - `python3 scripts/test_perception_contract.py` 通过；
+  - `python3 -m py_compile $(find src/m20pro_cloud_bridge/m20pro_cloud_bridge src/m20pro_bringup/launch scripts tools/edge_scan_feasibility -name '*.py' -type f | sort)` 通过；
+  - 已清理本轮生成的 `src/scripts/tools` 下 `__pycache__`。
+- 新归档：
+  - `/home/fabu/桌面/M20Pro/归档/edge_scan_feasibility_20260707_2250.tar.gz`;
+  - 包含 `m20pro日志.md`、`tools/edge_scan_feasibility`、edge scan 相关最小代码改动和 `scripts/test_perception_contract.py`;
+  - `tar -tzf` 已确认可列出中文报告、demo、服务模板和相关代码。
+- 当前判断：
+  - 普通 ROS2 恢复 106 `/LIDAR/POINTS` 仍不是推荐主线；
+  - 106 DrDDS edge scan 已经具备“高可行 demo”资格；
+  - 下一步仍不能直接切生产 Nav2，应做 5 分钟对比、短 rosbag、service trial，再做可回退 Nav2 输入试验；
+  - 目标链路仍是：106 直接从 DrDDS raw 点云生成轻量 scan，使 104 未来不再订阅 raw `/LIDAR/POINTS`、不再跑 `lidar_relay` 和 `pointcloud_fusion`。
+
+## 2026-07-07 22:42 CST - 补齐 106 edge scan 中文可行性报告并完成本地审计
+
+- 本轮不切换 104/106 正式链路；
+- 用户再次要求参考旧日志中 104 `/LIDAR/POINTS` 恢复经验，并继续围绕“104 不再订阅 raw 大点云、104 不再跑 relay/fusion、Nav2 更直接拿 `/scan`”推进可行性目标。
+- 已复核旧恢复经验：
+  - 6 月 4 日：正确核验顺序是 `source /opt/robot/scripts/setup_ros2.sh -> su -> root 下不再额外 source`;
+  - 6 月 9 日：104 能看到 `/LIDAR/POINTS` publisher 但 echo/hz 无样本时，106 本机 echo 正常，重启 106 `multicast-relay.service` 后 104 echo 恢复；
+  - 6 月 15 日：第二台机器狗通过补齐 106 `10.21.31.106` FastDDS 白名单、启用并重启 `multicast-relay.service` 恢复；
+  - 这套经验仍是 104 原厂点云链路排障手册，但不足以把 106 普通 ROS2/rclpy 入口变成稳定新主链路。
+- 新增中文决策报告：
+  - `tools/edge_scan_feasibility/DECISION_REPORT_CN.md`;
+  - 说明已测试路线：
+    - 104 strict UDP-only：不适合主线；
+    - 旧经验恢复 106 普通 ROS2 `/LIDAR/POINTS`：排障有用，但普通 rclpy 入口不可靠；
+    - 106 普通 Python relay：证明边缘处理有价值，但 CPU 高且入口脆弱；
+    - 106 原生 DrDDS 点云探针：高可行度；
+    - 106 原生 DrDDS 直接生成 `/m20pro/scan_edge_exp`：当前最高可行 demo。
+  - 明确 `drddsctl list` 只能看 DDS 图和端点，不是稳定数据接口；真正取样本应走 `ChannelLidarPointCloud` 这类 DrDDS 原生订阅。
+- 保留推荐 demo：
+  - `tools/edge_scan_feasibility/run_balanced_demo_on_106.sh`;
+  - 等价核心命令：
+    - `drdds_edge_scan_demo /LIDAR/POINTS /m20pro/scan_edge_exp 90 0 0 rt -0.05 0.55 4 12000 m20pro_base_link 0.0174533 10.0 0.2`。
+- 更新文档入口：
+  - `tools/edge_scan_feasibility/README.md` 指向中文决策报告；
+  - `tools/edge_scan_feasibility/FEASIBILITY_REPORT.md` 指向中文决策报告；
+  - `tools/edge_scan_feasibility/audit_artifacts.py` 把中文报告加入必备文件。
+- 本地验证：
+  - `/home/fabu/桌面/M20Pro/归档/edge_scan_feasibility_20260707_2242.tar.gz` 已确认有效，非 0 字节，可列出报告和 demo 文件；
+  - `python3 scripts/test_perception_contract.py` 通过；
+  - `for f in scripts/test_*_contract.py; do python3 "$f"; done` 全部通过；
+  - `python3 -m py_compile $(find src/m20pro_cloud_bridge/m20pro_cloud_bridge src/m20pro_bringup/launch scripts tools/edge_scan_feasibility -name '*.py' -type f | sort)` 通过；
+  - `tools/edge_scan_feasibility/audit_artifacts.py` 通过；
+  - service example 复制为 `/tmp/m20pro-edge-scan-106.service` 后 `systemd-analyze verify` 返回 0，仅有宿主机无关 systemd warning。
+- 清理：
+  - 已删除本轮检查生成的 `src/scripts/tools` 下 `__pycache__`。
+- 当前结论：
+  - 普通 ROS2/rclpy 恢复 106 `/LIDAR/POINTS` 不是推荐主线；
+  - 106 DrDDS edge scan 是当前最高可行方案；
+  - 生产链路仍未切换，104 仍保持 `local_fusion` fallback；
+  - 下一步换电池后按 `tools/edge_scan_feasibility/NEXT_BATTERY_TEST_PLAN.md` 做 5 分钟只读对比，再考虑 service trial。
+
+## 2026-07-07 22:42 CST - m20pro_real.launch 抽出 scan_topic 参数，默认仍为 /scan
+
+- 本轮仍不连接 104/106；
+- 目的：
+  - 继续为未来 edge scan 链路铺路；
+  - 先减少硬编码，把 `/scan` 变成 launch 可传参数；
+  - 默认不变，避免影响当前 104 正式链路。
+- 本地改动：
+  - `src/m20pro_bringup/launch/m20pro_real.launch.py`：
+    - 新增 `scan_topic = LaunchConfiguration("scan_topic")`;
+    - 新增 `DeclareLaunchArgument("scan_topic", default_value="/scan")`;
+    - `m20pro_pointcloud_fusion.output_scan_topic` 改用 `scan_topic`;
+    - Web dashboard 参数 `scan_topic` 改用同一 launch 参数。
+- 保持不变：
+  - `nav2_params_real.yaml` 中 AMCL 和 local/global costmap 仍硬编码 `/scan`;
+  - `m20pro_real_full.sh` 未改；
+  - systemd 默认未改；
+  - 不切 edge scan，不禁用 relay/fusion。
+- 意义：
+  - 未来旁路试验可更明确地区分 Web/融合输出 scan topic；
+  - 生产切换时仍需要解决 Nav2 `/scan` 输入：要么短期 remap edge scan 到 `/scan`，要么模板化 Nav2 参数。
+- 测试：
+  - `python3 -m py_compile src/m20pro_bringup/launch/m20pro_real.launch.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/perception_contract.py scripts/test_perception_contract.py` 通过；
+  - `python3 scripts/test_perception_contract.py` 通过；
+  - `tools/edge_scan_feasibility/audit_artifacts.py` 通过。
+
+## 2026-07-07 22:36 CST - Web 节点接入 perception_mode 参数，默认仍为 local_fusion
+
+- 本轮仍不连接 104/106；
+- 在上一轮纯合同基础上，完成运行参数入口的最小接入：
+  - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py`：
+    - 声明参数 `perception_mode`;
+    - 默认值 `local_fusion`;
+    - `_snapshot()` 调用 `perception_status_payload(...)` 时传入该参数。
+  - `src/m20pro_bringup/launch/m20pro_real.launch.py`：
+    - 新增 launch argument `perception_mode`;
+    - 默认值 `local_fusion`;
+    - 传给 Web dashboard 节点。
+- 保持不变：
+  - 没有修改 `m20pro_real_full.sh`;
+  - 没有修改 systemd 默认；
+  - 没有切换 `/scan`;
+  - 没有禁用 104 relay/fusion；
+  - 默认启动仍走当前 `local_fusion` 口径。
+- 测试：
+  - `python3 scripts/test_perception_contract.py` 通过；
+  - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/perception_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py src/m20pro_bringup/launch/m20pro_real.launch.py scripts/test_perception_contract.py` 通过；
+  - `tools/edge_scan_feasibility/audit_artifacts.py` 通过。
+- 迁移计划更新：
+  - `PRODUCTION_MIGRATION_PLAN.md` 记录 Web 节点和 launch 现在已暴露 `perception_mode`；
+  - `FEASIBILITY_REPORT.md` 记录该参数已可用但 systemd/默认生产链路仍不切 edge scan。
+
+## 2026-07-07 22:30 CST - 本地准备 Web/API 感知口径：新增 edge_scan 纯合同模式，默认行为不变
+
+- 本轮仍不连接 104/106；
+- 背景：
+  - 正式切换到 106 edge scan 后，104 可能不再运行 `lidar_relay` 和 `pointcloud_fusion`;
+  - 但当前 Web/API 的 `perception_ready` 仍把 relay freshness 当硬条件；
+  - 如果不先准备感知口径，未来即使 Nav2 有 edge scan，前端也可能误报 `lidar_relay_no_samples`。
+- 本地改动：
+  - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/perception_contract.py`;
+  - `perception_status_payload(...)` 新增可选参数 `perception_mode`;
+  - 默认值为 `local_fusion`，保持当前生产逻辑不变；
+  - 显式 `perception_mode="edge_scan"` 时：
+    - 新鲜 scan 成为硬条件；
+    - relay 和 relay pointcloud 不再作为 ready 必要条件；
+    - relay payload 标记 `not_used=true`;
+    - scan 缺失仍返回 `scan_unavailable`。
+- 测试：
+  - `scripts/test_perception_contract.py` 增加三条测试：
+    - 默认模式没有 relay 仍失败；
+    - edge_scan 模式只有 scan 新鲜即可 ready；
+    - edge_scan 模式 scan 缺失仍失败。
+  - `python3 scripts/test_perception_contract.py` 通过；
+  - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/perception_contract.py scripts/test_perception_contract.py` 通过；
+  - `tools/edge_scan_feasibility/audit_artifacts.py` 通过，说明 edge scan 实验仍未接入正式启动路径。
+- 当前边界：
+  - 22:36 已追加 Web/launch 参数入口；
+  - systemd 默认没有变化；
+  - 104 正式链路未切换。
+
+## 2026-07-07 22:22 CST - 离线新增 rosbag scan 对比分析工具
+
+- 本轮仍不连接 104/106；
+- 本机确认可用依赖：
+  - `rosbag2_py`;
+  - `rclpy`;
+  - `sensor_msgs`;
+  - `rosidl_runtime_py`。
+- 新增 `tools/edge_scan_feasibility/analyze_scan_bag.py`；
+- 作用：
+  - 读取 rosbag2 目录；
+  - 也可以直接读取无 metadata 的裸 `.db3`；
+  - 分析 LaserScan topic；
+  - 默认分析 `/scan` 和 `/m20pro/scan_edge_exp`;
+  - 输出 samples、unique stamps、rate、frame、finite bins、age、interval、range、angle_increment；
+  - 支持 `--json`;
+  - 支持 `--allow-missing`，可用于旧 bag 只含 `/scan` 的烟测。
+- 已更新：
+  - `NEXT_BATTERY_TEST_PLAN.md`：录完短 bag 后运行离线分析；
+  - `README.md`：新增 Bag Analysis 章节；
+  - `FEASIBILITY_REPORT.md`：把离线 bag 分析列为换电池后的延后项；
+  - `audit_artifacts.py`：把 `analyze_scan_bag.py` 纳入必需文件和可执行检查。
+- 本地验证：
+  - 两个 `rosbag2_2026_07_03-*` 旧目录有 topic 表但 `messages=0`，脚本可正常返回无样本；
+  - 对 `/home/fabu/bags/m20pro_nav_issue_20260703/m20_test_20260703_153157/m20_test_20260703_153157_0.db3` 裸 db3 运行：
+    - `samples=19976`;
+    - `unique=8051`;
+    - `rate_hz≈4.03`;
+    - frame=`m20pro_base_link`;
+    - finite mean≈`198.80`;
+    - age mean≈`0.136s`;
+    - angle_increment≈`0.0174533`。
+  - 说明该工具能处理现场常见的裸 `.db3` rosbag 文件。
+
+## 2026-07-07 22:17 CST - 离线新增 edge scan artifact 审计脚本，防止实验误入生产路径
+
+- 本轮仍不连接 104/106；
+- 新增 `tools/edge_scan_feasibility/audit_artifacts.py`；
+- 审计内容：
+  - 必需文档和 demo 文件是否齐全；
+  - `build_on_106.sh`、`run_balanced_demo_on_106.sh`、`compare_scan_topics.py` 是否可执行；
+  - 平衡版 demo 默认值是否仍为：
+    - topic `/m20pro/scan_edge_exp`;
+    - `height=[-0.05,0.55]`;
+    - `max_publish_hz=4`;
+    - `max_points=12000`;
+    - frame `m20pro_base_link`;
+    - angle `0.0174533`;
+  - service env 是否仍为 `DURATION_S=0` 且只发布实验 topic；
+  - `drdds_edge_scan_demo.cpp` 是否支持 `duration_s<=0` 持续运行；
+  - `src/`、`scripts/`、`systemd/` 中是否误出现 `scan_edge_exp`、`m20pro-edge-scan-106`、`M20PRO_SCAN_SOURCE`、`M20PRO_EDGE_SCAN_TOPIC` 等实验/未来切换字符串。
+- 用途：
+  - 同步或归档前确认 edge scan 仍是旁路实验；
+  - 避免在未完成电池测试/服务试验前误接入正式启动链路；
+  - 给后续继续开发提供一个轻量本地安全闸。
+- 本地检查：
+  - `tools/edge_scan_feasibility/audit_artifacts.py` 通过，输出 `OK: edge scan feasibility artifacts are complete and not wired into production paths`;
+  - `bash -n tools/edge_scan_feasibility/build_on_106.sh tools/edge_scan_feasibility/run_balanced_demo_on_106.sh` 通过；
+  - `python3 -m py_compile tools/edge_scan_feasibility/compare_scan_topics.py tools/edge_scan_feasibility/audit_artifacts.py` 通过；
+  - 已删除检查生成的 `__pycache__`。
+
+## 2026-07-07 22:12 CST - 离线梳理正式切换点：104 relay/fusion/Web 依赖需要一起改
+
+- 本轮仍不连接 104/106，不消耗机器狗电量；
+- 只读审计当前仓库中正式点云链路入口；
+- 当前 104 正式链路在代码中主要由以下位置决定：
+  - `src/m20pro_bringup/scripts/m20pro_real_full.sh`：
+    - 启动 `m20pro_lidar_relay_guard.sh`;
+    - 将 `cloud_topic:="${M20PRO_LIDAR_RELAY_TOPIC}"` 传入 launch；
+  - `src/m20pro_bringup/launch/m20pro_real.launch.py`：
+    - 启动 `m20pro_pointcloud_fusion`;
+    - `input_cloud_topic=cloud_topic`;
+    - `output_scan_topic="/scan"`;
+    - web dashboard 和 system_check 也拿到同一个 `cloud_topic`;
+  - `src/m20pro_bringup/config/nav2_params_real.yaml`：
+    - AMCL 和 local/global costmap 均硬编码 `/scan`;
+  - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/perception_contract.py`：
+    - 当前 `perception_ready` 把 relay freshness 作为硬条件；
+  - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py`：
+    - 订阅 relay status / relay 点云；
+    - 自检 required_nodes 里包含 `m20pro_pointcloud_fusion`。
+- 关键风险：
+  - 未来不能只让 Nav2 吃 edge scan；
+  - 如果直接停 104 relay/fusion，而不改 Web/API 感知口径，前端会继续因为 `lidar_relay_no_samples` 或缺少 `m20pro_pointcloud_fusion` 报错；
+  - 因此正式切换必须引入一个明确模式，例如 `M20PRO_SCAN_SOURCE=local_fusion|edge_scan`。
+- 新增离线迁移计划：
+  - `tools/edge_scan_feasibility/PRODUCTION_MIGRATION_PLAN.md`;
+  - 记录当前链路、目标链路、未来代码切换点、Web/API readiness 口径、Nav2 scan topic 处理方案、回退方式和验收条件。
+- 当前不做的事：
+  - 不改生产 launch；
+  - 不改 systemd 默认；
+  - 不切 Nav2；
+  - 不禁用 104 relay/fusion；
+  - 不把 edge scan 当成生产输入。
+
+## 2026-07-07 22:07 CST - 离线补充 106 edge scan 可回退服务试验模板
+
+- 本轮不连接 104/106，不消耗机器狗电量；
+- 清理本地 `tools/edge_scan_feasibility/__pycache__` 生成物；
+- 为下一阶段“服务化但可回退”补充模板：
+  - `tools/edge_scan_feasibility/SERVICE_TRIAL.md`;
+  - `tools/edge_scan_feasibility/service/m20pro-edge-scan-106.env.example`;
+  - `tools/edge_scan_feasibility/service/m20pro-edge-scan-106.service.example`。
+- 模板性质：
+  - 不安装；
+  - 不启用 systemd；
+  - 不发布正式 `/scan`;
+  - 只发布 `/m20pro/scan_edge_exp`;
+  - 第一轮服务试验明确不执行 `systemctl enable`，只允许手动 `start/stop`。
+- `drdds_edge_scan_demo` 增强：
+  - `DURATION_S=0` / `duration_s<=0` 表示持续运行；
+  - 手动 demo 默认仍为 `90s`，不影响当前短测习惯；
+  - 服务模板通过 env 设 `DURATION_S=0`，用于手动服务试验。
+- 服务试验继续依赖前置门槛：
+  - 必须先完成 `NEXT_BATTERY_TEST_PLAN.md` 的 5 分钟只读对比；
+  - 只有对比通过并录包复核后，才考虑服务化；
+  - 禁用 104 raw `/LIDAR/POINTS`、`lidar_relay`、`pointcloud_fusion` 仍是更后面的生产改动。
+- 本地检查：
+  - `bash -n tools/edge_scan_feasibility/build_on_106.sh tools/edge_scan_feasibility/run_balanced_demo_on_106.sh` 通过；
+  - `python3 -m py_compile tools/edge_scan_feasibility/compare_scan_topics.py` 通过；
+  - 将 `.service.example` 临时复制为 `/tmp/m20pro-edge-scan-106.service` 后执行 `systemd-analyze verify` 返回成功；
+  - verify 输出中仅有本机其他 systemd unit 的无关警告，未报告 edge scan 模板错误。
+
+## 2026-07-07 22:05 CST - 补充换电池后的最短验证计划
+
+- 不继续消耗机器狗电量；
+- 新增 `tools/edge_scan_feasibility/NEXT_BATTERY_TEST_PLAN.md`；
+- 该计划用于换电池后恢复测试，约 10 分钟第一轮：
+  - 先确认 104 正式 fallback `/scan` 和 Web 状态健康；
+  - 再在 106 跑 `run_balanced_demo_on_106.sh`；
+  - 104 只读对比 `/scan` 和 `/m20pro/scan_edge_exp` 5 分钟；
+  - 通过后才录一个 2~3 分钟短 bag；
+  - 不在第一轮切 Nav2 输入，不停正式 `/scan`，不禁用 104 relay/fusion。
+- 明确通过条件：
+  - `/m20pro/scan_edge_exp` frame=`m20pro_base_link`;
+  - 频率约 `3Hz+`;
+  - finite bins 均值与正式 `/scan` 相差约 `15%` 内；
+  - mean age 低于约 `0.30s`;
+  - 104 正式 `/scan` 一直保持健康。
+- 明确停止条件：
+  - 正式 `/scan` 变 stale；
+  - 104 不再 `perception_ready`;
+  - 实验 scan 低于约 `2Hz` 或消失；
+  - 电量不稳。
+- 更新 `tools/edge_scan_feasibility/README.md` 和 `FEASIBILITY_REPORT.md`，指向该恢复测试计划。
+
+## 2026-07-07 22:03 CST - 电量约束下归档 edge scan 可行性阶段，不继续耗电长测
+
+- 用户新增约束：
+  - 机器狗电量不足以支撑长时间测试；
+  - 需要在电量耗尽前完成当前阶段；
+  - 如果无法完成生产级验证，就先归档，等换好电池后继续。
+- 当前完成度审计：
+  - 已测试多条路线：
+    - 104 strict UDP-only raw 点云：失败，不适合直接替代 factory raw 点云链路；
+    - 106 普通 ROS2/rclpy 订阅 `/LIDAR/POINTS`：失败，能看到图信息但收不到样本；
+    - 按 104 旧恢复经验恢复 106：不足以恢复 rclpy 样本；
+    - 106 原生 DrDDS 读取 `/LIDAR/POINTS`：成功；
+    - 106 原生 DrDDS 生成实验 LaserScan：成功；
+    - 106 edge scan 参数 A-H：已找到接近正式 `/scan` 的平衡配置。
+  - 已形成报告：
+    - `tools/edge_scan_feasibility/FEASIBILITY_REPORT.md`;
+    - `tools/edge_scan_feasibility/README.md`;
+    - 本日志中的 21:17、21:42、21:58 三段现场记录。
+  - 已留下高可行 demo：
+    - `tools/edge_scan_feasibility/drdds_lidar_probe.cpp`;
+    - `tools/edge_scan_feasibility/drdds_edge_scan_demo.cpp`;
+    - `tools/edge_scan_feasibility/build_on_106.sh`;
+    - `tools/edge_scan_feasibility/run_balanced_demo_on_106.sh`;
+    - `tools/edge_scan_feasibility/compare_scan_topics.py`。
+- 当前不继续做的内容：
+  - 不做 106 常驻服务化；
+  - 不切 104 Nav2 输入；
+  - 不停 104 正式 `lidar_relay` / `pointcloud_fusion`;
+  - 不做 rosbag 长测；
+  - 不做单层短任务实走验证。
+- 原因：
+  - 这些是耗电或有生产链路风险的下一阶段验证；
+  - 当前阶段已经足够支持“可行性方案报告 + 高可行 demo”；
+  - 等电池充足后再继续，能避免因为电压/关机导致误判。
+- 下次换电池后建议顺序：
+  1. 先确认 104 正式链路仍 `perception_ready`，不要立即切链路；
+  2. 在 106 运行 `tools/edge_scan_feasibility/run_balanced_demo_on_106.sh`;
+  3. 在 104 用 `compare_scan_topics.py --duration 300 /scan /m20pro/scan_edge_exp` 做 5 分钟对比；
+  4. 录 rosbag，包含 `/scan`、`/m20pro/scan_edge_exp`、TF、Nav2/costmap 关键 topic；
+  5. 若 5 分钟对比稳定，再做“Nav2 只读/旁路配置验证”；
+  6. 最后才考虑可回退服务化和短任务实走。
+
+## 2026-07-07 21:58 CST - 106 edge scan 参数调优：已找到接近正式 `/scan` 的轻量 demo 配置
+
+- 本轮目标：
+  - 继续推进“104 不再订阅跨主机 raw `/LIDAR/POINTS`，104 不再跑 `lidar_relay` 和 `pointcloud_fusion`，Nav2 直接用更短 `/scan` 链路”的可行性验证；
+  - 不切正式 `/scan`；
+  - 不重启 104 正式服务；
+  - 不部署到 systemd；
+  - 只做 106 旁路发布 `/m20pro/scan_edge_exp`，104 只读对比。
+- 基线：
+  - 104 `m20pro-real.service=active`;
+  - `/api/state.perception_status.code=perception_ready`;
+  - 正式 relay 仍为 `/LIDAR/POINTS -> /m20pro/lidar_points_relay`;
+  - relay 输入约 `10.53Hz`，输出约 `3.93Hz`;
+  - `/scan` frame=`m20pro_base_link`，angle_increment≈`0.0174533`，range=`0.2~10.0`;
+  - 104 `/dev/shm` 仍约 `7.2G/7.7G`, `94%`。
+- 关键 demo 改进：
+  - `drdds_edge_scan_demo` 增加可配置参数：
+    - `frame_id`;
+    - `angle_increment`;
+    - `range_max`;
+    - `range_min`。
+  - 新增 104 只读对比工具：
+    - `tools/edge_scan_feasibility/compare_scan_topics.py`;
+    - 用于统计 LaserScan topic 的 rate、frame、finite bins、stamp age、range 和角分辨率。
+- 106 入口复核：
+  - `drdds_lidar_probe /LIDAR/POINTS 0 0 rt 5`;
+  - 5 秒收到 `45` 帧；
+  - `rate_hz=9.96576`;
+  - frame=`lidar_link`；
+  - 说明 106 DrDDS 原生点云入口继续可用。
+- 参数测试摘要（104 并行只读订阅 `/scan` 与 `/m20pro/scan_edge_exp`）：
+  - A：`height=[-1,1]`, `max_hz=10`, `max_points=20000`, frame=`m20pro_base_link`, angle=`0.0174533`
+    - 正式 `/scan` finite_mean≈`197.06`, rate≈`3.80Hz`;
+    - 实验 scan finite_mean≈`278.80`, rate≈`6.44Hz`;
+    - 结论：角分辨率和 frame 修正后仍偏“障碍太多”，需要调高度过滤。
+  - B：`height=[-0.2,0.6]`, `max_hz=10`, `max_points=20000`
+    - 正式 finite_mean≈`199.04`;
+    - 实验 finite_mean≈`252.25`;
+    - 结论：仍偏多。
+  - C：`height=[0.1,0.4]`, `max_hz=10`, `max_points=20000`
+    - 正式 finite_mean≈`194.18`;
+    - 实验 finite_mean≈`151.02`;
+    - 结论：过滤过窄，障碍偏少。
+  - D：`height=[0.0,0.5]`, `max_hz=10`, `max_points=20000`
+    - 正式 finite_mean≈`190.46`;
+    - 实验 finite_mean≈`174.58`;
+    - 结论：接近但略少。
+  - E：`height=[-0.05,0.55]`, `max_hz=10`, `max_points=20000`
+    - 正式 finite_mean≈`191.09`;
+    - 实验 finite_mean≈`193.20`;
+    - 实验 rate≈`6.34Hz`;
+    - frame/range/角分辨率均与正式 `/scan` 对齐；
+    - 结论：语义最贴近正式 `/scan`，但输出频率比正式链路高。
+  - F：`height=[-0.05,0.55]`, `max_hz=4`, `max_points=20000`
+    - 正式 finite_mean≈`188.86`;
+    - 实验 finite_mean≈`179.66`;
+    - 实验 rate≈`3.35Hz`;
+    - 结论：速率接近正式 `/scan`，障碍略少但在可继续调参范围内。
+  - G：`height=[-0.05,0.55]`, `max_hz=4`, `max_points=6000`
+    - 正式 finite_mean≈`186.60`;
+    - 实验 finite_mean≈`164.40`;
+    - 结论：采样点压到 6000 后 scan 偏稀，不适合作为 Nav2 替代起点。
+  - H：`height=[-0.05,0.55]`, `max_hz=4`, `max_points=12000`
+    - 正式 finite_mean≈`190.00`;
+    - 实验 finite_mean≈`182.49`;
+    - 实验 rate≈`3.36Hz`;
+    - 实验 age_mean≈`0.155s`，正式 `/scan` age_mean≈`0.145s`;
+    - frame=`m20pro_base_link`，range=`0.2~10.0`，angle_increment≈`0.0174533`;
+    - 106 demo 侧最终：`clouds=882`, `scans=294`, `rate_hz=3.3341`;
+    - 106 进程 CPU 观察：启动早期约 `27.1%`，中后段约 `7.5%`；
+    - 结论：这是目前“轻量化”和“接近正式 `/scan` 语义”之间最平衡的 demo 配置。
+- 当前推荐 demo 命令：
+  - `/tmp/m20pro_edge_scan_feasibility_bin/drdds_edge_scan_demo /LIDAR/POINTS /m20pro/scan_edge_exp 90 0 0 rt -0.05 0.55 4 12000 m20pro_base_link 0.0174533 10.0 0.2`
+- 本轮收尾：
+  - 106 上无残留 `drdds_edge_scan_demo` / `m20pro_edge_scan` 进程；
+  - 已清理 106 `/tmp` 中的临时 build、tar、log、pid 文件；
+  - 106 `/dev/shm` 保持约 `2.1G/7.7G`, `27%`;
+  - 104 临时 compare 脚本已从 `/tmp` 删除；
+  - 104 正式链路最终仍为：
+    - `m20pro-real.service=active`;
+    - `perception_ready`;
+    - `/scan` 新鲜，frame=`m20pro_base_link`;
+    - relay 输入约 `10.49Hz`，输出约 `3.93Hz`;
+    - `active_task=null`。
+- 当前结论：
+  - 106 DrDDS edge scan 是目前最高可行度路线；
+  - 已留下仓库 demo，不接入正式 launch/systemd；
+  - 若下一步继续，应做“服务化但可一键回退”的 106 edge scan 节点，再进行 rosbag 长测和 Nav2 旁路/短任务验证；
+  - 只有在 H/E 这类配置通过真实导航验证后，才能正式让 104 停掉 raw `/LIDAR/POINTS` 订阅、停掉 `lidar_relay` 和 `pointcloud_fusion`。
+
+## 2026-07-07 21:42 CST - 106 DrDDS edge scan demo 收尾，104 正式链路未受影响
+
+- 根据用户提醒，已再次把本轮判断和历史“恢复 104 `/LIDAR/POINTS`”经验对齐：
+  - 6 月恢复 104 的关键经验是：正确 root ROS 环境、106 `10.21.31.106` FastDDS 白名单、106 `multicast-relay.service`；
+  - 这套经验对“104 跨主机收不到 raw 点云”有效；
+  - 但本轮 106 本机问题不同：106 的原厂 DrDDS 层有 `/LIDAR/POINTS`，普通 ROS2/rclpy 入口仍收不到样本，所以不能继续只靠 `ros2 echo` 判断 106 点云源头是否正常。
+- 106 临时 edge scan demo 最终日志：
+  - 命令形态：`drdds_edge_scan_demo /LIDAR/POINTS /m20pro/scan_edge 90 0 0 rt -1.0 1.0 10 20000`;
+  - `edge_scan_start input=/LIDAR/POINTS output=/m20pro/scan_edge domain=0 use_shm=0 prefix=rt height=[-1,1]`;
+  - 最终：`clouds=900`，`scans=558`，`rate_hz=6.21106`；
+  - 输出 frame 当前仍为 `lidar_link`；
+  - scan finite bins 约 `890~918`，明显多于正式 `/scan` 的约 `200`，说明高度过滤/语义还需要调参，不能直接替换 Nav2 输入。
+- 104 并行只读接收对比结果已确认：
+  - 正式 `/scan`：约 `3.835Hz`，frame=`m20pro_base_link`，finite bins 均值约 `201`，stamp age 均值约 `0.045s`；
+  - 实验 `/m20pro/scan_edge`：约 `6.177Hz`，frame=`lidar_link`，finite bins 均值约 `879`，stamp age 均值约 `0.175s`；
+  - 104 能收到 106 DrDDS demo 发布的轻量 LaserScan，说明 106 边缘生成 scan 的路线具备高可行性。
+- 实验收尾：
+  - 106 上无残留 `drdds_edge_scan_demo` / `m20pro_edge_scan` 进程；
+  - 已删除 106 临时目录和文件：
+    - `/tmp/m20pro_edge_scan_feasibility_test`;
+    - `/tmp/m20pro_edge_scan_feasibility_bin`;
+    - `/tmp/m20pro_edge_scan_demo.log`;
+    - `/tmp/m20pro_edge_scan_demo.pid`。
+  - 106 `/dev/shm` 约 `2.1G/7.7G`, `27%`，未因 demo 留下大 SHM 段。
+- 104 正式链路复核：
+  - `m20pro-real.service=active`;
+  - `/api/state.perception_status.code=perception_ready`;
+  - 正式 relay 仍为 `/LIDAR/POINTS -> /m20pro/lidar_points_relay`;
+  - relay 输入约 `10.53Hz`，输出约 `3.93Hz`；
+  - `/scan` 新鲜，frame=`m20pro_base_link`，age 约 `0.08s`；
+  - 当前 `active_task=null`；
+  - 104 `/dev/shm` 仍约 `7.2G/7.7G`, `94%`，SHM 压力仍是后续必须解决的问题。
+- 当前可行性结论：
+  - 不建议继续把“106 普通 ROS2/rclpy 订阅 `/LIDAR/POINTS`”作为主路线；
+  - 建议主线改为“106 原厂 DrDDS 读取 raw 点云，在 106 生成轻量 scan 或轻量点云，再给 104”；
+  - 这条路线能避免 104 直接订阅跨主机 raw `/LIDAR/POINTS`，理论上最有希望降低 104 DDS/SHM 压力；
+  - 正式切换前必须补齐：
+    - 输出 frame/TF 语义对齐到 Nav2 当前使用的 `m20pro_base_link`；
+    - 高度过滤和障碍语义调到接近正式 `/scan`；
+    - 106 常驻服务和一键回退 104 本地 relay；
+    - 并行长测、rosbag 对比和最小单层短任务验证。
+- 仓库记录：
+  - 新增 `tools/edge_scan_feasibility/FEASIBILITY_REPORT.md`；
+  - 更新 `tools/edge_scan_feasibility/README.md`，补充 edge scan demo 命令、104 对比结果和禁止直接切 Nav2 的注意事项。
+
+## 2026-07-07 21:17 CST - 参考104恢复经验后确认：106 ROS2入口仍坏，但 DrDDS 原生入口可直接收点云
+
+- 用户提醒：之前恢复 104 `/LIDAR/POINTS` 的经验应在日志中有记录，需要参考。
+- 已复核历史经验：
+  - 2026-06-04：正确点云核验流程是 `source /opt/robot/scripts/setup_ros2.sh -> su -> root 下不再额外 source`；106 的 `/opt/robot/fastdds.xml` 加入过 `10.21.31.106` 白名单；点云异常时优先查 106 `multicast-relay.service`。
+  - 2026-06-09：104 能看到 `/LIDAR/POINTS` publisher 但 echo/hz 无样本，且 106 本机 echo 正常；当时重启 106 `multicast-relay.service` 后，104 echo 恢复。
+  - 2026-06-15：第二台机器狗也遇到过类似症状，最终靠补齐 106 `10.21.31.106` FastDDS 白名单、启用并重启 `multicast-relay.service` 恢复。
+- 本轮按该思路做了最小现场复核：
+  - 104 当前无 `active_task`；
+  - 104 `/api/state.perception_status.code=perception_ready`；
+  - 104 relay 仍从 `/LIDAR/POINTS` 收到约 `10.45Hz` 输入，`/scan` 新鲜；
+  - 106 `/opt/robot/fastdds.xml` 已包含 `127.0.0.1`、`10.21.33.106`、`10.21.31.106`；
+  - 106 `multicast-relay.service` 为 enabled/active；
+  - 106 `drddsctl list` 可见 `Publisher -> rt/LIDAR/POINTS`、`rt/LIDAR/POINTS2`、`rt/LOC_BODY_POINTS`。
+- 与 6 月 9 日不同的是：
+  - 106 root 正确环境下，`ros2 topic info -v /LIDAR/POINTS` 现在能看到 `Publisher count: 2`；
+  - 但 `ros2 topic echo /LIDAR/POINTS --no-arr` 仍无样本；
+  - 显式 `--qos-reliability reliable` 和 `best_effort` 也无样本；
+  - Python rclpy 同时开 best-effort/reliable 两个订阅，默认 RMW 和 `RMW_IMPLEMENTATION=rmw_fastrtps_cpp` 均为 `0` 样本。
+- 已按历史恢复经验执行一次最小恢复：
+  - 只重启 106 `multicast-relay.service`；
+  - 只重启 106 本机 ROS daemon；
+  - 未重启 104 `m20pro-real.service`；
+  - 未动 106 `rsdriver.service`、`localization.service`、雷达驱动或 DDS 原厂进程；
+  - 未清 live SHM。
+- 恢复结果：
+  - 106 ROS2/rclpy 订阅 `/LIDAR/POINTS` 仍为 `0` 样本；
+  - 104 正式链路未受影响，连续检查仍为 `perception_ready`，relay 输入约 `10.45Hz`，`/scan` 新鲜。
+- 临时 profile 矩阵也已排除：
+  - 106 上分别测试 `10.21.31.106` 单网卡、`10.21.33.106` 单网卡、UDP-only、UDP+SHM；
+  - rclpy best-effort/reliable 均无法收到 `/LIDAR/POINTS`；
+  - `/dev/shm` 在该矩阵前后约 `2.1G/7.7G`, `27%`，未明显升高。
+- 关键突破：DrDDS 原生 C++ 探针成功：
+  - 原因修正：
+    - 不能混用 ROS2 `sensor_msgs/msg/point_cloud2.hpp` 和原厂 dridl `PointCloud2`；
+    - 原厂 dridl PubSubTypes 需要编译宏 `-DGEN_API_VER=2`；
+    - 使用 `drdds/core/common_type.h` 的 `ChannelLidarPointCloud` 直接订阅。
+  - 成功命令形态：
+    - `/tmp/m20pro_drdds_lidar_probe_clean /LIDAR/POINTS 0 0 rt 8`;
+  - 成功结果：
+    - `sample frame=lidar_link`;
+    - 宽度随现场变化，例如 `22696`、`67125`、`44462`;
+    - `samples=51`;
+    - `rate_hz=9.99862`;
+    - `frame=lidar_link`;
+    - `use_shm=0`，即该探针本身不依赖 SHM。
+  - 对照失败：
+    - `LIDAR/POINTS` 不带前导 `/` 为 `0` 样本；
+    - domain `42` 为 `0` 样本；
+    - `use_shm=1` 为 `0` 样本；
+    - 本轮未证明 `/LIDAR/POINTS2` 或 `/LOC_BODY_POINTS` 可用。
+- 当前结论：
+  - 106 点云源头正常；
+  - 106 普通 ROS2/rclpy 订阅入口仍存在视角分裂/兼容问题；
+  - 6 月 9 日的 `multicast-relay` 重启经验对本次 106 本机 rclpy 无样本问题不充分；
+  - 真正可行的新路线是：106 上用原厂 DrDDS 原生接口读取 `/LIDAR/POINTS`，再做轻量 relay 或 `/scan_edge`；
+  - 这条路线有希望让 104 不再直接订阅 raw `/LIDAR/POINTS`，从而降低 104 DDS/SHM/跨主机 raw 点云压力。
+- 仓库记录：
+  - 新增手动 demo：
+    - `tools/edge_scan_feasibility/drdds_lidar_probe.cpp`;
+    - `tools/edge_scan_feasibility/build_on_106.sh`;
+    - `tools/edge_scan_feasibility/README.md`;
+  - 这些文件不接入 launch、不接入 systemd、不影响 104 正式导航链路，只作为 106 DrDDS 点云可行性证据工具。
+- demo 原样复测：
+  - 将 `tools/edge_scan_feasibility` 临时复制到 106 `/tmp/m20pro_edge_demo_test`;
+  - 在正确 root 环境中执行 `build_on_106.sh`;
+  - 运行 `/tmp/m20pro_edge_demo_test/probe /LIDAR/POINTS 0 0 rt 3`;
+  - 结果：
+    - `samples=23`;
+    - `rate_hz=10.5586`;
+    - `frame=lidar_link`;
+    - `probe_rc=0`;
+  - 测试后已删除 106 `/tmp/m20pro_edge_demo_test` 和临时运行脚本。
+- 下一步建议：
+  - 不再继续尝试把 106 rclpy 作为 edge scan 主路线；
+  - 下一步应做一个并行、可回退的 `drdds -> /m20pro/lidar_points_relay_106` 或 `drdds -> /m20pro/scan_edge` 最小节点；
+  - 先让 104 只读对比 `/scan` 与 `/m20pro/scan_edge`，确认频率、延迟、轮廓和任务导航无回归后，再考虑切换 104 正式输入。
+
+## 2026-07-07 20:33 CST - 纠正 106 点云判断：drdds 层有 `/LIDAR/POINTS`，ROS2 echo 视角异常
+
+- 用户给出官方聊天记录并明确指出：
+  - 106 的 `/LIDAR/POINTS` 按理就是应该有数据；
+  - 官方诊断使用 `drddsctl list`，而不是单纯 `ros2 topic info/echo`；
+  - 官方曾问“你们动了 106 的 fastdds 配置了吗”。
+- 本轮复核结论：
+  - 用户判断正确；
+  - 不能把 “106 上 `ros2 topic echo /LIDAR/POINTS` 超时” 解读为 “106 没有 `/LIDAR/POINTS` 点云”；
+  - 当前应区分两个层级：
+    - drdds / 原厂 DDS 层：106 有 publisher；
+    - ROS2 CLI / rclpy 订阅视角：当前看不到 publisher 或收不到样本。
+- 106 当前 `drddsctl` 实测：
+  - 可见：
+    - `Publisher -> rt/LIDAR/POINTS`;
+    - `Publisher -> rt/LIDAR/POINTS2`;
+    - `Publisher -> rt/LOC_BODY_POINTS`;
+    - 多个 `Subscriber -> rt/LIDAR/POINTS`。
+  - 这与官方截图中的结论一致：106 原厂 DDS 层有点云相关 publisher。
+- 106 当前 ROS2 CLI 实测：
+  - exact sequence：
+    - `source /opt/robot/scripts/setup_ros2.sh`;
+    - `su`;
+    - root 环境中 `FASTRTPS_DEFAULT_PROFILES_FILE=/opt/robot/fastdds.xml`;
+  - `ros2 topic echo /LIDAR/POINTS --no-arr` 仍超时；
+  - `ros2 topic info /LIDAR/POINTS --verbose` 仍显示 `Publisher count: 0`;
+  - 但这只说明 ROS2 CLI/RMW graph 视角异常，不否定 drdds 层 publisher 存在。
+- 106 FastDDS 配置事实：
+  - 当前 `/opt/robot/fastdds.xml` 白名单包含：
+    - `127.0.0.1`;
+    - `10.21.33.106`;
+    - `10.21.31.106`。
+  - 文件时间：
+    - `Modify: 2026-06-04 16:54:46 +0800`。
+  - 备份存在：
+    - `/opt/robot/fastdds.xml.bak.20260602`;
+    - `/opt/robot/fastdds.xml.bak_m20pro_20260604_165446`。
+  - 日志记录显示：6 月 4 日/15 日确实为了解决 104/PC 访问和第二台机器点云问题，备份并加入过 `10.21.31.106` 白名单。
+- 106 服务状态：
+  - `rsdriver.service active`;
+  - `localization.service active`;
+  - `multicast-relay.service active`;
+  - `rslidar`、`hsLidar`、`localization_ddsnode`、`multicast.py` 均在运行。
+- 正确判断口径：
+  - 判断 106 原厂点云是否存在，优先用：
+    - `drddsctl list | egrep 'Publisher:.*(LIDAR/POINTS|LIDAR/POINTS2|LOC_BODY_POINTS)'`;
+    - `rslidar` / `hsLidar` / `localization_ddsnode` / `multicast-relay.service` 状态；
+    - `rslidar` 日志中的 multicast 接收和 send success；
+    - 104 `m20pro_lidar_relay` 的实际 `input_rate_hz` / `messages`。
+  - `ros2 topic info /LIDAR/POINTS` 的 `Publisher count=0` 当前不是最终判据。
+- 对 106 edge scan 实验的修正：
+  - 106 仍可能是最合适的边缘处理位置；
+  - 但不能直接依赖普通 rclpy/ROS2 CLI 订阅 `/LIDAR/POINTS`；
+  - 若要在 106 做 `/scan_edge`，需要先解决“drdds publisher 如何被我们的处理节点稳定消费”的问题：
+    - 要么复用原厂/现有可消费 DDS 的进程方式；
+    - 要么用 drdds 原生接口/桥接；
+    - 要么找到与 `m20pro_lidar_relay` 在 104 上能收到样本一致的运行环境和 profile。
+- 操作边界：
+  - 本轮没有改 106；
+  - 没有重启服务；
+  - 没有清理 SHM；
+  - 没有恢复/回滚 `/opt/robot/fastdds.xml`；
+  - 若官方要求恢复 106 白名单到仅 `10.21.33.106`，必须先评估对 104/PC 点云访问、建图/重定位链路的影响，并保留回退备份。
+
+## 2026-07-07 20:26 CST - 106 点云异常不是“没有雷达”，更像 ROS2/DDS 订阅视角分裂
+
+- 用户补充手动实测：
+  - 103 和 104 按相同操作顺序可以 echo 到点云；
+  - 106 不可以；
+  - 官方人员说按理 106 肯定有点云。
+- 本轮只读核查 106：
+  - 普通 user：
+    - `FASTRTPS_DEFAULT_PROFILES_FILE=/opt/robot/fastdds.xml`;
+    - `/dev/shm` 约 `2.7G/7.7G`, `35%`;
+    - `fastrtps_*` 总量约 `2.6G`;
+    - `/LIDAR/POINTS` topic 可见，但 `Publisher count: 0`;
+    - `ros2 topic echo /LIDAR/POINTS --no-arr` 超时无样本。
+  - root：
+    - 同样 `FASTRTPS_DEFAULT_PROFILES_FILE=/opt/robot/fastdds.xml`;
+    - `/LIDAR/POINTS` 仍 `Publisher count: 0`;
+    - `/cloud_nav` 可见 bare DDS publisher：`_CREATED_BY_BARE_DDS_APP_`;
+    - `/cloud_obs`、`/SEG_CLOUD`、`/cloud_local`、`/local_scans` 等也可见 bare DDS 点云 topic；
+    - Python ROS2 订阅这些 topic 仍收不到样本。
+- 原厂进程证据：
+  - 106 上有 `rslidar`、`hsLidar`、`localization_ddsnode`、`passable_area` 等进程；
+  - `rslidar` 日志显示：
+    - 使用 `eth0 (10.21.33.106)` 接收 multicast；
+    - 接收 `224.10.10.201` / `224.10.10.202`;
+    - `begin to parse udp package`;
+  - 说明106原厂雷达驱动层很可能有数据。
+- 异常点：
+  - `rslidar` 启动脚本只是 `cd /opt/robot/share/node_driver/bin && taskset/chrt ./rslidar`;
+  - `rslidar` 进程环境里没有 `FASTRTPS_DEFAULT_PROFILES_FILE`、`ROS_DISTRO`、`RMW_IMPLEMENTATION`；
+  - 但进程映射了 `libfastrtps.so`、`libdrdds.so` 和多个 `/dev/shm/fastrtps_*`；
+  - 这说明它更像 bare DDS/原厂 drdds 进程，不一定和 ROS2 CLI/Python 订阅者处在同一个可用视角。
+- 与104对比：
+  - 104 Web/API 中 `m20pro_lidar_relay` 正在持续收到 `/LIDAR/POINTS`：
+    - `input_publisher_count=2`;
+    - `input_rate_hz≈10.5`;
+    - 输出 relay 新鲜；
+  - 但普通 CLI 在某些环境下也可能看不到 `/LIDAR/POINTS` publisher；
+  - 因此不能只用 `ros2 topic info/echo` 的单一视角判断原厂点云是否真实存在。
+- 当前判断：
+  - 106 很可能不是“没有点云”，而是 ROS2/DDS 订阅入口存在 graph/SHM/profile/bare-DDS 兼容视角问题；
+  - 这和之前104“topic 名能看到但样本进不来”的症状属于同一类风险；
+  - 不应在没有解决106订阅入口前，把106作为 `/scan_edge` 预处理节点。
+- 后续建议：
+  - 若要修106，需要先做 DDS/SHM/daemon 专项，不要直接重启原厂服务；
+  - 优先只读比较 103/104/106 的：
+    - `/opt/robot/fastdds.xml`;
+    - `rslidar` / `hsLidar` 启动环境；
+    - `/dev/shm/fastrtps_*` 被哪些进程占用；
+    - ROS daemon 状态；
+    - `ros2 topic info --verbose` 中 publisher GID 和 QoS；
+  - 真正要恢复106 CLI订阅时，应在现场明确授权后，再考虑重启 ROS daemon、清 stale SHM 或重启原厂 lidar/dds 进程。
+
+## 2026-07-07 20:17 CST - 106 侧点云预处理实验被入口条件卡住，下一步优先改测 103
+
+- 背景：
+  - 用户提出：如果在 106 直接把原始点云处理成 `/scan`，是否能显著缩短链路、降低 104 SHM。
+  - 初步判断：架构上收益很大，因为可避免把巨大 `/LIDAR/POINTS` 跨主机搬到 104。
+- 本轮只做临时探针：
+  - 未修改仓库；
+  - 未改 `/etc/default/m20pro-real`；
+  - 未重启 104/106 服务；
+  - 未替换正式 `/scan`；
+  - 未接入 Nav2；
+  - 未留下 `scan_edge` 实验进程。
+- 104 当前正式链路保持健康：
+  - `m20pro-real.service active/running`;
+  - `/api/state.active_task=None`;
+  - `perception_status.code=perception_ready`;
+  - relay 新鲜；
+  - `/scan` 新鲜；
+  - `localization_ok=true`。
+- 106 实测现象：
+  - 普通 user 按 ROS2 环境可看到 `/LIDAR/POINTS` 和 `/scan` topic 名，但订阅不到 `/LIDAR/POINTS` 样本；
+  - root + `source /opt/robot/scripts/setup_ros2.sh` 后，`FASTRTPS_DEFAULT_PROFILES_FILE=/opt/robot/fastdds.xml`；
+  - 仍然订阅不到 `/LIDAR/POINTS` 样本；
+  - `ros2 topic info /LIDAR/POINTS --verbose` 在 106 上显示 `Publisher count: 0`，只能看到订阅者，包括 104 上的 `m20pro_lidar_relay`；
+  - 106 本机有 `rslidar`、`localization_ddsnode`、`passable_area` 等原厂进程；
+  - 106 上能看到 `/cloud_nav`、`/cloud_obs`、`/SEG_CLOUD`、`/cloud_local`、`/local_scans` 等 `_CREATED_BY_BARE_DDS_APP_` 发布的点云 topic，但 Python ROS2 订阅探针在 10~30 秒内均未收到样本。
+- 用户手动复核：
+  - 103 和 104 按相同操作顺序可以 echo 到点云；
+  - 106 不可以。
+- 结论：
+  - “点云源头在 106，所以 106 最适合直接跑 ROS2 点云预处理”这个假设不成立；
+  - 106 侧 ROS2 标准订阅入口目前不可用，直接部署我们现有 Python `pointcloud_fusion` 到 106 大概率收不到输入；
+  - 不应把 106 作为下一步 edge scan 的首选实验节点。
+- 下一步建议：
+  - 优先在 103 做最小并行实验：
+    - 103 订阅 `/LIDAR/POINTS`;
+    - 发布 `/m20pro/scan_edge`;
+    - 104 不改正式 `/scan`，只读订阅 `/m20pro/scan_edge` 做频率、延迟、轮廓对比；
+    - 成功后再考虑让 104 Nav2 试用 `/m20pro/scan_edge`；
+    - 最后才讨论关闭 104 `lidar_relay` / `pointcloud_fusion` 以降低 SHM。
+  - 104 当前正式链路仍保持 `factory/factory`，不要为了 SHM 直接切混合 DDS。
+
+## 2026-07-07 17:59 CST - 104 同步后纠正 DDS 默认：混合 profile 不作为正式链路
+
+- 用户指出：
+  - 最终必须同步到 104；
+  - 104 实测才是准绳，不能只停留在上位机本地。
+- 本轮实际处理：
+  - 已把当前 real workspace 同步到 104；
+  - 同步前创建 104 源码备份：
+    - `/home/user/m20pro_real_ros2_ws_src_backup_20260707_175102.tar.gz`；
+  - 停止 `m20pro-real.service` 后 rsync 源码并重新 build；
+  - 重启服务并核验 104 状态。
+- 104 实测发现：
+  - `project_udp` 主栈 + `factory` raw relay 的混合 DDS 配置不能作为默认；
+  - 表面上 relay 状态新鲜，点云约 `5k~6k` 点；
+  - 但 `pointcloud_fusion` 收不到 relay `PointCloud2`，导致 `/scan` 断流；
+  - `/api/state.perception_status.code=scan_unavailable`；
+  - 这说明混合 DDS 虽然降低 `/dev/shm`，但会破坏导航需要的 `/scan` 链路。
+- 已恢复并验证 104 当前可用配置：
+  - `/etc/default/m20pro-real`：
+    - `M20PRO_FASTDDS_PROFILE=factory`;
+    - `M20PRO_LIDAR_RELAY_FASTDDS_PROFILE=factory`;
+    - `M20PRO_CLEAN_STALE_FASTDDS_SHM=1`。
+  - `m20pro-real.service` 为 `active/running`；
+  - `/api/state.active_task=None`；
+  - `/api/state.perception_status.code=perception_ready`；
+  - relay 新鲜，输出约 `5k~6k` 点；
+  - `/scan` 有有效距离；
+  - `localization_ok=true`；
+  - Nav2 lifecycle active。
+- 代价和结论：
+  - `/dev/shm` 回到约 `7.2G/7.7G`, `94%`；
+  - 这是后续 DDS/SHM 专项风险，但不能用破坏 `/scan` 的方案去换；
+  - 当前正式默认必须是 `factory/factory`，功能优先于 SHM 降压。
+- 本地纠正：
+  - `systemd/m20pro-real.default` 默认改回 `factory/factory`；
+  - `scripts/104_enable_autostart.sh` 默认改回 `factory/factory`；
+  - `src/m20pro_bringup/scripts/m20pro_real_full.sh` 默认主栈和 relay 均按 `factory`；
+  - `src/m20pro_bringup/scripts/m20pro_record_real.sh` 录包默认也收回到 `factory`；
+  - `README.md` / `scripts/README.md` / `docs/single_floor_navigation_architecture.md` 改为：
+    - `project_udp` 只作为 DDS/SHM 专项实验或只读诊断；
+    - 混合 DDS 已被 104 实测否决，不能作为正式链路默认。
+- 与前一条 17:10 记录的关系：
+  - 17:10 的“混合 profile 降 SHM”是实验尝试；
+  - 17:59 经过 104 `/scan` 断流验证后，该方案不再作为正式默认；
+  - 以后部署、开机自启动、录包和现场复盘均以本条结论为准。
+
+## 2026-07-07 17:37 CST - 本地继续按优先级收口：配置文档、诊断瘦身、新前端/U360兼容判断（DDS 口径后被 17:59 纠正）
+
+- 本轮原则：
+  - 不同步新版前端到 104；
+  - 不重启 104 服务；
+  - 不改导航/重定位/任务执行动作链路；
+  - 只做上位机本地文档、归档说明和兼容性核查。
+- 运行配置文档对齐（当时暂定口径，后续 17:59 经 104 `/scan` 断流实测否决）：
+  - `README.md` 不再写“默认 factory”或“项目 UDP-only”；
+  - 当时暂定说明 104 口径：
+    - 主栈/Nav2/Web/pointcloud fusion 使用项目 `project_udp`；
+    - 原始 `/LIDAR/POINTS` relay 使用 factory `/opt/robot/fastdds.xml`；
+    - `M20PRO_CLEAN_STALE_FASTDDS_SHM=1` 只做 `fuser` 保护的 stale SHM 清理；
+    - strict UDP-only 已实测不能稳定订阅 raw `/LIDAR/POINTS`，不作为正式链路。
+  - `scripts/README.md` 改成“全量 real 可先让网页/Nav2 起起来，通过自检/API/脚本确认点云链路”，不再写“启动前必须收到 raw 点云样本才启动”。
+- 诊断/兼容瘦身说明继续收口：
+  - 文档继续明确现场任务复盘统一看 rosbag；
+  - 不再依赖前端 watcher、ready-check、失败快照或现场快照；
+  - 电量只显示给操作员参考，不作为软件自检、部署、重定位或任务启动门槛。
+- 新版 lite 前端封存状态：
+  - 新增 `docs/archived_frontend_lite_workbench/20260702/README.md`；
+  - 明确该目录只是 2026-07-02 布局草稿，不能直接部署到 104；
+  - 该草稿未包含 `Unre` 分支里的 U360 雷达控件、任务导出、登记点云、人工回填和 `/api/radar/*` 对接；
+  - 草稿仍有旧 task readiness / watcher / field snapshot 残留，后续若启用必须先迁移当前旧面板能力。
+- `Unre`/U360 兼容核查结论：
+  - `gitlab/Unre` 不是只新增一个 ROS2 package，还改了旧前端和 Web 后端；
+  - 旧前端新增标点字段：
+    - `building`;
+    - `unit`;
+    - `house`;
+    - `scan_point`;
+    - `radar.scans`;
+    - 雷达计划选择。
+  - Web 后端新增：
+    - `/api/radar/task_export?format=json/csv`;
+    - `/api/radar/artifact`;
+    - `/api/radar/manual_measurement`;
+    - `radar_inspection` 状态订阅和任务卡结果展示；
+    - dwelling 阶段等待/释放雷达扫描结果的逻辑。
+  - 雷达 package 读取 `/m20pro/active_waypoint`，依赖 `waypoint.result_file_prefix`、`waypoint.room`、`waypoint.scan_point` 和 `waypoint.radar.scans`；
+  - 当前旧面板可以作为 U360 合并基础；新版 lite 面板暂不适配，暂不能同步到 104。
+- 官方 API 资料核查：
+  - 本地官方资料目录实际在 `/home/fabu/桌面/M20Pro/api`；
+  - 其中主要是云端平台/测量结果样本资料，未看到 `/nuc/scan`、`/nuc/startModelingTask`、`/nuc/queryState`、`/nuc/getResult`、`/nuc/downloadFile` 这些本机设备控制接口；
+  - `Unre` 雷达节点使用的是 U360 本机 HTTP 控制口，后续需要实习生补充设备本机 API 来源或实测证据。
+- 本轮验证：
+  - `bash -n scripts/104_enable_autostart.sh scripts/104_preflight_check.sh src/m20pro_bringup/scripts/m20pro_real_full.sh` 通过；
+  - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js` 通过；
+  - `python3 -m py_compile` 覆盖 Web/contract/脚本相关文件，通过；
+  - `python3 scripts/test_task_contract.py` 通过；
+  - `python3 scripts/test_active_task_contract.py` 通过；
+  - `python3 scripts/test_active_waypoint_contract.py` 通过；
+  - `python3 scripts/test_preflight_contract.py` 通过；
+  - `python3 scripts/test_localization_contract.py` 通过；
+  - `python3 scripts/test_navigation_readiness_contract.py` 通过；
+  - `git diff --check` 通过。
+- 后续建议：
+  - 先不要同步新版 lite 前端到 104；
+  - 先最小合并/评审 `Unre` 的 U360 package、后端 API 和旧前端入口；
+  - 等 U360 dry-run 和至少一次真机任务点触发跑通后，再把这些能力迁到新版布局；
+  - 新版布局迁移必须以不破坏旧面板导航/重定位/任务能力为红线。
+
+## 2026-07-07 17:10 CST - 104 SHM 降压实验：主系统 project_udp，raw relay factory（后被 17:59 否决为正式默认）
+
+- 背景：
+  - strict UDP-only 已验证不能直接收到原厂 raw `/LIDAR/POINTS` 样本；
+  - 104 factory/factory 运行时 `/dev/shm` 已升到约 `7.2G/7.7G`, `94%`；
+  - 该状态容易诱发 FastDDS SHM 注册失败、ROS graph 半坏、`pointcloud_fusion` 收不到 relay 点云等问题。
+- 采用方案：
+  - 不再推进 strict UDP-only 直接接 raw 点云；
+  - 104 改为混合 profile：
+    - 主系统/Nav2/Web/`pointcloud_fusion` 使用项目轻量 profile `project_udp`；
+    - 原始点云 `m20pro_lidar_relay` 继续使用 factory `/opt/robot/fastdds.xml`，保证能订阅 `/LIDAR/POINTS`；
+    - 启用带 `fuser` 保护的 stale FastDDS SHM 清理。
+- 104 现场配置改动：
+  - 备份：
+    - `/etc/default/m20pro-real.bak.20260707_170942`。
+  - `/etc/default/m20pro-real` 当前关键值：
+    - `M20PRO_FASTDDS_PROFILE=project_udp`;
+    - `M20PRO_LIDAR_RELAY_FASTDDS_PROFILE=factory`;
+    - `M20PRO_CLEAN_STALE_FASTDDS_SHM=1`。
+- 安全操作过程：
+  - 确认 `/api/state.active_task=None` 后停止本工程服务；
+  - 停止后执行 fuser 保护清理：
+    - 删除未被任何进程占用的 stale `fastrtps_*` 段 `40` 个；
+    - 保留仍被占用的段 `17` 个；
+    - 未清理 live SHM；
+    - 未动 106；
+    - 未重启原厂 lidar/multicast 服务。
+  - 清理后、启动前 `/dev/shm` 从 `94%` 降到约 `3%`。
+- 启动后结果：
+  - `m20pro-real.service`:
+    - `active/running`;
+    - `MainPID=10619`;
+    - `NRestarts=0`;
+    - `Result=success`。
+  - `/dev/shm` 启动后约：
+    - `1.7G/7.7G`, `22%`；
+    - 最大段只剩一个约 `500MB` factory 段；
+    - 其余主系统 FastDDS 段约 `67MB`。
+  - 进程环境确认：
+    - relay `FASTRTPS_DEFAULT_PROFILES_FILE=/opt/robot/fastdds.xml`;
+    - fusion `FASTRTPS_DEFAULT_PROFILES_FILE=/home/user/m20pro_real_ros2_ws/install/m20pro_bringup/share/m20pro_bringup/config/m20pro_fastdds_udp.xml`。
+- 功能验证：
+  - `/api/state.perception_status.code=perception_ready`;
+  - `/scan` 新鲜，`finite_ranges≈208`；
+  - relay 点云新鲜，约 `5.5k~6k` 点；
+  - relay `input_rate_hz≈9.7`, `publish_rate_hz≈3.7`；
+  - `/scan` publisher count 为 `1`;
+  - `/m20pro/lidar_points_relay` publisher count 为 `1`；
+  - `/m20pro_pointcloud_fusion`、`/m20pro_lidar_relay`、Nav2 `controller_server/planner_server/bt_navigator/waypoint_follower` 均可见；
+  - journal 显示：
+    - `PointCloud fusion ready: /m20pro/lidar_points_relay -> /scan in m20pro_base_link`;
+    - `cloud>0 processed>0 scan>0 reason=published`;
+    - `Nav2 lifecycle is active`;
+    - `M20PRO REAL OK`。
+- 仓库默认值对齐：
+  - `systemd/m20pro-real.default`：
+    - relay profile 默认改为 `factory`;
+    - 新增 `M20PRO_CLEAN_STALE_FASTDDS_SHM=1`。
+  - `scripts/104_enable_autostart.sh`：
+    - 生成 `/etc/default/m20pro-real` 时 relay profile 默认改为 `factory`;
+    - 写入 `M20PRO_CLEAN_STALE_FASTDDS_SHM=1`。
+  - `src/m20pro_bringup/scripts/m20pro_real_full.sh`：
+    - 当环境未显式指定 relay profile 时，relay 默认使用 `factory`。
+  - 以上默认值已同步到 104 源码位置；没有做全量部署，没有同步新版前端。
+
+## 2026-07-07 17:05 CST - 104 strict UDP-only 探针结论与 `/scan` 链路恢复
+
+- 背景：
+  - 104 `/dev/shm` 长期偏高，用户询问是否能用更好的 strict UDP-only 降低 SHM；
+  - 用户随后手动确认：按正确 root ROS 流程，104 仍能 echo 到原厂 `/LIDAR/POINTS`，说明原厂/factory 点云链路本身仍活着。
+- strict UDP-only 最小实验：
+  - 只在 104 `/tmp` 临时生成 strict UDP-only FastDDS profile 和 Python 探针；
+  - 未改仓库、未改 `/etc/default/m20pro-real`、未重启正式服务、未动 106；
+  - A 版：只启用 UDPv4、只白名单 `127.0.0.1` 和 `10.21.31.104`；
+  - B 版：在 A 的基础上增加 `10.21.31.103/104/106` initial peers。
+- strict UDP-only 结果：
+  - A 版跑满 5 分钟：
+    - `/LIDAR/POINTS`: `0` 条；
+    - `/m20pro/lidar_points_relay`: `1171` 条，约 `3.904Hz`；
+    - `/scan`: `0` 条。
+  - B 版跑满 5 分钟：
+    - `/LIDAR/POINTS`: `0` 条；
+    - `/m20pro/lidar_points_relay`: `1179` 条，约 `3.927Hz`；
+    - `/scan`: `0` 条。
+  - 结论：
+    - strict UDP-only 能看到 topic，也能稳定收到本工程降采样 relay 点云；
+    - 但 strict UDP-only 仍不能直接收到原厂 raw `/LIDAR/POINTS` 样本；
+    - 因此前置条件未满足，没有启动临时实验 relay；
+    - strict UDP-only 当前不能直接替代 factory raw 点云订阅链路。
+- 实验恢复：
+  - 已删除：
+    - `/tmp/m20pro_fastdds_strict_udp_104.xml`;
+    - `/tmp/m20pro_fastdds_strict_udp_104_peers.xml`;
+    - `/tmp/m20pro_udp_pointcloud_probe.py`。
+  - 无残留 strict UDP 探针进程；
+  - 104 正式服务未在实验阶段被重启或改配置。
+- 随后发现的正式链路故障：
+  - `/api/state.perception_status.code=scan_unavailable`;
+  - relay 点云已有数据：
+    - source=`relay`;
+    - points 约 `5k~6k`;
+    - relay input `/LIDAR/POINTS` publisher count 为 `2`；
+  - 但 `/scan` 无 publisher，`pointcloud_fusion` 日志持续：
+    - `cloud=0 processed=0 scan=0 reason=not_started`；
+  - `ros2 node list` 看不到 `/m20pro_pointcloud_fusion`，但系统进程仍在；
+  - 这与 2026-06-29 的“ROS graph / DDS participant 半坏状态”一致。
+- 恢复操作：
+  - 确认 `/api/state.active_task=None`，没有正在执行的任务；
+  - `/etc/default/m20pro-real` 已经是：
+    - `M20PRO_FASTDDS_PROFILE=factory`;
+    - `M20PRO_LIDAR_RELAY_FASTDDS_PROFILE=factory`;
+    - `M20PRO_CLEAN_STALE_FASTDDS_SHM=0`。
+  - 仅重启 104 本工程服务：
+    - `systemctl restart m20pro-real.service`;
+    - 未清 `/dev/shm/fastrtps_*`;
+    - 未动 106；
+    - 未重启原厂 multicast/lidar 服务。
+- 恢复结果：
+  - `m20pro-real.service`:
+    - `active/running`;
+    - `MainPID=9124`;
+    - `NRestarts=0`;
+    - `Result=success`。
+  - `/api/state.perception_status`:
+    - `code=perception_ready`;
+    - `ready=true`;
+    - message=`点云 relay 和 /scan 均有新鲜数据`；
+    - `/scan finite_ranges≈212~232`;
+    - relay 点云约 `5.9k` 点；
+    - relay `input_rate_hz≈9.6`, `publish_rate_hz≈3.5`。
+  - ROS graph:
+    - `/m20pro_pointcloud_fusion` 可见；
+    - `/scan` publisher count 为 `1`;
+    - local/global costmap 均有 publisher；
+    - Nav2 `controller_server`、`planner_server`、`bt_navigator`、`waypoint_follower` 可见。
+  - journal:
+    - `PointCloud fusion ready: /m20pro/lidar_points_relay -> /scan in m20pro_base_link`;
+    - `cloud>0 processed>0 scan>0 finite_bins≈200+ reason=published`;
+    - `Nav2 lifecycle is active`。
+- 仍需注意：
+  - `/dev/shm` 重启后约 `7.2G/7.7G`, `94%`；
+  - 这是后续 DDS participant 半坏的高风险诱因，但本轮没有清 SHM，也没有切 strict UDP-only；
+  - 当前现场优先保持可用链路：
+    - `/LIDAR/POINTS -> /m20pro/lidar_points_relay -> /scan -> costmap/Nav2/web`。
 
 ## 2026-07-01 20:54 CST - 104 已部署并验证楼层显示/跨楼层标点改动生效
 
@@ -4781,7 +6156,7 @@ ros2 topic echo /LIDAR/POINTS --no-arr
 ssh user@10.21.31.104
 source /opt/robot/scripts/setup_ros2.sh
 su
-# root password is the single quote character: '
+# root password is provided out-of-band; do not write it into the repo
 # after su, do not source anything else
 ros2 topic list | grep LIDAR
 ros2 topic info -v /LIDAR/POINTS
@@ -19525,3 +20900,1658 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
   - 104 当前 `/etc/default/m20pro-real` 仍使用 factory FastDDS 配置，因此 journal 中还能看到 SHM 相关启动警告；
   - 本轮没有改这个服务级 DDS 配置，避免把 real-only 清理扩大成通信策略调整；
   - 当前 relay 和 `/scan` 已经在刷新，所以该警告暂记为后续 DDS/SHM 专项处理项。
+
+## 2026-07-03 12:10 CST - 重定位/导航状态口径修正，本地已验证，104 尚未同步
+
+- 现场问题复盘：
+  - 单独网页重定位大体可用；
+  - 一旦开始导航、机器狗移动，旧前端会把“当前位置离开最近一次 2101 重定位回执坐标”显示成重定位失效；
+  - 这不符合真实逻辑：2101 重定位只负责在地图/场景切换后确认初始位姿，成功后应退居幕后；机器人移动后不应继续要求实时位姿贴着那根红色重定位箭头。
+- 104 只读观察到的关键矛盾：
+  - `/api/state.localization_ok=false`;
+  - `/api/state.navigation_status="location=0 obstacle=None usage_mode=None ooa=None"`;
+  - `navigation_status_parsed.location=0`;
+  - 因此 104 上存在“原始 `/localization_ok` 抖为 false，但原厂导航状态仍表示定位正常”的状态源不一致。
+- 本地后端修正：
+  - `localization_contract.py`：
+    - 不再把 `pose_near_2101=false` 当作持续重定位失败；
+    - `pose_near_2101` 仅保留为诊断字段，用来说明机器人已离开重定位点；
+    - `factory_localization_ok=true` 时，即使 `/localization_ok=false`，也可显示为“重定位成功，但状态源不一致”。
+  - `web_dashboard_node.py`：
+    - 新增统一判断 `_factory_localization_ok()`；
+    - 综合口径为：`/localization_ok=true` 或 `navigation_status location=0`；
+    - 状态展示、任务启动 readiness、Nav2 readiness 检查、网页重定位等待、运行中任务 tick 均使用该综合口径；
+    - 位姿新鲜度/合法性仍继续检查，不会在没有新鲜地图位姿时放行。
+  - `task_contract.py`：
+    - `task_pose_readiness_payload()` 新增可选 `factory_localization_ok`；
+    - 任务定位闸门使用综合定位口径，但保留原始 `localization_ok` 作为诊断字段。
+- 旧前端显示逻辑修正：
+  - 不再用 `pose_near_2101=false` 推翻“重定位成功”；
+  - 旧面板只把它显示为“已离开重定位点 X m”；
+  - `localizationConfirmedForDisplay()` 不再要求持续贴近 2101 点。
+- 本地验证已通过：
+  - `python3 -m py_compile` 相关后端文件；
+  - `python3 scripts/test_localization_contract.py`;
+  - `python3 scripts/test_task_contract.py`;
+  - `python3 scripts/test_task_progress_contract.py`;
+  - `python3 scripts/test_navigation_readiness_contract.py`;
+  - `python3 scripts/check_preflight_policy.py`;
+  - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js`。
+- 104 专用最小同步包已准备好：
+  - `/tmp/m20pro_104_nav_fix.tar.gz`;
+  - 包内只含：
+    - `localization_contract.py`;
+    - `task_contract.py`;
+    - `web_dashboard_node.py`;
+    - 旧面板 `static/dashboard.js` 的最小显示补丁；
+  - 明确不包含昨天的新面板 `dashboard.html/css`。
+- 当前阻塞：
+  - 当前 Codex 工具环境网络被限制，`ssh user@10.21.31.104` 返回 `socket: Operation not permitted`；
+  - 因此本轮尚未同步到 104、尚未 build、尚未重启 `m20pro-real.service`。
+- 网络恢复后的 104 最小执行顺序：
+  - 备份 104 当前四个文件；
+  - 将 `/tmp/m20pro_104_nav_fix.tar.gz` 解包覆盖到 `/home/user/m20pro_real_ros2_ws`;
+  - 在 104 上执行 `colcon build --symlink-install --packages-select m20pro_cloud_bridge`;
+  - 重启 `m20pro-real.service`;
+  - 只读确认 `/api/state` 中：
+    - `factory_localization_ok=true` 当 `navigation_status_parsed.location=0`;
+    - 前端不再因机器人离开 2101 点而显示重定位失败；
+    - 任务运行中不会因为单次 `/localization_ok=false` 立刻暂停下发目标。
+
+## 2026-07-06 10:30 CST - 单层导航失败录包复盘：目标和路径已发出，但位姿源污染导致 Nav2 快速失败
+
+- 用户现场反馈：
+  - 点击“开始导航”后，前端出现多条虚线；
+  - 机器狗本体表现为原地转圈/没有正常沿路径前进；
+  - 用户已录包，要求查明原因，不能再凭感觉判断“应该能跑”。
+- 已拉取并分析的 104 rosbag：
+  - 本机路径：`/home/fabu/bags/m20pro_nav_issue_20260703/m20_test_20260703_153157/m20_test_20260703_153157_0.db3`;
+  - 104 原路径：`/home/user/bags/m20_test_20260703_153157/m20_test_20260703_153157_0.db3`;
+  - 另外两个 7 月 3 日 rosbag 只有 metadata/空 db3，`message_count=0`，不可用于分析。
+- 录包关键事实：
+  - `/m20pro/floor_goal` 有 3 条目标，均为 F20，目标点 `x=-0.690, y=-1.282, yaw=-0.968`;
+  - `/plan` 有 1 条路径，46 个点，起点约 `(-2.800, -0.300)`，终点就是目标 `(-0.690, -1.282)`；
+  - `/m20pro/stair_status` 显示：
+    - `50.326s` 下发同层目标；
+    - `50.392s` Nav2 接受目标；
+    - `50.470s` Nav2 以 `status=6` 失败；
+    - 第二次尝试也在 `86s-93s` 之间失败；
+  - `/cmd_vel` 共 125 条，全部为 0，没有非零速度命令；
+  - `/STEER`/`/HANDLE_STEER` 未证明有我们栈发出的有效转圈命令；
+  - 因此本包不能支持“我们的导航栈发了原地转圈速度”的结论。
+- 录包中最严重的问题：
+  - `/m20pro_tcp_bridge/map_pose` 在导航前后出现明显跳变：
+    - 一组在 `(-2.80, -0.32, yaw≈0.032)`;
+    - 一组在 `(-3.48, -0.35, yaw≈0.038)`;
+    - 还频繁跳到 `(0,0,0)`;
+  - 第二次开始任务时，`/m20pro/active_waypoint` 记录的机器人位姿直接变成 `(0,0,0)`，这会让任务层把假位姿当成真位姿；
+  - 前端多条虚线至少有一部分来自旧路径/位姿历史没有在导航复位后清干净。
+- 本次代码修复：
+  - `tcp_bridge_node.py` 增加位姿稳定过滤：
+    - 原厂 `1007/2` 返回 `Location!=0` 或坐标不合理时，不发布 `/m20pro_tcp_bridge/map_pose`、`/odom`、TF；
+    - 已有可信位姿后，拒绝 `(0,0,0)` 原点占位；
+    - 拒绝单次超过 `0.6m` 的瞬间跳变，只有新位姿连续稳定约 `1.2s` 后才接纳；
+    - 人工 2101 重定位后的大跳变只在“跳到刚请求的重定位目标附近”时放行，避免把重定位后的 `(0,0,0)` 误放行；
+    - 短时间坏样本只丢弃，不立刻把 `localization_ok` 打成 false；超过 `1.0s` 没有好位姿才进入异常。
+  - `web_dashboard_node.py` 增加导航显示状态清理：
+    - `_reset_navigation_session()` 后清空 `path.points` 和 `pose_history`；
+    - 目标是避免导航失败后旧 path/旧位姿历史继续在前端画成多条虚线；
+    - 不清除真实 pose，不改任务下发协议，不改导航目标格式。
+- 本地验证：
+  - `python3 -m py_compile src/m20pro_navigation/m20pro_navigation/tcp_bridge_node.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py` 通过；
+  - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js` 通过；
+  - 以下 contract 测试通过：
+    - `scripts/test_localization_contract.py`;
+    - `scripts/test_task_contract.py`;
+    - `scripts/test_task_progress_contract.py`;
+    - `scripts/test_navigation_readiness_contract.py`;
+    - `scripts/test_nav_status_contract.py`。
+- 104 同步范围：
+  - 已同步到 104 的文件：
+    - `src/m20pro_navigation/m20pro_navigation/tcp_bridge_node.py`;
+    - `src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py`。
+  - 明确没有同步昨天做的新前端静态面板：
+    - 未覆盖 104 的 `static/dashboard.html`;
+    - 未覆盖 104 的 `static/dashboard.css`;
+    - 未覆盖 104 的 `static/dashboard.js`。
+  - 104 仍保持旧面板，避免把前端布局试验混入导航修复。
+- 104 构建与重启：
+  - 在 104 上以 root 环境执行：
+    - `colcon build --packages-select m20pro_navigation m20pro_cloud_bridge --symlink-install`;
+  - 构建成功，2 个包完成；
+  - 已重启 `m20pro-real.service`;
+  - 当前服务为 `active`；
+  - 当前进程仍为 `move` 模式，`enable_axis_command:=true`，TCP 桥日志显示 `axis command enabled; idle zero disabled`。
+- 104 新参数确认：
+  - `/m20pro_tcp_bridge pose_jump_reject_m = 0.6`;
+  - `/m20pro_tcp_bridge pose_filter_hold_last_good_s = 1.0`;
+  - `/m20pro_tcp_bridge reject_origin_placeholder_pose = true`。
+- 104 当前运行状态：
+  - `/api/state` 显示：
+    - `selected_map_id=map_1782442183242_ee7c6b76`;
+    - `floor=F20`;
+    - `localization_ok=false`;
+    - `factory_localization_ok=false`;
+    - `pose_fresh=false`;
+    - `pose=None`;
+    - `navigation_status=location=1 obstacle=0 usage_mode=None ooa=None`;
+    - `task_readiness.code=map_relocalization_required`。
+  - `/m20pro_tcp_bridge/localization_ok` 连续为 `false`；
+  - `/m20pro_tcp_bridge/map_pose` 当前没有正常输出；
+  - journal 中 TCP 桥正在拦截明显无效的原厂位姿，例如：
+    - `Location=1`;
+    - `PosX≈7900`;
+    - `PosY≈2200`;
+    - `PosZ≈-12000`;
+  - 这说明现在不是前端误判，而是原厂定位状态确实未恢复，当前不具备开跑条件。
+- 当前结论：
+  - 录包证明“目标已发、路径已出、Nav2 快速失败、cmd_vel 没有非零速度”；
+  - 录包同时证明 `/map_pose` 源头存在跳零点和大跳变污染；
+  - 本次已把假位姿挡在 TCP 桥入口，避免再污染 Nav2/TF/任务层；
+  - 但 104 当前还没有重新定位成功，不能直接开始导航。
+- 下一次现场复测顺序：
+  - 在旧前端完成一次网页重定位；
+  - 必须看到：
+    - `navigation_status location=0`;
+    - `factory_localization_ok=true`;
+    - `/api/state.pose_fresh=true`;
+    - `/api/state.pose` 坐标不是 `(0,0,0)`，且和红色定位箭头/激光轮廓相符；
+    - `task_readiness.ready=true` 或至少不再是 `map_relocalization_required`；
+  - 然后只执行一个单层短任务；
+  - 复测时同时盯：
+    - `/m20pro_tcp_bridge/map_pose`;
+    - `/m20pro/stair_status`;
+    - `/plan`;
+    - `/cmd_vel`;
+    - `/m20pro/active_waypoint`;
+    - `journalctl -u m20pro-real.service -f`。
+  - 如果再次失败，下一步重点不再是前端按钮，而是看 Nav2 `status=6` 的 controller/planner 日志原因。
+
+## 2026-07-06 11:55 CST - 本地外科式减负：降低前端自动轮询负载，不改导航/重定位核心链路
+
+- 起因：
+  - 用户指出当前系统“核心链路外面包了一圈太厚的诊断和兼容逻辑”，希望继续做外科手术式减负；
+  - 本轮原则：只减自动轮询和重复请求负担，不改 `/api/tasks/start`、重定位成功判据、Nav2 目标下发、TCP 桥控制链路；
+  - 本轮只在上位机本地仓库完成，未同步 104。
+- 任务列表减负：
+  - `/api/tasks` 默认仍保持完整 readiness，兼容旧脚本和手动刷新；
+  - 新增显式轻量模式 `/api/tasks?readiness=light`：
+    - 不计算每张任务卡的 readiness；
+    - 不调用导航 lifecycle/costmap readiness；
+    - 返回 `readiness_included=false`、`readiness_mode=light`、`task_readiness=null`；
+  - 前端自动任务列表刷新改为 6 秒一次 light 模式；
+  - 手动刷新、生成/删除/改名任务、停止/复位任务、自检结束、启动任务前仍使用 full readiness；
+  - 如果任务卡来自 light 模式，按钮显示“检查条件”，点击后先 full readiness 检查，通过后才允许进入确认并调用 `/api/tasks/start`。
+- 状态接口减负：
+  - `/api/state` 默认仍返回完整调试数据；
+  - 新增兼容轻量查询 `/api/state?debug=0`：
+    - 后端内部仍用完整 topics/events 计算 perception/status/readiness；
+    - 只在 HTTP 返回前裁掉 `events` 和 `topics`；
+    - 返回 `debug_included=false`；
+  - 前端主循环默认使用 `/api/state?debug=0`；
+  - 进入“更多”页时每 3 秒拉一次完整 `/api/state`，用于 topic 表、事件和调试详情。
+- 点位刷新减负：
+  - 前端 `loadAnnotations()` 增加同地图短时间请求合并；
+  - 同一地图 1.2 秒内重复刷新直接复用当前页面数据；
+  - 删除点位、保存点位、切换地图仍强制刷新，避免缓存影响标点结果。
+- 顺手去掉的重复动作：
+  - 任务启动成功后不再成功路径刷新一次、`finally` 又刷新一次；
+  - 保留 `finally` 里的一次 full 刷新，确保启动结果仍能回到页面。
+- 防回归规则：
+  - `scripts/check_preflight_policy.py` 增加检查：
+    - `/api/tasks` 默认 full，自动刷新 light；
+    - 启动任务前必须 full readiness；
+    - `/api/state` 默认 full，只有 `debug=0` 才轻量；
+    - 前端主循环使用轻量 state，更多页使用完整 state。
+- 本地验证：
+  - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js` 通过；
+  - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/check_preflight_policy.py` 通过；
+  - `python3 scripts/check_preflight_policy.py` 通过；
+  - `python3 scripts/test_task_contract.py` 通过；
+  - `python3 scripts/test_annotation_contract.py` 通过；
+  - `python3 scripts/test_localization_contract.py` 通过；
+  - `python3 scripts/test_task_progress_contract.py` 通过。
+- 本地接口探针：
+  - 本地 8091 启动后访问 `/api/state?debug=0`：
+    - `debug_included=false`;
+    - `topics=0`;
+    - `events=0`;
+    - `perception_status.code=perception_ready`，说明内部感知判断没有被裁剪破坏；
+  - 访问默认 `/api/state`：
+    - `debug_included=true`;
+    - 能返回 topics/events；
+  - 访问 `/api/tasks?readiness=light`：
+    - `readiness_included=false`;
+    - `task_readiness=null`;
+  - 访问默认 `/api/tasks`：
+    - `readiness_included=true`;
+    - `task_readiness` 正常返回。
+- 当前结论：
+  - 本轮是“减轮询、减重复、保核心”的小手术；
+  - 没有同步 104；
+  - 不会改变目前 104 旧面板和导航修复状态；
+  - 后续若要上 104，应先明确是否同步新版前端，再按备份、同步、build、重启、只读验证、最小动作验证顺序执行。
+
+## 2026-07-06 16:05 CST - 电量改为纯显示信息，不再作为自检/任务/运行守护条件
+
+- 用户明确要求：
+  - 电量不应该成为条件；
+  - 只显示出来让操作员知道即可；
+  - 操作员会自行判断有没有电、能不能继续现场动作。
+- 本轮原则：
+  - 继续做外科式减负；
+  - 不改重定位、地图选择、Nav2 目标下发、点位/任务数据结构；
+  - 不同步 104，只改上位机本地仓库。
+- 自检改动：
+  - `web_dashboard_node.py`：
+    - `_run_preflight_locked()` 不再读取 `battery`;
+    - 不再向自检 `items` 里加入电量项；
+    - `_wait_for_preflight_baseline()` 不再等待电池 topic；
+    - 删除 `preflight_min_battery_level` 参数；
+  - `preflight_contract.py`：
+    - 删除 `preflight_battery_item()`；
+  - `scripts/test_preflight_contract.py`：
+    - 删除电量自检项测试；
+  - 结果：电量不会导致“开机基础自检失败”，也不会拖慢自检等待。
+- 任务启动/运行守护改动：
+  - `task_contract.py`：
+    - `battery_readiness_payload()` 改成纯显示型证据；
+    - 始终返回 `ready=true`;
+    - 返回 `display_only=true`;
+    - 仍记录：
+      - 是否收到电池数据；
+      - `level`;
+      - 数据新鲜度；
+      - 是否低于参考值 `below_min_level`;
+    - 但不再产生 `battery_missing`、`battery_stale`、`battery_low` 失败码；
+    - `task_runtime_readiness_payload()` 不再因为 `battery_readiness.ready=false` 阻断启动；
+    - `runtime_guard_readiness_payload()` 不再因为电量阻断或停止任务。
+  - `web_dashboard_node.py`：
+    - 删除 `task_start_require_battery_ok` / `task_runtime_require_battery_ok` 条件参数；
+    - 保留 `task_start_min_battery_level=25`、`task_runtime_min_battery_level=20` 作为显示/诊断参考值；
+    - `_task_battery_readiness_payload()` 固定以 `required=False` 调用 contract。
+- 前端/脚本显示改动：
+  - `dashboard.js`：
+    - 顶栏电量继续显示；
+    - 任务下一步提示不再把 `battery_low` 放在最高优先级；
+    - 开始按钮文案不再出现“等电池/先充电”。
+  - `104_frontend_task_ready_check.py`：
+    - 继续打印电量；
+    - 不再因为低电返回 state-level blocker；
+    - 不再给出“先充电，不要开始移动任务”的 next action。
+  - `104_analyze_frontend_task_watch.py`：
+    - 不再把低电作为任务失败归因；
+    - runtime guard 归因改为 perception runtime guard。
+  - `104_goal_mode_battery_gate.py`：
+    - 保留入口兼容；
+    - 改为只读“电量显示探针”；
+    - 读不到电量或低于参考值也返回 `0`;
+    - 不再作为 goal-mode gate。
+- 文档同步：
+  - `README.md`、`scripts/README.md`、`docs/single_floor_navigation_architecture.md` 均改为：
+    - 电量只显示给操作员参考；
+    - 不作为软件自检、部署、重定位或任务启动门槛；
+    - 软件阻断仍以定位、地图、Nav2、scan、点云链路为准。
+- 防回归：
+  - `scripts/check_preflight_policy.py` 改成保护新规则：
+    - 禁止 web 暴露 `task_start_require_battery_ok` / `task_runtime_require_battery_ok`;
+    - 禁止 preflight contract 重新加入 `preflight_battery_item`;
+    - 禁止 web preflight 读取/等待/评分电量；
+    - 要求 task contract 把电量作为 `display_only` 证据；
+    - 禁止 ready-check 再把电量当 blocker。
+- 当前结论：
+  - 电量现在是“显示信息/记录字段”，不是软件条件；
+  - 自检、任务启动 readiness、运行守护都不会再因为电量缺失、过期或偏低而阻断；
+  - 顶栏和调试/记录脚本仍能让操作员看到电量；
+  - 本轮未同步 104。
+
+## 2026-07-06 16:29 CST - 非新版前端改动同步到 104 并完成只读验证
+
+- 用户要求：
+  - 除了新的前端界面，其他都同步到 104 测一测；
+  - 104 继续保留旧面板，不把“作业/检测/更多”的新版布局推过去。
+- 同步范围：
+  - 已同步到 104：
+    - 后端/contract：`annotation_contract.py`、`localization_contract.py`、`preflight_contract.py`、`task_contract.py`、`web_dashboard_node.py`;
+    - 导航桥：`tcp_bridge_node.py`;
+    - 只读诊断脚本和 contract 测试；
+    - README、架构文档和本日志；
+    - 旧面板 `static/dashboard.js` 的最小补丁。
+  - 本轮未同步 `scripts/check_preflight_policy.py`：
+    - 本地版本包含新版前端布局/轻量轮询的防回归检查；
+    - 104 当前按用户要求保留旧面板，直接同步该 policy 脚本会造成旧面板下的假失败。
+  - 明确未同步新版布局：
+    - 未覆盖 104 的 `static/dashboard.html`;
+    - 未覆盖 104 的 `static/dashboard.css`;
+    - `static/dashboard.js` 只做旧面板最小逻辑补丁，不包含新版 `lite-workbench` 或 `data-tab="work"` 布局。
+- 104 备份：
+  - 同步前备份：
+    - `/home/user/m20pro_backups/non_frontend_sync_before_20260706_162004.tar.gz`;
+  - 旧面板 JS 最小补丁前备份：
+    - `/home/user/m20pro_backups/dashboard_js_before_min_patch_20260706_162630.js`。
+- 旧面板 JS 最小补丁：
+  - 删除旧面板中 `battery_low` / `battery_missing` / `battery_stale` 对应的“先充电/等电池”按钮和下一步文案；
+  - 主循环在非“看板”页读取 `/api/state?debug=0`，降低 topic/events 大 payload 轮询压力；
+  - 保留“看板”页读取完整 `/api/state`，保证事件、topic 表等旧调试区域仍能显示；
+  - 不改页面结构、不改标签页、不改重定位/标点/任务按钮绑定。
+- 104 构建/重启：
+  - 104 上通过：
+    - `python3 -m py_compile`，使用临时 `PYTHONPYCACHEPREFIX` 避开历史 `__pycache__` 权限问题；
+    - `python3 scripts/test_preflight_contract.py`;
+    - `python3 scripts/test_task_contract.py`;
+    - `python3 scripts/test_task_progress_contract.py`;
+    - `python3 scripts/test_localization_contract.py`;
+    - `python3 scripts/test_annotation_contract.py`;
+  - 104 上执行：
+    - `colcon build --packages-select m20pro_cloud_bridge m20pro_navigation --symlink-install`;
+    - 构建成功；
+    - 已重启 `m20pro-real.service`;
+    - 服务为 `active`;
+    - 当前仍为 `move` 模式，`enable_axis_command:=true`。
+- 104 静态前端确认：
+  - `dashboard.html`：
+    - hash `2a92c2d64c48cd299031c8c194d43d91ea2765c14df24a2425b566d611cf8c62`;
+    - `lite-workbench=False`;
+    - `data-tab="work"=False`。
+  - `dashboard.css`：
+    - hash `f5e4d18021a41a23fe7612de8a9744cd4519d29e4cbb6428d48c172c309d0592`;
+    - `lite-workbench=False`;
+    - `data-tab="work"=False`。
+  - `dashboard.js`：
+    - hash `18b559bcd0d2feda04b5d0f1a37cd1f6b643f88c758be8013da2a923cbc4d9d0`;
+    - `lite-workbench=False`;
+    - `data-tab="work"=False`;
+    - `battery_low=False`;
+    - `/api/state?debug=0=True`。
+- 104 接口只读验证：
+  - `/healthz` 返回 `{"ok":true}`;
+  - `/api/state?debug=0` 返回：
+    - `localization_ok=true`;
+    - `factory_localization_ok=true`;
+    - `pose_fresh=true`;
+    - `navigation_status="location=0 obstacle=0 usage_mode=None ooa=None"`;
+    - `perception_status.code=perception_ready`;
+    - `task_readiness.battery_readiness.display_only=true`。
+  - `/api/tasks`：
+    - `readiness_included=true`;
+    - `task_readiness.code=ready`;
+    - 任务数量 `4`。
+  - `/api/tasks?readiness=light`：
+    - `readiness_included=false`;
+    - `task_readiness=null`;
+    - 任务数量 `4`。
+- 104 自检验证：
+  - `POST /api/preflight/run` 成功启动后台自检；
+  - `/api/preflight` 完成后：
+    - `ok=true`;
+    - `has_battery_item=False`;
+    - `failures=[]`;
+  - 说明电量已不再作为自检条件。
+- 104 任务 readiness 只读验证：
+  - `./scripts/104_frontend_task_ready_check.py --url http://127.0.0.1:8080` 通过；
+  - 输出关键值：
+    - `localization_status=localized_ready`;
+    - `task_readiness=ready`;
+    - `perception_status=perception_ready`;
+    - `battery_level=78%`;
+    - `scan_finite=196`;
+    - `lidar_points=5807 source=relay`;
+    - 推荐任务 `task_1782725122874_bf2aa6b2`;
+    - `[OK] at least one matching task is ready to start from the frontend`。
+- 电量探针验证：
+  - `./scripts/104_goal_mode_battery_gate.py --url http://127.0.0.1:8080`;
+  - 输出：
+    - `[goal_battery_gate] read-only`;
+    - `battery_level=78%`;
+    - `task_readiness=ready`;
+    - 返回码 `0`。
+- 未完成/注意：
+  - 104 本机没有 Chrome/Chromium，`104_frontend_task_smoke.py` 无法运行浏览器烟测；
+  - 本轮没有点击网页重定位、没有启动任务、没有发送运动命令；
+  - journal 中仍可见 FastDDS SHM 启动警告和一次 `shm_usage=94.4%` 短暂 WARN，但随后 `M20PRO REAL OK`，点云 fusion 持续刷新；
+  - SHM/DDS 仍作为后续通信专项观察项，不在本轮同步范围内。
+- 当前结论：
+  - 除新版前端布局外，本轮后端、contract、导航桥、电量 display-only、自检和任务 readiness 改动已同步到 104；
+  - 104 旧面板保留；
+  - 104 当前只读状态显示已具备“可以从前端启动至少一个当前地图任务”的条件；
+  - 真正运动验证仍需现场人工确认首点/顺序、启动 watcher 后再点击开始任务。
+
+## 2026-07-06 17:42 CST - 上位机本地继续减负：任务 readiness/快照/watcher 正式退出 active 流程
+
+- 用户要求：
+  - 不再做任务 readiness 二次检查；
+  - 去掉任务快照和失败证据，现场统一用 rosbag 复盘；
+  - watcher/analyzer 与快照证据重复，也从正式流程中移除；
+  - 新版轻量前端封存，当前开发和 104 仍以旧界面为主；
+  - 保留接口化，特别是任务点名称、房间、扫描点、昂锐雷达 metadata 能被其他 package 读取。
+- 本轮范围：
+  - 只在上位机本地仓库修改；
+  - 未同步 104；
+  - 未重启 104 服务；
+  - 未改动导航控制链路和 `tcp_bridge_node.py`。
+- 前端状态：
+  - 新版 lite workbench 已封存到 `docs/archived_frontend_lite_workbench/20260702/`；
+  - active 前端继续使用旧面板 `static/dashboard.html/css/js`；
+  - 旧面板中清理了 `runtime_guard` / “链路守护”显示残留；
+  - 重定位状态不再显示“重定位锁”，改成“固定地图仍需重定位/已确认”。
+- 后端任务启动链路：
+  - `/api/tasks/start` 现在只做最小接口/静态校验：
+    - task id；
+    - 是否已有任务运行；
+    - 任务是否存在；
+    - 点位是否缺失、顺序是否有效；
+    - 点位地图/当前选择地图是否一致；
+    - 前端 expected task/first waypoint/map/pose 是否和后端一致。
+  - 不再在任务启动时重复检查 Nav2、地图、点云、scan、电量等自检项；
+  - active task 的 `start_readiness` 仅保留兼容说明：`任务接口校验通过；不再重复检查自检项`。
+- `/api/state` 和 `/api/tasks`：
+  - 本条记录生成时曾短暂采用“保留空壳字段”的兼容策略；
+  - 随后按用户要求继续减负，已在后续 17:58 记录中彻底删除这些空壳字段；
+  - 以后以 17:58 记录为准。
+- 快照/失败证据：
+  - `task_snapshot_contract.py` 已瘦身为 active-waypoint 接口辅助，不再生成任务 runtime/result snapshot；
+  - 任务终态持久化只更新：
+    - `status`;
+    - `last_error`;
+    - `updated_at`;
+  - 旧的 `last_result` / `last_timeline` 会在终态更新时清掉，避免前端继续依赖历史失败快照。
+- watcher/analyzer/ready-check：
+  - 已从正式入口移走；
+  - 随后按用户要求直接删除历史脚本，不再保留 `scripts/archived_task_watch/` 或 `scripts/archived_frontend_diagnostics/`。
+  - README 和 `scripts/README.md` 已改为：
+    - 现场任务问题统一录 rosbag；
+    - `./scripts/104_record_bag.sh 180 <label>`;
+    - 上位机用 `./scripts/local_pull_bags.sh` 拉回。
+- 接口化保留：
+  - `/m20pro/active_waypoint` 继续作为任务/雷达接口；
+  - active waypoint payload 保留：
+    - 当前任务点；
+    - 房间 `room`;
+    - 扫描点 `scan_point`;
+    - 结果前缀 `result_file_prefix`;
+    - `radar.scans[].mode/label/result_suffix`;
+    - 当前 phase、目标位姿、Nav2 feedback 摘要、路径终点误差和 dwell 剩余时间。
+  - `scripts/test_task_snapshot_contract.py` 现在重点保护这些语义字段，避免昂锐雷达 package 读不到任务点名称和扫描模式。
+- 电量：
+  - 电量仍然只显示给操作员参考；
+  - `104_goal_mode_battery_gate.py` 不再打印 `task_readiness`，改为打印 `localization_status`；
+  - 电量不作为自检、任务启动、运行守护条件。
+- 文档同步：
+  - `README.md`：
+    - 删除 ready-check/watcher/analyzer 作为现场诊断入口；
+    - 增加 rosbag 复盘章节。
+  - `scripts/README.md`：
+    - 明确 watcher/ready-check/analyzer/smoke 只在 archived 目录保留为历史参考。
+  - `docs/single_floor_navigation_architecture.md`：
+    - 主链路改成 active task + `/m20pro/active_waypoint` + rosbag；
+    - 明确任务启动只做接口/静态 contract；
+    - 不再把 `last_result.runtime_snapshot`、前端快照、watcher 当核心证据。
+- 已验证：
+  - `python3 -m py_compile`：
+    - `web_dashboard_node.py`;
+    - `task_contract.py`;
+    - `task_snapshot_contract.py`;
+    - `localization_contract.py`;
+    - `scripts/test_task_contract.py`;
+    - `scripts/104_goal_mode_battery_gate.py`。
+  - `node --check static/dashboard.js` 通过。
+  - Contract 测试通过：
+    - `python3 scripts/test_task_contract.py`;
+    - `python3 scripts/test_task_snapshot_contract.py`;
+    - `python3 scripts/test_localization_contract.py`;
+    - `python3 scripts/test_annotation_contract.py`;
+    - `python3 scripts/test_preflight_contract.py`;
+    - `python3 scripts/test_task_progress_contract.py`。
+- 当前结论：
+  - 任务启动链路已从“自检 + readiness + runtime guard + watcher + 快照”收回到“接口/静态校验 + active task 执行”；
+  - 现场复盘只保留 rosbag 作为正式证据；
+  - 新版前端不参与当前 active 开发；
+  - 本轮尚未同步 104，104 当前仍是上一轮同步后的旧面板状态。
+
+## 2026-07-06 17:55 CST - 删除 watcher/ready-check 历史归档脚本
+
+- 用户进一步明确：
+  - 不需要 `scripts/archived_task_watch` 等历史脚本；
+  - 该删就删。
+- 已删除：
+  - `scripts/archived_task_watch/`;
+  - `scripts/archived_frontend_diagnostics/`;
+  - `scripts/__pycache__` 里对应的旧 pyc 缓存：
+    - `104_analyze_frontend_task_watch`;
+    - `104_frontend_task_ready_check`;
+    - `104_frontend_task_smoke`;
+    - `check_preflight_policy`。
+- 文档同步：
+  - `scripts/README.md` 改成“历史前端 watcher/ready-check/analyzer/smoke 脚本已删除，不再作为维护对象”。
+- 当前状态：
+  - 正式现场复盘只保留 rosbag；
+  - 这些旧脚本不会再被误认为可用现场入口；
+  - 本轮仍未同步 104。
+
+## 2026-07-06 17:58 CST - 彻底删除 task_readiness 空壳字段
+
+- 用户追问：
+  - 为什么不能彻底把不需要的字段清理干净，而是选择置空。
+- 结论调整：
+  - 之前置空是保守兼容策略；
+  - 当前项目目标是轻量化、接口清晰；
+  - 用户明确不需要为了旧字段保留空壳，所以继续删除。
+- 已从 active API 返回中删除：
+  - `/api/state.task_readiness`;
+  - `/api/state.last_task_result`;
+  - `/api/tasks.task_readiness`;
+  - `/api/tasks.readiness_included`;
+  - `/api/tasks.readiness_mode`;
+  - `/api/localization/initialpose.task_readiness`;
+  - `/api/localization/initialpose.task_ready`;
+  - `localization_status.task_ready`;
+  - `localization_status.task_readiness_code`;
+  - `localization_status.task_readiness_message`。
+- 定位接口边界同步收紧：
+  - 重定位响应只表达重定位是否真正成功；
+  - 不再夹带“任务页可启动/不可启动”判断；
+  - 旧前端定位日志不再显示“任务页”行。
+- 内部错误 payload：
+  - `readiness_error_payload(...)` 的字段从 `task_readiness` 改为通用 `readiness`；
+  - 仍用于创建任务/启动任务的静态校验失败详情，不再表示任务 readiness 门禁。
+- 保留的旧数据清理：
+  - 任务终态更新仍会 `pop("last_result")` / `pop("last_timeline")`;
+  - 这是为了清掉历史任务文件里的旧字段，不是继续生成快照。
+- 已验证：
+  - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/localization_contract.py scripts/test_task_contract.py scripts/test_localization_contract.py`;
+  - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js`;
+  - `python3 scripts/test_task_contract.py`;
+  - `python3 scripts/test_localization_contract.py`。
+- 当前状态：
+  - active API 不再保留 task readiness 空壳字段；
+  - 重定位、任务、自检三条线边界更清楚；
+  - 本轮仍未同步 104。
+
+## 2026-07-07 15:08 CST - 旧点位 `type` 字段降级为兼容读取，active 语义接口改用 `manual_point_type`
+
+- 用户要求继续外科手术式瘦身。
+- 本轮只做小范围减法，不碰导航控制链路、不碰重定位判据、不碰 active task 状态机。
+- 点位类型收口：
+  - 旧字段 `type` 仍可被读取，用于兼容历史点位 JSON；
+  - 新的任务/雷达语义接口以 `manual_point_type` 为准；
+  - `annotation_semantics_payload(...)` 不再输出旧 `type`；
+  - `/m20pro/active_waypoint` 中的 `waypoint` 语义不再携带旧 `type` 字段。
+- 旧前端显示收口：
+  - 地图箭头颜色、点位列表标签、任务点勾选列表都优先使用 `manual_point_type`；
+  - 旧 `type` 只作为老数据兜底；
+  - “保存地图点位”事件 payload 从 `type` 改为 `manual_point_type`。
+- 导航 readiness 文案收口：
+  - `navigation_readiness_contract.py` 文件说明从“task start checks”改为“relocalization and diagnostics”；
+  - disabled 文案从“任务启动前不要求 Nav2 readiness”改为“当前不要求检查 Nav2 readiness”，避免让人误以为任务启动还有一层 Nav2 readiness 门禁。
+- 已验证：
+  - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/annotation_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/navigation_readiness_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py scripts/test_annotation_contract.py scripts/test_navigation_readiness_contract.py`;
+  - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js`;
+  - `python3 scripts/test_annotation_contract.py`;
+  - `python3 scripts/test_navigation_readiness_contract.py`。
+- 当前状态：
+  - 旧 `type` 还保留读取兼容，不作为 active 语义接口主字段；
+  - 本轮仍未同步 104。
+
+## 2026-07-07 15:22 CST - 继续外科手术式瘦身：active-waypoint 接口变薄，任务静态校验改名
+
+- 用户继续要求：
+  - 保持功能不受影响；
+  - 继续去掉核心链路外面多余的诊断/兼容壳；
+  - 不碰 104，先在上位机本地收敛。
+- active task 状态减负：
+  - `create_active_task_state(...)` 不再要求和保存：
+    - `start_readiness`;
+    - `post_reset_navigation_readiness`。
+  - 新启动任务的 active task 只保存运行状态、点位序列、目标下发和 Nav2 反馈相关字段；
+  - 不再把“启动前 readiness 说明包”塞进任务状态。
+- `/m20pro/active_waypoint` 接口减负：
+  - `task_snapshot_contract.py` 改名为 `active_waypoint_contract.py`；
+  - `scripts/test_task_snapshot_contract.py` 改名为 `scripts/test_active_waypoint_contract.py`；
+  - active-waypoint payload 现在只保留外部包真正需要的轻量字段：
+    - `task_id` / `task_name`;
+    - `phase` / `index`;
+    - `remaining_dwell_s` / `elapsed_s`;
+    - `distance_m` / `robot_pose` / `goal_pose`;
+    - `nav_goal_status`;
+    - `status_message`;
+    - `waypoint` 点位语义。
+  - 从 active-waypoint payload 删除：
+    - path 版本、path 终点误差、path 点数；
+    - plan verified 明细；
+    - Nav2 feedback 原始明细和反馈年龄；
+    - ignored old feedback；
+    - floor_goal 发布计数/来源/目标楼层；
+    - 目标下发次数；
+    - stall/progress 诊断字段；
+    - state pose 镜像。
+  - 这些运行诊断如仍需要，留在 active task 内部状态和 rosbag 中复盘，不再污染昂锐雷达/甲方前端要消费的任务点接口。
+- 任务静态校验命名收口：
+  - `readiness_error_payload(...)` 改为 `validation_error_payload(...)`;
+  - 对外错误详情字段从 `readiness` 改为 `validation`;
+  - `task_create_static_context(...)` / `task_start_static_context(...)` 的内部失败结果 key 从 `readiness` 改为 `validation`;
+  - 含义明确为“任务创建/启动静态校验失败”，不再让人误以为任务启动还有一层 readiness 门禁。
+- 启动诊断壳删除：
+  - 删除 `src/m20pro_bringup/scripts/m20pro_runtime_snapshot.sh`;
+  - `m20pro_real_full.sh` 不再启动时运行该脚本；
+  - `m20pro_bringup/CMakeLists.txt` 不再安装该脚本。
+  - 原因：该脚本只打印 DDS/SHM/topic 环境，且可能在启动时等待 `ros2 topic list`；现场诊断统一改用手动脚本和 rosbag，不让 real full 启动链路背诊断壳。
+- 文档同步：
+  - `README.md` 中 `/m20pro/active_waypoint` 说明改成轻量任务/雷达接口；
+  - `docs/single_floor_navigation_architecture.md` 中 `task_snapshot_contract.py` 章节改成 `active_waypoint_contract.py`；
+  - `scripts/README.md` 中 active-waypoint 录包说明改成当前任务阶段、目标位姿、停留时间和点位语义字段。
+- 已验证：
+  - `python3 scripts/test_active_waypoint_contract.py`;
+  - `python3 scripts/test_active_task_contract.py`;
+  - `python3 scripts/test_task_contract.py`;
+  - `python3 scripts/test_annotation_contract.py`;
+  - `python3 scripts/test_localization_contract.py`;
+  - `python3 scripts/test_navigation_readiness_contract.py`;
+  - `python3 scripts/test_preflight_contract.py`;
+  - `python3 scripts/test_task_progress_contract.py`;
+  - `python3 scripts/test_task_plan_contract.py`;
+  - `python3 scripts/test_nav_status_contract.py`;
+  - `python3 scripts/test_web_runtime_contract.py`;
+  - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js`;
+  - `python3 -m compileall -q src/m20pro_cloud_bridge/m20pro_cloud_bridge scripts/test_active_waypoint_contract.py scripts/test_active_task_contract.py scripts/test_task_contract.py`;
+  - `bash -n src/m20pro_bringup/scripts/m20pro_real_full.sh`。
+- 当前状态：
+  - 本轮仍是上位机本地改动，未同步 104；
+  - 未改 `tcp_bridge_node.py`、未改实际目标下发、未改重定位成功判据；
+  - 旧任务 JSON 中可能残留的 `readiness`、`last_result`、`last_timeline` 仍由 web 节点在合适位置 `pop(...)` 清掉，不会继续生成。
+
+## 2026-07-08 16:29 CST - 分析 `nav_issue_20260708_154536`：修复重定位风暴与 Nav2 假成功后继续任务
+
+- 用户现场录包反馈：
+  - 先跑过一次任务，后来开始录包后重定位衔接异常；
+  - 导航看起来到第一个点后就乱，前端不显示第一点到第二点路径，也不显示实时位姿，机器狗最终撞墙。
+- 104 rosbag：
+  - `/home/user/bags/nav_issue_20260708_154536`;
+  - 时长约 85.9 秒，包含 `/scan`、`/cmd_vel`、`/plan`、`/m20pro/floor_goal`、`/m20pro/active_waypoint`、`/m20pro_tcp_bridge/map_pose`、`/m20pro_tcp_bridge/relocalization_result` 等关键话题。
+- 包内关键结论：
+  - `/m20pro/floor_goal` 只下发了两个点：`test2` `(2.399,-0.716)` 和 `test3` `(8.311,-0.044)`，点位本身不是乱的；
+  - `/m20pro_tcp_bridge/map_pose` 只有 20 条，集中在 57.65s 到 62.77s，之后不再持续输出，解释了前端没有实时位姿；
+  - `/m20pro_tcp_bridge/relocalization_result` 有 10199 条，成功/失败高频交替，说明重定位请求被重复打到原厂接口；
+  - 第一个目标在 58.529s 被 Nav2 接收，58.580s 就报 `nav_goal_succeeded`，但反馈距离仍有 4.585m；
+  - `/cmd_vel` 在这个“成功”之后仍连续输出约 4 秒，任务却已经进入第一个点的 `dwelling`，因此状态机和实际控制输出脱节；
+  - 第二个目标下发后 Nav2 仍按过期/断续位姿规划，最终任务因导航错误停止。
+- 104 服务日志进一步确认：
+  - `bt_navigator` 在 15:46:36 打印 `Navigation succeeded`，几毫秒后 `controller_server` 才开始 `Received a goal, begin computing control effort`；
+  - 这次不能再把 Nav2 Action 的 `SUCCEEDED` 单独当作“真到点”；
+  - 当前重启后的 104 仍能看到点云融合 `/scan` 正常，但原厂 1007 位姿当前返回 `Location=1` 和几千米级坐标，所以 `/map_pose` 需要下一次人工重定位恢复。
+- 已做修复：
+  - `web_dashboard_node.py`：
+    - 网页重定位默认发布次数从 10 次降为 1 次；
+    - Nav2 返回 `nav_goal_succeeded` 后，必须结合当前点位距离证据判断；
+    - 如果 Nav2 报成功但剩余距离仍大于 `goal_reached_tolerance_m + 0.2m`，任务直接失败并复位导航，不再进入驻留或下发下一点。
+  - `nav_status_contract.py`：
+    - `nav_success_completion_decision(...)` 增加距离证据；
+    - 优先使用 Nav2 feedback 的 `last_nav_distance_remaining_m`，没有 feedback 时才使用 `/map_pose` 算出的 `last_distance_m`；
+    - 新增 `premature_nav_success` 和 `nav_success_without_distance_evidence` 两类安全失败。
+  - `tcp_bridge_node.py`：
+    - 增加重定位重复请求抑制；
+    - 同一位姿在 1.5 秒内重复发布 `/initialpose` 时，不再重复调用原厂 2101/1；
+    - 避免一次前端操作或外部 DDS 发布者造成重定位风暴。
+- 已验证：
+  - 上位机：
+    - `python3 -m py_compile src/m20pro_navigation/m20pro_navigation/tcp_bridge_node.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/nav_status_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py`;
+    - `python3 scripts/test_nav_status_contract.py`;
+    - `python3 scripts/test_localization_contract.py`;
+    - `python3 scripts/test_active_task_contract.py`;
+    - `python3 scripts/test_task_progress_contract.py`。
+  - 104：
+    - 已同步上述源码和 `scripts/test_nav_status_contract.py`;
+    - 已执行 `colcon build --symlink-install --packages-select m20pro_navigation m20pro_cloud_bridge`;
+    - 已重启 `m20pro-real.service`;
+    - 参数确认：`/m20pro_web_dashboard initialpose_publish_repeats = 1`；
+    - 参数确认：`/m20pro_tcp_bridge relocalization_duplicate_suppression_s = 1.5`；
+    - `/m20pro_tcp_bridge/map_pose` 当前有 publisher，但由于原厂定位当前未恢复，暂时不持续输出有效位姿。
+- 下一次实测重点：
+  - 先在前端完成一次重定位，确认右侧最终结果只给一个明确成功/失败，不再成功失败高频闪；
+  - 重定位成功后确认 `/m20pro_tcp_bridge/map_pose` 持续刷新；
+  - 再跑单楼层短任务；
+  - 如果 Nav2 再次提前成功，前端应该直接报 `premature_nav_success` 并停住，而不是继续执行第二点。
+
+## 2026-07-08 20:15 CST - 根据 `rosbag2_2026_07_08-19_48_04` 根治位姿主链路：real 模式改用官方连续 TF
+
+- 用户再次实测反馈：
+  - 单点导航仍走不准点位；
+  - 现场看点位距离约 1-2m，但系统里仍显示很远。
+- 104 新 rosbag：
+  - `/home/user/bags/rosbag2_2026_07_08-19_48_04`;
+  - 时长约 72s，包含 `/m20pro/floor_goal`、`/m20pro_tcp_bridge/map_pose`、`/tf`、`/plan`、`/cmd_vel`、`/scan`、local/global costmap 和任务状态；
+  - 这是一个有效包，足够定位“为什么走不准”。
+- 关键结论：
+  - 本轮只下发了一个目标：`test2`，目标坐标 `x=2.399, y=-0.716, yaw=0.2509`；
+  - 目标下发前，项目位姿 `/m20pro_tcp_bridge/map_pose` 认为机器人在 `x≈-2.863, y≈0.321`，到目标距离约 `5.36m`；
+  - 因此用户现场看到的 1-2m 与系统内部 5.36m 不一致，本质是位姿/地图坐标链路没有对齐；
+  - 更严重的是：`/m20pro_tcp_bridge/map_pose` 和项目 `/odom` 只持续到约 `16.75s`，而 `/m20pro/floor_goal` 在约 `16.76s` 才发出；
+  - 目标刚发出，Nav2 使用的 `map -> odom -> m20pro_base_link` 位姿链路就断了，后续反馈里的 `pose_x=-2.863, pose_y=0.321` 一直不变；
+  - 服务日志显示 1007 位姿接口在导航时持续返回 `Location=0` 但 `PosX/PosY/PosZ/Yaw=None`，被保护逻辑拒绝发布；
+  - 同一个包里，官方 `/tf` 的 `map -> base_link` 持续完整 72s，共 721 条，并能反映机器人实际移动；
+  - 所以根因不是“任务点下发错”，而是 real 模式把不稳定的 TCP 1007 查询位姿当成了 Nav2 主位姿源。
+- 根治方向：
+  - real 模式主位姿源改为官方连续 TF `map -> base_link`；
+  - `tcp_bridge` 负责把官方 `base_link` 位姿转换成项目统一链路：
+    - `/m20pro_tcp_bridge/map_pose`;
+    - `/odom`;
+    - TF `map -> odom -> m20pro_base_link`;
+  - Nav2、前端和任务状态继续使用项目统一的 `m20pro_base_link`，但其来源不再依赖会断流的 1007 坐标字段。
+- 已改代码：
+  - `tcp_bridge_node.py`：
+    - 新增参数 `pose_source`，real 配置使用 `official_tf`;
+    - 订阅 `/tf`，提取官方 `map -> base_link`;
+    - 当 `pose_source=official_tf` 时，直接用官方 TF 发布 `/m20pro_tcp_bridge/map_pose`、项目 `/odom` 和 `map -> odom -> m20pro_base_link`;
+    - 仍用 `2002/1` 的 `Location=0` 作为定位确认条件，避免未定位时乱发布位姿；
+    - 保留旧 `tcp_1007` / `auto` 兼容模式，但 real 主链路不再依赖 1007。
+  - `m20pro_real.yaml`：
+    - 设置 `pose_source: "official_tf"`;
+    - 官方 TF 输入固定为 `map -> base_link`;
+    - 输出项目 base frame 仍是 `m20pro_base_link`。
+- 已同步并验证：
+  - 上位机：`python3 -m py_compile src/m20pro_navigation/m20pro_navigation/tcp_bridge_node.py` 通过；
+  - 104：已同步 `tcp_bridge_node.py` 和 `m20pro_real.yaml`;
+  - 104：已执行 `colcon build --symlink-install --packages-select m20pro_navigation m20pro_bringup`;
+  - 104：已重启 `m20pro-real.service`;
+  - 104 日志确认持续输出：
+    - `using official TF pose source map->base_link ...`;
+  - 104 `/api/state` 确认：
+    - `localization_ok=true`;
+    - `pose` 新鲜，`pose_age_sec≈0.01s`;
+    - `/scan`、local/global costmap、当前地图均新鲜；
+    - `localization_status.confirmed=true`。
+- 下一次实测重点：
+  - 不要再先测多点任务，先测单点；
+  - 下发前确认前端机器人箭头与真实位置一致；
+  - 下发后重点看 `/plan` 起点是否随机器人真实位姿移动；
+  - 如果仍走偏，下一步就不再查“位姿是否断”，而查地图/重定位坐标是否与现场真实位置一致，以及 DWB 控制和 103 轴控的执行方向是否一致。
+
+## 2026-07-08 20:16 CST - 导航链路后续修复原则：优先根治，不再为了小改动堆补丁
+
+- 用户明确要求：
+  - 不要总追求改动面最小；
+  - 应该追求最根治、最高效的改动；
+  - 前端必须实时显示机器狗真实位姿和真实规划路径；
+  - 导航必须真实到点、停住、驻留，避障必须真实可用。
+- 后续处理原则：
+  - 先从主链路找根因：地图/重定位坐标、实时位姿、规划路径、控制输出、避障代价地图、任务状态机；
+  - 不能只在外围加“成功/失败保护”“兼容判断”“诊断字段”来掩盖核心链路问题；
+  - 如果主位姿源、目标坐标、控制方向、Nav2 反馈、任务状态机之间存在不一致，优先改主链路；
+  - 小改动仍然可以做，但前提是它确实解决根因，而不是让系统看起来暂时不报错；
+  - 每次实测后优先用 rosbag 证明：机器人真实位姿是否连续、路径起点是否正确、目标点是否正确、`cmd_vel` 是否合理、costmap 是否有障碍、任务是否按到点和驻留闭环。
+
+## 2026-07-08 20:30 CST - 修复软急停后停止/复位无效：停止按钮必须能清理 Nav2 残留目标
+
+- 用户现场反馈：
+  - 机器狗走过第一个点后快撞墙，按了软急停；
+  - 之后定位不能正常继续用；
+  - 点击“停止当前任务”也没法恢复。
+- 根因判断：
+  - 旧逻辑把“停止当前任务”过度绑定到前端 `active_task`；
+  - 如果软急停、导航异常或状态机失败后，前端 `active_task` 已经没有了，但 floor_manager/Nav2 仍可能残留活跃目标或 pending goal；
+  - 此时旧 `/api/tasks/stop` 会走 `idle_stop_task_response()` 直接返回“无需停止”，不会发布 `/m20pro/stop_task`，不会取消 Nav2，不会发零速度，不会清 costmap；
+  - 旧前端还会在没有 `active_task/active_waypoint` 时禁用“停止当前任务”按钮，导致现场无法用这个按钮恢复导航链路。
+- 已改代码：
+  - `active_task_contract.py`：
+    - `idle_stop_task_response(reason)` 改为 `reset_navigation=true`；
+    - 无 active task 的 stop 不再表示 no-op，而表示“没有前端任务，但已发送导航取消/复位指令”。
+  - `web_dashboard_node.py`：
+    - `_stop_task(...)` 删除“无 active_task 且不是 reset 就提前返回”的分支；
+    - 无论是否存在前端 active task，都会调用 `_reset_navigation_session(...)`；
+    - 因此都会发布 `/m20pro/stop_task`、发送零速度、清 local/global costmap、清路径显示和 active waypoint。
+  - 旧面板 `dashboard.js/html`：
+    - “停止当前任务”按钮不再因为没有 active task 而禁用；
+    - 没有 active task 时，按钮含义变为“取消可能残留的导航目标并发送零速度”；
+    - 更新静态资源版本号，避免浏览器继续使用旧 JS 缓存。
+- 已验证：
+  - 上位机：
+    - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/active_task_contract.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py`;
+    - `python3 scripts/test_active_task_contract.py`;
+    - `python3 scripts/test_nav_status_contract.py`;
+    - `python3 scripts/test_task_progress_contract.py`;
+    - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js`。
+  - 104：
+    - 已同步上述旧面板/停止链路文件；
+    - 已执行 `colcon build --symlink-install --packages-select m20pro_cloud_bridge`;
+    - 已重启 `m20pro-real.service`；
+    - 服务 active，`web_dashboard`、`tcp_bridge`、`floor_manager`、`controller_server`、`bt_navigator` 均已重新启动；
+    - `/api/state` 返回 `localization_ok=true`、位姿新鲜、`/scan` 有有限距离数据、当前无 active task；
+    - 在无 active task 状态下 POST `/api/tasks/stop`，返回 `reset_navigation=true`；
+    - 104 日志确认 floor_manager 收到 `web_manual_stop`，并清理了 global/local costmap。
+- 注意：
+  - 如果手柄软急停把机器狗本体切到“关节阻尼/软急停”运动状态，导航软件的停止/复位只能清理 Nav2 和前端状态；
+  - 真正恢复可运动状态仍可能需要手柄或原厂运动状态指令把本体切回站立/标准运动模式；
+  - 但软件侧以后不能再因为没有 active task 就让“停止当前任务”失效。
+
+## 2026-07-08 20:43 CST - 修复工位到测试场地途中位姿/轨迹不连续：位姿新鲜度与定位确认解耦
+
+- 用户指出：
+  - 在工位重定位成功后，如果机器狗正常走到测试场地起点，同一张地图内不应该丢失定位；
+  - 前端应该实时显示机器狗从工位到测试场地的位姿和运动轨迹；
+  - 图片里机器狗仍显示在工位，而红框是测试场地起点，这种表现不符合预期。
+- 根因判断：
+  - 之前 real 主位姿源已经从不稳定的 TCP 1007 改成官方连续 TF `map -> base_link`；
+  - 但实现里仍把官方 TF 位姿发布绑定到原厂 `Location=0`；
+  - 只要 `Location` 状态短暂抖动或状态查询延迟，`/m20pro_tcp_bridge/map_pose` 就可能停止发布，前端箭头和轨迹就会停在旧位置；
+  - 前端 `pose_fresh` 也被 `factory_localization_ok` 绑定，导致“位姿实际还在刷新”和“定位确认状态”混成了一个条件。
+- 已改代码：
+  - `tcp_bridge_node.py`：
+    - `pose_source=official_tf` 时，官方 TF 只要新鲜、有限、坐标合理，就继续发布 `/m20pro_tcp_bridge/map_pose`、`/odom` 和项目 TF；
+    - `/m20pro_tcp_bridge/localization_ok` 仍按最近原厂 `Location` 状态发布；
+    - 也就是说：位姿链路保持连续，定位确认仍独立显示/判断。
+  - `web_dashboard_node.py`：
+    - API 的 `pose_fresh` 改为只表示“地图位姿是否新鲜”；
+    - 不再因为 `factory_localization_ok=false` 就把新鲜位姿判成不可用；
+    - 旧面板位姿轨迹缓存从 180 点增加到 900 点，避免从工位走到测试点时轨迹前段太快被挤掉。
+  - 旧面板 `dashboard.js/html`：
+    - 若 `localization_ok=false` 但 `pose_fresh=true`，前端提示改为“地图位姿仍在刷新，但定位状态未确认”；
+    - 这种情况下仍允许地图上显示实时箭头和轨迹；
+    - 更新静态资源版本号，避免浏览器缓存旧 JS。
+- 预期效果：
+  - 同一张地图内，工位重定位成功后正常走到测试场地，前端应该持续看到机器狗箭头移动；
+  - 绿色虚线轨迹应记录最近约 900 个位姿点；
+  - 如果原厂定位状态短暂异常，顶部/状态区可以告警，但箭头不应直接停死在工位；
+  - 如果官方 TF 本身停止或地图坐标真正漂掉，仍会表现为位姿过期/不可信，需要重新定位或录包分析。
+- 已验证：
+  - 上位机：
+    - `python3 -m py_compile src/m20pro_navigation/m20pro_navigation/tcp_bridge_node.py src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py`;
+    - `python3 scripts/test_localization_contract.py`;
+    - `python3 scripts/test_task_progress_contract.py`;
+    - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js`。
+  - 104：
+    - 已同步 `tcp_bridge_node.py`、`web_dashboard_node.py`、旧面板 `dashboard.js/html`;
+    - 已执行 `colcon build --symlink-install --packages-select m20pro_navigation m20pro_cloud_bridge`;
+    - 已重启 `m20pro-real.service`;
+    - `/api/state` 确认 `localization_ok=true`、`factory_localization_ok=true`、`pose_fresh=true`、`pose_age_sec≈0.06s`;
+    - `pose_history` 已超过旧上限 180，验证 900 点轨迹缓存生效；
+    - 104 日志确认使用官方 TF 位姿源：`using official TF pose source map->base_link`;
+    - `system_check` 报 `M20PRO REAL OK`。
+
+## 2026-07-08 20:52 CST - 复盘 `rosbag2_2026_07_08-20_50_18`：位姿连续性修复有效，但轨迹存在源头抖动
+
+- 用户刚录包位置：
+  - `/home/user/bags/rosbag2_2026_07_08-20_50_18`;
+  - 时长约 88.5 秒，消息总数 7223。
+- 这个包能验证的内容：
+  - `/m20pro_tcp_bridge/map_pose`：1328 条，约 15.03Hz；
+  - `/odom`：1329 条，约 15.03Hz；
+  - 官方 `/tf map -> base_link`：886 条，约 10.02Hz；
+  - `/m20pro_tcp_bridge/localization_ok`：1327 条，全为 true；
+  - `/m20pro_tcp_bridge/navigation_status`：443 条，`location=0` 全程稳定；
+  - `/m20pro/current_floor`：88 条，全为 `F20`。
+- 结论：
+  - 这次修复对“位姿连续发布”有效；
+  - `map_pose` 最大断流间隔约 0.169 秒，没有超过 0.5 秒的断流；
+  - `map_pose` 与官方 TF 基本一致，抽样最近邻平均平面误差约 0.027m；
+  - 前端理论上应该能看到蓝色箭头和轨迹实时变化。
+- 位姿变化数据：
+  - 起点约 `x=-10.914, y=-3.387, yaw=-1.709`;
+  - 终点约 `x=-11.134, y=-3.393, yaw=-1.884`;
+  - 净位移约 0.22m；
+  - 最大偏离起点约 1.08m；
+  - yaw 变化范围约 0.408rad，约 23.4 度。
+- 暴露的新细节：
+  - 虽然活动范围约 1m，但逐帧轨迹累计约 24.36m；
+  - 单步平面跳动中位数约 0.007m，95 分位约 0.081m，99 分位约 0.200m，最大约 0.339m；
+  - 说明官方 TF/定位源自身有小范围抖动；
+  - 这不再是 104 桥接断流，而是上游位姿源的抖动或定位环境噪声。
+- 本包不能验证的内容：
+  - `/cmd_vel`：0 条；
+  - `/plan`：0 条；
+  - `/scan`：0 条；
+  - `/m20pro/floor_goal`：0 条；
+  - 因此本包只能说明实时位姿显示链路有效，不能说明导航、规划、避障是否已经可用。
+
+## 2026-07-08 21:17 CST - 修正前端绿色轨迹：过滤官方 TF 抖动，避免小范围移动显示成几十米累计轨迹
+
+- 用户追问：
+  - 明明只是在工位小范围移动，为什么前面分析会出现约 24m 的累计轨迹。
+- 解释：
+  - 24.36m 是把 `/m20pro_tcp_bridge/map_pose` 每一帧之间的位移直接相加得到的“原始累计长度”；
+  - 这个数会把定位抖动也当作真实运动；
+  - 本包中 `map_pose` 约 15Hz，共 1328 个点，平均每帧平面变化约 1.84cm；
+  - `1.84cm × 1327` 就会累计到约 24m；
+  - 因此 24m 不代表机器狗真的走了 24m，只代表原始定位点在 88 秒里一直有小幅抖动和少量较大跳动。
+- 更合理的读法：
+  - 净位移约 0.22m；
+  - 最大偏离起点约 1.08m；
+  - 这两个数更符合“小范围移动”的现场描述；
+  - 原始逐帧累计长度不能作为现场实际里程。
+- 已改代码：
+  - `web_dashboard_node.py` 的 `pose_history` 不再直接保存每一帧原始位姿；
+  - 蓝色实时箭头仍使用最新位姿，保持实时；
+  - 绿色历史轨迹改为使用低通滤波后的位姿：
+    - `pose_history_filter_alpha=0.08`;
+    - `pose_history_min_distance_m=0.15`;
+    - `pose_history_min_yaw_delta_rad=0.17`;
+    - `pose_history_keepalive_s=5.0`;
+    - `pose_history_reset_distance_m=1.5`;
+  - 切地图、启动同步地图、复位导航会话时同步清空轨迹滤波状态。
+- 离线估算：
+  - 对同一个 bag，原始轨迹为 `1328 点 / 24.36m`;
+  - 用新滤波规则估算约为 `32 点 / 4.3m`;
+  - 仍会保留小范围来回移动，但不会把 15Hz 定位抖动全部画成绿色轨迹。
+- 104 验证：
+  - 已同步 `web_dashboard_node.py`;
+  - 已执行 `colcon build --symlink-install --packages-select m20pro_cloud_bridge`;
+  - 已重启 `m20pro-real.service`;
+  - `/api/state` 显示 `pose_fresh=true`;
+  - 重启后约 8 秒轨迹点数为 1，约 20 秒后轨迹点数为 7，说明绿色轨迹不再按 15Hz 记录所有抖动点。
+
+## 2026-07-09 10:24 CST - 决定主界面取消绿色历史轨迹显示，避免误导现场判断
+
+- 用户反馈：
+  - 绿色轨迹体验很差，bug 较多；
+  - 经常出现好几条绿色轨迹，容易误导现场判断。
+- 处理原则：
+  - 绿色轨迹不是 Nav2 真实规划路径；
+  - 它只是前端根据历史定位点画出来的显示层辅助线；
+  - 在定位源存在抖动、滤波状态重置、地图刷新或小范围来回移动时，它很容易看起来像多条轨迹；
+  - 主界面真正必须保留的是：
+    - 蓝色实时机器狗位姿箭头；
+    - 橙色 Nav2 规划路径；
+    - 任务点/目标点；
+    - 实时激光轮廓。
+- 已在上位机修改：
+  - `dashboard.js`：主地图不再调用 `drawPoseHistory(...)`；
+  - 后端 `pose_history` 数据暂时保留，供调试和后续 rosbag/API 分析；
+  - `dashboard.html` 静态资源版本改为 `20260709-no-pose-trail`，避免浏览器缓存旧 JS。
+- 已验证：
+  - 上位机 `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js` 通过；
+  - 上位机 `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py` 通过。
+- 同步状态：
+  - 104 当前不在线；
+  - `ping 10.21.31.104` 丢包 100%；
+  - `ssh user@10.21.31.104` 超时；
+  - 因此本改动尚未同步到 104，待 104 开机后再同步、构建并重启 `m20pro-real.service`。
+
+## 2026-07-09 10:34 CST - 104 已同步去绿色轨迹；补上官方 TF 位姿启动安全门槛
+
+- 104 同步状态：
+  - 104 已在线；
+  - 已同步旧面板 `dashboard.js/html` 和 `m20pro日志.md`;
+  - 已执行 `colcon build --symlink-install --packages-select m20pro_cloud_bridge`;
+  - 已重启 `m20pro-real.service`;
+  - 104 静态页面版本已是 `20260709-no-pose-trail`;
+  - 104 上 `dashboard.js` 已无主界面 `drawPoseHistory(latest.pose_history...)` 调用。
+- 同步后发现的问题：
+  - 服务重启后，原厂状态为 `location=1`；
+  - 官方 TF 一度给出几千米级坐标；
+  - 之前为了保持“重定位后运动途中位姿不断”，放宽了官方 TF 位姿发布门槛；
+  - 这会导致未定位启动时的假坐标进入前端/API，风险很大。
+- 已立刻修复：
+  - `tcp_bridge_node.py`：
+    - 新增官方 TF 位姿“解锁”逻辑；
+    - 服务启动后，必须先看到最近的 `Location=0`，才允许接受官方 TF 为主位姿源；
+    - 解锁后，如果 `Location` 短暂抖动，仍可继续用官方 TF 保持位姿连续；
+    - 官方 TF 位姿也重新走稳定性过滤，避免大跳直接进入 `/m20pro_tcp_bridge/map_pose`。
+  - `m20pro_real.yaml`：
+    - `max_abs_map_position_m` 从 `10000.0` 收紧到 `1000.0`；
+    - 当前真实地图坐标是十几米量级，几千米坐标明确属于未定位/异常假坐标。
+- 已同步并验证：
+  - 上位机：
+    - `python3 -m py_compile src/m20pro_navigation/m20pro_navigation/tcp_bridge_node.py`;
+    - `python3 scripts/test_localization_contract.py`;
+    - `python3 scripts/test_task_progress_contract.py`。
+  - 104：
+    - 已同步 `tcp_bridge_node.py` 和 `m20pro_real.yaml`;
+    - 已执行 `colcon build --symlink-install --packages-select m20pro_navigation m20pro_bringup`;
+    - 已重启 `m20pro-real.service`;
+    - 当前未定位状态下 `/api/state` 正确显示：
+      - `pose=null`;
+      - `pose_fresh=false`;
+      - `localization_ok=false`;
+      - `navigation_status=location=1 ...`;
+    - 说明几千米假坐标已经被挡住。
+- 当前现场状态：
+  - `/scan` 仍有数据；
+  - 当前未完成定位确认，Nav2/system_check 处于 waiting；
+  - 下一步需要在前端完成一次明确重定位，让 `location=0` 后再测试实时位姿和导航。
+
+## 2026-07-09 11:03 CST - 明确重定位最终结论显示，避免 2101 原始回执误导
+
+- 现场截图判断：
+  - 右侧面板最终标题为“重定位成功”；
+  - 原厂定位为“已确认”；
+  - 地图位姿为“新鲜 / <1s 前”；
+  - 固定地图为“已确认”；
+  - 因此这次系统最终判定是重定位成功。
+- 容易误导的地方：
+  - 面板同时显示了 `2101回执 失败回执 / 24s前`；
+  - 这条是上一条 TCP 2101 原始回执/诊断信息；
+  - 在当前逻辑里，最终能否继续操作以“固定地图已确认 + 原厂定位已确认 + 地图位姿新鲜”为准；
+  - 成功状态下继续突出 2101 失败回执，会让操作员看不清到底成功还是失败。
+- 已在上位机修改旧面板显示层：
+  - `dashboard.js`：标题改为“最终结论：重定位成功/失败”；
+  - 成功时主状态只显示原厂定位、地图位姿、固定地图三项依据；
+  - 失败时才展示 2101 回执作为失败证据；
+  - `localizeLog` 成功时不再直接打印 2101 原始失败回执，改为显示最终结论和判定依据。
+- 注意：
+  - 这次只改 UI 显示层；
+  - 不改重定位发布逻辑；
+  - 不改 Nav2、点云、任务执行链路。
+- 104 同步和验证：
+  - 已同步 `dashboard.js`、`dashboard.html`、`m20pro日志.md`;
+  - 已执行 `colcon build --symlink-install --packages-select m20pro_cloud_bridge`;
+  - 已重启 `m20pro-real.service`;
+  - 104 页面脚本版本为 `20260709-final-localization-verdict`;
+  - `/api/state` 验证：
+    - `pose_fresh=true`;
+    - `localization_ok=true`;
+    - `factory_localization_ok=true`;
+    - `map_relocalization_required=null`;
+    - `scan.finite_ranges≈204`;
+  - 因此 104 当前最终定位状态为“重定位成功：定位已确认”。
+
+## 2026-07-09 11:18 CST - 彻底停用绿色历史轨迹，保留空字段兼容
+
+- 用户追问：
+  - 绿色轨迹是否只是前端不显示；
+  - 是否还存在其他隐形风险。
+- 代码核查结论：
+  - 绿色轨迹不是 Nav2 规划路径；
+  - 不参与重定位；
+  - 不参与任务下发；
+  - 不参与避障或控制；
+  - 之前只是 Web 后端累计 `pose_history`，前端用 `drawPoseHistory(...)` 画成绿色虚线。
+- 已进一步瘦身：
+  - `dashboard.js`：删除未调用的 `drawPoseHistory(...)` 函数；
+  - `web_dashboard_node.py`：停止累计 `pose_history`，删除轨迹滤波参数和滤波函数；
+  - `/api/state` 中仍保留 `pose_history: []`，避免旧前端或外部接口因字段消失而报错。
+- 风险判断：
+  - 主地图只保留蓝色实时机器狗位姿、橙色 Nav2 规划路径、任务点和激光轮廓；
+  - 绿色历史轨迹不会再成为现场判断依据；
+  - 对导航、重定位、点云、任务执行没有控制层影响。
+- 已验证：
+  - `node --check dashboard.js` 通过；
+  - `python3 -m py_compile web_dashboard_node.py` 通过。
+- 104 同步和验证：
+  - 已同步 `dashboard.js`、`web_dashboard_node.py`、`m20pro日志.md`;
+  - 已执行 `colcon build --symlink-install --packages-select m20pro_cloud_bridge`;
+  - 已重启 `m20pro-real.service`;
+  - `/api/state` 验证 `pose_history_len=0`；
+  - `/scan` 仍有数据，`scan.finite_ranges≈200`；
+  - 104 上已搜不到 `drawPoseHistory`、`pose_history_filter`、`task_pose_history`；
+  - 服务重启后当前定位状态为未确认，需要现场重新重定位后再继续导航测试。
+
+## 2026-07-09 11:45 CST - 新版前端布局稿同步旧面板关键修复，但仍不部署到 104
+
+- 背景：
+  - 新版前端目前封存在 `docs/archived_frontend_lite_workbench/20260702/`;
+  - 104 正式运行的仍是旧面板 `src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/`;
+  - 用户要求新版前端也同步修复，因为未来总要启用。
+- 已同步到新版布局稿的旧面板修复：
+  - 重定位状态显示改为“最终结论：重定位成功/失败”；
+  - 成功时主状态只显示原厂定位、地图位姿、固定地图三项依据；
+  - 失败时才显示 2101 原始回执；
+  - `localizeLog` 成功时不再打印旧的 2101 失败回执；
+  - 删除绿色历史轨迹 `drawPoseHistory(...)` 和调用，只保留橙色 Nav2 路径、蓝色实时位姿、任务点、激光轮廓；
+  - 停止任务按钮改为始终可点，无活动任务时也会调用 `/api/tasks/stop`，用于取消残留导航目标并发送零速度；
+  - 任务列表改为轻量 `/api/tasks`，不再请求 `readiness=full/light`;
+  - 删除新版稿中的 task_readiness、watcher、field snapshot、复制验收/复制记录等旧诊断入口。
+- 已更新：
+  - `docs/archived_frontend_lite_workbench/20260702/dashboard.js`;
+  - `docs/archived_frontend_lite_workbench/20260702/dashboard.html`;
+  - `docs/archived_frontend_lite_workbench/20260702/README.md`。
+- 已验证：
+  - `node --check docs/archived_frontend_lite_workbench/20260702/dashboard.js` 通过；
+  - 搜索确认新版稿中已无 `task_readiness`、`renderTaskReadiness`、`taskWatcher`、`copyFieldSnapshot`、`drawPoseHistory`、`pose_history` 等旧残留关键词。
+- 注意：
+  - 本次只维护新版前端封存稿；
+  - 未把新版前端同步为 104 正式界面；
+  - 新版仍缺少昂锐/U360 雷达完整控件和实机验收，不能直接替换旧面板。
+
+## 2026-07-09 11:58 CST - 核查上位机、104 实际文件、GitLab 三者同步状态
+
+- 核查范围：
+  - 上位机：`/home/fabu/桌面/M20Pro/m20pro_real_ros2_ws`;
+  - 104：`/home/user/m20pro_real_ros2_ws`;
+  - 排除：`.git`、`build`、`install`、`log`、`__pycache__`、rosbag/bags、新版前端封存稿 `docs/archived_frontend_lite_workbench/`、106 点云处理 `tools/edge_scan_feasibility/`、`scripts/106_enable_edge_scan_service.sh`。
+- 初次比对结果：
+  - 只剩 `m20pro日志.md` 和 `scripts/test_perception_contract.py` 两处差异；
+  - 其中 `scripts/test_perception_contract.py` 是测试文件差异，不影响 104 运行；
+  - 已同步这两处到 104。
+- 同步后复查：
+  - `rsync -rcn --delete --itemize-changes ...` 输出 0 行；
+  - 因此在上述排除范围之外，上位机与 104 实际文件已经一致。
+- Git 状态风险：
+  - 上位机 `main` 当前提交为 `6a63b68`;
+  - GitLab `main` 也是 `6a63b68`;
+  - 104 工作区 Git HEAD 仍是 `3cf69ed`，但实际文件通过多次 rsync 已覆盖为接近上位机当前工作区；
+  - 上位机和 104 都存在大量未提交改动；
+  - 因此“GitLab 上已提交代码”与“104 实际运行代码”仍然不等价。
+- 结论：
+  - 现场测试以 104 实际文件为准，目前已与上位机同步；
+  - 若要让 GitLab 也等价，需要把当前上位机未提交改动整理提交并 push。
+
+## 2026-07-09 14:07 CST - 已把现场修复提交并推送到公司 GitLab
+
+- 已处理用户要求：
+  - GitHub 是个人仓库，不作为公司协作基准；
+  - 本次只推送公司 GitLab remote：`gitlab`。
+- 提交内容：
+  - 旧面板重定位最终结论显示；
+  - 删除绿色历史轨迹主链路残留；
+  - 停止任务按钮始终调用 `/api/tasks/stop`；
+  - 104 导航/定位相关修复；
+  - 新版前端封存稿同步关键旧面板修复；
+  - 相关 contract 测试更新。
+- 安全处理：
+  - 提交前发现日志历史中曾有 root 密码明文提示；
+  - 最新版本已改成“密码通过线下方式提供，不写入仓库”；
+  - 注意：历史提交里如需彻底清除，需要单独安排 Git 历史重写。
+- 已验证：
+  - `node --check` 旧面板和新版封存稿通过；
+  - `python3 -m py_compile` 关键 Python 文件通过；
+  - `scripts/test_active_task_contract.py` 通过；
+  - `scripts/test_nav_status_contract.py` 通过；
+  - `scripts/test_localization_contract.py` 通过；
+  - `scripts/test_task_progress_contract.py` 通过；
+  - `scripts/test_perception_contract.py` 通过。
+- GitLab 状态：
+  - 已提交 `8efa50a fix: sync field navigation and dashboard repairs`;
+  - 已推送到 `gitlab/main`;
+  - `git ls-remote gitlab refs/heads/main` 确认 GitLab main 指向 `8efa50a...`。
+- 104 状态：
+  - 已把日志同步到 104；
+  - 排除新版前端、106 点云处理、build/install/log/cache/bag 后，上位机与 104 实际文件 dry-run 比对为 0 行差异；
+  - 104 直接 `git fetch gitlab` 因 DNS 无法解析 `git.fabu.ai` 失败，所以 104 仍以 rsync 后的实际文件为准。
+
+## 2026-07-09 14:16 CST - 104 老备份和旧 rosbag 已归档到上位机并清理
+
+- 用户目标：
+  - 104 只保留当前有用的运行内容；
+  - 旧备份、旧 rosbag、旧任务诊断日志先转移到上位机，再从 104 清掉。
+- 上位机归档位置：
+  - `/home/fabu/桌面/M20Pro/104_archives/host_104_cleanup_20260709_141223`;
+  - 归档约 `1.9G`；
+  - 已包含旧 `_m20pro_archives`、`m20pro_backups`、旧源码备份压缩包、旧 bags、旧 `task_watch_logs`、旧 colcon `log` 等。
+- 已从 104 删除：
+  - `/home/user/_m20pro_archives`;
+  - `/home/user/m20pro_backups`;
+  - `/home/user/m20pro_real_ros2_ws_src_backup_20260707_175102.tar.gz`;
+  - `/home/user/bags`;
+  - `/home/user/rosbag2_2026_07_08-14_08_40`;
+  - `/home/user/m20pro_real_ros2_ws/rosbag2_2026_07_08-11_33_21`;
+  - `/home/user/m20pro_real_ros2_ws/task_watch_logs`;
+  - `/home/user/m20pro_real_ros2_ws/log`。
+- 明确未动：
+  - `/home/user/m20pro_real_ros2_ws/src`;
+  - `/home/user/m20pro_real_ros2_ws/install`;
+  - `/home/user/m20pro_real_ros2_ws/build`;
+  - `/home/user/m20pro_maps`;
+  - `/home/user/.m20pro_web`;
+  - systemd 服务和当前地图/任务配置。
+- 清理后 104 空间：
+  - 清理前 `/` 约 `18G` 总量，已用 `9.3G`，可用 `8.7G`，使用率 `52%`;
+  - 清理后 `/` 约 `18G` 总量，已用 `7.4G`，可用 `11G`，使用率 `42%`;
+  - `/home/user` 目录当前约 `2.9M`；
+  - `/home/user/m20pro_real_ros2_ws` 当前约 `1.2M`，其中主要保留 `.git`、`src`、`build`、`install`、`docs/scripts/systemd/tools/maps`。
+- 服务状态：
+  - 未重启服务；
+  - `m20pro-real.service` 仍为 `active`;
+  - `/api/state` 可访问；
+  - 当前 `scan_ranges=195`;
+  - 当前 `pose_fresh=False`、`localization_ok=False`，表示清理后服务仍在，但机器需要现场重新重定位后才应视为已定位。
+
+## 2026-07-09 14:28 CST - 现场临时切到 106 edge_scan 点云处理链路，供工位重定位测试
+
+- 用户目标：
+  - 先在工位验证新点云链路下能否完成重定位；
+  - 本轮先用现有可回退链路，不引入新的 `/m20pro/scan_edge` Nav2 参数化改造。
+- 106 状态：
+  - 已启动 `m20pro-edge-scan-106.service`;
+  - 服务命令为 `drdds_edge_scan_demo /LIDAR/POINTS /scan ...`;
+  - 日志持续输出 `scan xxx finite_bins≈180-190 frame=m20pro_base_link`；
+  - 说明 106 侧已经从 DrDDS 原始点云生成轻量 `/scan`。
+- 104 状态：
+  - `/etc/default/m20pro-real` 已切换为：
+    - `M20PRO_SCAN_SOURCE=edge_scan`;
+    - `M20PRO_EDGE_SCAN_TOPIC=/scan`;
+    - `M20PRO_SCAN_TOPIC=/scan`;
+    - `M20PRO_FASTDDS_PROFILE=project_udp`。
+  - 已重启 `m20pro-real.service`;
+  - 当前 104 启动参数显示：
+    - `perception_mode:=edge_scan`;
+    - `fusion:=false`;
+    - `enable_lidar_points_subscriptions:=false`;
+  - 104 已不再运行 `m20pro_lidar_relay` 和 `m20pro_pointcloud_fusion`。
+- 验证结果：
+  - `/api/state` 显示：
+    - `perception_status.mode=edge_scan`;
+    - `perception_status.code=perception_ready`;
+    - `scan.frame_id=m20pro_base_link`;
+    - `scan.age_sec≈0.13`;
+    - `scan.finite_ranges≈191`。
+  - 104 `/dev/shm` 当前约 `1.1G/7.7G`，使用率约 `15%`。
+  - 命令行 `ros2 topic echo /scan` 仍可能没有输出，和此前记录的 CLI DDS 发现问题一致；现场测试以 Web/API 服务进程收到的新鲜 scan 为准。
+- 当前定位状态：
+  - 因 104 服务重启，当前 `localization_ok=False`、`pose_fresh=False`;
+  - `map_relocalization_clearance.code=tcp_2101_not_success`;
+  - 这是预期状态，下一步需要用户在前端重新拖箭头执行 2101 重定位。
+- 快速回退：
+  - 104 改回 `M20PRO_SCAN_SOURCE=local_fusion`、`M20PRO_FASTDDS_PROFILE=factory` 后重启 `m20pro-real.service`;
+  - 106 停止 `m20pro-edge-scan-106.service`;
+  - 老链路仍保留，可随时回退。
+
+## 2026-07-09 14:39 CST - 用户工位实测：106 edge_scan 链路下位姿和激光轮廓正常
+
+- 用户实测结论：
+  - 新的 106 点云处理链路在工位中仍然可以正常显示机器人位姿；
+  - 前端激光轮廓也能正常显示。
+- 104 API 复核：
+  - `perception_status.mode=edge_scan`;
+  - `perception_status.code=perception_ready`;
+  - `scan.frame_id=m20pro_base_link`;
+  - `scan.age_sec≈0.30`;
+  - `scan.finite_ranges≈187`;
+  - `localization_ok=True`;
+  - `pose_fresh=True`;
+  - `factory_localization_ok=True`。
+- 当前结论：
+  - edge_scan 链路已通过“工位重定位 + 实时位姿 + 激光轮廓显示”最小验收；
+  - 仍未完成真实单层短任务导航和避障验收；
+  - 下一步应在测试场地录包验证：路径显示、Nav2 costmap、`/cmd_vel`、避障、到点停止和任务点衔接。
+
+## 2026-07-09 14:53 CST - 104 临时旧地图已归档并清理，只保留当前 164234 地图
+
+- 背景：
+  - 用户追问此前要求删除临时地图但未删除；
+  - 上一轮清理为了避免误删运行资产，刻意未碰 `/home/user/m20pro_maps`；
+  - 本轮确认当前实际使用地图后补做地图清理。
+- 当前使用地图：
+  - 前端当前选中 `map_1782442183242_ee7c6b76`;
+  - 地图名 `DESK_20260625_164234`;
+  - 路径 `/home/user/m20pro_maps/DESK_20260625_164234`;
+  - API 复核 `selected_map.available=True`。
+- 已归档到上位机：
+  - `/home/fabu/桌面/M20Pro/104_archives/host_104_map_cleanup_20260709_145159`;
+  - 归档约 `4.1M`；
+  - 包含旧地图目录和清理前的 `maps.json`。
+- 已从 104 删除的旧临时地图：
+  - `/home/user/m20pro_maps/m20pro_desk_20260622_204142`;
+  - `/home/user/m20pro_maps/m20pro_desk_20260622_204142_be02ac`;
+  - `/home/user/m20pro_maps/DESK_20260622_211614`。
+- 已同步清理前端地图列表：
+  - `/home/user/.m20pro_web/maps.json` 现在只保留 `DESK_20260625_164234`;
+  - 清理前的 `maps.json` 已在上位机归档，104 上不再额外保留 `maps.json.bak_*` 或本次临时备份文件。
+- 引用关系复核：
+  - 现有 `annotations.json` 只引用 `builtin_F20` 和当前 `map_1782442183242_ee7c6b76`;
+  - 现有 `tasks.json` 只引用 `builtin_F20` 和当前 `map_1782442183242_ee7c6b76`;
+  - 删除旧地图不会影响当前任务点和任务。
+- 清理后状态：
+  - `/home/user/m20pro_maps` 只剩 `DESK_20260625_164234`;
+  - `m20pro-real.service` 未重启；
+  - `/api/state` 显示当前地图仍为 `DESK_20260625_164234`;
+  - `perception_status=edge_scan/perception_ready`;
+  - `localization_ok=True`、`pose_fresh=True`。
+
+## 2026-07-09 15:07 CST - 修复前端建图环境检查：104 root 到 106 免密已通，检查按钮通过
+
+- 现场现象：
+  - 用户点击前端 `建图 -> 检查 106 环境` 后提示没有免密；
+  - 该接口由 104 上的 `m20pro-real.service` 调用，而服务以 root 运行，所以需要配置的是 104 root 到 106 user 的 SSH 免密，不只是 104 user。
+- 已处理：
+  - 104 root 已生成/使用专用 SSH key；
+  - 104 root 的 `/root/.ssh/known_hosts` 已加入 `10.21.31.106`;
+  - 106 `user` 的 `~/.ssh/authorized_keys` 已加入 `m20pro-104-root-to-106` 公钥；
+  - 104 root 现在可以 `ssh -o BatchMode=yes user@10.21.31.106`。
+- 修复后端检查逻辑：
+  - 原检查命令包含 `sudo -n drmap stop_mapping -h`;
+  - 实测发现原厂 `drmap stop_mapping -h` 不是安全的纯 help/dry-run，会进入尝试结束建图流程并超时；
+  - 已从检查接口中移除 `stop_mapping -h`;
+  - 现在只检查 SSH、active map 路径、`sudo -n drmap mapping -h`;
+  - 完成/保存建图按钮仍会调用 `drmap stop_mapping`，但不在环境检查中提前探测。
+- 已同步并重启 104：
+  - 更新 `src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py`;
+  - 已重启 `m20pro-real.service`;
+  - 本地 `python3 -m py_compile` 通过；
+  - `./scripts/test_mapping_contract.py` 通过。
+- 最终验证：
+  - `/api/mapping/check_environment` 返回 `ok=true`;
+  - 输出包含 `drmap_mapping_help=ok`;
+  - 104 当前地图仍为 `DESK_20260625_164234`;
+  - `perception_status=edge_scan/perception_ready`;
+  - `localization_ok=True`、`pose_fresh=True`。
+- 注意：
+  - 建图会改变 106 active map；
+  - 建完并拉到 104 后必须重新重定位；
+  - 如果点击 `完成/保存建图` 后原厂 `drmap stop_mapping` 长时间无响应，应到 106 上查看 `/tmp/m20pro_drmap_mapping_<session_id>.log` 或按原厂流程手动处理。
+
+## 2026-07-09 15:23 CST - 用户工位静态测试：前端建图相关按钮基本可用
+
+- 用户实测：
+  - 用户在工位测试；
+  - 未让机器狗移动；
+  - 仅点击若干前端按钮做静态验证；
+  - 用户反馈几个按钮工作正常。
+- 104 复核：
+  - 当前没有 active task；
+  - `/api/mapping/check_environment` 返回 `ok=true`;
+  - 当前地图仍为 `DESK_20260625_164234`;
+  - `perception_status=edge_scan/perception_ready`;
+  - 建图会话新增 `test_field`，状态为 `saved`，说明建图会话/保存按钮链路至少返回了成功状态。
+- 106 复核：
+  - 未看到 `drmap`/mapping 残留建图进程；
+  - `m20pro-edge-scan-106.service` 仍为 `active`;
+  - 只看到 edge_scan 进程 `drdds_edge_scan_demo /LIDAR/POINTS /scan ...`。
+- 注意：
+  - 本轮只是静态按钮/接口测试；
+  - 未验证机器狗实际移动建图；
+  - 未验证新地图质量；
+  - 未验证从 106 active map 拉取新地图后重新定位和导航。
+
+## 2026-07-09 15:33 CST - 定位周期性消失/漂移根因：106 active map 被建图测试切到 test_field，已恢复 164234
+
+- 用户现象：
+  - 用户感觉定位每隔一段较长时间会消失或漂移。
+- 现场复核：
+  - 104 当前仍选中 `DESK_20260625_164234`;
+  - 104 `/api/state` 显示 `navigation_status=location=1`；
+  - 前端定位结论为 `localization_not_confirmed`；
+  - edge_scan 感知链路仍正常，`perception_status=edge_scan/perception_ready`；
+  - 因此问题不是 scan 断流，而是原厂定位已不确认。
+- 根因确认：
+  - 106 `/var/opt/robot/data/maps/active` 已指向 `/var/opt/robot/data/maps/test_field-20260709-152308`;
+  - 这是用户静态测试建图按钮时创建/保存的测试地图；
+  - 但 104 前端/Nav2 仍使用 `DESK_20260625_164234`；
+  - 106 原厂定位地图与 104 显示/导航地图不一致，会导致定位消失、漂移、激光轮廓不贴图。
+- 已恢复：
+  - 使用官方入口执行：
+    - `sudo drmap apply /var/opt/robot/data/maps/map-20260625-164234`;
+  - 官方命令输出确认：
+    - 删除原导航地图软链接；
+    - 创建 active 软链接指向 `/var/opt/robot/data/maps/map-20260625-164234`;
+    - 重启 `localization` 和 `planner`；
+  - 恢复后 106 active map 为 `/var/opt/robot/data/maps/map-20260625-164234`;
+  - `localization.service`、`planner.service`、`global_planner.service`、`m20pro-edge-scan-106.service` 均为 active。
+- 恢复后状态：
+  - 104 与 106 地图重新一致；
+  - 104 edge_scan 仍为 `perception_ready`;
+  - 但 106 定位重启后仍显示 `location=1`；
+  - 因此需要用户在前端当前 `DESK_20260625_164234` 地图上重新执行一次重定位。
+- 防复发修复：
+  - 旧版前端 `启动 106 建图` 按钮新增确认弹窗；
+  - 旧版前端 `完成/保存建图` 按钮新增确认弹窗；
+  - 避免以后随手测按钮时再次改变 106 active map。
+- 验证：
+  - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js` 通过；
+  - 已把 `dashboard.js` 同步到 104；
+  - 浏览器需强刷后看到新确认弹窗。
+
+## 2026-07-09 16:05 CST - 建图流程根治修复：建图不立即生效，前端切换地图才 apply 到 106
+
+- 用户要求：
+  - 参考《山猫 M20 Pro 软件使用手册》；
+  - 建图保存后不要立即影响当前导航/定位地图；
+  - 新地图只有在前端切换/设为当前地图时才生效；
+  - 刚刚建好的 `test_field` 没有出现在前端地图列表，需要查明原因。
+- 手册依据：
+  - 手册写明默认 `sudo drmap mapping` 建图完成后会激活该地图用于定位导航；
+  - 手册写明 `sudo drmap mapping -b` 表示建图完成后无需立即激活；
+  - 因此本工程 Web 建图默认命令必须使用 `-b`，不能继续用旧的 `drmap mapping -s -n`。
+- 代码修复：
+  - `web_dashboard_node.py` 默认建图启动命令改为：
+    - `drmap mapping -b -s -n {map_name}`;
+  - 三个 launch 默认参数同步改为 `-b -s -n`：
+    - `m20pro.launch.py`;
+    - `m20pro_real.launch.py`;
+    - `m20pro_web_dashboard.launch.py`;
+  - `/api/mapping/import_active_map` 不再盲目拉取 `/var/opt/robot/data/maps/active`;
+  - 如果有建图任务名或 payload 里的 `factory_map_name/map_name`，会在 106 `/var/opt/robot/data/maps` 下查找最新 `{map_name}-*` 地图包；
+  - 导入地图记录保存真实 106 地图包路径：
+    - `source_path=/var/opt/robot/data/maps/<name>-<timestamp>`;
+    - `factory_apply_path=...`;
+    - `factory_source_reason=latest_named_map_package`;
+  - 导入只归档到 104，不再自动改 `selected_map_id`，避免“导入”变相触发“启用”；
+  - `/api/maps/select` 在 104 Nav2 加载成功后，如果地图记录有真实 106 地图包路径，会调用：
+    - `sudo -n drmap apply <source_path>`;
+  - 旧地图记录如果只写着 `/var/opt/robot/data/maps/active`，不会盲目 apply，避免切错图。
+- 前端修复：
+  - 建图按钮提示改为“使用 -b，只建图，不立即切换为导航地图”；
+  - 完成/保存按钮提示改为“保存后先拉取建图结果，再手动切换地图生效”；
+  - “拉取 106 当前地图”标题改为“拉取 106 建图结果”。
+- `test_field` 复核结论：
+  - 106 上存在目录：
+    - `/var/opt/robot/data/maps/test_field-20260709-152308`;
+  - 但该目录没有 `occ_grid.yaml`、`map.yaml`、`jueying.yaml`、PGM 或 PCD；
+  - `poses.txt` 为 0 字节，地图包实际没有生成可供前端/Nav2使用的 2D 栅格地图；
+  - 因此前端不显示 `test_field` 是正确行为：它不是可用地图，而是一次未成功保存出栅格结果的原厂地图包残留。
+- 导入失败保护：
+  - 如果地图包已 scp 到 104 但找不到可用 yaml，接口会返回明确错误：
+    - `地图包已拉取，但没有生成可供前端/Nav2使用的栅格 yaml`;
+  - 同时自动清理失败导入目录，避免 `/home/user/m20pro_maps` 继续变乱。
+- 104 同步和验证：
+  - 已 rsync 到 104；
+  - 已在 104 执行：
+    - `colcon build --packages-select m20pro_cloud_bridge m20pro_bringup --symlink-install`;
+    - 重启 `m20pro-real.service`;
+  - 安装目录确认三个 launch 均为 `drmap mapping -b -s -n`;
+  - `/api/maps` 当前仍只有内置 `F19/F20/F21` 和 `DESK_20260625_164234`；
+  - `test_field` 没有进入 maps.json；
+  - 已清理 104 上失败导入残留：
+    - `/home/user/m20pro_maps/test_field`;
+    - `/home/user/m20pro_maps/test_field_074be5`;
+  - 106 active map 仍为：
+    - `/var/opt/robot/data/maps/map-20260625-164234`;
+  - `localization.service`、`planner.service`、`global_planner.service` 均为 active。
+- 本地验证：
+  - `python3 -m py_compile src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py` 通过；
+  - `node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js` 通过；
+  - `scripts/test_mapping_contract.py` 通过；
+  - `scripts/test_map_contract.py` 通过。
+- 注意：
+  - 本轮中再次确认 `drmap stop_mapping -h` 不是安全 help，会进入停止建图流程；后续不要用它做环境探测；
+  - 这次误触没有改变 106 active map，已复核 active 仍指向 `map-20260625-164234`。
+
+## 2026-07-09 16:20 CST - 新版封存前端同步建图不立即生效文案
+
+- 用户追问新版前端的建图逻辑是否已改。
+- 复核结果：
+  - 新版封存前端位于 `docs/archived_frontend_lite_workbench/20260702`;
+  - 它调用的仍是同一套后端接口：
+    - `/api/mapping/start`;
+    - `/api/mapping/finish`;
+    - `/api/mapping/import_active_map`;
+    - `/api/maps/select`;
+  - 因此底层建图不立即生效、按名称导入、前端切换地图才 apply 到 106 的核心逻辑已经由后端保证；
+  - 但新版封存前端的界面文案和确认弹窗没有同步，容易误导操作员。
+- 已补齐：
+  - `docs/archived_frontend_lite_workbench/20260702/dashboard.js`;
+    - 启动 106 建图前增加确认：
+      - 使用 `-b`，只建图，不立即切换为导航地图；
+    - 完成/保存建图前增加确认：
+      - 保存后先拉取建图结果，再手动切换地图生效；
+  - `docs/archived_frontend_lite_workbench/20260702/dashboard.html`;
+    - “建图 / 拉取 106 地图”改为“建图 / 拉取 106 建图结果”；
+    - 增加说明：默认按手册通过 `drmap -b` 建图，保存后不会立即用于导航。
+- 验证：
+  - `node --check docs/archived_frontend_lite_workbench/20260702/dashboard.js` 通过；
+  - `git diff --check` 通过。
+- 注意：
+  - 新版前端仍是封存/未部署状态；
+  - 本次只同步文案和危险操作确认，不改运行中的 104 旧版前端服务。
+
+## 2026-07-09 17:05 CST - 部署测试场地新地图 TEST_FIELD_20260709_163256
+
+- 用户在上位机 `src/m20pro_bringup/maps` 下放入新地图：
+  - `src/m20pro_bringup/maps/test-20260709-163256`;
+  - 包含 `occ_grid.yaml`、`occ_grid.pgm`、`full_cloud.pcd` 和原厂地图内部数据。
+- 本地处理：
+  - 清理拷贝带来的 AppleDouble 元数据文件 `._*`;
+  - 将 `occ_grid.yaml` 的 image 从绝对路径改为相对路径：
+    - `image: occ_grid.pgm`;
+  - 本地地图包大小约 115MB；
+  - Git 只纳入轻量 2D 栅格资产 `occ_grid.yaml/occ_grid.pgm`，继续忽略 `*.pcd`、`.blocks`、`.sessions`、`.optimizers` 和 `occ_grid_id_map.toml`，避免仓库被原厂关键帧/点云撑大。
+- 已同步到 104：
+  - 源码路径：
+    - `/home/user/m20pro_real_ros2_ws/src/m20pro_bringup/maps/test-20260709-163256`;
+  - 已执行：
+    - `colcon build --packages-select m20pro_bringup --symlink-install`;
+  - install 路径可用：
+    - `/home/user/m20pro_real_ros2_ws/install/m20pro_bringup/share/m20pro_bringup/maps/test-20260709-163256`;
+  - 同时通过导入 API 拉入 104 前端归档：
+    - `/home/user/m20pro_maps/TEST_FIELD_20260709_163256`;
+    - `map_id=map_1783587590787_a658b6bb`;
+    - `floor=F20`;
+    - `source_path=/var/opt/robot/data/maps/test-20260709-163256`;
+    - `factory_apply_path=/var/opt/robot/data/maps/test-20260709-163256`。
+- 已同步到 106：
+  - 原厂地图包路径：
+    - `/var/opt/robot/data/maps/test-20260709-163256`;
+  - 这样后续在前端选择 `TEST_FIELD_20260709_163256` 时，后端可以调用 `drmap apply` 让 106 原厂定位地图同步切过去。
+- 当前状态：
+  - 前端地图列表已经出现 `TEST_FIELD_20260709_163256`;
+  - 当前选中地图仍是 `DESK_20260625_164234`;
+  - 106 active map 仍是 `/var/opt/robot/data/maps/map-20260625-164234`;
+  - 本次没有把机器狗当前定位地图切到测试场地，避免在工位环境造成 104/106 错配。
+- 验证：
+  - 只读打开 `/api/map_file?map_id=map_1783587590787_a658b6bb`;
+  - 返回 `available=True`;
+  - 地图尺寸 `255x212`;
+  - 分辨率 `0.1`;
+  - origin `(-19.1, -10.1, 0.0)`。
+- 使用提醒：
+  - 到测试场地后，在前端地图列表选择 `TEST_FIELD_20260709_163256`;
+  - 选择后会触发 104 Nav2 load map 和 106 `drmap apply`;
+  - 切图后必须重新执行一次网页重定位，成功后再标点/导航。
+
+## 2026-07-09 17:20 CST - 简化 104 前端地图显示名
+
+- 用户要求：
+  - 尾号 `164234` 的工位地图命名太复杂，改成 `F20（带工位）`;
+  - 新加入的测试场地地图改成 `Test Field`。
+- 已修改 104 运行态地图记录：
+  - 文件：
+    - `/home/user/.m20pro_web/maps.json`;
+  - `map_1782442183242_ee7c6b76`:
+    - old name: `DESK_20260625_164234`;
+    - new name: `F20（带工位）`;
+  - `map_1783587590787_a658b6bb`:
+    - old name: `TEST_FIELD_20260709_163256`;
+    - new name: `Test Field`。
+- 处理方式：
+  - 只改前端显示名；
+  - 不改 `map_id`;
+  - 不改 104 归档目录；
+  - 不改 106 原厂地图包路径；
+  - 不改 `factory_apply_path`，因此不会影响前端切图时同步 `drmap apply`。
+- 生效方式：
+  - 运行中的 Web 后端会缓存地图列表；
+  - 修改 `maps.json` 后已重启 `m20pro-real.service` 让前端立即显示新名字。
+- 验证：
+  - `/api/maps` 当前显示：
+    - `F20（带工位）`;
+    - `Test Field`;
+  - 当前 selected map 仍为 `map_1782442183242_ee7c6b76`;
+  - 106 active map 仍为 `/var/opt/robot/data/maps/map-20260625-164234`；
+  - 本次没有切换到测试场地地图。
+
+## 2026-07-09 18:30 CST - 根治实时 /map 下点位消失和重启回默认图
+
+- 用户现象：
+  - 当地图显示切到“实时 /map”时，如果实时图其实就是当前真实工作地图，之前在 `F20（带工位）` 上保存的巡检点位会消失；
+  - 104 重启后曾回到 `builtin_F20`，导致实时点位只显示内置 F20 的旧点，隐藏 `F20（带工位）` 的 5 个点。
+- 根因：
+  - 旧逻辑把 `selected_map_id` 同时当成“前端显示选择”和“Nav2/任务点归属工作地图”；
+  - 一旦前端选择实时 `/map`，`selected_map_id=None`，后端和启动脚本就失去固定地图身份；
+  - 前端还会在没有 `selected_map_id` 时按楼层自动选回内置 F20，进一步把实时显示模式覆盖掉。
+- 根治改动：
+  - 新增/启用持久字段 `working_map_id`：
+    - `selected_map_id`：只表示前端显式选中的固定地图；
+    - `working_map_id`：表示当前 Nav2/任务/点位真正归属的固定工作地图；
+    - `effective_map_id`：API 根据显式选择、实时 `/map` 元数据匹配、工作地图计算出的当前有效地图；
+  - `map_selection_contract.py`：
+    - 新增 `matching_fixed_map_id_for_live_map`;
+    - 新增 `effective_map_id_for_display`;
+    - 实时 `/map` 只有在宽、高、分辨率、origin 与固定地图一致时，才解析成固定地图；
+    - 若实时图可用但匹配不上任何固定地图，不再拿旧工作地图硬凑，避免错图显示点位；
+    - 切到实时显示不再清除 `map_relocalization_required`，避免“显示模式清掉重定位锁”的假成功。
+  - `web_dashboard_node.py`：
+    - `/api/state`、`/api/maps` 返回 `working_map_id/effective_map_id`;
+    - `/api/annotations?map_id=live_map` 和 `/api/tasks?map_id=live_map` 统一按 `effective_map_id` 过滤；
+    - 保存点位、生成任务、开始任务都使用有效固定地图，不再让实时显示模式导致点位落到 `live_map`;
+    - 启动归一化不再把 `selected_map_id` 塞成默认内置图，而是维护 `working_map_id`;
+    - 楼梯语义区发布也改用有效地图。
+  - `m20pro_real_full.sh`：
+    - 启动 Nav2 时优先读取 `selected_map_id`;
+    - 如果前端处于实时显示模式，则读取 `working_map_id`;
+    - 支持 selected 失效时回退到 working；
+    - 104 断电/重启后不会再因为 `selected_map_id=None` 掉回默认内置 F20。
+  - 旧版前端 `static/dashboard.js`：
+    - 不再因为后端没有 `selected_map_id` 就自动按楼层选择内置 F20；
+    - 点位、任务、按钮可用性改用 `effective_map_id`;
+    - 实时 `/map` 匹配到固定工作地图时，点位/任务列表正常显示。
+  - 新版封存前端 `docs/archived_frontend_lite_workbench/20260702/dashboard.js` 同步同样的地图身份修复。
+- 104 同步与恢复：
+  - 已 rsync 到 104；
+  - 已执行：
+    - `colcon build --packages-select m20pro_cloud_bridge m20pro_bringup --symlink-install`;
+    - 重启 `m20pro-real.service`。
+  - 已把 104 恢复到：
+    - `selected_map_id=null`（前端显示实时 /map）；
+    - `working_map_id=map_1782442183242_ee7c6b76`;
+    - `effective_map_id=map_1782442183242_ee7c6b76`;
+    - 工作地图名称 `F20（带工位）`。
+- 104 验证：
+  - `/api/state.selected_map_status.ready=True`;
+  - live `/map` 元数据为 `423x500, resolution=0.1, origin=(-19.1,-13.4,0)`;
+  - 与 `F20（带工位）` 固定地图一致；
+  - `/api/annotations?map_id=live_map`：
+    - `effective_map_id=map_1782442183242_ee7c6b76`;
+    - 返回 5 个点：`test1/test2/test3/test4/test5`;
+    - 隐藏内置 F20 的 3 个旧点；
+  - `/api/tasks?map_id=live_map`：
+    - `effective_map_id=map_1782442183242_ee7c6b76`;
+    - 返回 2 个该地图任务；
+  - 第二次重启后进程参数确认包含：
+    - `map:=/home/user/m20pro_maps/DESK_20260625_164234/occ_grid.yaml`;
+  - 重启后 `/api/state` 仍保持：
+    - `selected_map_id=null`;
+    - `working_map_id=map_1782442183242_ee7c6b76`;
+    - `effective_map_id=map_1782442183242_ee7c6b76`;
+  - `startup_map_sync` 已更新为 `F20（带工位）`，不是旧的 `builtin_F20`。
+- 当前注意：
+  - 因为刚刚重新加载了 `F20（带工位）`，104 正确保留了 `map_relocalization_required`;
+  - 这不是故障，而是正确行为：需要重新执行网页重定位，收到开发手册 2101 成功和实时位姿证据后才会清除；
+  - 以后“实时 /map”只是显示源，不再代表“没有固定地图”。
+- 验证：
+  - 本地：
+    - `python3 -m py_compile web_dashboard_node.py map_selection_contract.py startup_map_sync_contract.py` 通过；
+    - `node --check static/dashboard.js` 通过；
+    - `node --check docs/archived_frontend_lite_workbench/20260702/dashboard.js` 通过；
+    - `bash -n src/m20pro_bringup/scripts/m20pro_real_full.sh` 通过；
+    - `scripts/test_map_selection_contract.py` 通过；
+    - `scripts/test_annotation_contract.py` 通过；
+    - `scripts/test_task_contract.py` 通过；
+    - `scripts/test_localization_contract.py` 通过；
+    - `scripts/test_preflight_contract.py` 通过。
+  - 104：
+    - `scripts/test_map_selection_contract.py` 通过；
+    - `bash -n src/m20pro_bringup/scripts/m20pro_real_full.sh` 通过；
+    - 104 未安装 `node`，JS 语法以本机 `node --check` 为准。
+
+## 2026-07-09 18:50 CST - 新增前端 API 对接契约文档
+
+- 用户要求：
+  - 把当前 API 化接口整理成文档；
+  - 加入 Git；
+  - 后续接口变化要实时维护。
+- 已新增：
+  - `docs/frontend_api_contract.md`。
+- 文档覆盖：
+  - 基本请求/响应约定；
+  - `selected_map_id / working_map_id / effective_map_id` 地图身份模型；
+  - `/api/state`、`/api/maps`、`/api/maps/select`;
+  - `/api/annotations`、`/api/tasks`;
+  - `/api/localization/initialpose`;
+  - `/api/preflight`;
+  - `/api/mapping/*`;
+  - YOLO、视频、项目接口；
+  - 甲方前端推荐调用流程；
+  - 昂锐雷达读取任务点名称、房间、扫描点、结果前缀、雷达模式的推荐字段；
+  - ROS 2 包可订阅 `/m20pro/active_waypoint` 获取当前任务点 JSON。
+- 已更新：
+  - `README.md` 增加 API 文档入口。
+- 维护规则：
+  - 后端新增、删除、修改接口字段时，同步更新 `docs/frontend_api_contract.md`;
+  - 新版前端和甲方前端不要复制后端判断逻辑，尤其不要自己推断实时 `/map` 属于哪张固定地图。

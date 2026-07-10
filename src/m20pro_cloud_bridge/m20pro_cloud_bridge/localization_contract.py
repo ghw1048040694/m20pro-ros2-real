@@ -224,18 +224,18 @@ def map_relocalization_clearance_payload(
         **tcp,
     }
     if not required:
-        return {**base, "code": "no_map_relocalization_lock", "message": "没有固定地图重定位锁需要清除"}
+        return {**base, "code": "no_map_relocalization_lock", "message": "没有固定地图重定位要求需要清除"}
     if lock_map_id and selected_id and lock_map_id != selected_id:
         return {
             **base,
             "code": "map_relocalization_lock_map_mismatch",
-            "message": "固定地图重定位锁属于另一张地图，不能用当前证据清除",
+            "message": "固定地图重定位要求属于另一张地图，不能用当前证据清除",
         }
     if selected_status and selected_status.get("ready") is not True:
         return {
             **base,
             "code": str(selected_status.get("code") or "selected_map_not_ready"),
-            "message": str(selected_status.get("message") or "网页选择地图与 Nav2 当前 /map 尚未一致，不能清除重定位锁"),
+            "message": str(selected_status.get("message") or "网页选择地图与 Nav2 当前 /map 尚未一致，不能清除重定位要求"),
         }
     startup_sync_lock = str(required.get("reason") or "") == "startup_sync"
     if startup_sync_lock and factory_ok is True and pose_fresh:
@@ -243,35 +243,35 @@ def map_relocalization_clearance_payload(
             return {
                 **base,
                 "code": "pose_not_near_tcp_2101",
-                "message": "地图位姿与最近 2101 成功回执坐标不一致，不能清除重定位锁",
+                "message": "地图位姿与最近 2101 成功回执坐标不一致，不能清除重定位要求",
             }
         return {
             **base,
             "clear": True,
             "code": "startup_map_relocalization_lock_clearable",
-            "message": "启动同步产生的固定地图重定位锁可清除：原厂定位确认、地图位姿新鲜",
+            "message": "启动同步产生的固定地图重定位要求可清除：原厂定位确认、地图位姿新鲜",
         }
     if not tcp.get("tcp_2101_accepted"):
-        return {**base, "code": "tcp_2101_not_success", "message": "未收到开发手册 2101/1 成功回执，不能清除重定位锁"}
+        return {**base, "code": "tcp_2101_not_success", "message": "未收到开发手册 2101/1 成功回执，不能清除重定位要求"}
     if not tcp.get("tcp_2101_recent"):
-        return {**base, "code": "tcp_2101_not_recent", "message": "2101 成功回执不是最近结果，不能清除重定位锁"}
+        return {**base, "code": "tcp_2101_not_recent", "message": "2101 成功回执不是最近结果，不能清除重定位要求"}
     if not tcp_after_lock:
-        return {**base, "code": "tcp_2101_before_map_lock", "message": "2101 成功回执早于本次固定地图加载，不能清除重定位锁"}
+        return {**base, "code": "tcp_2101_before_map_lock", "message": "2101 成功回执早于本次固定地图加载，不能清除重定位要求"}
     if factory_ok is not True:
-        return {**base, "code": "factory_localization_not_confirmed", "message": "原厂定位尚未确认，不能清除重定位锁"}
+        return {**base, "code": "factory_localization_not_confirmed", "message": "原厂定位尚未确认，不能清除重定位要求"}
     if not pose_fresh:
-        return {**base, "code": "pose_missing_or_stale", "message": "地图位姿缺失、无效或已过期，不能清除重定位锁"}
+        return {**base, "code": "pose_missing_or_stale", "message": "地图位姿缺失、无效或已过期，不能清除重定位要求"}
     if pose_near_2101 is not True:
         return {
             **base,
             "code": "pose_not_near_tcp_2101",
-            "message": "地图位姿与最近 2101 成功回执坐标不一致，不能清除重定位锁",
+            "message": "地图位姿与最近 2101 成功回执坐标不一致，不能清除重定位要求",
         }
     return {
         **base,
         "clear": True,
         "code": "map_relocalization_lock_clearable",
-        "message": "固定地图重定位锁可清除：2101 成功、原厂定位确认、地图位姿新鲜",
+        "message": "固定地图重定位要求可清除：2101 成功、原厂定位确认、地图位姿新鲜",
     }
 
 
@@ -421,7 +421,6 @@ def localization_status_payload(
     pose_age_sec: Optional[float],
     pose_timeout_s: float,
     navigation_status: Any = None,
-    task_readiness: Optional[Dict[str, Any]] = None,
     navigation_readiness: Optional[Dict[str, Any]] = None,
     factory_localization_ok: Any = None,
     relocalization_result: Any = None,
@@ -454,16 +453,11 @@ def localization_status_payload(
         "pose_timeout_s": timeout_s,
         "navigation_status": navigation_status,
         "map_relocalization_required": map_relocalization_required,
-        "task_ready": None,
         "navigation_ready": None,
         "updated_at": (now_text or default_now_text)(),
         **pose_tcp,
         **tcp,
     }
-    if task_readiness is not None:
-        base["task_ready"] = bool(task_readiness.get("ready"))
-        base["task_readiness_code"] = task_readiness.get("code")
-        base["task_readiness_message"] = task_readiness.get("message")
     if navigation_readiness is not None:
         base["navigation_ready"] = bool(navigation_readiness.get("ready"))
         base["navigation_readiness_message"] = navigation_readiness.get("message")
@@ -478,16 +472,16 @@ def localization_status_payload(
         ):
             message = (
                 "重定位失败：已收到 2101 回执，原厂定位和地图位姿也在更新；"
-                "但当前固定地图的重定位锁还没有清除，任务页不会允许开始任务"
+                "但当前固定地图的重定位要求还没有清除"
             )
         elif tcp.get("tcp_2101_accepted") and tcp.get("tcp_2101_recent"):
-            message = "重定位失败：已收到 2101 回执，但原厂定位或地图位姿还没有确认；任务页不会允许开始任务"
+            message = "重定位失败：已收到 2101 回执，但原厂定位或地图位姿还没有确认"
         elif tcp.get("tcp_2101_accepted"):
-            message = "重定位失败：只有旧的 2101 回执，不是本轮新确认；当前固定地图仍要求重定位，任务页不会允许开始任务"
+            message = "重定位失败：只有旧的 2101 回执，不是本轮新确认；当前固定地图仍要求重定位"
         else:
             message = "重定位失败：%s" % str(
                 map_relocalization_required.get("message")
-                or "当前固定地图仍要求按开发手册2101完成重定位；任务页不会允许开始任务"
+                or "当前固定地图仍要求按开发手册2101完成重定位"
             )
         return {
             **base,
@@ -495,85 +489,55 @@ def localization_status_payload(
             "code": "map_relocalization_required",
             "message": message,
         }
-    if localization_ok is not True:
+    if factory_ok is not True:
         return {
             **base,
             "confirmed": False,
             "code": "localization_not_confirmed",
-            "message": "重定位失败：原厂定位未确认；任务页不会允许开始任务",
+            "message": "重定位失败：原厂定位未确认",
         }
     if not pose_ok:
         return {
             **base,
             "confirmed": False,
             "code": "pose_missing_or_invalid",
-            "message": "重定位失败：原厂定位为 true，但地图位姿缺失或无效；任务页不会允许开始任务",
+            "message": "重定位失败：原厂定位为 true，但地图位姿缺失或无效",
         }
     if not age_ok:
         return {
             **base,
             "confirmed": False,
             "code": "pose_stale",
-            "message": "重定位失败：地图位姿已过期；任务页不会允许开始任务",
+            "message": "重定位失败：地图位姿已过期",
         }
-    if (
-        tcp.get("tcp_2101_accepted")
-        and tcp.get("tcp_2101_recent")
-        and pose_tcp.get("pose_near_2101") is False
-    ):
-        return {
-            **base,
-            "confirmed": False,
-            "code": "pose_not_near_tcp_2101",
-            "message": "重定位失败：实时地图位姿与最近 2101 回执坐标不一致；请检查坐标单位/地图是否正确后重新定位",
-        }
-    if task_readiness is not None and task_readiness.get("ready") is not True:
-        return {
-            **base,
-            "confirmed": True,
-            "code": "localized_task_not_ready",
-            "message": "重定位成功：定位已确认；但任务页暂不可启动：%s"
-            % str(task_readiness.get("message") or "任务启动条件未满足"),
-        }
-    if task_readiness is not None and task_readiness.get("ready") is True:
-        return {
-            **base,
-            "confirmed": True,
-            "code": "localized_ready",
-            "message": "重定位成功：定位已确认，任务页可启动",
-        }
+    source_note = "定位已确认"
+    if localization_ok is not True:
+        source_note = "定位状态源不一致：/localization_ok 未确认，但原厂导航状态确认定位"
     return {
         **base,
         "confirmed": True,
         "code": "localized_confirmed",
-        "message": "重定位失败：定位已确认，但任务页启动条件还没有确认",
+        "message": "重定位成功：%s" % source_note,
     }
 
 
 def relocalization_response_payload(
     verification: Dict[str, Any],
-    task_readiness: Optional[Dict[str, Any]],
     *,
     now_text: Optional[NowText] = None,
 ) -> Dict[str, Any]:
     confirmed = bool(verification.get("factory_pose_accepted"))
     navigation_ready = bool(verification.get("navigation_ready"))
-    task_ready = bool(task_readiness.get("ready")) if task_readiness is not None else None
-    task_message = str(task_readiness.get("message") or "") if task_readiness is not None else ""
 
-    if confirmed and task_ready is True:
+    if confirmed:
         message = "重定位成功"
-        code = "localized_task_ready"
-    elif confirmed:
-        message = "重定位成功：定位已确认；但任务页暂不可启动：%s" % (task_message or "任务启动条件未满足")
-        code = "localized_task_not_ready"
+        code = "localized_confirmed"
     else:
         message = "重定位失败：%s" % str(verification.get("message") or "已发布 /initialpose，但尚未确认定位生效")
         code = "localization_not_confirmed"
 
     return {
         "confirmed": confirmed,
-        "task_ready": task_ready,
         "navigation_ready": navigation_ready,
         "tcp_2101_required": verification.get("tcp_2101_required"),
         "tcp_2101_accepted": verification.get("tcp_2101_accepted"),
@@ -581,7 +545,6 @@ def relocalization_response_payload(
         "code": code,
         "message": message,
         "verification_message": verification.get("message"),
-        "task_readiness": task_readiness,
         "updated_at": (now_text or default_now_text)(),
     }
 
@@ -590,7 +553,6 @@ def initialpose_api_response_payload(
     *,
     localization_status: Dict[str, Any],
     verification: Dict[str, Any],
-    task_readiness: Optional[Dict[str, Any]],
     topic: Any,
     publish_repeats: Any,
     frame_id: Any,
@@ -612,7 +574,6 @@ def initialpose_api_response_payload(
     return {
         "ok": True,
         "confirmed": bool(localization_status.get("confirmed")),
-        "task_ready": localization_status.get("task_ready"),
         "navigation_ready": bool(localization_status.get("navigation_ready")),
         "code": localization_status.get("code"),
         "message": localization_status.get("message", "已发布网页重定位请求"),
@@ -623,5 +584,4 @@ def initialpose_api_response_payload(
         "pose": normalized_pose,
         "verification": verification,
         "localization_status": localization_status,
-        "task_readiness": task_readiness,
     }

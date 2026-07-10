@@ -185,8 +185,6 @@ def create_active_task_state(
     *,
     task_map_id: str,
     now_text: str,
-    start_readiness: Dict[str, Any],
-    post_reset_navigation_readiness: Dict[str, Any],
 ) -> Dict[str, Any]:
     active = {
         "task_id": task.get("id"),
@@ -205,8 +203,6 @@ def create_active_task_state(
         "phase": "navigating",
         "last_nav_goal_status": "idle",
         "status_message": "任务已创建，准备下发第一个点位",
-        "start_readiness": start_readiness,
-        "post_reset_navigation_readiness": post_reset_navigation_readiness,
     }
     task_id = active.get("task_id")
     annotation_ids = list(active.get("annotation_ids") or [])
@@ -258,13 +254,15 @@ def stop_task_state(
     }
 
 
-def idle_stop_task_response() -> Dict[str, Any]:
+def idle_stop_task_response(reason: str = "web_manual_stop") -> Dict[str, Any]:
+    is_reset = str(reason or "") == "web_manual_reset"
     return {
         "ok": True,
         "active_task": None,
         "stopped_task_id": None,
-        "reset_navigation": False,
-        "message": "当前没有前端任务在执行，无需停止",
+        "reset_navigation": True,
+        "reason": reason,
+        "message": "已显式复位导航状态" if is_reset else "当前没有前端任务在执行，已发送导航取消/复位指令",
     }
 
 

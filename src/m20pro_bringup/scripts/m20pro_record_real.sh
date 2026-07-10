@@ -7,16 +7,26 @@ OUT_DIR="${M20PRO_BAG_DIR:-/home/user/bags}"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 OUT_PATH="${OUT_DIR}/${PREFIX}_${STAMP}"
 
+if [[ -r /etc/default/m20pro-real ]]; then
+  set +u
+  source /etc/default/m20pro-real
+  set -u
+fi
 if [[ -z "${ROS_DISTRO:-}" ]]; then
   set +u
   source /opt/robot/scripts/setup_ros2.sh
   set -u
 fi
-if [[ -z "${FASTRTPS_DEFAULT_PROFILES_FILE:-}" ]]; then
-  UDP_PROFILE="/home/user/m20pro_real_ros2_ws/install/m20pro_bringup/share/m20pro_bringup/config/m20pro_fastdds_udp.xml"
-  if [[ -f "${UDP_PROFILE}" && "${M20PRO_FASTDDS_PROFILE:-project_udp}" != "factory" ]]; then
-    export FASTRTPS_DEFAULT_PROFILES_FILE="${UDP_PROFILE}"
-  else
+if [[ -f "${M20PRO_WS:-/home/user/m20pro_real_ros2_ws}/install/setup.bash" ]]; then
+  set +u
+  source "${M20PRO_WS:-/home/user/m20pro_real_ros2_ws}/install/setup.bash"
+  set -u
+fi
+UDP_PROFILE="/home/user/m20pro_real_ros2_ws/install/m20pro_bringup/share/m20pro_bringup/config/m20pro_fastdds_udp.xml"
+if [[ -f "${UDP_PROFILE}" && "${M20PRO_FASTDDS_PROFILE:-factory}" != "factory" ]]; then
+  export FASTRTPS_DEFAULT_PROFILES_FILE="${UDP_PROFILE}"
+elif [[ -z "${FASTRTPS_DEFAULT_PROFILES_FILE:-}" ]]; then
+  if [[ -f /opt/robot/fastdds.xml ]]; then
     export FASTRTPS_DEFAULT_PROFILES_FILE="/opt/robot/fastdds.xml"
   fi
 fi
@@ -40,40 +50,85 @@ EOF
 fi
 
 echo "[m20pro_record_real] output: ${OUT_PATH}"
-ros2 run m20pro_bringup m20pro_lidar_guard.sh record
 
-exec timeout "${DURATION_S}" ros2 bag record -o "${OUT_PATH}" \
-  /LIDAR/POINTS \
-  /LIDAR/POINTS2 \
-  /LIDAR/IMU201 \
-  /LIDAR/IMU202 \
-  /LIDAR/STATUS \
-  /IMU \
-  /ODOM \
-  /scan \
-  /tf \
-  /tf_static \
-  /odom \
-  /map \
-  /local_costmap/costmap \
-  /local_costmap/costmap_updates \
-  /global_costmap/costmap \
-  /global_costmap/costmap_updates \
-  /plan \
-  /cmd_vel \
-  /m20pro/current_floor \
-  /m20pro/stair_status \
-  /m20pro/floor_goal \
-  /m20pro/active_waypoint \
-  /m20pro_tcp_bridge/map_pose \
-  /NAV_STATUS \
-  /MOTION_STATE \
-  /MOTION_STATUS \
-  /MOTION_INFO \
-  /GAIT \
-  /LOCATION_STATUS \
-  /LOCATION_STATUS/MATCHING_ERROR \
-  /STEER \
-  /HANDLE_STEER \
-  /BATTERY_DATA \
+guard_topic_has_sample() {
+  local topic="$1"
+  local wait_s="${2:-8}"
+  local list_out="${TMPDIR:-/tmp}/m20pro_record_topics.out"
+  local echo_out="${TMPDIR:-/tmp}/m20pro_record_echo.out"
+  local echo_err="${TMPDIR:-/tmp}/m20pro_record_echo.err"
+
+  if ! timeout 8s ros2 topic list >"${list_out}" 2>/dev/null; then
+    echo "[m20pro_record_real] ros2 topic list timed out; not recording an empty bag" >&2
+    return 1
+  fi
+  if ! grep -qx "${topic}" "${list_out}"; then
+    echo "[m20pro_record_real] ${topic} is not visible; not recording an empty bag" >&2
+    return 1
+  fi
+  : >"${echo_out}"
+  : >"${echo_err}"
+  if timeout "${wait_s}" bash -c '
+    ros2 topic echo "$1" --no-arr 2>"$2" |
+      awk "{ print; if (\$0 == \"---\") exit 0 }" >"$3"
+  ' _ "${topic}" "${echo_err}" "${echo_out}" && [[ -s "${echo_out}" ]]; then
+    echo "[m20pro_record_real] ${topic} sample OK"
+    return 0
+  fi
+  echo "[m20pro_record_real] ${topic} is visible but no sample arrived within ${wait_s}s; not recording an empty bag" >&2
+  tr '\n' ' ' <"${echo_err}" | sed 's/[[:space:]][[:space:]]*/ /g' | cut -c1-220 >&2 || true
+  echo >&2
+  return 1
+}
+
+GUARD_TOPIC="${M20PRO_RECORD_GUARD_TOPIC:-/scan}"
+GUARD_WAIT_S="${M20PRO_RECORD_GUARD_WAIT_S:-8}"
+guard_topic_has_sample "${GUARD_TOPIC}" "${GUARD_WAIT_S}"
+
+TOPICS=(
+  /scan
+  /tf
+  /tf_static
+  /odom
+  /map
+  /local_costmap/costmap
+  /local_costmap/costmap_updates
+  /global_costmap/costmap
+  /global_costmap/costmap_updates
+  /plan
+  /cmd_vel
+  /m20pro/current_floor
+  /m20pro/stair_status
+  /m20pro/floor_goal
+  /m20pro/active_waypoint
+  /m20pro_tcp_bridge/map_pose
+  /m20pro_tcp_bridge/localization_ok
+  /m20pro_tcp_bridge/navigation_status
+  /m20pro_tcp_bridge/relocalization_result
+  /NAV_STATUS
+  /MOTION_STATE
+  /MOTION_STATUS
+  /MOTION_INFO
+  /GAIT
+  /STEER
+  /HANDLE_STEER
+  /BATTERY_DATA
   /FAULT_STATUS
+)
+
+if [[ "${M20PRO_RECORD_INCLUDE_RAW_LIDAR:-0}" == "1" ]]; then
+  TOPICS+=(
+    /LIDAR/POINTS
+    /LIDAR/POINTS2
+    /LIDAR/IMU201
+    /LIDAR/IMU202
+    /LIDAR/STATUS
+    /IMU
+    /ODOM
+    /LOCATION_STATUS
+    /LOCATION_STATUS/MATCHING_ERROR
+  )
+fi
+
+echo "[m20pro_record_real] guard_topic=${GUARD_TOPIC} duration=${DURATION_S}s include_raw_lidar=${M20PRO_RECORD_INCLUDE_RAW_LIDAR:-0}"
+exec timeout --signal=INT "${DURATION_S}" ros2 bag record -o "${OUT_PATH}" "${TOPICS[@]}"

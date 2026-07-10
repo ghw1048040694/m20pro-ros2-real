@@ -19,6 +19,12 @@ m20pro日志.md
 docs/single_floor_navigation_architecture.md
 ```
 
+新版前端、甲方前端和外部功能包对接 API 契约放在：
+
+```text
+docs/frontend_api_contract.md
+```
+
 现场执行脚本 Word 放在：
 
 ```text
@@ -97,9 +103,6 @@ source install/setup.bash
 ```bash
 ./scripts/104_diagnose_preflight.sh
 ./scripts/104_check_lidar.sh
-./scripts/104_frontend_task_ready_check.py --task-id <task_id>
-./scripts/104_watch_frontend_task.sh 300 field_task
-./scripts/104_analyze_frontend_task_watch.py task_watch_logs/<时间>_field_task
 ./scripts/104_status.sh
 ./scripts/104_start_web.sh                 # 仅开发预览网页，不用于真机测试
 ./scripts/104_stop_web.sh
@@ -113,11 +116,11 @@ source install/setup.bash
 
 现场真机测试只走全量 real 启动：`104_start_real_shadow.sh` 或 `104_start_real_move.sh`。全量 real 会同时拉起 tcp_bridge、Nav2、点云融合和网页前端。
 
-全量 real 启动会先拉起点云 relay，但默认不等待 `/LIDAR/POINTS` 样本才启动 Nav2 和网页。原因是现场需要网页可用来显示 `perception_status`、地图、定位和任务阻断原因。只看到 topic 名或 publisher count 不算感知通过；任务启动前必须在前端/ready-check 中确认 `/LIDAR/POINTS -> lidar_relay -> /scan` 链路恢复。此时只停止本工程 real stack，不要清 `/dev/shm/fastrtps_*`，不要从本工程脚本重启原厂 multicast/lidar 服务。
+全量 real 启动会先拉起点云 relay，但默认不等待 `/LIDAR/POINTS` 样本才启动 Nav2 和网页。原因是现场需要网页可用来显示 `perception_status`、地图、定位和任务状态。只看到 topic 名或 publisher count 不算感知通过；任务前在网页自检、`/api/state` 或 `104_check_lidar.sh` 中确认 `/LIDAR/POINTS -> lidar_relay -> /scan` 链路恢复。此时只停止本工程 real stack，不要手动清 `/dev/shm/fastrtps_*`，不要从本工程脚本重启原厂 multicast/lidar 服务。
 
-默认使用原厂 `/opt/robot/fastdds.xml`。项目内 `m20pro_fastdds_udp.xml` 已改为 UDP-only，只在显式设置 `M20PRO_USE_PROJECT_FASTDDS=1` 做 DDS 实验时使用。
+104 现场默认保持原厂 FastDDS 口径：主栈、Nav2、网页、点云融合和原始点云 relay 均使用 factory profile。2026-07-07 已实测：`project_udp` 主栈 + factory relay 的混合配置虽然能降低 `/dev/shm`，但会让 relay 状态新鲜而 `/scan` 断流，不能作为正式链路默认值。项目内 `m20pro_fastdds_udp.xml` 只保留为 DDS/SHM 专项实验或只读诊断用；strict UDP-only 已实测无法稳定订阅原始 `/LIDAR/POINTS`，不要作为正式链路切换。开机脚本只会用 `fuser` 保护性清理没有进程占用的陈旧 `fastrtps_*` SHM 文件，不清正在使用的通信段。
 
-`104_start_real_move.sh` 会放开运动控制，只能在现场有人看护、手柄急停可用时执行。启动后打开网页，在“自检”页点一次“开机基础自检”。基础自检用于确认全量系统、网页、原始点云、电量和原厂状态链路；定位、`/scan`、Nav2 生命周期和代价地图需要到测试场地重定位后再确认。`104_start_web.sh` 只用于开发预览网页界面，不会拉起 tcp_bridge/Nav2/点云融合，不能作为重定位、标点、下发任务的现场流程。
+`104_start_real_move.sh` 会放开运动控制，只能在现场有人看护、手柄急停可用时执行。启动后打开网页，在“自检”页点一次“开机基础自检”。基础自检用于确认全量系统、网页、原始点云和原厂状态链路；电量只在界面显示给操作员参考，不作为软件自检或任务启动条件；定位、`/scan`、Nav2 生命周期和代价地图需要到测试场地重定位后再确认。`104_start_web.sh` 只用于开发预览网页界面，不会拉起 tcp_bridge/Nav2/点云融合，不能作为重定位、标点、下发任务的现场流程。
 
 ## 开机自启动
 
@@ -145,7 +148,29 @@ cd /home/user/m20pro_real_ros2_ws
 
 自启动服务只启动本工程，不修改原厂 multicast/FastDDS 服务。`move` 模式会把运动控制链路准备好，但任务仍必须在网页中人工点击开始。
 
-自启动同样会先启动点云 relay，但默认不因 `/LIDAR/POINTS` 暂时无样本而阻塞网页。点云未就绪时，网页仍应起来并在自检/任务页显示感知链路故障；恢复时先用网页状态、ready-check 或 `./scripts/104_check_lidar.sh` 确认样本，再继续重定位、标点和任务启动。
+自启动同样会先启动点云 relay，但默认不因 `/LIDAR/POINTS` 暂时无样本而阻塞网页。点云未就绪时，网页仍应起来并在自检/任务页显示感知链路故障；恢复时先用网页状态或 `./scripts/104_check_lidar.sh` 确认样本，再继续重定位、标点和任务启动。默认环境变量应保持：
+
+```text
+M20PRO_FASTDDS_PROFILE=factory
+M20PRO_LIDAR_RELAY_FASTDDS_PROFILE=factory
+M20PRO_CLEAN_STALE_FASTDDS_SHM=1
+```
+
+## 现场复盘
+
+现场任务问题统一用 rosbag 复盘，不再依赖前端 watcher、ready-check 或失败快照脚本。
+
+104 上录包：
+
+```bash
+./scripts/104_record_bag.sh 180 field_task
+```
+
+上位机拉回录包：
+
+```bash
+./scripts/local_pull_bags.sh
+```
 
 `m20pro_real_full.sh move` 会在 `/tmp` 生成运行时参数文件，把 `m20pro_tcp_bridge.enable_axis_command` 明确覆盖为 `true`；`shadow` 会覆盖为 `false`。这样不会改动原始 `m20pro_real.yaml`，也能避免 Foxy 中节点专属参数压过 launch 参数的问题。
 
@@ -201,9 +226,9 @@ http://10.21.31.104:8080
 基本流程：
 
 1. `建图`：记录项目、建筑、单层/多层、楼层编号。
-2. `建图`：用 106 原厂 `drmap` 建图，或手动在 106 上建图。
-3. `地图`：选择项目内置地图，或从 106 active map 拉取到 104 归档。
-4. `地图`：切换要查看和标点的楼层地图。
+2. `建图`：用 106 原厂 `drmap mapping -b` 建图，或手动在 106 上建图；建图保存后不立即用于导航。
+3. `地图`：选择项目内置地图，或按建图名称把 106 地图包拉取到 104 归档。
+4. `地图`：切换要查看和标点的楼层地图；这一步才会把可用的 106 原厂地图包 apply 成 active。
 5. 左侧大地图：查看当前单层 2D 栅格地图、机器人位姿、任务点和路径。
 6. `定位`：如果机器人位置不准，在地图上拖箭头并执行网页重定位。
 7. `标点`：在地图上按住并拖出箭头，保存巡检点、过渡点、充电点。
@@ -242,7 +267,7 @@ pgrep -af '[f]fmpeg .*rtsp://10.21.31.103' || true
 
 停止观看视频后，`camera_proxy.cameras.front.clients` 应回到 `0`，`running=false`，并且不应残留 FFmpeg 拉流进程。要继续接近原厂手柄的低延时手感，下一步应考虑 WebRTC 或 H.264/H.265 硬解链路，而不是继续在 MJPEG 显示层反复调参。
 
-网页重定位以定位页最终结论为准：`/initialpose` 只是网页侧触发动作，开发手册 TCP `2101/1` 回执也只是必要证据之一，不能单独算成功。现场必须在定位页看到“重定位成功”，任务页才允许开始任务。执行任务时不能重定位；需要先停止当前任务，再到 `定位` 页拖箭头并点击 `执行重定位`。
+网页重定位以作业页重定位区最终结论为准：`/initialpose` 只是网页侧触发动作，开发手册 TCP `2101/1` 回执也只是必要证据之一，不能单独算成功。现场必须在作业页看到“重定位成功”，任务区才允许开始任务。执行任务时不能重定位；需要先停止当前任务，再到作业页重定位区拖箭头并点击 `执行重定位`。
 
 如果网页箭头方向看起来不对，不要直接改 180 度偏置。先检查：
 
@@ -297,7 +322,7 @@ NavMode=1    自主导航
 /m20pro/stop_task
 ```
 
-`/m20pro/active_waypoint` 是 JSON，包含当前点位名称、楼栋、单元、户号、区域、房间/部位、扫描点、结果文件名前缀、点位类型、yaw、停留时间和原厂导航字段。昂锐雷达检测节点应优先使用这里的 `waypoint.result_file_prefix` 命名结果文件，并读取 `waypoint.radar.scans` 决定当前点位要做哪些扫描。
+`/m20pro/active_waypoint` 是轻量 JSON，包含当前任务阶段、目标位姿、剩余停留时间和 `waypoint` 点位语义。昂锐雷达检测节点应优先使用这里的 `waypoint.result_file_prefix`、`waypoint.room`、`waypoint.scan_point` 和 `waypoint.radar.scans` 命名并区分扫描结果。
 
 雷达扫描计划示例：
 
@@ -397,7 +422,7 @@ docs/single_floor_navigation_architecture.md          # 单层导航架构和拆
 - HTTP/ROS 集成和现场副作用：`web_dashboard_node.py`。
 - 地图读取、选图、派生地图和启动同步：`map_*_contract.py`、`startup_map_sync_contract.py`。
 - 重定位结论和导航 readiness：`localization_contract.py`、`navigation_readiness_contract.py`。
-- 任务创建、启动、当前点推进和结果快照：`task_*_contract.py`、`active_task_contract.py`。
+- 任务创建、启动、当前点推进和任务/雷达接口：`task_*_contract.py`、`active_task_contract.py`、`active_waypoint_contract.py`。
 - Nav2 状态、路径终点匹配和运行进展判断：`nav_status_contract.py`、`task_plan_contract.py`、`task_progress_contract.py`。
 - 感知、自检、运行时守护和 ROS 消息转换：`perception_contract.py`、`preflight_contract.py`、`web_runtime_contract.py`、`ros_message_contract.py`。
 
@@ -464,11 +489,15 @@ ros2 service call /global_costmap/clear_entirely_global_costmap nav2_msgs/srv/Cl
 src/m20pro_bringup/config/map_manifest.yaml
 ```
 
-106 原厂地图一般在：
+106 当前生效的原厂地图由 active 软链接指向：
 
 ```text
 /var/opt/robot/data/maps/active
 ```
+
+网页建图默认按软件使用手册使用 `drmap mapping -b -s -n <map_name>`：只建图，不立即激活为导航地图。保存后，前端会按 `<map_name>-日期-时间` 在 `/var/opt/robot/data/maps` 下查找最新地图包并拉到 104；只有在前端选择/切换该地图时，才会对有真实 `source_path` 的地图调用 `drmap apply`。
+
+如果导入时报“没有生成可供前端/Nav2使用的栅格 yaml”，说明 106 的地图包还没有成功生成 `occ_grid.yaml`/`map.yaml` 这类 2D 栅格地图，不能加入前端地图列表，需要重新按原厂流程完成建图保存。
 
 手动复制示例：
 

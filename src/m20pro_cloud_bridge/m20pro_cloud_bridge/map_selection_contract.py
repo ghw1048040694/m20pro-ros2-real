@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Iterable, Optional
 
 from .task_contract import map_metadata_mismatch_error, readiness_failure, readiness_success
 
@@ -71,6 +71,54 @@ def selected_map_status_payload(
     )
 
 
+def matching_fixed_map_id_for_live_map(
+    live_map: Dict[str, Any],
+    candidates: Iterable[Dict[str, Any]],
+) -> Optional[str]:
+    if not isinstance(live_map, dict) or not live_map.get("available"):
+        return None
+    matches = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        map_id = str(candidate.get("id") or candidate.get("map_id") or "").strip()
+        if not map_id:
+            continue
+        summary = candidate.get("summary") if isinstance(candidate.get("summary"), dict) else candidate
+        if summary.get("available") and map_metadata_mismatch_error(live_map, summary) is None:
+            matches.append(candidate)
+    if not matches:
+        return None
+    preferred = next((item for item in matches if item.get("source") != "project_builtin"), matches[0])
+    return str(preferred.get("id") or preferred.get("map_id") or "").strip() or None
+
+
+def effective_map_id_for_display(
+    *,
+    selected_map_id: Optional[str],
+    live_map: Dict[str, Any],
+    candidates: Iterable[Dict[str, Any]],
+    working_map_id: Optional[str] = None,
+) -> Optional[str]:
+    selected = str(selected_map_id or "").strip()
+    if selected:
+        return selected
+    candidate_list = [item for item in candidates if isinstance(item, dict)]
+    live_match = matching_fixed_map_id_for_live_map(live_map, candidate_list)
+    if live_match:
+        return live_match
+    if isinstance(live_map, dict) and live_map.get("available"):
+        return None
+    working = str(working_map_id or "").strip()
+    if not working:
+        return None
+    for candidate in candidate_list:
+        candidate_id = str(candidate.get("id") or candidate.get("map_id") or "").strip()
+        if candidate_id == working:
+            return working
+    return None
+
+
 def map_relocalization_required_payload(
     *,
     map_id: Optional[str],
@@ -120,6 +168,8 @@ def apply_selected_map_choice_state(
     selected_id = str(map_id or "").strip() or None
     selection_changed = str(previous_map_id or "") != str(selected_id or "")
     updated["selected_map_id"] = selected_id
+    if selected_id:
+        updated["working_map_id"] = selected_id
     relocalization_required = None
     if selected_id and (selection_changed or bool(nav2_load.get("loaded"))):
         relocalization_required = map_relocalization_required_payload(
@@ -130,8 +180,6 @@ def apply_selected_map_choice_state(
             now_text=now_text or default_now_text,
         )
         updated["map_relocalization_required"] = relocalization_required
-    elif not selected_id:
-        updated.pop("map_relocalization_required", None)
     else:
         relocalization_required = updated.get("map_relocalization_required")
     return {

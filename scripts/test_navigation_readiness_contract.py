@@ -164,7 +164,7 @@ def test_navigation_readiness_disabled_payload() -> None:
     assert_equal(result["ready"], True, "disabled readiness is ready")
     assert_equal(result["code"], "ready", "disabled readiness code")
     assert_equal(result["required"], False, "disabled readiness required flag")
-    assert_equal(result["message"], "任务启动前不要求 Nav2 readiness", "disabled readiness message")
+    assert_equal(result["message"], "当前不要求检查 Nav2 readiness", "disabled readiness message")
     assert_equal(result["updated_at"], "fixed-time", "disabled readiness timestamp")
 
 

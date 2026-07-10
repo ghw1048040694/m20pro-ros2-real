@@ -12,7 +12,9 @@ sys.path.insert(0, str(ROOT / "src/m20pro_cloud_bridge"))
 
 from m20pro_cloud_bridge.map_selection_contract import (  # noqa: E402
     apply_selected_map_choice_state,
+    effective_map_id_for_display,
     map_relocalization_required_payload,
+    matching_fixed_map_id_for_live_map,
     selected_map_status_payload,
     selected_map_wait_timeout_payload,
 )
@@ -89,6 +91,91 @@ def test_live_map_unavailable() -> None:
     assert_equal(payload["live_map"]["available"], False, "live unavailable")
 
 
+def test_matching_fixed_map_id_for_live_map() -> None:
+    live = map_payload()
+    candidates = [
+        {
+            "id": "builtin_F20",
+            "source": "project_builtin",
+            "summary": map_payload(map_id="builtin_F20", name="20楼"),
+        },
+        {
+            "id": "map_real",
+            "source": "106_active_map",
+            "summary": map_payload(map_id="map_real", name="F20（带工位）"),
+        },
+        {
+            "id": "map_other",
+            "source": "106_active_map",
+            "summary": map_payload(map_id="map_other", width=101),
+        },
+    ]
+    assert_equal(
+        matching_fixed_map_id_for_live_map(live, candidates),
+        "map_real",
+        "archived matching map preferred over builtin",
+    )
+    assert_equal(
+        matching_fixed_map_id_for_live_map(map_payload(width=88), candidates),
+        None,
+        "no metadata match",
+    )
+
+
+def test_effective_map_id_for_display() -> None:
+    candidates = [{"id": "map_real", "source": "106_active_map", "summary": map_payload(map_id="map_real")}]
+    assert_equal(
+        effective_map_id_for_display(
+            selected_map_id="map_selected",
+            live_map=map_payload(),
+            candidates=candidates,
+            working_map_id="map_working",
+        ),
+        "map_selected",
+        "explicit selected map wins",
+    )
+    assert_equal(
+        effective_map_id_for_display(
+            selected_map_id=None,
+            live_map=map_payload(),
+            candidates=candidates,
+            working_map_id=None,
+        ),
+        "map_real",
+        "live map resolves to matching fixed map",
+    )
+    assert_equal(
+        effective_map_id_for_display(
+            selected_map_id=None,
+            live_map=map_payload(width=88),
+            candidates=candidates,
+            working_map_id="map_real",
+        ),
+        None,
+        "available live map must match a fixed map before using points",
+    )
+    assert_equal(
+        effective_map_id_for_display(
+            selected_map_id=None,
+            live_map={"available": False},
+            candidates=candidates,
+            working_map_id="map_real",
+        ),
+        "map_real",
+        "saved working map is fallback when live map is unavailable",
+    )
+    assert_equal(
+        effective_map_id_for_display(
+            selected_map_id=None,
+            live_map={"available": False},
+            candidates=candidates,
+            working_map_id="map_missing",
+        ),
+        None,
+        "missing working map is ignored",
+    )
+
+
 def test_map_relocalization_required_payload() -> None:
     manual = map_relocalization_required_payload(
         map_id="map_a",
@@ -137,6 +224,7 @@ def test_apply_selected_map_choice_state() -> None:
         now_text=now_text,
     )
     assert_equal(selected["settings"]["selected_map_id"], "map_a", "selected map stored")
+    assert_equal(selected["settings"]["working_map_id"], "map_a", "working map stored")
     assert_true(selected["selection_changed"], "selection changed")
     assert_true(selected["clear_pose"], "loaded map clears pose")
     assert_equal(selected["relocalization_required"]["map_id"], "map_a", "relocalization map id")
@@ -156,7 +244,7 @@ def test_apply_selected_map_choice_state() -> None:
     assert_equal(unchanged["relocalization_required"], {"old": True}, "old relocalization requirement retained")
 
     live = apply_selected_map_choice_state(
-        {"selected_map_id": "map_a", "map_relocalization_required": {"old": True}},
+        {"selected_map_id": "map_a", "working_map_id": "map_a", "map_relocalization_required": {"old": True}},
         map_id=None,
         previous_map_id="map_a",
         record=None,
@@ -164,7 +252,12 @@ def test_apply_selected_map_choice_state() -> None:
         now_text=now_text,
     )
     assert_equal(live["settings"]["selected_map_id"], None, "live map selection stored")
-    assert_true("map_relocalization_required" not in live["settings"], "live map clears relocalization requirement")
+    assert_equal(live["settings"]["working_map_id"], "map_a", "live map keeps working map")
+    assert_equal(
+        live["settings"]["map_relocalization_required"],
+        {"old": True},
+        "live display keeps relocalization requirement",
+    )
     assert_true(not live["clear_pose"], "live map does not clear pose through fixed-map gate")
 
 
@@ -174,6 +267,8 @@ def main() -> int:
         test_selected_map_ready,
         test_selected_map_metadata_mismatch,
         test_live_map_unavailable,
+        test_matching_fixed_map_id_for_live_map,
+        test_effective_map_id_for_display,
         test_map_relocalization_required_payload,
         test_selected_map_wait_timeout_payload,
         test_apply_selected_map_choice_state,

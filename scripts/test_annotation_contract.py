@@ -175,6 +175,12 @@ def test_build_annotation_record() -> None:
         {
             "area": "A区",
             "place": "工位",
+            "scan_point": "P01",
+            "result_file_prefix": "B03_U01_H2008_F20_工位_P01",
+            "radar": {
+                "enabled": True,
+                "scans": [{"mode": "measuring", "label": "实测实量", "result_suffix": "measure"}],
+            },
             "target_classes": "helmet, vest",
             "notes": "检查安全帽",
             "speed": "2",
@@ -191,6 +197,9 @@ def test_build_annotation_record() -> None:
     assert_equal(record["label"], "充电点", "record label")
     assert_equal(record["area"], "A区", "record area")
     assert_equal(record["room"], "工位", "record room")
+    assert_equal(record["scan_point"], "P01", "record scan point")
+    assert_equal(record["result_file_prefix"], "B03_U01_H2008_F20_工位_P01", "record result prefix")
+    assert_equal(record["radar"]["scans"][0]["mode"], "measuring", "record radar plan")
     assert_equal(record["pose"], {"x": 1.2, "y": 3.4, "z": 0.1, "yaw": 0.5}, "record pose")
     assert_equal(record["manual_point_type"], "charge", "record manual point type")
     assert_equal(record["vendor_navigation"]["PointInfo"], 3, "record point info")
@@ -245,6 +254,8 @@ def test_annotation_semantics_normalization() -> None:
         "inspect_duration_s": "2.5",
         "vendor_navigation": {"Gait": "13", "bad": "ignored"},
         "target_classes": "helmet, vest",
+        "station": "S02",
+        "radar": "bad",
     }
     normalized = normalize_annotation_semantics(item)
     assert_equal(normalized["manual_point_type"], "transition", "manual point type")
@@ -254,8 +265,10 @@ def test_annotation_semantics_normalization() -> None:
     assert_equal(normalized["dwell_s"], 2.5, "dwell from legacy duration")
     assert_equal(normalized["area"], "A区", "area alias")
     assert_equal(normalized["room"], "门口", "room alias")
+    assert_equal(normalized["scan_point"], "S02", "scan point alias")
+    assert_equal(normalized["radar"], {}, "bad radar normalized")
     assert_equal(normalized["target_classes"], ["helmet", "vest"], "target classes")
-    assert_true(normalized["result_file_prefix"].startswith("F20_A区_门口_过渡"), "result prefix")
+    assert_true(normalized["result_file_prefix"].startswith("F20_A区_门口_S02_过渡"), "result prefix")
 
 
 def test_payload_helpers() -> None:
@@ -295,13 +308,20 @@ def test_annotation_semantics_payload() -> None:
         "floor": "F20",
         "pose": {"x": 1.0, "y": 2.0, "z": 0.1, "yaw": 0.2},
         "dwell_s": "4",
+        "room": "客厅",
+        "scan_point": "P03",
+        "radar": {"enabled": True, "scans": [{"mode": "modeling"}]},
     }
     payload = annotation_semantics_payload(annotation)
     assert_equal(payload["manual_point_type"], "task", "task type")
     assert_equal(payload["manual_point_type_label"], "任务点", "type label")
+    assert_true("type" not in payload, "legacy type is omitted from semantic payload")
     assert_equal(payload["dwell_s"], 4.0, "payload dwell")
     assert_equal(payload["vendor_navigation"]["PosX"], 1.0, "vendor pos x")
     assert_equal(payload["vendor_navigation"]["AngleYaw"], 0.2, "vendor yaw")
+    assert_equal(payload["room"], "客厅", "payload room")
+    assert_equal(payload["scan_point"], "P03", "payload scan point")
+    assert_equal(payload["radar"]["scans"][0]["mode"], "modeling", "payload radar")
     assert_equal(annotation_dwell_s(annotation), 4.0, "annotation dwell")
 
 
