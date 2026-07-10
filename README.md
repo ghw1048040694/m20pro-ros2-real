@@ -156,16 +156,18 @@ M20PRO_CLEAN_STALE_FASTDDS_SHM=1
 M20PRO_SCAN_TOPIC=/scan
 ```
 
-YOLO 检测默认不随真机全量服务启动，避免在导航调试时抢占 104 算力。需要短期验证 `src/m20pro_inspection/models/best.pt` 时，104 使用独立依赖目录 `/home/user/m20pro_yolo_pydeps`，`m20pro_inspection.launch.py` 只给 YOLO 节点注入 `PYTHONPATH` 和 `LD_PRELOAD=/lib/aarch64-linux-gnu/libgomp.so.1`，不污染 Nav2、web、tcp bridge 等导航节点。确认依赖可用后，再把 `/etc/default/m20pro-real` 中的检测开关改为：
+YOLO 模型在 x86_64 上位机由 `best.pt` 导出 ONNX，再用 RKNN Toolkit2 编译为 RK3588 FP16 模型。104 只安装 RKNNLite 和 `librknnrt`，不安装或运行 Torch。正式配置为：
 
 ```text
 M20PRO_ENABLE_INSPECTION=true
-M20PRO_INSPECTION_BACKEND=auto
-M20PRO_INSPECTION_MODEL_PATH=/home/user/m20pro_real_ros2_ws/install/m20pro_inspection/share/m20pro_inspection/models/best.pt
+M20PRO_INSPECTION_BACKEND=rknn
+M20PRO_INSPECTION_MODEL_PATH=/home/user/m20pro_real_ros2_ws/install/m20pro_inspection/share/m20pro_inspection/models/best_rk3588_fp16.rknn
 M20PRO_INSPECTION_CLASS_NAMES_PATH=/home/user/m20pro_real_ros2_ws/install/m20pro_inspection/share/m20pro_inspection/models/labels_zh.txt
 ```
 
-更适合实机常驻的路线仍然是把 `.pt` 转成 RKNN，用 `M20PRO_INSPECTION_BACKEND=rknn` 指向 RKNN 模型。当前 `best.pt` 类别为：未戴安全帽、未穿安全背心、跌倒、火灾、现场杂乱、配电箱打开。
+转换环境固定为 Ultralytics 8.3.40、CPU Torch 2.4.1、ONNX 1.16.1 和 RKNN Toolkit2 2.3.2，执行 `scripts/convert_yolo_to_rknn.py` 可重复生成模型。104 的 RTSP 线程持续排空 30fps 源流且只保留最新帧，NPU 按 5Hz 消费，避免推理积压旧画面。当前类别为：未戴安全帽、未穿安全背心、跌倒、火灾、现场杂乱、配电箱打开。
+
+104 重装运行时使用 `scripts/104_install_rknn_runtime.sh`。脚本默认从 `/tmp` 读取 RKNNLite 2.3.2 arm64 wheel、`librknnrt.so` 和模型，安装后会执行一次 NPU 初始化检查。
 
 ## 现场复盘
 
@@ -261,22 +263,29 @@ rtsp://10.21.31.103:8554/video1
 rtsp://10.21.31.103:8554/video2
 ```
 
-104 的 `web_dashboard` 默认用 FFmpeg 拉流并转成 MJPEG，前端只在点击“打开”后才建立视频连接。当前前端不会直接把 `/camera/front.mjpg` 塞给 `<img>` 让浏览器自行缓存，而是用 `fetch(...).body.getReader()` 读取 MJPEG 长连接，按 `Content-Length` 解析每帧 JPEG，并通过 latest-frame-only 方式显示：浏览器来不及显示的旧帧会被丢弃，只保留最新帧进入绘制。
-
-如果现场感觉视频有 5 秒以上延时，先强制刷新网页，推荐 `Ctrl+F5`，确认浏览器加载的是带版本号的前端脚本：
+103 使用 Rockchip MPP 硬件编码 H.264 Constrained Baseline（1280x720、30 fps、GOP 15）。104 的独立 MediaMTX 网关按需拉取 RTSP，只做封装转换，不解码、不缩放、不转 JPEG；网页通过低延迟 HLS 播放 H.264，由浏览器硬件解码。生产链路为：
 
 ```text
-/static/dashboard.js?v=20260630-video-latest
+103 camera -> Rockchip H.264 -> RTSP -> 104 MediaMTX remux -> LL-HLS -> browser
 ```
 
-如果强刷新后仍然有明显长延时，优先检查 103 源码流、RTSP 服务端缓存、编码 GOP 或网络链路。104 上可以先确认代理空闲和当前后端配置：
+前端只在点击“打开”后加载对应播放器，关闭或切换相机时立即移除 iframe，使 104 网关停止无消费者的上游拉流。`web_dashboard` 的 `enable_camera_proxy` 必须保持为 `false`，生产进程中不应存在摄像头 FFmpeg/MJPEG 转码。
+
+如果现场仍加载旧页面，先强制刷新网页，推荐 `Ctrl+F5`，确认浏览器加载的是当前版本脚本：
+
+```text
+/static/dashboard.js?v=20260710-camera-h264
+```
+
+如果强刷新后仍然有明显长延时，优先检查 103 源码流、编码 GOP、104 网关和网络链路：
 
 ```bash
-curl http://127.0.0.1:8080/api/state | python3 -m json.tool
+systemctl status m20pro-camera-webrtc-104.service
+curl http://127.0.0.1:8888/video1/index.m3u8
 pgrep -af '[f]fmpeg .*rtsp://10.21.31.103' || true
 ```
 
-停止观看视频后，`camera_proxy.cameras.front.clients` 应回到 `0`，`running=false`，并且不应残留 FFmpeg 拉流进程。要继续接近原厂手柄的低延时手感，下一步应考虑 WebRTC 或 H.264/H.265 硬解链路，而不是继续在 MJPEG 显示层反复调参。
+YOLO 独立消费同一条 H.264 RTSP，在推理进程内只解码一次；禁止从网页帧或 MJPEG 代理取图。当前 MediaMTX v1.4.2 的 WebRTC 与现代 Chrome 的 ICE 协商不可靠，因此生产前端使用已验证的低延迟 HLS；升级网关并通过真实浏览器 ICE 验证后才可切换 WebRTC。
 
 网页重定位以作业页重定位区最终结论为准：`/initialpose` 只是网页侧触发动作，开发手册 TCP `2101/1` 回执也只是必要证据之一，不能单独算成功。现场必须在作业页看到“重定位成功”，任务区才允许开始任务。执行任务时不能重定位；需要先停止当前任务，再到作业页重定位区拖箭头并点击 `执行重定位`。
 

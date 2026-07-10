@@ -41,7 +41,8 @@ class M20TcpBridge(Node):
         self.declare_parameter("reject_origin_placeholder_pose", True)
         self.declare_parameter("origin_placeholder_radius_m", 0.05)
         self.declare_parameter("pose_jump_reject_m", 0.6)
-        self.declare_parameter("pose_jump_accept_after_s", 1.2)
+        # A persistent wrong hypothesis must not become trusted merely because it is stable.
+        self.declare_parameter("pose_jump_accept_after_s", 0.0)
         self.declare_parameter("pose_filter_hold_last_good_s", 1.0)
         self.declare_parameter("pose_relocalization_jump_grace_s", 3.0)
         self.declare_parameter("pose_relocalization_jump_grace_radius_m", 1.0)
@@ -811,6 +812,8 @@ class M20TcpBridge(Node):
             distance = math.hypot(x - float(last["x"]), y - float(last["y"]))
             if distance > jump_limit and not self._within_relocalization_jump_grace(now, x, y):
                 accept_after_s = max(0.0, float(self.get_parameter("pose_jump_accept_after_s").value))
+                if accept_after_s <= 0.0:
+                    return False, "jump_requires_relocalization distance=%.2f" % distance
                 pending = self.pending_jump_pose
                 if (
                     pending is not None

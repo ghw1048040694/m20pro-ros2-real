@@ -1,28 +1,26 @@
 # Inspection Models
 
-The current short-term test model is:
+The source model is kept on the x86_64 conversion workstation:
 
 ```text
 best.pt
 ```
 
-`best.pt` is used by the `ultralytics` backend for quick validation on a
-workstation or on 104 after Python dependencies are installed. On 104, those
-dependencies are installed outside the workspace in:
+The RK3588 production artifact generated from it is:
 
 ```text
-/home/user/m20pro_yolo_pydeps
+best_rk3588_fp16.rknn
 ```
 
-The launch file injects that path only into the YOLO node. It also preloads
-`/lib/aarch64-linux-gnu/libgomp.so.1` on 104 for the PyTorch runtime.
-
-For field deployment on RK3588, prefer converting the model to RKNN and
-override `model_path` to the RKNN artifact:
+104 contains only the RKNNLite runtime in:
 
 ```text
-playphone_bg_best_rk3588_int8.rknn
+/home/user/m20pro_rknn_pydeps
 ```
+
+It does not contain the Torch conversion environment. Rebuild the artifact on
+the workstation with `scripts/convert_yolo_to_rknn.py`; see
+`best_rk3588_fp16.json` for input format, tool versions, classes and hashes.
 
 Optional class names are stored one per line:
 

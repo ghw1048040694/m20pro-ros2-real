@@ -1,10 +1,53 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-07-09 17:48 CST
+Last updated: 2026-07-10 16:44 CST
 
 This file is maintained by Codex as the local M20 Pro project memory for future ChatGPT review. It records the current architecture, important decisions, recent changes, verification status, and next steps.
 
 Naming note: this file replaced the previous local-only `codex.md`. Going forward, maintain this file, `m20pro日志.md`, after every meaningful project change or field diagnosis.
+
+## 2026-07-10 16:44 CST - 生成 7.10 项目周报
+
+- 参照桌面 `周报/耿浩威7.3周报.docx` 的标题、字号和章节结构，生成 `/home/fabu/桌面/周报/耿浩威7.10周报.docx`。
+- 周报面向管理汇报，按导航定位、点云减负、地图与前端、H.264 视频、YOLO NPU 和工程交付归纳本周已完成成果，不采用逐日排障日志写法。
+- LibreOffice 转换检查通过：文档共 4 页，无空白页，标题和正文层级完整。
+
+## 2026-07-10 16:40 CST - YOLO 正式切换 RK3588 NPU，并撤除 104 Torch 路线
+
+- 决策修正：模型转换在 x86_64 上位机完成，104 只运行 `.rknn`；昨天在 104 安装 Torch 仅完成了基准验证，不再作为生产依赖。
+- 上位机独立转换环境：`/home/fabu/.venvs/m20pro-rknn`，固定 Ultralytics 8.3.40、CPU Torch 2.4.1、ONNX 1.16.1、RKNN Toolkit2 2.3.2；Torch 只用于读取源 `.pt` 和导出 ONNX。
+- 当前 6 类 `best.pt` 已确认：未戴安全帽、未穿安全背心、跌倒、火灾、现场杂乱、配电箱打开；导出 ONNX 固定输入 640x640、输出 `(1,10,8400)`。
+- 生成 `best_rk3588_fp16.rknn`：目标 `rk3588`，NHWC uint8 RGB 输入，模型内完成 `/255`，非量化 FP16 先建立正确性基准；转换脚本为 `scripts/convert_yolo_to_rknn.py`，元数据和 SHA256 为 `best_rk3588_fp16.json`。
+- 104 运行时：
+  - `/home/user/m20pro_rknn_pydeps` 安装官方 RKNNLite 2.3.2，约 1.7MB；
+  - `/usr/lib/librknnrt.so` 为 Rockchip 官方 aarch64 2.3.2；
+  - 驱动版本 0.9.2，模型确认运行在 RK3588 RKNPU v2；
+  - 零输入连续推理约 89ms，输出 `(1,10,8400)` float32。
+- 完整链路验证：真实 `rtsp://10.21.31.103:8554/video1` -> 最新帧预处理 -> RKNN NPU -> ROS detections/status -> `/api/state` 已通过；生产状态 `backend=rknn`、`model_loaded=true`、`ready=true`、无错误。
+- 精度对照：用数据集中的“配电箱打开”样本比较 Torch 与 RKNN FP16 原始输出，形状均为 `(1,10,8400)`，两者最高置信目标均为 class 5、anchor 8190，置信度分别为 0.99833 和 0.99854，证明类别/输出布局未在转换中错位。
+- RTSP 根治：旧节点在 5Hz 定时器内直接读取 30fps 视频，存在缓冲积压；现改为独立线程持续排空并只保留最新帧，推理消费后清空，同时强制 RTSP/TCP、低延迟和单帧缓冲。稳定后 5Hz 推理、画面年龄约 0.11s、推理约 96ms。
+- 生产切换：`/etc/default/m20pro-real` 已设 `M20PRO_ENABLE_INSPECTION=true`、`M20PRO_INSPECTION_BACKEND=rknn`，模型指向 `best_rk3588_fp16.rknn`；正式服务重启后 `M20PRO REAL OK`。
+- 撤除旧路线：104 删除 `/home/user/m20pro_yolo_pydeps`（587MB）、`/home/user/m20pro_yolo_wheelhouse`（170MB）、104 上 `.pt/.onnx` 副本及旧玩手机 RKNN 模型，共释放约 757MB；launch 不再注入 Torch PYTHONPATH 或 `LD_PRELOAD=libgomp`。
+
+## 2026-07-10 15:42 CST - 短时定位漂移自行恢复及无法人工重定位根因修复
+
+- 现场现象：定位偶尔明显漂移，约一段时间后自行回到正确位置；漂移期间网页无法稳定保留人工重定位操作。
+- 104 日志证据：
+  - 正常稳定簇约为 `(-11.2, -3.27, yaw -1.61)`；
+  - 15:22:23 原厂 `map->base_link` 跳到 `(-10.73, -5.90)`；
+  - 15:22:53 又到 `(-11.62, -5.22)`；
+  - 15:23:53 自行恢复到 `(-11.17, -3.28, yaw -1.61)`；
+  - 错误期间原厂状态仍返回 `Location=0`，所以不是网页绘制误差，而是原厂定位短时进入错误匹配假设，随后依靠激光匹配重新收敛。
+- 地图一致性复核：106 `/var/opt/robot/data/maps/active` 仍指向正确的 `map-20260625-164234`，`map_server` 也从该链接加载；不是 2026-07-09 的活动地图误切问题复发。
+- 104 防护缺口：位姿过滤器虽会拒绝首次超过 0.6m 的跳变，但旧逻辑允许错误簇稳定 1.2 秒后自动成为新的可信位姿，导致持续错误定位穿透保护。
+- 根治修改：
+  - `pose_jump_accept_after_s` 默认改为 `0.0`；
+  - 未处于明确重定位授权窗口时，超过 0.6m 的大跳变返回 `jump_requires_relocalization`，不会因持续稳定而自动接管；
+  - 正常连续运动仍按逐帧位姿更新，不受影响；明确人工重定位继续通过目标附近授权窗口接纳大跳；
+  - 错误簇被隔离后，原定位恢复到最后可信簇会自动重新放行。
+- 无法重定位根因：前端状态轮询只要看到原厂仍报定位成功，就立即清除 `localizeDraft` 并隐藏红色定位箭头；错误位姿期间 `Location=0`，所以操作员刚拖出的重定位初值会被下一轮轮询清掉。
+- 前端修复：定位草稿不再由普通状态轮询清除或隐藏，只在本次 `/api/localization/initialpose` 得到确认成功后清除；因此即使原厂错误地维持 `Location=0`，操作员仍能拖箭头并重新执行重定位。
+- 验证：`py_compile`、`node --check`、`git diff --check` 通过；定位 contract 10 项测试全部通过；104 `m20pro_navigation` 和 `m20pro_cloud_bridge` 构建通过，正式服务重启并重新进入 Nav2 active。
 
 ## 2026-07-10 14:53 CST - 网页和原厂手柄同时无画面：103 MPP 推流进程假活，已恢复
 
@@ -22855,3 +22898,24 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
     - `model_path=.../models/best.pt`;
   - 临时 YOLO 进程已清理；
   - `m20pro-real.service` 仍保持 `active`，未重启正式服务。
+
+## 2026-07-10 15:32 CST - 前端视频链路根治：H.264 直通取代 MJPEG 转码
+
+- 根因结论：旧生产链路在 104 对 103 RTSP 做软件解码、缩放、JPEG 重编码，再由网页解析 MJPEG 并逐帧创建 Blob；重复编解码、内存复制和浏览器主线程绘制造成持续卡顿，也无法作为后续 YOLO 的合理输入边界。
+- 103 两路正式视频已切换为 Rockchip MPP 硬件 H.264 Constrained Baseline：1280x720、30 fps、GOP 15、每个 IDR 携带参数集；MediaMTX 确认 `/video1`、`/video2` 都是 H.264，104 FFmpeg 解码和抽帧通过。
+- 新生产架构：`103 camera -> Rockchip H.264 -> RTSP -> 104 MediaMTX remux -> LL-HLS -> browser hardware decode`。
+- 104 新增并启用 `m20pro-camera-webrtc-104.service`：
+  - 从 103 按需拉取两路 RTSP，固定 TCP；
+  - 只 remux，不解码、不缩放、不转 JPEG；
+  - LL-HLS 使用 200ms part、1s segment、7 segment 窗口；
+  - 服务 `enabled + active`，异常退出自动重启。
+- WebRTC 调查：103 和 104 当前 MediaMTX v1.4.2 均能返回 H.264 WHEP offer，但现代 Chrome 的 ICE 探测到达后服务端不响应，最终超时；因此未把未经验证的 WebRTC iframe 投产，104 网关关闭 WebRTC 监听，生产采用真实验证通过的 LL-HLS。
+- 前端已删除 MJPEG fetch、边界解析、JPEG Blob 和逐帧绘制代码；前后相机按需加载 104 播放器，关闭或切换时移除 iframe。
+- `m20pro_real_full.sh` 正式启动参数改为 `enable_camera_proxy:=false`；104 重启后进程中没有摄像头 ffmpeg，旧 `/camera/*.mjpg` 和 `/camera/*.jpg` 不再是生产接口。
+- 真实 Chrome 验证：
+  - `video1`、`video2` 均为 1280x720；
+  - `readyState=4`、`paused=false`、`error=null`；
+  - 两路 `currentTime` 在 2 秒观察窗口内均持续推进约 2 秒；
+  - HLS master 标记 H.264 `avc1.42c028`、30 fps。
+- 104 运行态：`m20pro-real.service` 与视频网关均 active；Nav2 system check 为 `M20PRO REAL OK`；`/dev/shm` 约 10%；网关内存约 6 MB。
+- YOLO 边界：后续推理节点独立消费同一 H.264 RTSP，在推理流水线内只解码一次，不从网页帧或 MJPEG 取图。

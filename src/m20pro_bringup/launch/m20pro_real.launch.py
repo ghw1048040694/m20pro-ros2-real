@@ -39,7 +39,7 @@ def generate_launch_description():
     default_map = os.path.join(bringup_share, "maps", "F20", "occ_grid.yaml")
     default_rviz = os.path.join(bringup_share, "rviz", "m20pro_navigation.rviz")
     inspection_launch = os.path.join(inspection_share, "launch", "m20pro_inspection.launch.py")
-    default_inspection_model = os.path.join(inspection_share, "models", "best.pt")
+    default_inspection_model = os.path.join(inspection_share, "models", "best_rk3588_fp16.rknn")
     default_inspection_classes = os.path.join(inspection_share, "models", "labels_zh.txt")
     radar_launch = os.path.join(radar_share, "launch", "m20pro_radar_inspection.launch.py")
 

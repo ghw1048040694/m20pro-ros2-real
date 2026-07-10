@@ -1,0 +1,30 @@
+{
+  "source": "best.pt",
+  "source_sha256": "f466b060473f994237f1adb8c5691deffe98f30265479f2b2543e011632d8a62",
+  "onnx": "best.onnx",
+  "onnx_sha256": "45f802a9f475209257529a5920b3144fbd70e686935ad7d66045bc9ba7751a8f",
+  "artifact": "best_rk3588_fp16.rknn",
+  "artifact_sha256": "e8f1807b2691f4a8e43d1d65c991a80531831be4c59cc8a4a477fd5eba7f2d77",
+  "target_platform": "rk3588",
+  "precision": "fp16",
+  "input": {
+    "shape": [1, 640, 640, 3],
+    "layout": "NHWC",
+    "dtype": "uint8",
+    "color": "RGB"
+  },
+  "classes": {
+    "0": "no-hardhat",
+    "1": "no-safety-vest",
+    "2": "falling",
+    "3": "fire",
+    "4": "site-clutter",
+    "5": "electrical-box-open"
+  },
+  "toolchain": {
+    "ultralytics": "8.3.40",
+    "torch": "2.4.1+cpu",
+    "onnx": "1.16.1",
+    "rknn_toolkit2": "2.3.2"
+  }
+}

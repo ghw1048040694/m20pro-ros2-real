@@ -61,7 +61,7 @@ def _launch_setup(context, *args, **kwargs):
 def generate_launch_description():
     inspection_share = get_package_share_directory("m20pro_inspection")
     default_config = os.path.join(inspection_share, "config", "yolov8_inspection.yaml")
-    default_model = os.path.join(inspection_share, "models", "best.pt")
+    default_model = os.path.join(inspection_share, "models", "best_rk3588_fp16.rknn")
     default_classes = os.path.join(inspection_share, "models", "labels_zh.txt")
 
     return LaunchDescription([
@@ -73,7 +73,7 @@ def generate_launch_description():
         DeclareLaunchArgument("rtsp_url", default_value="rtsp://10.21.31.103:8554/video1"),
         DeclareLaunchArgument("image_topic", default_value="/camera/image_raw"),
         DeclareLaunchArgument("camera_name", default_value="front_wide"),
-        DeclareLaunchArgument("pythonpath", default_value="/home/user/m20pro_yolo_pydeps"),
-        DeclareLaunchArgument("ld_preload", default_value="/lib/aarch64-linux-gnu/libgomp.so.1"),
+        DeclareLaunchArgument("pythonpath", default_value="/home/user/m20pro_rknn_pydeps"),
+        DeclareLaunchArgument("ld_preload", default_value=""),
         OpaqueFunction(function=_launch_setup),
     ])

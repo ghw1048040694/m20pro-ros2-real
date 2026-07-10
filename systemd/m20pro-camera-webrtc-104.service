@@ -1,0 +1,16 @@
+[Unit]
+Description=M20Pro 104 H264 browser camera gateway
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=user
+Group=user
+ExecStart=/usr/local/lib/m20pro/mediamtx /etc/m20pro-camera-webrtc-104.yml
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,31 @@
+logLevel: info
+logDestinations: [stdout]
+
+rtsp: yes
+rtspAddress: :8555
+rtmp: no
+srt: no
+hls: yes
+hlsAddress: :8888
+hlsAllowOrigin: '*'
+hlsAlwaysRemux: no
+hlsVariant: lowLatency
+hlsSegmentCount: 7
+hlsSegmentDuration: 1s
+hlsPartDuration: 200ms
+
+webrtc: no
+
+paths:
+  video1:
+    source: rtsp://10.21.31.103:8554/video1
+    sourceOnDemand: yes
+    sourceOnDemandStartTimeout: 10s
+    sourceOnDemandCloseAfter: 10s
+    rtspTransport: tcp
+  video2:
+    source: rtsp://10.21.31.103:8554/video2
+    sourceOnDemand: yes
+    sourceOnDemandStartTimeout: 10s
+    sourceOnDemandCloseAfter: 10s
+    rtspTransport: tcp
