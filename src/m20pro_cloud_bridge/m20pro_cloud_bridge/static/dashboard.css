@@ -146,6 +146,9 @@
       height: 100%;
       image-rendering: pixelated;
       touch-action: none;
+      cursor: default;
+    }
+    canvas.pointing {
       cursor: crosshair;
     }
     canvas.panning {

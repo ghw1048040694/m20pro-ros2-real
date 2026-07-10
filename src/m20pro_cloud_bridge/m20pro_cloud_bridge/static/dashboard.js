@@ -1448,8 +1448,12 @@
     function activePointerMode() {
       const tab = activeTabName();
       if (tab === "localize") return "localize";
+      if (tab === "marks") return "mark";
       if (tab === "work") return state.workPointerMode === "mark" ? "mark" : "localize";
-      return "mark";
+      return null;
+    }
+    function updatePointerModeUi() {
+      canvas.classList.toggle("pointing", Boolean(activePointerMode()));
     }
     function setWorkPointerMode(mode) {
       state.workPointerMode = mode === "mark" ? "mark" : "localize";
@@ -1460,6 +1464,7 @@
       $("cursor").textContent = state.workPointerMode === "localize"
         ? "重定位模式：拖拽地图设置位置和朝向"
         : "标点模式：拖拽地图设置位置和朝向";
+      updatePointerModeUi();
       draw();
     }
     function drawArrow(pose, options = {}) {
@@ -2249,6 +2254,7 @@
         document.querySelectorAll(".panel").forEach(item => item.classList.remove("active"));
         btn.classList.add("active");
         $(`tab-${btn.dataset.tab}`).classList.add("active");
+        updatePointerModeUi();
         draw();
       });
     }
@@ -2268,8 +2274,10 @@
       }
       const p = canvasToWorld(evt.clientX, evt.clientY);
       if (!p) return;
+      const mode = activePointerMode();
+      if (!mode) return;
       evt.preventDefault();
-      state.markPointer = {id: evt.pointerId, start: p, moved: false, mode: activePointerMode()};
+      state.markPointer = {id: evt.pointerId, start: p, moved: false, mode};
       canvas.setPointerCapture(evt.pointerId);
       if (state.markPointer.mode === "localize") {
         setLocalizeDraft(

@@ -22997,3 +22997,11 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - Web 录包根因修正：瞬态 systemd 单元与正式 root ROS/DDS 服务使用同一运行身份，显式设置 `HOME/USER/LOGNAME/ROS_LOG_DIR`，避免 ROS2 日志目录初始化崩溃和普通用户 DDS 只发现原厂话题；录制完成后自动将 bag 归属修正为 `user:user`。
 - 104 真实验收包 `web_api_acceptance6_20260710_203207`：10.504s、4.6 MiB、1060 条消息；`/m20pro/recording_scan=30`、`map_pose=143`、`/odom=144`、`/tf=249`、`/map=1`，静止状态下 `/cmd_vel=0` 符合预期。
 - 验证状态：JavaScript/Python/Bash 语法、`git diff --check`、20 个 `scripts/test_*.py`、5 个 ROS2 包全量构建通过；104 `m20pro-real.service=active`，系统检查输出 `M20PRO REAL OK`。
+
+## 2026-07-10 21:10 CST - 地图标点改为显式模式白名单
+
+- 根因：共享前端控制器的地图指针状态机将“定位”和新前端“作业”以外的所有标签默认回退为标点，导致看板、地图、任务等页面点击地图也会改写待保存点位。
+- 修正为显式白名单：只有原前端“标点”标签或新前端“作业 -> 标点”被选中时才能产生标点草稿；“定位”只生成重定位草稿；其余页面点击不产生、不改写任何点位。
+- 交互提示同步收口：仅标点/定位取点模式显示十字光标，其余状态使用普通光标。
+- 104 真实 Chrome PointerEvent 验收：看板页点击后点位坐标仍为空；进入“标点”后点击成功写入 `-12.970, 19.100`；切换到“任务”后点击其他位置，坐标保持不变。
+- JavaScript 语法、`git diff --check`、5 个 ROS2 包全量构建通过；104 静态资源已同步，`m20pro-real.service=active`。
