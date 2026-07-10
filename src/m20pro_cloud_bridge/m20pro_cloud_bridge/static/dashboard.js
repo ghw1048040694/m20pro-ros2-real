@@ -96,148 +96,27 @@
       transition: "#b45309"
     };
     const cameraViewers = {
-      front: { active: false, token: 0, objectUrl: null, abortController: null, latestPayload: null, renderScheduled: false },
-      rear: { active: false, token: 0, objectUrl: null, abortController: null, latestPayload: null, renderScheduled: false }
+      front: { active: false },
+      rear: { active: false }
     };
 
 	    function $(id) { return document.getElementById(id); }
 	    function text(value) { return value === null || value === undefined || value === "" ? "-" : String(value); }
 	    function fmtNumber(value, digits = 2) { return Number.isFinite(value) ? value.toFixed(digits) : "-"; }
-	    function clearVideoFrame(name) {
-	      const img = $(`${name}Video`);
-	      const viewer = cameraViewers[name];
-	      if (!img || !viewer) return;
-	      img.removeAttribute("src");
-	      if (viewer.abortController) {
-	        viewer.abortController.abort();
-	        viewer.abortController = null;
-	      }
-	      viewer.latestPayload = null;
-	      viewer.renderScheduled = false;
-	      if (viewer.objectUrl) {
-	        URL.revokeObjectURL(viewer.objectUrl);
-	        viewer.objectUrl = null;
-	      }
-	    }
-	    function parseMjpegHeaders(headerText) {
-	      const headers = {};
-	      for (const line of headerText.split("\r\n")) {
-	        const index = line.indexOf(":");
-	        if (index <= 0) continue;
-	        headers[line.slice(0, index).trim().toLowerCase()] = line.slice(index + 1).trim();
-	      }
-	      return headers;
-	    }
-	    async function displayVideoFrame(img, viewer, payload) {
-	      const nextUrl = URL.createObjectURL(new Blob([payload], { type: "image/jpeg" }));
-	      const oldUrl = viewer.objectUrl;
-	      viewer.objectUrl = nextUrl;
-	      img.src = nextUrl;
-	      if (oldUrl) URL.revokeObjectURL(oldUrl);
-	    }
-	    function queueLatestVideoFrame(img, viewer, token, payload) {
-	      viewer.latestPayload = payload;
-	      if (viewer.renderScheduled) return;
-	      viewer.renderScheduled = true;
-	      requestAnimationFrame(() => {
-	        viewer.renderScheduled = false;
-	        const latestPayload = viewer.latestPayload;
-	        viewer.latestPayload = null;
-	        if (!viewer.active || viewer.token !== token || !latestPayload) return;
-	        displayVideoFrame(img, viewer, latestPayload);
-	      });
-	    }
-	    async function pumpVideoFrames(name, token) {
-	      const img = $(`${name}Video`);
-	      const viewer = cameraViewers[name];
-	      if (!img || !viewer) return;
-	      const source = img.dataset.src;
-	      while (viewer.active && viewer.token === token && source) {
-	        const abortController = new AbortController();
-	        viewer.abortController = abortController;
-	        try {
-	          const separator = source.includes("?") ? "&" : "?";
-	          const response = await fetch(`${source}${separator}ts=${Date.now()}`, {
-	            cache: "no-store",
-	            signal: abortController.signal
-	          });
-	          if (!response.ok) throw new Error(`HTTP ${response.status}`);
-	          if (!response.body) throw new Error("stream unavailable");
-	          const reader = response.body.getReader();
-	          let buffer = new Uint8Array(0);
-	          while (viewer.active && viewer.token === token) {
-	            const { value, done } = await reader.read();
-	            if (done) break;
-	            if (!value) continue;
-	            const merged = new Uint8Array(buffer.length + value.length);
-	            merged.set(buffer);
-	            merged.set(value, buffer.length);
-	            buffer = merged;
-	            while (viewer.active && viewer.token === token) {
-	              const headerEnd = findBytePattern(buffer, [13, 10, 13, 10]);
-	              if (headerEnd < 0) {
-	                if (buffer.length > 2000000) buffer = buffer.slice(buffer.length - 4096);
-	                break;
-	              }
-	              const headerText = new TextDecoder("latin1").decode(buffer.slice(0, headerEnd));
-	              const headers = parseMjpegHeaders(headerText);
-	              const contentLength = Number(headers["content-length"]);
-	              if (!Number.isFinite(contentLength) || contentLength <= 0) {
-	                const nextBoundary = findBytePattern(buffer.slice(Math.max(1, headerEnd)), [45, 45, 102, 114, 97, 109, 101]);
-	                if (nextBoundary < 0) break;
-	                buffer = buffer.slice(Math.max(1, headerEnd) + nextBoundary);
-	                continue;
-	              }
-	              const frameStart = headerEnd + 4;
-	              const frameEnd = frameStart + contentLength;
-	              if (buffer.length < frameEnd + 2) break;
-		              const payload = buffer.slice(frameStart, frameEnd);
-		              buffer = buffer.slice(frameEnd + 2);
-		              if (payload.length > 2 && payload[0] === 0xff && payload[1] === 0xd8) {
-		                queueLatestVideoFrame(img, viewer, token, payload);
-		              }
-	            }
-	          }
-	        } catch (err) {
-	          if (!viewer.active || viewer.token !== token || err.name === "AbortError") break;
-	          await new Promise(resolve => setTimeout(resolve, 500));
-	        } finally {
-	          if (viewer.abortController === abortController) viewer.abortController = null;
-	        }
-	      }
-	      if (viewer.token === token && !viewer.active) clearVideoFrame(name);
-	    }
-	    function findBytePattern(buffer, pattern) {
-	      outer:
-	      for (let i = 0; i <= buffer.length - pattern.length; i += 1) {
-	        for (let j = 0; j < pattern.length; j += 1) {
-	          if (buffer[i + j] !== pattern[j]) continue outer;
-	        }
-	        return i;
-	      }
-	      return -1;
-	    }
 	    function setVideoActive(cameraName) {
 	      for (const name of ["front", "rear"]) {
-	        const img = $(`${name}Video`);
+	        const frame = $(`${name}Video`);
 	        const btn = $(`${name}VideoBtn`);
-	        if (!img || !btn) continue;
+	        if (!frame || !btn) continue;
 	        const viewer = cameraViewers[name];
-			        const active = name === cameraName;
-			        if (active) {
-			          if (viewer && !viewer.active) {
-			            viewer.active = true;
-			            viewer.token += 1;
-			            pumpVideoFrames(name, viewer.token);
-			          }
-			          btn.textContent = "关闭";
-			          btn.classList.add("active");
+	        const active = name === cameraName;
+	        viewer.active = active;
+	        if (active) {
+	          frame.src = frame.dataset.src;
+	          btn.textContent = "关闭";
+	          btn.classList.add("active");
 	        } else {
-	          if (viewer) {
-	            viewer.active = false;
-	            viewer.token += 1;
-	          }
-	          clearVideoFrame(name);
+	          frame.removeAttribute("src");
 	          btn.textContent = "打开";
 	          btn.classList.remove("active");
 	        }

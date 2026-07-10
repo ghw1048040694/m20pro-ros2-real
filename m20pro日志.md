@@ -1,6 +1,6 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-07-09 17:48 CST
+Last updated: 2026-07-10 15:32 CST
 
 This file is maintained by Codex as the local M20 Pro project memory for future ChatGPT review. It records the current architecture, important decisions, recent changes, verification status, and next steps.
 
@@ -22855,3 +22855,24 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
     - `model_path=.../models/best.pt`;
   - 临时 YOLO 进程已清理；
   - `m20pro-real.service` 仍保持 `active`，未重启正式服务。
+
+## 2026-07-10 15:32 CST - 前端视频链路根治：H.264 直通取代 MJPEG 转码
+
+- 根因结论：旧生产链路在 104 对 103 RTSP 做软件解码、缩放、JPEG 重编码，再由网页解析 MJPEG 并逐帧创建 Blob；重复编解码、内存复制和浏览器主线程绘制造成持续卡顿，也无法作为后续 YOLO 的合理输入边界。
+- 103 两路正式视频已切换为 Rockchip MPP 硬件 H.264 Constrained Baseline：1280x720、30 fps、GOP 15、每个 IDR 携带参数集；MediaMTX 确认 `/video1`、`/video2` 都是 H.264，104 FFmpeg 解码和抽帧通过。
+- 新生产架构：`103 camera -> Rockchip H.264 -> RTSP -> 104 MediaMTX remux -> LL-HLS -> browser hardware decode`。
+- 104 新增并启用 `m20pro-camera-webrtc-104.service`：
+  - 从 103 按需拉取两路 RTSP，固定 TCP；
+  - 只 remux，不解码、不缩放、不转 JPEG；
+  - LL-HLS 使用 200ms part、1s segment、7 segment 窗口；
+  - 服务 `enabled + active`，异常退出自动重启。
+- WebRTC 调查：103 和 104 当前 MediaMTX v1.4.2 均能返回 H.264 WHEP offer，但现代 Chrome 的 ICE 探测到达后服务端不响应，最终超时；因此未把未经验证的 WebRTC iframe 投产，104 网关关闭 WebRTC 监听，生产采用真实验证通过的 LL-HLS。
+- 前端已删除 MJPEG fetch、边界解析、JPEG Blob 和逐帧绘制代码；前后相机按需加载 104 播放器，关闭或切换时移除 iframe。
+- `m20pro_real_full.sh` 正式启动参数改为 `enable_camera_proxy:=false`；104 重启后进程中没有摄像头 ffmpeg，旧 `/camera/*.mjpg` 和 `/camera/*.jpg` 不再是生产接口。
+- 真实 Chrome 验证：
+  - `video1`、`video2` 均为 1280x720；
+  - `readyState=4`、`paused=false`、`error=null`；
+  - 两路 `currentTime` 在 2 秒观察窗口内均持续推进约 2 秒；
+  - HLS master 标记 H.264 `avc1.42c028`、30 fps。
+- 104 运行态：`m20pro-real.service` 与视频网关均 active；Nav2 system check 为 `M20PRO REAL OK`；`/dev/shm` 约 10%；网关内存约 6 MB。
+- YOLO 边界：后续推理节点独立消费同一 H.264 RTSP，在推理流水线内只解码一次，不从网页帧或 MJPEG 取图。

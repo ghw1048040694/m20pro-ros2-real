@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>M20Pro 现场操作台</title>
-  <link rel="stylesheet" href="/static/dashboard.css?v=20260701-floor-display" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=20260710-camera-h264" />
 
 </head>
 <body>
@@ -92,14 +92,14 @@
 	                  <strong>前摄像头</strong>
 	                  <button id="frontVideoBtn" class="mini-btn" type="button" data-video-camera="front">打开</button>
 	                </div>
-		                <img id="frontVideo" data-src="/camera/front.mjpg" alt="前摄像头画面" />
+	                <iframe id="frontVideo" data-src="http://10.21.31.104:8888/video1/" title="前摄像头画面" allow="autoplay; fullscreen" loading="lazy"></iframe>
 	              </div>
 	              <div class="video-card">
 	                <div class="video-head">
 	                  <strong>后摄像头</strong>
 	                  <button id="rearVideoBtn" class="mini-btn" type="button" data-video-camera="rear">打开</button>
 	                </div>
-		                <img id="rearVideo" data-src="/camera/rear.mjpg" alt="后摄像头画面" />
+	                <iframe id="rearVideo" data-src="http://10.21.31.104:8888/video2/" title="后摄像头画面" allow="autoplay; fullscreen" loading="lazy"></iframe>
 	              </div>
             </div>
           </div>
@@ -386,7 +386,7 @@
     </aside>
   </main>
 
-  <script src="/static/dashboard.js?v=20260709-final-localization-verdict"></script>
+  <script src="/static/dashboard.js?v=20260710-camera-h264"></script>
 
 </body>
 </html>

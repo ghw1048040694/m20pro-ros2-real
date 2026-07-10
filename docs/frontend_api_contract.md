@@ -655,16 +655,16 @@ M20PRO_INSPECTION_CLASS_NAMES_PATH=/home/user/m20pro_real_ros2_ws/install/m20pro
 
 | 接口 | 说明 |
 | --- | --- |
-| `GET /camera/front.mjpg` | 前相机 MJPEG |
-| `GET /camera/rear.mjpg` | 后相机 MJPEG |
-| `GET /camera/front.jpg` | 前相机单帧 |
-| `GET /camera/rear.jpg` | 后相机单帧 |
+| `http://10.21.31.104:8888/video1/` | 前相机 H.264 低延迟 HLS 播放器 |
+| `http://10.21.31.104:8888/video2/` | 后相机 H.264 低延迟 HLS 播放器 |
 
-视频是否可用可先看：
+`/camera/*.mjpg` 与 `/camera/*.jpg` 属于已停用的旧代理接口，正式服务以 `enable_camera_proxy=false` 启动。视频网关按需拉取 103 RTSP，不经过 `web_dashboard` 的 Python/FFmpeg/JPEG 路径。
+
+视频是否可用可检查：
 
 ```text
-GET /api/state?debug=0
-camera_proxy
+GET http://10.21.31.104:8888/video1/index.m3u8
+GET http://10.21.31.104:8888/video2/index.m3u8
 ```
 
 ## 项目接口

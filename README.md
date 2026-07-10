@@ -255,22 +255,29 @@ rtsp://10.21.31.103:8554/video1
 rtsp://10.21.31.103:8554/video2
 ```
 
-104 的 `web_dashboard` 默认用 FFmpeg 拉流并转成 MJPEG，前端只在点击“打开”后才建立视频连接。当前前端不会直接把 `/camera/front.mjpg` 塞给 `<img>` 让浏览器自行缓存，而是用 `fetch(...).body.getReader()` 读取 MJPEG 长连接，按 `Content-Length` 解析每帧 JPEG，并通过 latest-frame-only 方式显示：浏览器来不及显示的旧帧会被丢弃，只保留最新帧进入绘制。
-
-如果现场感觉视频有 5 秒以上延时，先强制刷新网页，推荐 `Ctrl+F5`，确认浏览器加载的是带版本号的前端脚本：
+103 使用 Rockchip MPP 硬件编码 H.264 Constrained Baseline（1280x720、30 fps、GOP 15）。104 的独立 MediaMTX 网关按需拉取 RTSP，只做封装转换，不解码、不缩放、不转 JPEG；网页通过低延迟 HLS 播放 H.264，由浏览器硬件解码。生产链路为：
 
 ```text
-/static/dashboard.js?v=20260630-video-latest
+103 camera -> Rockchip H.264 -> RTSP -> 104 MediaMTX remux -> LL-HLS -> browser
 ```
 
-如果强刷新后仍然有明显长延时，优先检查 103 源码流、RTSP 服务端缓存、编码 GOP 或网络链路。104 上可以先确认代理空闲和当前后端配置：
+前端只在点击“打开”后加载对应播放器，关闭或切换相机时立即移除 iframe，使 104 网关停止无消费者的上游拉流。`web_dashboard` 的 `enable_camera_proxy` 必须保持为 `false`，生产进程中不应存在摄像头 FFmpeg/MJPEG 转码。
+
+如果现场仍加载旧页面，先强制刷新网页，推荐 `Ctrl+F5`，确认浏览器加载的是当前版本脚本：
+
+```text
+/static/dashboard.js?v=20260710-camera-h264
+```
+
+如果强刷新后仍然有明显长延时，优先检查 103 源码流、编码 GOP、104 网关和网络链路：
 
 ```bash
-curl http://127.0.0.1:8080/api/state | python3 -m json.tool
+systemctl status m20pro-camera-webrtc-104.service
+curl http://127.0.0.1:8888/video1/index.m3u8
 pgrep -af '[f]fmpeg .*rtsp://10.21.31.103' || true
 ```
 
-停止观看视频后，`camera_proxy.cameras.front.clients` 应回到 `0`，`running=false`，并且不应残留 FFmpeg 拉流进程。要继续接近原厂手柄的低延时手感，下一步应考虑 WebRTC 或 H.264/H.265 硬解链路，而不是继续在 MJPEG 显示层反复调参。
+YOLO 独立消费同一条 H.264 RTSP，在推理进程内只解码一次；禁止从网页帧或 MJPEG 代理取图。当前 MediaMTX v1.4.2 的 WebRTC 与现代 Chrome 的 ICE 协商不可靠，因此生产前端使用已验证的低延迟 HLS；升级网关并通过真实浏览器 ICE 验证后才可切换 WebRTC。
 
 网页重定位以作业页重定位区最终结论为准：`/initialpose` 只是网页侧触发动作，开发手册 TCP `2101/1` 回执也只是必要证据之一，不能单独算成功。现场必须在作业页看到“重定位成功”，任务区才允许开始任务。执行任务时不能重定位；需要先停止当前任务，再到作业页重定位区拖箭头并点击 `执行重定位`。
 
