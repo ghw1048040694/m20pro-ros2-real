@@ -163,18 +163,22 @@ def test_node_and_topic_items() -> None:
     assert_equal(nodes_missing["message"], "缺少：/map_server", "missing node message")
 
     topics_ok = preflight_base_topics_item(
-        ["/LIDAR/POINTS", "/map"],
-        ["/LIDAR/POINTS", "/map"],
+        ["/m20pro_tcp_bridge/navigation_status", "/map"],
+        ["/m20pro_tcp_bridge/navigation_status", "/map"],
     )
     assert_equal(topics_ok["status"], "ok", "topics ok")
     assert_equal(topics_ok["message"], "全部存在", "topics ok message")
 
     base_missing = preflight_base_topics_item(
         ["/map"],
-        ["/LIDAR/POINTS", "/map"],
+        ["/m20pro_tcp_bridge/navigation_status", "/map"],
     )
     assert_equal(base_missing["status"], "fail", "base topic missing fails")
-    assert_equal(base_missing["message"], "缺少：/LIDAR/POINTS", "base topic missing message")
+    assert_equal(
+        base_missing["message"],
+        "缺少：/m20pro_tcp_bridge/navigation_status",
+        "base topic missing message",
+    )
 
     navigation_missing = preflight_navigation_topics_item(
         ["/scan"],
@@ -229,64 +233,33 @@ def test_odom_navigation_status_and_lifecycle_items() -> None:
 
 
 def test_perception_items() -> None:
-    lidar_ready = preflight_perception_items(
-        {"width": 10, "height": 2},
-        {"finite_ranges": 0},
-        lidar_ok=True,
-        scan_ok=False,
-        lidar_age_text="0.2s 前",
-        scan_age_text="",
-        finite_ranges=0,
-    )
-    assert_equal(lidar_ready["perception_ok"], True, "lidar makes perception ready")
-    assert_equal(lidar_ready["items"][0]["status"], "ok", "lidar item ok")
-    assert_equal(lidar_ready["items"][0]["message"], "20 点 / 0.2s 前", "lidar message")
-    assert_equal(lidar_ready["items"][1]["status"], "warn", "scan missing warns")
-
-    scan_fallback = preflight_perception_items(
-        {},
+    ready = preflight_perception_items(
         {"finite_ranges": 36},
-        lidar_ok=False,
         scan_ok=True,
-        lidar_age_text="",
         scan_age_text="0.4s 前",
         finite_ranges=36,
     )
-    assert_equal(scan_fallback["perception_ok"], True, "scan fallback makes perception usable")
-    assert_equal(scan_fallback["items"][0]["status"], "warn", "missing lidar warns when scan works")
-    assert_equal(
-        scan_fallback["items"][0]["message"],
-        "未直接缓存原始点云，但 /scan 新鲜且有效距离 36；工位自检按感知链路可用处理",
-        "scan fallback lidar message",
-    )
-    assert_equal(scan_fallback["items"][1]["status"], "ok", "scan item ok")
-    assert_equal(scan_fallback["items"][1]["message"], "有效距离 36 / 0.4s 前", "scan message")
+    assert_equal(ready["perception_ok"], True, "edge scan makes perception usable")
+    assert_equal(ready["items"][0]["status"], "ok", "edge scan item ok")
+    assert_equal(ready["items"][1]["status"], "ok", "scan item ok")
 
     missing = preflight_perception_items(
         {},
-        {},
-        lidar_ok=False,
         scan_ok=False,
-        lidar_age_text="",
         scan_age_text="",
         finite_ranges=0,
     )
     assert_equal(missing["perception_ok"], False, "missing perception fails")
-    assert_equal(missing["items"][0]["status"], "fail", "missing lidar fails")
-    assert_equal(missing["items"][0]["message"], "未收到 /LIDAR/POINTS，也没有可用 /scan", "missing lidar message")
+    assert_equal(missing["items"][0]["status"], "fail", "missing edge scan fails")
     assert_equal(missing["items"][1]["message"], "未收到 /scan；未定位或 TF 未建立时可能暂时没有", "missing scan message")
 
     malformed = preflight_perception_items(
-        {"width": "bad", "height": None},
         {},
-        lidar_ok=True,
         scan_ok=True,
-        lidar_age_text="0.1s 前",
         scan_age_text="0.1s 前",
         finite_ranges="bad",
     )
     assert_equal(malformed["perception_ok"], False, "malformed counts do not crash or pass")
-    assert_equal(malformed["lidar_points"], 0, "malformed lidar count defaults to zero")
     assert_equal(malformed["finite_ranges"], 0, "malformed scan count defaults to zero")
 
 

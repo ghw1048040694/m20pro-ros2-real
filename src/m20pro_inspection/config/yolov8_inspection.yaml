@@ -8,12 +8,13 @@ m20pro_yolov8_inspection:
     image_topic: "/camera/image_raw"
     camera_name: "front_wide"
 
-    # Put the RK3588 NPU model at src/m20pro_inspection/models/inspection.rknn,
-    # or override model_path in the launch command.
-    backend: "auto"  # auto, rknn, onnx, or dry_run
+    # Put the current .pt test model at src/m20pro_inspection/models/best.pt.
+    # For field deployment on RK3588, prefer a converted .rknn model and override model_path.
+    backend: "auto"  # auto, ultralytics, rknn, onnx, or dry_run
     model_path: ""
     class_names_path: ""
     class_names: [""]
+    ultralytics_device: "cpu"
 
     input_size: 640
     conf_threshold: 0.35
@@ -28,6 +29,7 @@ m20pro_yolov8_inspection:
     detections_topic: "~/detections"
     annotated_image_topic: "~/annotated_image"
     event_topic: "~/events"
+    status_topic: "~/status"
 
     # Empty event_classes means every class can generate an event.
     event_classes: [""]

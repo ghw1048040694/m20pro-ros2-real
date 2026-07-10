@@ -20,7 +20,7 @@ from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path as RosPath
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import Image, LaserScan, PointCloud2
+from sensor_msgs.msg import Image, LaserScan
 from std_msgs.msg import Bool, String
 from visualization_msgs.msg import Marker, MarkerArray
 
@@ -693,11 +693,6 @@ class WebDashboardNode(Node):
         self._map_file_cache_lock = threading.Lock()
         self._map_file_cache: Dict[str, Dict[str, Any]] = {}
         self._map_file_summary_cache: Dict[str, Dict[str, Any]] = {}
-        self._lidar_points_topic = str(self.get_parameter("lidar_points_topic").value)
-        self._lidar_points_relay_subscribe_topic = str(self.get_parameter("lidar_points_relay_subscribe_topic").value)
-        self._enable_lidar_points_subscriptions = bool(
-            self.get_parameter("enable_lidar_points_subscriptions").value
-        )
         self._last_scan_overlay_update = 0.0
         self._last_scan_overlay_points: List[Dict[str, float]] = []
         self._startup_map_sync_timer = None
@@ -735,16 +730,6 @@ class WebDashboardNode(Node):
             str(self.get_parameter("stair_zones_topic").value),
             10,
         )
-        self.lidar_points_relay_pub = None
-        if bool(self.get_parameter("enable_lidar_points_relay").value):
-            relay_topic = str(self.get_parameter("lidar_points_relay_topic").value)
-            relay_qos = QoSProfile(depth=2)
-            relay_qos.reliability = ReliabilityPolicy.BEST_EFFORT
-            self.lidar_points_relay_pub = self.create_publisher(PointCloud2, relay_topic, relay_qos)
-            self.get_logger().info(
-                "LIDAR pointcloud relay enabled: %s -> %s"
-                % (str(self.get_parameter("lidar_points_topic").value), relay_topic)
-            )
         self.clear_costmap_clients = []
         if ClearEntireCostmap is not None:
             self.clear_costmap_clients = [
@@ -768,7 +753,6 @@ class WebDashboardNode(Node):
             "navigation_status": None,
             "navigation_status_parsed": None,
             "battery": None,
-            "lidar_relay_status": None,
             "pose": None,
             "path": {"version": 0, "points": []},
             "pose_history": [],
@@ -776,6 +760,7 @@ class WebDashboardNode(Node):
             "map_version": 0,
             "dynamic_obstacles": [],
             "detections": None,
+            "inspection_status": None,
             "active_waypoint": None,
             "relocalization_result": None,
             "map_relocalization_required": None,
@@ -872,14 +857,7 @@ class WebDashboardNode(Node):
         self.declare_parameter("localization_ok_topic", "/m20pro_tcp_bridge/localization_ok")
         self.declare_parameter("navigation_status_topic", "/m20pro_tcp_bridge/navigation_status")
         self.declare_parameter("battery_topic", "/BATTERY_DATA")
-        self.declare_parameter("lidar_points_topic", "/LIDAR/POINTS")
-        self.declare_parameter("lidar_points_relay_subscribe_topic", "/m20pro/lidar_points_relay")
-        self.declare_parameter("lidar_relay_status_topic", "/m20pro/lidar_relay/status")
-        self.declare_parameter("enable_lidar_points_subscriptions", True)
-        self.declare_parameter("enable_lidar_points_relay", False)
-        self.declare_parameter("lidar_points_relay_topic", "/m20pro/lidar_points_relay")
         self.declare_parameter("scan_topic", "/scan")
-        self.declare_parameter("perception_mode", "local_fusion")
         self.declare_parameter("scan_overlay_max_points", 720)
         self.declare_parameter("scan_overlay_update_min_interval_s", 0.1)
         self.declare_parameter("scan_overlay_min_range_m", 0.05)
@@ -897,6 +875,7 @@ class WebDashboardNode(Node):
         self.declare_parameter("relocalization_result_topic", "/m20pro_tcp_bridge/relocalization_result")
         self.declare_parameter("detections_topic", "/m20pro_yolov8_inspection/detections")
         self.declare_parameter("events_topic", "/m20pro_yolov8_inspection/events")
+        self.declare_parameter("inspection_status_topic", "/m20pro_yolov8_inspection/status")
         self.declare_parameter("annotated_image_topic", "/m20pro_yolov8_inspection/annotated_image")
         self.declare_parameter("subscribe_annotated_image", False)
         self.declare_parameter("enable_camera_proxy", False)
@@ -1168,9 +1147,6 @@ class WebDashboardNode(Node):
         map_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
         scan_qos = QoSProfile(depth=5)
         scan_qos.reliability = ReliabilityPolicy.BEST_EFFORT
-        cloud_qos = QoSProfile(depth=2)
-        cloud_qos.reliability = ReliabilityPolicy.BEST_EFFORT
-        cloud_qos.durability = DurabilityPolicy.VOLATILE
 
         self.create_subscription(String, self._topic("current_floor_topic"), self._on_current_floor, 10)
         self.create_subscription(String, self._topic("stair_status_topic"), self._on_stair_status, 10)
@@ -1183,27 +1159,6 @@ class WebDashboardNode(Node):
             self.create_subscription(BatteryData, self._topic("battery_topic"), self._on_battery, 10)
         else:
             self.get_logger().warning("drdds.msg.BatteryData is unavailable; battery display is disabled")
-        if self._enable_lidar_points_subscriptions and self._topic("lidar_points_topic"):
-            self.create_subscription(PointCloud2, self._topic("lidar_points_topic"), self._on_lidar_points, cloud_qos)
-        relay_subscribe_topic = self._topic("lidar_points_relay_subscribe_topic")
-        if (
-            self._enable_lidar_points_subscriptions
-            and relay_subscribe_topic
-            and relay_subscribe_topic != self._topic("lidar_points_topic")
-        ):
-            self.create_subscription(
-                PointCloud2,
-                relay_subscribe_topic,
-                self._on_lidar_points_relay,
-                cloud_qos,
-            )
-        if self._enable_lidar_points_subscriptions and self._topic("lidar_relay_status_topic"):
-            self.create_subscription(
-                String,
-                self._topic("lidar_relay_status_topic"),
-                self._on_lidar_relay_status,
-                10,
-            )
         self.create_subscription(LaserScan, self._topic("scan_topic"), self._on_scan, scan_qos)
         self.create_subscription(Odometry, self._topic("odom_topic"), self._on_odom, 10)
         self.create_subscription(PoseStamped, self._topic("pose_topic"), self._on_pose, 20)
@@ -1221,6 +1176,7 @@ class WebDashboardNode(Node):
         )
         self.create_subscription(String, self._topic("detections_topic"), self._on_detections, 10)
         self.create_subscription(String, self._topic("events_topic"), self._on_event, 10)
+        self.create_subscription(String, self._topic("inspection_status_topic"), self._on_inspection_status, 10)
 
         if bool(self.get_parameter("subscribe_annotated_image").value):
             self.create_subscription(Image, self._topic("annotated_image_topic"), self._on_annotated_image, 2)
@@ -1324,40 +1280,6 @@ class WebDashboardNode(Node):
         with self._lock:
             self._state["battery"] = battery
             self._mark_topic("battery")
-
-    def _on_lidar_points(self, msg: PointCloud2) -> None:
-        source = "relay" if self._lidar_points_topic == self._lidar_points_relay_subscribe_topic else "raw"
-        self._remember_lidar_points(msg, source)
-        if self.lidar_points_relay_pub is not None:
-            self.lidar_points_relay_pub.publish(msg)
-
-    def _on_lidar_points_relay(self, msg: PointCloud2) -> None:
-        self._remember_lidar_points(msg, "relay")
-
-    def _on_lidar_relay_status(self, msg: String) -> None:
-        parsed = parse_json_text(msg.data)
-        if not isinstance(parsed, dict):
-            parsed = {"raw": msg.data}
-        parsed["last_update"] = time.time()
-        with self._lock:
-            self._state["lidar_relay_status"] = parsed
-            self._mark_topic("lidar_relay_status")
-
-    def _remember_lidar_points(self, msg: PointCloud2, source: str) -> None:
-        stamp = stamp_to_float(msg.header.stamp)
-        with self._lock:
-            self._state["lidar_points"] = {
-                "last_update": time.time(),
-                "stamp": stamp,
-                "frame_id": msg.header.frame_id,
-                "width": int(msg.width),
-                "height": int(msg.height),
-                "point_step": int(msg.point_step),
-                "row_step": int(msg.row_step),
-                "is_dense": bool(msg.is_dense),
-                "source": source,
-            }
-            self._mark_topic("lidar_points")
 
     def _on_scan(self, msg: LaserScan) -> None:
         now = time.time()
@@ -1571,6 +1493,15 @@ class WebDashboardNode(Node):
             }
             self._mark_topic("detections")
 
+    def _on_inspection_status(self, msg: String) -> None:
+        with self._lock:
+            self._state["inspection_status"] = {
+                "last_update": time.time(),
+                "raw": msg.data,
+                "parsed": parse_json_text(msg.data),
+            }
+            self._mark_topic("inspection_status")
+
     def _on_relocalization_result(self, msg: String) -> None:
         with self._lock:
             self._state["relocalization_result"] = {
@@ -1627,7 +1558,7 @@ class WebDashboardNode(Node):
             snapshot["pose_history"] = list(self._state.get("pose_history") or [])
             snapshot["dynamic_obstacles"] = list(self._state["dynamic_obstacles"])
             snapshot["events"] = list(self._state["events"])
-            for key in ("lidar_points", "lidar_relay_status", "scan", "odom", "local_costmap", "global_costmap", "active_waypoint"):
+            for key in ("scan", "odom", "local_costmap", "global_costmap", "active_waypoint"):
                 if isinstance(self._state.get(key), dict):
                     snapshot[key] = dict(self._state[key])
             snapshot["topics"] = {
@@ -1640,7 +1571,6 @@ class WebDashboardNode(Node):
             snapshot,
             now=now,
             now_text=now_text,
-            perception_mode=str(self.get_parameter("perception_mode").value),
         )
         with self._data_lock:
             snapshot["selected_map_id"] = self._settings.get("selected_map_id")
@@ -2139,8 +2069,6 @@ class WebDashboardNode(Node):
         items: List[Dict[str, Any]] = []
 
         node_names = set(self.get_node_names())
-        perception_mode = str(self.get_parameter("perception_mode").value or "local_fusion")
-        edge_scan_mode = perception_mode == "edge_scan"
         required_nodes = [
             "m20pro_tcp_bridge",
             "m20pro_web_dashboard",
@@ -2151,8 +2079,6 @@ class WebDashboardNode(Node):
             "m20pro_nav2_startup_gate",
             "m20pro_floor_manager",
         ]
-        if not edge_scan_mode:
-            required_nodes.insert(1, "m20pro_pointcloud_fusion")
         items.append(preflight_node_item(list(node_names), required_nodes))
 
         topic_names = {name for name, _types in self.get_topic_names_and_types()}
@@ -2160,8 +2086,6 @@ class WebDashboardNode(Node):
             self._topic("navigation_status_topic"),
             self._topic("map_topic"),
         ]
-        if not edge_scan_mode:
-            base_topics.insert(0, self._topic("lidar_points_topic"))
         navigation_topics = [
             self._topic("scan_topic"),
             self._topic("odom_topic"),
@@ -2177,7 +2101,6 @@ class WebDashboardNode(Node):
             current_state = {
                 key: self._state.get(key)
                 for key in (
-                    "lidar_points",
                     "scan",
                     "odom",
                     "pose",
@@ -2208,30 +2131,12 @@ class WebDashboardNode(Node):
 
         scan_ok, scan_age, scan = fresh("scan")
         finite_ranges = int(scan.get("finite_ranges", 0)) if isinstance(scan, dict) else 0
-        lidar_ok, lidar_age, lidar = fresh("lidar_points")
         perception = preflight_perception_items(
-            lidar if isinstance(lidar, dict) else {},
             scan if isinstance(scan, dict) else {},
-            lidar_ok=lidar_ok,
             scan_ok=scan_ok,
-            lidar_age_text=fmt_age_text(lidar_age) if lidar_age is not None else "",
             scan_age_text=fmt_age_text(scan_age) if scan_age is not None else "",
             finite_ranges=finite_ranges,
         )
-        if edge_scan_mode:
-            scan_ready = bool(scan_ok and finite_ranges > 0)
-            for item in perception["items"]:
-                if item.get("key") == "lidar_points":
-                    item["key"] = "edge_scan"
-                    item["label"] = "106 边缘激光"
-                    item["status"] = "ok" if scan_ready else "fail"
-                    item["message"] = (
-                        f"edge scan 已输出 /scan，有效距离 {finite_ranges} / "
-                        f"{fmt_age_text(scan_age) if scan_age is not None else '未知'}"
-                        if scan_ready
-                        else "edge scan 尚未输出可用 /scan；检查 106 m20pro-edge-scan-106.service"
-                    )
-            perception["perception_ok"] = scan_ready
         items.extend(perception["items"])
         perception_ok = bool(perception["perception_ok"])
 
@@ -2317,19 +2222,14 @@ class WebDashboardNode(Node):
         while time.time() < deadline:
             now = time.time()
             with self._lock:
-                lidar = dict(self._state.get("lidar_points") or {})
                 scan = dict(self._state.get("scan") or {})
                 navigation_status = self._state.get("navigation_status")
                 map_seen = isinstance(self._state.get("map"), dict)
-            lidar_ok = (
-                bool(lidar.get("width"))
-                and now - float(lidar.get("last_update", 0.0) or 0.0) <= 2.0
-            )
             scan_ok = (
                 int(scan.get("finite_ranges", 0) or 0) > 0
                 and now - float(scan.get("last_update", 0.0) or 0.0) <= 2.0
             )
-            if map_seen and (lidar_ok or scan_ok) and navigation_status:
+            if map_seen and scan_ok and navigation_status:
                 return
             time.sleep(0.1)
 

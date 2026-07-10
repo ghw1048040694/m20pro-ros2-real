@@ -236,7 +236,6 @@ wait_for_cmd "ROS graph available" timeout 5 ros2 node list || true
 
 required_nodes=(
   m20pro_tcp_bridge
-  m20pro_pointcloud_fusion
   m20pro_web_dashboard
   map_server
   controller_server
@@ -253,7 +252,6 @@ for node in "${required_nodes[@]}"; do
 done
 
 required_topics=(
-  /LIDAR/POINTS
   /m20pro_tcp_bridge/navigation_status
   /map
 )

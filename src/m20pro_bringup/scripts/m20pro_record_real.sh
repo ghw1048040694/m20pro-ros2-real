@@ -116,19 +116,5 @@ TOPICS=(
   /FAULT_STATUS
 )
 
-if [[ "${M20PRO_RECORD_INCLUDE_RAW_LIDAR:-0}" == "1" ]]; then
-  TOPICS+=(
-    /LIDAR/POINTS
-    /LIDAR/POINTS2
-    /LIDAR/IMU201
-    /LIDAR/IMU202
-    /LIDAR/STATUS
-    /IMU
-    /ODOM
-    /LOCATION_STATUS
-    /LOCATION_STATUS/MATCHING_ERROR
-  )
-fi
-
-echo "[m20pro_record_real] guard_topic=${GUARD_TOPIC} duration=${DURATION_S}s include_raw_lidar=${M20PRO_RECORD_INCLUDE_RAW_LIDAR:-0}"
+echo "[m20pro_record_real] guard_topic=${GUARD_TOPIC} duration=${DURATION_S}s"
 exec timeout --signal=INT "${DURATION_S}" ros2 bag record -o "${OUT_PATH}" "${TOPICS[@]}"

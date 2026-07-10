@@ -21,8 +21,6 @@ def generate_launch_description():
     map_manifest = LaunchConfiguration("map_manifest")
     real_params_file = LaunchConfiguration("real_params_file")
     real_nav2_params_file = LaunchConfiguration("real_nav2_params_file")
-    cloud_topic = LaunchConfiguration("cloud_topic")
-    backup_cloud_topic = LaunchConfiguration("backup_cloud_topic")
     enable_axis_command = LaunchConfiguration("enable_axis_command")
     enable_initialpose_relocalization = LaunchConfiguration("enable_initialpose_relocalization")
     enable_initialpose_3d_adapter = LaunchConfiguration("enable_initialpose_3d_adapter")
@@ -86,8 +84,6 @@ def generate_launch_description():
             "real_nav2_params_file",
             default_value=os.path.join(bringup_share, "config", "nav2_params_real.yaml"),
         ),
-        DeclareLaunchArgument("cloud_topic", default_value="/LIDAR/POINTS"),
-        DeclareLaunchArgument("backup_cloud_topic", default_value=""),
         DeclareLaunchArgument("enable_axis_command", default_value="false"),
         DeclareLaunchArgument(
             "enable_initialpose_relocalization",
@@ -119,13 +115,13 @@ def generate_launch_description():
         DeclareLaunchArgument("camera_proxy_max_width", default_value="480"),
         DeclareLaunchArgument("camera_proxy_transport", default_value="tcp"),
         DeclareLaunchArgument("enable_inspection", default_value="false"),
-        DeclareLaunchArgument("inspection_backend", default_value="dry_run"),
+        DeclareLaunchArgument("inspection_backend", default_value="auto"),
         DeclareLaunchArgument("inspection_source_type", default_value="rtsp"),
         DeclareLaunchArgument("inspection_rtsp_url", default_value="rtsp://10.21.31.103:8554/video1"),
         DeclareLaunchArgument("inspection_camera_name", default_value="front_wide"),
         DeclareLaunchArgument(
             "inspection_model_path",
-            default_value=os.path.join(inspection_share, "models", "playphone_bg_best_rk3588_int8.rknn"),
+            default_value=os.path.join(inspection_share, "models", "best.pt"),
         ),
         DeclareLaunchArgument(
             "inspection_class_names_path",
@@ -169,8 +165,6 @@ def generate_launch_description():
                 "map_manifest": map_manifest,
                 "params_file": real_params_file,
                 "nav2_params_file": real_nav2_params_file,
-                "cloud_topic": cloud_topic,
-                "backup_cloud_topic": backup_cloud_topic,
                 "enable_axis_command": enable_axis_command,
                 "enable_initialpose_relocalization": enable_initialpose_relocalization,
                 "enable_initialpose_3d_adapter": enable_initialpose_3d_adapter,

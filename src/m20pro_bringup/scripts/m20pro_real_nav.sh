@@ -3,7 +3,6 @@ set -euo pipefail
 
 WS_DIR="${M20PRO_WS:-/home/user/m20pro_real_ros2_ws}"
 MODE="${1:-safe}"
-CLOUD_TOPIC="${M20PRO_CLOUD_TOPIC:-/LIDAR/POINTS}"
 
 set +u
 source /opt/robot/scripts/setup_ros2.sh
@@ -15,7 +14,6 @@ set -u
 
 COMMON_ARGS=(
   mode:=real
-  cloud_topic:="${CLOUD_TOPIC}"
   rviz:=false
   enable_web_dashboard:=false
   enable_camera_proxy:=false

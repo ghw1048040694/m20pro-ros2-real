@@ -19,11 +19,11 @@ ANGLE_INCREMENT="${ANGLE_INCREMENT:-0.0174533}"
 RANGE_MAX="${RANGE_MAX:-10.0}"
 RANGE_MIN="${RANGE_MIN:-0.2}"
 
-if [[ ! -x "${OUT_DIR}/drdds_edge_scan_demo" ]]; then
+if [[ ! -x "${OUT_DIR}/m20pro_edge_scan" ]]; then
   "${SCRIPT_DIR}/build_on_106.sh" "${OUT_DIR}"
 fi
 
-exec "${OUT_DIR}/drdds_edge_scan_demo" \
+exec "${OUT_DIR}/m20pro_edge_scan" \
   "${INPUT_TOPIC}" \
   "${OUTPUT_TOPIC}" \
   "${DURATION_S}" \
