@@ -41,6 +41,10 @@
 关键 Web API：
 
 ```text
+GET  /api/radar/status
+GET  /api/radar/results?task_id=<task_id>
+GET  /api/radar/result?radar_task_id=<radar_task_id>
+GET  /api/radar/task?task_id=<task_id>
 GET  /api/radar/task_export?task_id=<task_id>&format=json
 GET  /api/radar/task_export?task_id=<task_id>&format=csv
 POST /api/radar/artifact
@@ -363,6 +367,12 @@ manual/task_001.json
 平台回收结果：
 
 ```bash
+curl "http://机器狗IP:8080/api/radar/status"
+
+curl "http://机器狗IP:8080/api/radar/results?task_id=<task_id>"
+
+curl "http://机器狗IP:8080/api/radar/task?task_id=<task_id>"
+
 curl -o radar_task.json \
   "http://机器狗IP:8080/api/radar/task_export?task_id=<task_id>&format=json"
 

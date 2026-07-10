@@ -102,6 +102,9 @@ def generate_launch_description():
     radar_release_on_analysis = LaunchConfiguration("radar_release_on_analysis")
     radar_start_retry_timeout_s = LaunchConfiguration("radar_start_retry_timeout_s")
     radar_start_retry_interval_s = LaunchConfiguration("radar_start_retry_interval_s")
+    radar_result_retry_count = LaunchConfiguration("radar_result_retry_count")
+    radar_result_retry_interval_s = LaunchConfiguration("radar_result_retry_interval_s")
+    radar_query_error_timeout_s = LaunchConfiguration("radar_query_error_timeout_s")
     radar_modeling_scene = LaunchConfiguration("radar_modeling_scene")
     radar_modeling_enable_camera = LaunchConfiguration("radar_modeling_enable_camera")
     radar_inspection_timeout_s = LaunchConfiguration("radar_inspection_timeout_s")
@@ -178,6 +181,9 @@ def generate_launch_description():
         DeclareLaunchArgument("radar_release_on_analysis", default_value="true"),
         DeclareLaunchArgument("radar_start_retry_timeout_s", default_value="120.0"),
         DeclareLaunchArgument("radar_start_retry_interval_s", default_value="5.0"),
+        DeclareLaunchArgument("radar_result_retry_count", default_value="5"),
+        DeclareLaunchArgument("radar_result_retry_interval_s", default_value="2.0"),
+        DeclareLaunchArgument("radar_query_error_timeout_s", default_value="120.0"),
         DeclareLaunchArgument("radar_modeling_scene", default_value="modeling"),
         DeclareLaunchArgument("radar_modeling_enable_camera", default_value="false"),
         DeclareLaunchArgument("radar_inspection_timeout_s", default_value="1800.0"),
@@ -414,6 +420,9 @@ def generate_launch_description():
                 "release_on_analysis": radar_release_on_analysis,
                 "start_retry_timeout_s": radar_start_retry_timeout_s,
                 "start_retry_interval_s": radar_start_retry_interval_s,
+                "result_retry_count": radar_result_retry_count,
+                "result_retry_interval_s": radar_result_retry_interval_s,
+                "query_error_timeout_s": radar_query_error_timeout_s,
                 "modeling_scene": radar_modeling_scene,
                 "modeling_enable_camera": radar_modeling_enable_camera,
                 "output_dir": radar_output_dir,

@@ -24,6 +24,9 @@ m20pro_radar_inspection:
     release_on_analysis: true
     start_retry_timeout_s: 120.0
     start_retry_interval_s: 5.0
+    result_retry_count: 5
+    result_retry_interval_s: 2.0
+    query_error_timeout_s: 120.0
 
     modeling_scene: "modeling"
     modeling_enable_camera: false

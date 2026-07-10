@@ -24,6 +24,9 @@ def generate_launch_description():
     release_on_analysis = LaunchConfiguration("release_on_analysis")
     start_retry_timeout_s = LaunchConfiguration("start_retry_timeout_s")
     start_retry_interval_s = LaunchConfiguration("start_retry_interval_s")
+    result_retry_count = LaunchConfiguration("result_retry_count")
+    result_retry_interval_s = LaunchConfiguration("result_retry_interval_s")
+    query_error_timeout_s = LaunchConfiguration("query_error_timeout_s")
     modeling_scene = LaunchConfiguration("modeling_scene")
     modeling_enable_camera = LaunchConfiguration("modeling_enable_camera")
     output_dir = LaunchConfiguration("output_dir")
@@ -41,6 +44,9 @@ def generate_launch_description():
         DeclareLaunchArgument("release_on_analysis", default_value="true"),
         DeclareLaunchArgument("start_retry_timeout_s", default_value="120.0"),
         DeclareLaunchArgument("start_retry_interval_s", default_value="5.0"),
+        DeclareLaunchArgument("result_retry_count", default_value="5"),
+        DeclareLaunchArgument("result_retry_interval_s", default_value="2.0"),
+        DeclareLaunchArgument("query_error_timeout_s", default_value="120.0"),
         DeclareLaunchArgument("modeling_scene", default_value="modeling"),
         DeclareLaunchArgument("modeling_enable_camera", default_value="false"),
         DeclareLaunchArgument("output_dir", default_value="~/.m20pro_radar_results"),
@@ -63,6 +69,9 @@ def generate_launch_description():
                     "release_on_analysis": ParameterValue(release_on_analysis, value_type=bool),
                     "start_retry_timeout_s": ParameterValue(start_retry_timeout_s, value_type=float),
                     "start_retry_interval_s": ParameterValue(start_retry_interval_s, value_type=float),
+                    "result_retry_count": ParameterValue(result_retry_count, value_type=int),
+                    "result_retry_interval_s": ParameterValue(result_retry_interval_s, value_type=float),
+                    "query_error_timeout_s": ParameterValue(query_error_timeout_s, value_type=float),
                     "modeling_scene": modeling_scene,
                     "modeling_enable_camera": ParameterValue(
                         modeling_enable_camera,

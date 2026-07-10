@@ -159,21 +159,29 @@
         box.textContent = parsed;
         return;
       }
-      const summary = parsed.summary || {};
+      const scanResults = Array.isArray(parsed.scan_results) ? parsed.scan_results : [];
+      const displayResult = scanResults.find(item => item && item.summary) || scanResults[0] || {};
+      const summary = parsed.summary || displayResult.summary || {};
       const metrics = Array.isArray(summary.metrics) ? summary.metrics : [];
       const status = parsed.status || "-";
       const stateText = parsed.state || "-";
-      const taskId = parsed.taskId || summary.taskId || "-";
-      const mode = parsed.scan_mode || summary.mode || "-";
+      const resultFetchStatus = parsed.result_fetch_status || displayResult.result_fetch_status || "";
+      const resultFetchError = parsed.result_fetch_error || displayResult.result_fetch_error || summary.resultFetchError || "";
+      const taskId = displayResult.taskId || parsed.taskId || summary.taskId || "-";
+      const mode = displayResult.scan_mode || parsed.scan_mode || summary.mode || "-";
       const backend = parsed.backend || "-";
-      const started = parsed.started_at || "-";
-      const finished = parsed.finished_at || "-";
-      const released = parsed.scan_released_at || "-";
-      const duration = Number.isFinite(Number(parsed.duration_s)) ? `${Number(parsed.duration_s).toFixed(1)}s` : "-";
-      const releaseDuration = Number.isFinite(Number(parsed.scan_release_duration_s)) ? `${Number(parsed.scan_release_duration_s).toFixed(1)}s` : "-";
+      const started = displayResult.started_at || parsed.started_at || "-";
+      const finished = displayResult.finished_at || parsed.finished_at || "-";
+      const released = displayResult.scan_released_at || parsed.scan_released_at || "-";
+      const durationValue = displayResult.duration_s ?? parsed.duration_s;
+      const releaseDurationValue = displayResult.scan_release_duration_s ?? parsed.scan_release_duration_s;
+      const duration = Number.isFinite(Number(durationValue)) ? `${Number(durationValue).toFixed(1)}s` : "-";
+      const releaseDuration = Number.isFinite(Number(releaseDurationValue)) ? `${Number(releaseDurationValue).toFixed(1)}s` : "-";
       const location = summary.location || {};
       const place = [location.floor, location.room, location.label].filter(Boolean).join(" / ") || "-";
-      const statusClass = status === "completed" ? "ok" : (status === "failed" ? "fail" : "warn");
+      const statusClass = status === "failed"
+        ? "fail"
+        : ((stateText === "result_unavailable" || resultFetchStatus === "failed") ? "warn" : radarStatusClass(status || stateText));
       box.textContent = "";
       const head = document.createElement("div");
       head.className = "radar-head";
@@ -194,8 +202,9 @@
         ["时间", `${started} -> ${finished} / ${duration}`],
         ["可离开", `${released} / ${releaseDuration}`],
         ["指标", `${metrics.length} 项`],
-        ["摘要", parsed.summary_path || "-"],
-        ["原始", parsed.raw_path || parsed.task_info_path || "-"]
+        ["结果", resultFetchStatus === "failed" ? "暂不可用" : (resultFetchStatus || "-")],
+        ["摘要", parsed.summary_path || displayResult.summary_path || "-"],
+        ["原始", parsed.raw_path || parsed.task_info_path || displayResult.raw_path || displayResult.task_info_path || "-"]
       ];
       for (const [label, value] of rows) {
         const labelEl = document.createElement("div");
@@ -228,6 +237,11 @@
         table.appendChild(tbody);
         tableWrap.appendChild(table);
         box.appendChild(tableWrap);
+      } else if (resultFetchStatus === "failed" || summary.resultUnavailable) {
+        const note = document.createElement("div");
+        note.className = "small";
+        note.textContent = `结果暂不可用${resultFetchError ? `：${resultFetchError}` : ""}`;
+        box.appendChild(note);
       } else if (parsed.error) {
         const note = document.createElement("div");
         note.className = "small";
@@ -267,18 +281,44 @@
           : "";
         const manualValueText = manualValues ? `回填:${manualValues}` : "";
         const metricText = metrics.length ? `指标:${metrics.length}项` : "";
+        const resultFetchText = item.result_fetch_status === "failed"
+          ? `结果暂不可用:${item.result_fetch_error || ""}`
+          : (item.error ? `错误:${item.error}` : "");
+        const statusText = item.status && item.state && item.state !== item.status
+          ? `${item.status} / ${item.state}`
+          : (item.status || item.state || "-");
+        const statusClass = item.status === "failed"
+          ? "fail"
+          : ((item.state === "result_unavailable" || item.result_fetch_status === "failed") ? "warn" : radarStatusClass(item.status || item.state));
+        const metricRows = metrics.length ? `
+          <div class="metric-table">
+            <table>
+              <tbody>
+                ${metrics.map(metric => `
+                  <tr>
+                    <td>${escapeHtml(metric.measurementItemId || "")}</td>
+                    <td>${escapeHtml(metric.measurementItem || "")}</td>
+                    <td>${escapeHtml(metric.location || "")}</td>
+                    <td>${escapeHtml(metric.displayValue || metric.rawValue || "")}</td>
+                  </tr>
+                `).join("")}
+              </tbody>
+            </table>
+          </div>
+        ` : "";
         return `
           <div class="radar-result-row">
             <div class="radar-result-head">
               <span>${escapeHtml(title)}</span>
-              <span class="check-status ${radarStatusClass(item.status || item.state)}">${escapeHtml(item.status || item.state || "-")}</span>
+              <span class="check-status ${statusClass}">${escapeHtml(statusText)}</span>
             </div>
             <div class="radar-result-meta">${escapeHtml([item.taskId, item.started_at, item.finished_at].filter(Boolean).join(" / "))}</div>
-            <div class="radar-result-meta">${escapeHtml([metricText, artifactText, manualText, manualValueText, item.error ? `错误:${item.error}` : ""].filter(Boolean).join(" / "))}</div>
+            <div class="radar-result-meta">${escapeHtml([metricText, artifactText, manualText, manualValueText, resultFetchText].filter(Boolean).join(" / "))}</div>
             <div class="actions">
               ${item.scan_mode === "modeling" ? `<button data-radar-artifact="${escapeHtml(item.run_id)}" data-task-id="${escapeHtml(task.id)}">登记点云</button>` : ""}
               ${item.manual_measure_required ? `<button data-radar-manual="${escapeHtml(item.run_id)}" data-task-id="${escapeHtml(task.id)}">人工回填</button>` : ""}
             </div>
+            ${metricRows}
           </div>
         `;
       }).join("");

@@ -7,7 +7,7 @@ import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import rclpy
 from rclpy.executors import ExternalShutdownException
@@ -149,6 +149,8 @@ class U360Client:
             raise RuntimeError("%s returned HTTP %s: %s" % (path, exc.code, detail[:300])) from exc
         except urllib.error.URLError as exc:
             raise RuntimeError("%s request failed: %s" % (path, exc.reason)) from exc
+        except OSError as exc:
+            raise RuntimeError("%s request failed: %s" % (path, exc)) from exc
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError as exc:
@@ -250,6 +252,9 @@ class RadarInspectionNode(Node):
         self.declare_parameter("release_on_analysis", True)
         self.declare_parameter("start_retry_timeout_s", 120.0)
         self.declare_parameter("start_retry_interval_s", 5.0)
+        self.declare_parameter("result_retry_count", 5)
+        self.declare_parameter("result_retry_interval_s", 2.0)
+        self.declare_parameter("query_error_timeout_s", 120.0)
         self.declare_parameter("modeling_scene", "modeling")
         self.declare_parameter("modeling_enable_camera", False)
         self.declare_parameter("output_dir", "~/.m20pro_radar_results")
@@ -410,10 +415,21 @@ class RadarInspectionNode(Node):
         failed = [item for item in scan_results if not item.get("ok", True) or item.get("status") == "failed"]
         artifact_pending = any(item.get("artifact_status") == "pending_import" for item in scan_results)
         manual_pending = any(item.get("manual_measure_status") == "pending" for item in scan_results)
+        result_unavailable = any(
+            item.get("state") == "result_unavailable" or item.get("result_fetch_status") == "failed"
+            for item in scan_results
+        )
+        result_fetch_errors = [
+            str(item.get("result_fetch_error") or "")
+            for item in scan_results
+            if item.get("result_fetch_error")
+        ]
         result.update(
             {
                 "status": "failed" if failed else "completed",
-                "state": "failed" if failed else ("manual_pending" if manual_pending else "finished"),
+                "state": "failed"
+                if failed
+                else ("result_unavailable" if result_unavailable else ("manual_pending" if manual_pending else "finished")),
                 "progress": 100,
                 "scan_mode": "plan",
                 "scan_label": "雷达扫描计划",
@@ -425,6 +441,10 @@ class RadarInspectionNode(Node):
                 "manual_measure_required": manual_pending,
             }
         )
+        if result_unavailable:
+            result["result_fetch_status"] = "failed"
+            if result_fetch_errors:
+                result["result_fetch_error"] = "；".join(result_fetch_errors)
         self._write_result_files(result)
         return result
 
@@ -450,18 +470,67 @@ class RadarInspectionNode(Node):
 
         mode = str(request.get("mode") or self.scan_mode)
         if mode == "measuring":
-            raw_result = client.get_result(request["taskId"])
-            result["raw_result"] = raw_result
-            result["summary"] = summarize_measurement_result(raw_result, request)
+            try:
+                raw_result = self._call_u360_with_retry(
+                    key,
+                    active_waypoint,
+                    request,
+                    "getResult",
+                    lambda: client.get_result(request["taskId"]),
+                    state,
+                    progress,
+                )
+            except Exception as exc:
+                result.update(
+                    {
+                        "state": "result_unavailable",
+                        "result_fetch_status": "failed",
+                        "result_fetch_error": str(exc),
+                        "summary": self._unavailable_summary(request, active_waypoint, str(exc)),
+                    }
+                )
+            else:
+                if result.get("state") == "result_unavailable":
+                    result["state"] = "finished"
+                    result["progress"] = 100
+                result["raw_result"] = raw_result
+                result["summary"] = summarize_measurement_result(raw_result, request)
+                result["result_fetch_status"] = "success"
         elif mode == "modeling":
-            task_info = client.get_task_info(request["taskId"])
-            result["task_info"] = task_info
-            result["downloads"] = self._download_modeling_files(client, request["taskId"], task_info)
-            has_download = any(bool(item.get("ok")) for item in result.get("downloads") or [])
-            result["artifact_status"] = "downloaded" if has_download else "pending_import"
+            try:
+                task_info = self._call_u360_with_retry(
+                    key,
+                    active_waypoint,
+                    request,
+                    "getTaskInfo",
+                    lambda: client.get_task_info(request["taskId"]),
+                    state,
+                    progress,
+                )
+            except Exception as exc:
+                result.update(
+                    {
+                        "state": "result_unavailable",
+                        "result_fetch_status": "failed",
+                        "result_fetch_error": str(exc),
+                        "downloads": [],
+                        "artifact_status": "pending_import",
+                    }
+                )
+            else:
+                if result.get("state") == "result_unavailable":
+                    result["state"] = "finished"
+                    result["progress"] = 100
+                result["task_info"] = task_info
+                result["downloads"] = self._download_modeling_files(client, request["taskId"], task_info)
+                has_download = any(bool(item.get("ok")) for item in result.get("downloads") or [])
+                result["artifact_status"] = "downloaded" if has_download else "pending_import"
+                result["result_fetch_status"] = "success"
             result["manual_measure_status"] = "pending"
             result["manual_measure_required"] = True
-            result["artifact_policy"] = "auto_download" if has_download else "manual_import"
+            result["artifact_policy"] = (
+                "auto_download" if result.get("artifact_status") == "downloaded" else "manual_import"
+            )
 
         self._write_result_files(result)
         with self._lock:
@@ -473,10 +542,12 @@ class RadarInspectionNode(Node):
             "completed",
             active_waypoint,
             request,
-            state=state,
-            progress=progress,
+            state=str(result.get("state") or state),
+            progress=result.get("progress") if result.get("progress") is not None else progress,
             scan_released=released_for_motion,
             analysis_pending=False,
+            result_fetch_status=result.get("result_fetch_status"),
+            result_fetch_error=result.get("result_fetch_error"),
         )
         return result
 
@@ -524,6 +595,40 @@ class RadarInspectionNode(Node):
             remaining_s = max(0.0, deadline - time.time())
             time.sleep(min(interval_s, remaining_s))
 
+    def _call_u360_with_retry(
+        self,
+        key: str,
+        active_waypoint: Dict[str, Any],
+        request: Dict[str, Any],
+        operation_name: str,
+        operation: Callable[[], Dict[str, Any]],
+        state: str,
+        progress: Optional[int],
+    ) -> Dict[str, Any]:
+        retry_count = max(1, int(self.get_parameter("result_retry_count").value))
+        interval_s = max(0.2, float(self.get_parameter("result_retry_interval_s").value))
+        last_error: Optional[Exception] = None
+        for attempt in range(1, retry_count + 1):
+            try:
+                return operation()
+            except Exception as exc:
+                last_error = exc
+                if attempt >= retry_count:
+                    break
+                self._publish_status(
+                    key,
+                    "communication_retry",
+                    active_waypoint,
+                    request,
+                    state="%s_retry" % operation_name,
+                    progress=progress,
+                    error=str(exc),
+                    attempt=attempt,
+                    retry_after_s=interval_s,
+                )
+                time.sleep(interval_s)
+        raise RuntimeError("%s unavailable after %d attempts: %s" % (operation_name, retry_count, last_error))
+
     def _poll_until_finished(
         self,
         client: U360Client,
@@ -538,8 +643,42 @@ class RadarInspectionNode(Node):
         state = "unknown"
         progress: Optional[int] = None
         released = False
+        query_error_started_at: Optional[float] = None
+        last_query_error = ""
+        query_error_timeout_s = max(0.0, float(self.get_parameter("query_error_timeout_s").value))
         while time.time() - started <= max_wait_s:
-            last_response = client.query_state(request["taskId"])
+            try:
+                last_response = client.query_state(request["taskId"])
+            except Exception as exc:
+                now = time.time()
+                if query_error_started_at is None:
+                    query_error_started_at = now
+                last_query_error = str(exc)
+                if query_error_timeout_s > 0.0 and now - query_error_started_at >= query_error_timeout_s:
+                    return (
+                        {
+                            "result": "unknown",
+                            "state": "result_unavailable",
+                            "progress": progress,
+                            "fallback": "query_state_unavailable",
+                            "error": last_query_error,
+                        },
+                        "result_unavailable",
+                        progress,
+                    )
+                self._publish_status(
+                    key,
+                    "communication_retry",
+                    active_waypoint,
+                    request,
+                    state="queryState_retry",
+                    progress=progress,
+                    error=last_query_error,
+                    retry_after_s=poll_interval_s,
+                )
+                time.sleep(poll_interval_s)
+                continue
+            query_error_started_at = None
             state, progress = extract_state(last_response)
             if not bool(request.get("defer_motion_release")) and not released and self._should_release_for_motion(request, state):
                 released = True
@@ -585,6 +724,22 @@ class RadarInspectionNode(Node):
             )
             time.sleep(poll_interval_s)
         raise RuntimeError("U360 scan timeout after %.0fs; last_state=%s" % (max_wait_s, state))
+
+    def _unavailable_summary(
+        self,
+        request: Dict[str, Any],
+        active_waypoint: Dict[str, Any],
+        error: str,
+    ) -> Dict[str, Any]:
+        summary = self._dry_summary(request, active_waypoint)
+        summary.update(
+            {
+                "statusText": "雷达扫描已触发，结果暂不可用",
+                "resultUnavailable": True,
+                "resultFetchError": error,
+            }
+        )
+        return summary
 
     def _should_release_for_motion(self, request: Dict[str, Any], state: str) -> bool:
         if str(request.get("mode") or self.scan_mode) != "measuring":
@@ -764,6 +919,8 @@ class RadarInspectionNode(Node):
         attempt: Optional[int] = None,
         retry_after_s: Optional[float] = None,
         scan_plan: Optional[Dict[str, Any]] = None,
+        result_fetch_status: Optional[str] = None,
+        result_fetch_error: Optional[str] = None,
     ) -> None:
         payload = {
             "waypoint_key": key,
@@ -787,6 +944,10 @@ class RadarInspectionNode(Node):
             payload["attempt"] = attempt
         if retry_after_s is not None:
             payload["retry_after_s"] = retry_after_s
+        if result_fetch_status is not None:
+            payload["result_fetch_status"] = result_fetch_status
+        if result_fetch_error is not None:
+            payload["result_fetch_error"] = result_fetch_error
         if scan_released:
             with self._lock:
                 released_at = self._release_times.get(key)
@@ -812,6 +973,8 @@ class RadarInspectionNode(Node):
             "raw_path": result.get("raw_path"),
             "artifact_status": result.get("artifact_status"),
             "manual_measure_status": result.get("manual_measure_status"),
+            "result_fetch_status": result.get("result_fetch_status"),
+            "result_fetch_error": result.get("result_fetch_error"),
             "error": result.get("error"),
             "finished_at": result.get("finished_at"),
         }

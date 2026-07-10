@@ -3482,6 +3482,8 @@ class WebDashboardNode(Node):
                     "scan_released_at": result.get("scan_released_at"),
                     "scan_release_duration_s": result.get("scan_release_duration_s"),
                     "error": result.get("error"),
+                    "result_fetch_status": result.get("result_fetch_status"),
+                    "result_fetch_error": result.get("result_fetch_error"),
                     "raw_path": result.get("raw_path"),
                     "summary_path": result.get("summary_path"),
                     "task_info_path": result.get("task_info_path"),
@@ -3526,6 +3528,171 @@ class WebDashboardNode(Node):
             )
         )
         return jobs
+
+    def _radar_all_jobs(self) -> List[Dict[str, Any]]:
+        jobs_dir = self._radar_results_dir() / "jobs"
+        if not jobs_dir.exists():
+            return []
+        jobs: List[Dict[str, Any]] = []
+        manual_cache: Dict[str, Dict[str, Any]] = {}
+        for path in sorted(jobs_dir.glob("*.json")):
+            try:
+                with path.open("r", encoding="utf-8") as file:
+                    payload = json.load(file)
+            except Exception as exc:
+                jobs.append({"ok": False, "job_path": str(path), "error": str(exc)})
+                continue
+            if not isinstance(payload, dict):
+                continue
+            active = payload.get("active_waypoint") if isinstance(payload.get("active_waypoint"), dict) else {}
+            task_id = str(active.get("task_id") or payload.get("taskId") or "").strip()
+            if task_id not in manual_cache:
+                manual_cache[task_id] = self._load_radar_manual_records(task_id) if task_id else {}
+            for job in self._radar_jobs_from_payload(path, payload):
+                job["task_id"] = task_id
+                jobs.append(self._decorate_radar_job(job, manual_cache[task_id]) if task_id else job)
+        jobs.sort(
+            key=lambda item: (
+                str(item.get("finished_at") or ""),
+                str(item.get("started_at") or ""),
+                str(item.get("taskId") or ""),
+            ),
+            reverse=True,
+        )
+        return jobs
+
+    @staticmethod
+    def _query_text(query: Dict[str, List[str]], name: str, default: str = "") -> str:
+        return str((query.get(name) or [default])[0] or "").strip()
+
+    @staticmethod
+    def _query_int(query: Dict[str, List[str]], name: str, default: int, minimum: int, maximum: int) -> int:
+        try:
+            value = int(float((query.get(name) or [default])[0]))
+        except (TypeError, ValueError):
+            value = default
+        return max(minimum, min(maximum, value))
+
+    @staticmethod
+    def _radar_job_metric_count(job: Dict[str, Any]) -> int:
+        summary = job.get("summary") if isinstance(job.get("summary"), dict) else {}
+        metrics = summary.get("metrics") if isinstance(summary.get("metrics"), list) else []
+        return len(metrics)
+
+    def _radar_public_job(self, job: Dict[str, Any]) -> Dict[str, Any]:
+        item = dict(job)
+        item["metric_count"] = self._radar_job_metric_count(item)
+        item["result_unavailable"] = bool(
+            item.get("state") == "result_unavailable" or item.get("result_fetch_status") == "failed"
+        )
+        return item
+
+    def _radar_filter_jobs(self, query: Dict[str, List[str]]) -> Tuple[List[Dict[str, Any]], Dict[str, Any], int]:
+        task_id = self._query_text(query, "task_id")
+        radar_task_id = self._query_text(query, "radar_task_id") or self._query_text(query, "taskId")
+        run_id = self._query_text(query, "run_id")
+        waypoint_key = self._query_text(query, "waypoint_key")
+        status = self._query_text(query, "status")
+        state = self._query_text(query, "state")
+        mode = self._query_text(query, "mode") or self._query_text(query, "scan_mode")
+        offset = self._query_int(query, "offset", 0, 0, 1000000)
+        limit = self._query_int(query, "limit", 50, 1, 500)
+        jobs = self._radar_all_jobs()
+        if task_id:
+            jobs = [job for job in jobs if str(job.get("task_id") or "") == task_id]
+        if radar_task_id:
+            jobs = [job for job in jobs if str(job.get("taskId") or "") == radar_task_id]
+        if run_id:
+            jobs = [job for job in jobs if str(job.get("run_id") or "") == run_id]
+        if waypoint_key:
+            jobs = [job for job in jobs if str(job.get("waypoint_key") or "") == waypoint_key]
+        if status:
+            jobs = [job for job in jobs if str(job.get("status") or "") == status]
+        if state:
+            jobs = [job for job in jobs if str(job.get("state") or "") == state]
+        if mode:
+            jobs = [job for job in jobs if str(job.get("scan_mode") or "") == mode]
+        filters = {
+            "task_id": task_id or None,
+            "radar_task_id": radar_task_id or None,
+            "run_id": run_id or None,
+            "waypoint_key": waypoint_key or None,
+            "status": status or None,
+            "state": state or None,
+            "mode": mode or None,
+            "offset": offset,
+            "limit": limit,
+        }
+        return jobs[offset : offset + limit], filters, len(jobs)
+
+    def _radar_status_payload(self) -> Dict[str, Any]:
+        with self._lock:
+            latest = dict(self._state.get("radar_inspection") or {})
+            topic_results = dict(self._state.get("radar_inspection_results") or {})
+        latest_parsed = latest.get("parsed") if isinstance(latest.get("parsed"), dict) else None
+        jobs = [self._radar_public_job(job) for job in self._radar_all_jobs()]
+        return {
+            "ok": True,
+            "results_dir": str(self._radar_results_dir()),
+            "latest": latest,
+            "latest_parsed": latest_parsed,
+            "latest_job": jobs[0] if jobs else None,
+            "job_count": len(jobs),
+            "topic_result_count": len(topic_results),
+        }
+
+    def _radar_results_payload(self, query: Dict[str, List[str]]) -> Dict[str, Any]:
+        jobs, filters, total = self._radar_filter_jobs(query)
+        return {
+            "ok": True,
+            "results_dir": str(self._radar_results_dir()),
+            "filters": filters,
+            "total": total,
+            "count": len(jobs),
+            "results": [self._radar_public_job(job) for job in jobs],
+        }
+
+    def _radar_result_payload(self, query: Dict[str, List[str]]) -> Dict[str, Any]:
+        jobs, filters, total = self._radar_filter_jobs(query)
+        if not jobs:
+            return self._error("未找到雷达结果", {"code": "radar_result_not_found", "filters": filters})
+        return {
+            "ok": True,
+            "results_dir": str(self._radar_results_dir()),
+            "filters": filters,
+            "total": total,
+            "result": self._radar_public_job(jobs[0]),
+        }
+
+    def _radar_task_summary(self, jobs: List[Dict[str, Any]]) -> Dict[str, Any]:
+        status_counts: Dict[str, int] = {}
+        state_counts: Dict[str, int] = {}
+        metric_count = 0
+        result_unavailable_count = 0
+        for job in jobs:
+            status = str(job.get("status") or "unknown")
+            state = str(job.get("state") or "unknown")
+            status_counts[status] = status_counts.get(status, 0) + 1
+            state_counts[state] = state_counts.get(state, 0) + 1
+            metric_count += self._radar_job_metric_count(job)
+            if job.get("state") == "result_unavailable" or job.get("result_fetch_status") == "failed":
+                result_unavailable_count += 1
+        return {
+            "scan_count": len(jobs),
+            "metric_count": metric_count,
+            "status_counts": status_counts,
+            "state_counts": state_counts,
+            "result_unavailable_count": result_unavailable_count,
+        }
+
+    def _radar_task_payload(self, query: Dict[str, List[str]]) -> Dict[str, Any]:
+        task_id = self._query_text(query, "task_id")
+        if not task_id:
+            return self._error("缺少 task_id", {"code": "radar_task_bad_request"})
+        payload = self._radar_task_export_payload(task_id)
+        jobs = payload.get("results") if isinstance(payload.get("results"), list) else []
+        payload["summary"] = self._radar_task_summary(jobs)
+        return payload
 
     def _radar_task_export_payload(self, task_id: str) -> Dict[str, Any]:
         with self._data_lock:
@@ -3661,7 +3828,7 @@ class WebDashboardNode(Node):
                         metric.get("displayValue") or metric.get("rawValue") or metric.get("value"),
                         job.get("summary_path"),
                         job.get("raw_path") or job.get("task_info_path"),
-                        job.get("error"),
+                        job.get("error") or job.get("result_fetch_error"),
                     ]
                 )
         return output.getvalue().encode("utf-8-sig")
@@ -5612,6 +5779,14 @@ class WebDashboardNode(Node):
                         self._send_json(node._tasks_payload(query))
                     elif parsed.path == "/api/preflight":
                         self._send_json(node._preflight_payload())
+                    elif parsed.path == "/api/radar/status":
+                        self._send_json(node._radar_status_payload())
+                    elif parsed.path == "/api/radar/results":
+                        self._send_json(node._radar_results_payload(query))
+                    elif parsed.path == "/api/radar/result":
+                        self._send_api(node._radar_result_payload(query))
+                    elif parsed.path == "/api/radar/task":
+                        self._send_api(node._radar_task_payload(query))
                     elif parsed.path == "/api/radar/task_export":
                         task_id = (query.get("task_id") or [""])[0]
                         export_format = (query.get("format") or ["json"])[0]
