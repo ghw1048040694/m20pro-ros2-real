@@ -22919,3 +22919,27 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
   - HLS master 标记 H.264 `avc1.42c028`、30 fps。
 - 104 运行态：`m20pro-real.service` 与视频网关均 active；Nav2 system check 为 `M20PRO REAL OK`；`/dev/shm` 约 10%；网关内存约 6 MB。
 - YOLO 边界：后续推理节点独立消费同一 H.264 RTSP，在推理流水线内只解码一次，不从网页帧或 MJPEG 取图。
+## 2026-07-10 18:55 CST - 主线接入 U360 雷达巡检接口，104 dry-run 闭环通过
+
+- 用户要求以当前 `main` 为基线接入 GitLab `Unre` 的雷达功能，不覆盖现有导航、106 点云、视频和 RKNN 链路。
+- 已将 GitLab `Unre` 的 U360 雷达增量合入主线，包括：
+  - 订阅 `/m20pro/active_waypoint`，仅在任务点 `dwelling` 阶段触发；
+  - 支持实测实量、点云建模、多扫描计划、结果落盘与 JSON/CSV 导出；
+  - 新增 `/api/radar/status`、`/api/radar/results`、`/api/radar/result`、`/api/radar/task`、`/api/radar/task_export` 等接口；
+  - 处理启动响应超时后的状态确认、结果查询重试和分析阶段提前释放机器人。
+- 审查中发现并根治 ROS 2 Foxy `IncludeLaunchDescription` 参数串线：
+  - 初版雷达进程误加载 YOLO YAML；
+  - 节点名专用 YAML 又覆盖后续通配参数，导致结果写到 `/root/.m20pro_radar_results`，与 Web API 读取的 `/home/user/m20pro_radar_results` 不一致，且将来可能阻止 `u360_http` 生效；
+  - 雷达子启动参数全部收口为独立 `radar_*` 命名，运行时只使用一份 launch 生成的参数，不再叠加两份优先级不明的参数源。
+- 新增 `scripts/test_radar_inspection_contract.py`，覆盖任务点唯一键、多扫描计划排序、关闭/默认计划、U360 嵌套 JSON 状态、超时判断、测量结果解析和设备任务 ID。
+- 验证：
+  - 全部既有 `scripts/test_*.py` 与新增雷达测试通过；
+  - 本地 5 个 ROS 2 包全量构建通过；
+  - 104 已同步、全量构建并重启，`m20pro-real.service=active`、`NRestarts=0`；
+  - RKNN YOLO 保持启用，模型仍为 `best_rk3588_fp16.rknn`；
+  - 雷达当前以 `dry_run` 启用，合成停留点已完成“触发 -> 状态/结果话题 -> 结果落盘 -> Web API 任务汇总”闭环，不涉及站立、导航或速度下发；
+  - 合成测试数据已从 104 正式结果目录清理。
+- 真雷达前置条件：
+  - 104 `eth1` 当前为 `NO-CARRIER`，没有到 `192.168.107.72` 的路由，HTTP 连接失败；
+  - 因此暂不切换 `M20PRO_RADAR_BACKEND=u360_http`，避免任务在停留点等待后失败；
+  - 插入雷达网线或建立可达网络后，先验证 `192.168.107.72:8080`，再切真雷达后端。
