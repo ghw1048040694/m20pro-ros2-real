@@ -6,6 +6,37 @@ This file is maintained by Codex as the local M20 Pro project memory for future 
 
 Naming note: this file replaced the previous local-only `codex.md`. Going forward, maintain this file, `m20pro日志.md`, after every meaningful project change or field diagnosis.
 
+## 2026-07-10 14:53 CST - 网页和原厂手柄同时无画面：103 MPP 推流进程假活，已恢复
+
+- 用户现象：
+  - 104 网页前摄像头无画面；
+  - 后续确认原厂手柄也同时看不到画面。
+- 104 诊断：
+  - camera proxy `enabled=true`, ffmpeg 可用，前端客户请求能触发 worker;
+  - ffmpeg 反复以 code 1 退出；
+  - 手工读取 `rtsp://10.21.31.103:8554/video1` 和 `video2` 均返回 `404 Not Found`;
+  - 103:8554 端口可达，因此不是 104 前端或网络不通。
+- 103 根因：
+  - MediaMTX 进程存活，但日志明确显示 `no one is publishing to path 'video1/video2'`;
+  - 两个原厂 `push_video` 编码进程各占约 50% CPU，但持续报 Rockchip MPP `mpp_frame_deinit invalid NULL pointer`;
+  - 进程存活但已不再向 MediaMTX 注册推流，属于假活。
+- 硬件入口复核：
+  - `/dev/video0` 和 `/dev/video2` 均存在；
+  - `v4l2-ctl` 显示两路 `SM_USB_107X`, `Camera 1: ok`, 1280x720 MJPEG;
+  - 停止故障推流子进程后，ffmpeg 直接从两个 V4L2 设备各读 5 帧均 `rc=0`;
+  - 因此 USB 摄像头本身有帧，故障点是 MPP 编码/推流进程。
+- 恢复处理：
+  - 只终止两路假活编码子进程及守护子进程，未重启整台 103，未动运动控制链路；
+  - 用原厂 `/opt/robot/scripts/board_resources/rtsp_service/push_video.sh` 重新启动两路推流。
+- 恢复验证：
+  - MediaMTX: `video1` 和 `video2` 均 `is publishing`, H265 1 track;
+  - 原厂手柄 `10.21.33.11` 已同时 `is reading from path 'video1/video2'`;
+  - 104 camera proxy 已收到恢复后第一帧，`sequence=1`;
+  - 浏览器视频客户断开后，104 按低负载设计显示 `clients=0/running=false`，重新打开视频页会再次拉流。
+- 结论：
+  - 本次无画面与新点云链路删除无关；
+  - 是 103 原厂 RTSP 源端假活，所以原厂手柄和 104 网页同时受影响。
+
 ## 2026-07-10 14:40 CST - 新 edge scan 成为唯一正式点云链路，旧 104 relay/fusion 已归档并根除
 
 - 用户决策：
