@@ -16,6 +16,7 @@
       sessionId: null,
       markDraft: null,
       markDraftSource: "map_click",
+      editingAnnotationId: null,
       localizeDraft: null,
       markPointer: null,
       panPointer: null,
@@ -145,6 +146,13 @@
       const scans = Array.isArray(radar.scans) ? radar.scans : [];
       if (!scans.length) return "雷达:实测实量";
       return `雷达:${scans.map(item => item.label || item.mode || "-").join("+")}`;
+    }
+    function radarPlanSelectValue(radar) {
+      if (!radar || radar.enabled === false) return "none";
+      const modes = new Set((Array.isArray(radar.scans) ? radar.scans : []).map(item => item && item.mode));
+      if (modes.has("measuring") && modes.has("modeling")) return "both";
+      if (modes.has("modeling")) return "modeling";
+      return "measuring";
     }
     function renderRadarInspection(record) {
       const box = $("radarInspection");
@@ -1907,9 +1915,15 @@
           </div>
           <div class="item-meta">${item.floor || "-"} / ${typeLabel} / x ${fmtNumber(Number(pose.x))}, y ${fmtNumber(Number(pose.y))}, 朝向 ${fmtNumber(Number(pose.yaw), 2)} / 停留 ${fmtNumber(Number(item.dwell_s || 0), 1)}s</div>
           ${place ? `<div class="item-meta">${place}</div>` : ""}
-          <div class="actions"><button class="danger" data-delete-mark="${item.id}">删除</button></div>
+          <div class="actions">
+            <button data-edit-mark="${item.id}">修改</button>
+            <button class="danger" data-delete-mark="${item.id}">删除</button>
+          </div>
         `;
         box.appendChild(el);
+      }
+      for (const btn of box.querySelectorAll("[data-edit-mark]")) {
+        btn.addEventListener("click", () => beginEditAnnotation(btn.dataset.editMark));
       }
       for (const btn of box.querySelectorAll("[data-delete-mark]")) {
         btn.addEventListener("click", async () => {
@@ -1918,6 +1932,42 @@
           draw();
         });
       }
+    }
+    function setMarkEditMode(annotationId = null) {
+      state.editingAnnotationId = annotationId || null;
+      $("saveMarkBtn").textContent = annotationId ? "保存修改" : "保存点位";
+      $("cancelEditMarkBtn").hidden = !annotationId;
+    }
+    function beginEditAnnotation(annotationId) {
+      const item = state.annotations.find(entry => String(entry.id) === String(annotationId));
+      if (!item) return;
+      const pose = item.pose || {};
+      setMarkEditMode(item.id);
+      $("markType").value = item.type || "patrol";
+      $("manualPointType").value = item.manual_point_type || manualTypeByUiType[item.type] || "task";
+      $("markFloor").value = item.floor || displayedMapFloor();
+      $("markLabel").value = item.label || "";
+      $("markBuilding").value = item.building || "";
+      $("markUnit").value = item.unit || "";
+      $("markHouse").value = item.house || "";
+      $("markArea").value = item.area || "";
+      $("markRoom").value = item.room || "";
+      $("markResultPrefix").value = item.result_file_prefix || "";
+      $("markScanPoint").value = item.scan_point || "";
+      $("markRadarPlan").value = radarPlanSelectValue(item.radar);
+      $("markXY").value = `${Number(pose.x).toFixed(3)}, ${Number(pose.y).toFixed(3)}`;
+      $("markYaw").value = Number(pose.yaw || 0).toFixed(4);
+      $("markDwell").value = String(Number(item.dwell_s || 0));
+      const vendor = item.vendor_navigation || {};
+      $("markGait").value = String(vendor.Gait ?? 12);
+      $("markSpeed").value = String(vendor.Speed ?? 1);
+      $("markManner").value = String(vendor.Manner ?? 0);
+      $("markObsMode").value = String(vendor.ObsMode ?? 0);
+      $("markNavMode").value = String(vendor.NavMode ?? 1);
+      state.markDraft = {x: Number(pose.x), y: Number(pose.y), yaw: Number(pose.yaw || 0)};
+      state.markDraftSource = "map_click";
+      $("cursor").textContent = `正在修改 ${item.label || item.id}`;
+      draw();
     }
     function renderTaskPoints() {
       const box = $("taskPointList");
@@ -2404,21 +2454,24 @@
     });
     async function applySelectedMap() {
       const mapId = $("mapSelect").value;
-      if (mapId) await loadFileMap(mapId);
-      else {
-        await loadFileMap("");
-        state.liveMapVersion = -1;
-      }
-      $("cursor").textContent = mapId
-        ? `已切换显示地图：${displayedMapFloor() || mapId}`
-        : "已切换到实时 /map";
       try {
         const result = await api("POST", "/api/maps/select", {map_id: mapId});
         setLog("mapsLog", result);
       } catch (err) {
         setLog("mapsLog", err);
-        $("cursor").textContent = `已切换前端显示；后端同步失败：${err.message || JSON.stringify(err)}`;
+        $("mapSelect").value = state.selectedMapId || "";
+        $("cursor").textContent = `地图切换失败，已保持当前工作地图：${err.message || JSON.stringify(err)}`;
+        throw err;
       }
+      if (mapId) await loadFileMap(mapId);
+      else {
+        await loadFileMap("");
+        state.liveMapVersion = -1;
+      }
+      setMarkEditMode(null);
+      $("cursor").textContent = mapId
+        ? `已切换工作地图：${displayedMapFloor() || mapId}；请重新定位后再执行任务`
+        : "已切换到实时 /map";
       try {
         updateState(await fetchJson("/api/state"));
       } catch (err) {
@@ -2451,6 +2504,13 @@
     });
     $("manualPointType").addEventListener("change", () => syncManualDefaults(true));
     $("markFloor").addEventListener("input", () => updateMarkControls());
+    $("cancelEditMarkBtn").addEventListener("click", () => {
+      setMarkEditMode(null);
+      state.markDraft = null;
+      state.markDraftSource = "map_click";
+      $("cursor").textContent = "已取消修改";
+      draw();
+    });
     $("saveMarkBtn").addEventListener("click", async () => {
       try {
         const blocked = markBlockedReason();
@@ -2460,7 +2520,9 @@
         const y = Number(yText);
         if (!Number.isFinite(x) || !Number.isFinite(y)) throw {message: "点位坐标无效，请先点击地图取点"};
         const yaw = Number($("markYaw").value);
-        const payload = await api("POST", "/api/annotations", {
+        const editingId = state.editingAnnotationId;
+        const payload = await api("POST", editingId ? "/api/annotations/update" : "/api/annotations", {
+          id: editingId,
           map_id: currentAnnotationMapId(),
           source: state.markDraftSource || "map_click",
           type: $("markType").value,
@@ -2493,6 +2555,7 @@
         await loadAnnotations();
         state.markDraft = null;
         state.markDraftSource = "map_click";
+        setMarkEditMode(null);
         draw();
         $("markLabel").value = "";
         $("markResultPrefix").value = "";

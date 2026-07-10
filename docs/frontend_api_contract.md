@@ -384,6 +384,23 @@ GET /api/annotations?map_id=live_map
 
 删除点位。任务执行中涉及当前任务的点位不能删除。
 
+### POST `/api/annotations/update`
+
+修改已有点位。请求体与新增点位一致，并额外传入 `id`。点位 `id`、`map_id` 和 `created_at` 保持不变；不允许通过修改接口把点位迁移到另一张地图。点位正在当前任务中执行时不允许修改。
+
+```json
+{
+  "id": "point_xxx",
+  "map_id": "map_xxx",
+  "type": "patrol",
+  "floor": "F20",
+  "label": "修改后的点位",
+  "pose": {"x": 1.0, "y": 2.0, "z": 0.0, "yaw": 0.5},
+  "manual_point_type": "task",
+  "dwell_s": 10
+}
+```
+
 ## 任务接口
 
 ### GET `/api/tasks`

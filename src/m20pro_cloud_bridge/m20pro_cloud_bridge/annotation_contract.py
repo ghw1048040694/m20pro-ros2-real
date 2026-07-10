@@ -288,6 +288,26 @@ def build_annotation_record(
     return normalize_annotation_semantics(item)
 
 
+def update_annotation_record(
+    existing: Dict[str, Any],
+    payload: Dict[str, Any],
+    context: Dict[str, Any],
+    *,
+    dwell_s: float,
+    now_text_value: str,
+) -> Dict[str, Any]:
+    updated = build_annotation_record(
+        payload,
+        context,
+        annotation_id=str(existing.get("id") or ""),
+        map_id=str(existing.get("map_id") or ""),
+        dwell_s=dwell_s,
+        now_text_value=str(existing.get("created_at") or now_text_value),
+    )
+    updated["updated_at"] = now_text_value
+    return updated
+
+
 def annotation_map_pose_error_payload(
     point_pose: Dict[str, Any],
     target_map_payload: Dict[str, Any],

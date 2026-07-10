@@ -31,6 +31,8 @@ elif [[ -z "${FASTRTPS_DEFAULT_PROFILES_FILE:-}" ]]; then
   fi
 fi
 mkdir -p "${OUT_DIR}"
+export ROS2CLI_DISABLE_DAEMON=1
+ros2 daemon stop >/dev/null 2>&1 || true
 
 if [[ "${EUID}" -ne 0 && "${M20PRO_ALLOW_USER_RECORD:-0}" != "1" ]]; then
   cat >&2 <<'EOF'
@@ -81,12 +83,12 @@ guard_topic_has_sample() {
   return 1
 }
 
-GUARD_TOPIC="${M20PRO_RECORD_GUARD_TOPIC:-/scan}"
+GUARD_TOPIC="${M20PRO_RECORD_GUARD_TOPIC:-/m20pro/recording_scan}"
 GUARD_WAIT_S="${M20PRO_RECORD_GUARD_WAIT_S:-8}"
 guard_topic_has_sample "${GUARD_TOPIC}" "${GUARD_WAIT_S}"
 
 TOPICS=(
-  /scan
+  /m20pro/recording_scan
   /tf
   /tf_static
   /odom

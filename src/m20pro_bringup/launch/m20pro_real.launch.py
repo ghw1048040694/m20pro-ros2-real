@@ -316,6 +316,13 @@ def generate_launch_description():
         ),
         Node(
             package="m20pro_navigation",
+            executable="scan_recording_relay",
+            name="m20pro_scan_recording_relay",
+            output="screen",
+            parameters=[{"input_topic": scan_topic, "output_topic": "/m20pro/recording_scan"}],
+        ),
+        Node(
+            package="m20pro_navigation",
             executable="floor_manager",
             name="m20pro_floor_manager",
             output="screen",

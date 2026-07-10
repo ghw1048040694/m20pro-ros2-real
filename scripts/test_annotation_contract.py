@@ -22,6 +22,7 @@ from m20pro_cloud_bridge.annotation_contract import (  # noqa: E402
     normalize_annotation_semantics,
     resolve_annotation_dwell_s,
     string_list,
+    update_annotation_record,
     vendor_navigation_from_payload,
 )
 
@@ -344,6 +345,36 @@ def test_annotation_list_filter_payload() -> None:
     assert_equal(filtered["total_annotation_count"], 3, "filtered total count")
 
 
+def test_update_annotation_preserves_identity() -> None:
+    existing = {
+        "id": "point_a",
+        "map_id": "map_a",
+        "created_at": "2026-06-27 01:00:00",
+    }
+    payload = {
+        "map_id": "map_a",
+        "type": "patrol",
+        "floor": "F20",
+        "label": "updated",
+        "pose": {"x": 2.0, "y": 3.0, "z": 0.0, "yaw": 0.4},
+        "dwell_s": 8,
+    }
+    context = annotation_create_static_context(payload, default_label_index=1)
+    updated = update_annotation_record(
+        existing,
+        payload,
+        context,
+        dwell_s=8.0,
+        now_text_value="2026-06-27 02:00:00",
+    )
+    assert_equal(updated["id"], "point_a", "update id")
+    assert_equal(updated["map_id"], "map_a", "update map")
+    assert_equal(updated["created_at"], "2026-06-27 01:00:00", "created timestamp")
+    assert_equal(updated["updated_at"], "2026-06-27 02:00:00", "updated timestamp")
+    assert_equal(updated["label"], "updated", "updated label")
+    assert_equal(updated["pose"]["x"], 2.0, "updated pose")
+
+
 def main() -> int:
     for test in (
         test_requires_fixed_map,
@@ -360,6 +391,7 @@ def main() -> int:
         test_payload_helpers,
         test_annotation_semantics_payload,
         test_annotation_list_filter_payload,
+        test_update_annotation_preserves_identity,
     ):
         test()
         print(f"[OK] {test.__name__}")

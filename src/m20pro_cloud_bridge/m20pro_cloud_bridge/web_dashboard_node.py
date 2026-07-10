@@ -55,6 +55,7 @@ from .annotation_contract import (
     annotation_dwell_s,
     annotation_semantics_payload,
     build_annotation_record,
+    update_annotation_record,
     normalize_annotation_semantics,
     resolve_annotation_dwell_s,
 )
@@ -3193,8 +3194,6 @@ class WebDashboardNode(Node):
         map_id = context.get("map_id")
         if not map_id or map_id == "live_map":
             map_id = self._effective_map_id(map_id, runtime_state=runtime_state) or map_id
-        if map_id and map_id != "live_map":
-            self._remember_working_map_id(map_id, reason="create_annotation")
         with self._data_lock:
             if map_id and map_id != "live_map" and not self._find_map_record_unlocked(map_id):
                 return self._error("地图不存在")
@@ -3234,6 +3233,8 @@ class WebDashboardNode(Node):
             dwell_s=self._resolve_dwell_s(payload),
             now_text_value=now_text(),
         )
+        if map_id and map_id != "live_map":
+            self._remember_working_map_id(map_id, reason="create_annotation")
         with self._data_lock:
             self._annotations.append(item)
             self._save_json("annotations.json", self._annotations)
@@ -3303,6 +3304,46 @@ class WebDashboardNode(Node):
             self._save_json("annotations.json", self._annotations)
             self._save_json("tasks.json", self._tasks)
         return {"ok": True, "deleted": annotation_id, "affected_tasks": affected_tasks}
+
+    def _update_annotation(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        annotation_id = str(payload.get("id") or "").strip()
+        if not annotation_id:
+            return self._error("缺少点位 id")
+        with self._data_lock:
+            active = self._settings.get("active_task") or {}
+            if active.get("status") == "running" and annotation_id in (active.get("annotation_ids") or []):
+                return self._error("点位正在当前任务中执行，请先停止任务再修改")
+            existing = next((dict(item) for item in self._annotations if item.get("id") == annotation_id), None)
+        if existing is None:
+            return self._error("点位不存在")
+
+        requested_map_id = str(payload.get("map_id") or existing.get("map_id") or "").strip()
+        if requested_map_id != str(existing.get("map_id") or ""):
+            return self._error("修改点位不能跨地图迁移，请在目标地图新建点位")
+        merged_payload = dict(payload)
+        merged_payload["map_id"] = requested_map_id
+        context = annotation_create_static_context(merged_payload, default_label_index=1)
+        if not context.get("ok"):
+            return self._error(str(context["message"]), {"code": context["code"]})
+        target_map_payload = self._map_file_snapshot(requested_map_id)
+        map_pose_error = annotation_map_pose_error_payload(dict(context["pose"]), target_map_payload)
+        if map_pose_error:
+            return self._error(
+                str(map_pose_error["message"]),
+                {"code": map_pose_error["code"], "detail": map_pose_error["detail"]},
+            )
+        updated = update_annotation_record(
+            existing,
+            merged_payload,
+            context,
+            dwell_s=self._resolve_dwell_s(merged_payload),
+            now_text_value=now_text(),
+        )
+        with self._data_lock:
+            self._annotations = [updated if item.get("id") == annotation_id else item for item in self._annotations]
+            self._save_json("annotations.json", self._annotations)
+        self._append_event("修改地图点位", {"annotation_id": annotation_id, "map_id": requested_map_id})
+        return {"ok": True, "annotation": updated}
 
     def _tasks_payload(self, query: Optional[Dict[str, List[str]]] = None) -> Dict[str, Any]:
         include_all = self._as_bool((query or {}).get("include_all", [False])[0])
@@ -5840,6 +5881,8 @@ class WebDashboardNode(Node):
                         self._send_api(node._import_active_map(payload))
                     elif parsed.path == "/api/annotations":
                         self._send_api(node._create_annotation(payload))
+                    elif parsed.path == "/api/annotations/update":
+                        self._send_api(node._update_annotation(payload))
                     elif parsed.path == "/api/tasks":
                         self._send_api(node._create_task(payload))
                     elif parsed.path == "/api/tasks/update":

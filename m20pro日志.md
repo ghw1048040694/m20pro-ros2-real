@@ -22943,3 +22943,46 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
   - 104 `eth1` 当前为 `NO-CARRIER`，没有到 `192.168.107.72` 的路由，HTTP 连接失败；
   - 因此暂不切换 `M20PRO_RADAR_BACKEND=u360_http`，避免任务在停留点等待后失败；
   - 插入雷达网线或建立可达网络后，先验证 `192.168.107.72:8080`，再切真雷达后端。
+## 2026-07-10 19:47 CST - Test Field 点位新增/修改、导航录包与到点摆动根因收口
+
+- 用户实测结果：
+  - test1 首次完成真实单层导航、到点和停留闭环；
+  - test2 到达点位附近后出现左右反复转向，最终 Nav2 报成功并进入停留；
+  - Test Field 画布上无法保存点位，已有点位没有修改入口；
+  - 正式录包脚本报 `/scan is visible but no sample arrived`，`ros2 bag record -a` 因未安装 `grid_map_msgs` 整体失败。
+- Test Field 点位根因与修复：
+  - 当时前端画布显示 `Test Field`，但 104 的 `selected_map_id / working_map_id / effective_map_id` 仍全部是 `F20（带工位）`；
+  - 前端旧流程先切画布、再调后端切图，后端失败时仍保留新画布，导致“看的地图”与“工作地图”分裂；
+  - 现改为先调 `/api/maps/select`，只有后端/Nav2 接受后才更换画布；失败时恢复原选项，不再留假显示状态；
+  - 移除点位创建校验完成前就改写 `working_map_id` 的副作用。
+- 点位修改从接口层完整实现：
+  - 新增 `POST /api/annotations/update`；
+  - 修改时保留点位 `id`、`map_id`、`created_at`，并生成 `updated_at`；
+  - 禁止跨地图修改，禁止修改正在当前任务执行的点位；
+  - 前端点位列表增加“修改”，可回填位置、朝向、停留、步态、速度、避障和雷达计划，支持保存/取消。
+- Test Field 接口实测：
+  - 在 `map_1783587590787_a658b6bb` 自由区 `(-4.294, -1.003)` 创建临时点成功；
+  - 同一 ID 修改名称、yaw 和停留时间成功；
+  - 删除临时点成功，未留测试数据；
+  - 验证后 `selected_map_id` 和 `working_map_id` 均恢复为原 F20 地图。
+- 录包根因与修复：
+  - 106 edge scan 为裸 DDS 发布端，104 正式启动时存在的订阅者可收到，后启动 CLI/rosbag 能发现端点但收不到样本；
+  - 新增正式常驻 `m20pro_scan_recording_relay`，启动时订阅 `/scan`，用 reliable ROS 发布者转发为 `/m20pro/recording_scan`，专供晚加入的录包进程取证；
+  - `m20pro_record_real.sh` 以 `/m20pro/recording_scan` 为样本门禁，禁用旧 ROS CLI daemon，并只录明确的导航话题；
+  - 不再使用 `ros2 bag record -a`，避免枚举原厂话题时因本机缺少 `grid_map_msgs` 类型支持而整包失败。
+- 104 录包实测：
+  - `/home/user/bags/acceptance_recording_20260710_194340`；
+  - 时长 10.25s，1069 条消息；
+  - `/m20pro/recording_scan=34`、`map_pose=155`、`/odom=153`、`/tf=261`、`/map=1`；
+  - 本次静止录包未执行导航，因此 `/plan` 和 `/cmd_vel` 为 0 符合预期。
+- test2 到点摆动证据与控制包络修正：
+  - 目标 `(2.399, -0.716, yaw=0.2509)`；
+  - 第 3 秒距离已达 `0.128m`，随后在 `0.18~0.36m` 附近反复追逐；
+  - 第 5 秒约为 `0.291m`、yaw 误差仅 `0.048rad`，对机器狗已是合理到点，但原 `0.25m` 包络仍强制继续控制；
+  - 后续反馈 yaw 出现 `0.289 -> 1.747 -> 1.959 -> 2.298 -> 0.852 -> 1.075rad`，对定位/运动噪声的追逐引发左右摆动；
+  - Nav2 `SimpleGoalChecker` 和 DWB `RotateToGoal` 的包络统一为 `0.35m / 0.35rad`，与机器狗实测精度及项目已有 `0.35m` 到点口径一致；
+  - 不改目标坐标、不跳过真实到点判定，不用更大的宽容值掩盖偏差。
+- 验证：
+  - JavaScript 语法检查、Python 编译、全部 `scripts/test_*.py`、5 包全量构建均通过；
+  - 104 已同步、构建和重启，`m20pro-real.service=active`；
+  - 本轮没有下发新导航目标，修正后的到点稳定性需用户下一次 test2 实测并录包验收。
