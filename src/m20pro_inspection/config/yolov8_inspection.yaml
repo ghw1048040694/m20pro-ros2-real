@@ -8,8 +8,7 @@ m20pro_yolov8_inspection:
     image_topic: "/camera/image_raw"
     camera_name: "front_wide"
 
-    # Put the current .pt test model at src/m20pro_inspection/models/best.pt.
-    # For field deployment on RK3588, prefer a converted .rknn model and override model_path.
+    # Compile best.pt on the x86_64 workstation; 104 runs only the RKNN artifact.
     backend: "auto"  # auto, ultralytics, rknn, onnx, or dry_run
     model_path: ""
     class_names_path: ""
@@ -24,7 +23,7 @@ m20pro_yolov8_inspection:
     publish_rate_hz: 5.0
     reconnect_interval_s: 2.0
 
-    publish_annotated_image: true
+    publish_annotated_image: false
     publish_empty_detections: true
     detections_topic: "~/detections"
     annotated_image_topic: "~/annotated_image"

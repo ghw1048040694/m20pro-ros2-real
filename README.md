@@ -150,16 +150,18 @@ M20PRO_CLEAN_STALE_FASTDDS_SHM=1
 M20PRO_SCAN_TOPIC=/scan
 ```
 
-YOLO 检测默认不随真机全量服务启动，避免在导航调试时抢占 104 算力。需要短期验证 `src/m20pro_inspection/models/best.pt` 时，104 使用独立依赖目录 `/home/user/m20pro_yolo_pydeps`，`m20pro_inspection.launch.py` 只给 YOLO 节点注入 `PYTHONPATH` 和 `LD_PRELOAD=/lib/aarch64-linux-gnu/libgomp.so.1`，不污染 Nav2、web、tcp bridge 等导航节点。确认依赖可用后，再把 `/etc/default/m20pro-real` 中的检测开关改为：
+YOLO 模型在 x86_64 上位机由 `best.pt` 导出 ONNX，再用 RKNN Toolkit2 编译为 RK3588 FP16 模型。104 只安装 RKNNLite 和 `librknnrt`，不安装或运行 Torch。正式配置为：
 
 ```text
 M20PRO_ENABLE_INSPECTION=true
-M20PRO_INSPECTION_BACKEND=auto
-M20PRO_INSPECTION_MODEL_PATH=/home/user/m20pro_real_ros2_ws/install/m20pro_inspection/share/m20pro_inspection/models/best.pt
+M20PRO_INSPECTION_BACKEND=rknn
+M20PRO_INSPECTION_MODEL_PATH=/home/user/m20pro_real_ros2_ws/install/m20pro_inspection/share/m20pro_inspection/models/best_rk3588_fp16.rknn
 M20PRO_INSPECTION_CLASS_NAMES_PATH=/home/user/m20pro_real_ros2_ws/install/m20pro_inspection/share/m20pro_inspection/models/labels_zh.txt
 ```
 
-更适合实机常驻的路线仍然是把 `.pt` 转成 RKNN，用 `M20PRO_INSPECTION_BACKEND=rknn` 指向 RKNN 模型。当前 `best.pt` 类别为：未戴安全帽、未穿安全背心、跌倒、火灾、现场杂乱、配电箱打开。
+转换环境固定为 Ultralytics 8.3.40、CPU Torch 2.4.1、ONNX 1.16.1 和 RKNN Toolkit2 2.3.2，执行 `scripts/convert_yolo_to_rknn.py` 可重复生成模型。104 的 RTSP 线程持续排空 30fps 源流且只保留最新帧，NPU 按 5Hz 消费，避免推理积压旧画面。当前类别为：未戴安全帽、未穿安全背心、跌倒、火灾、现场杂乱、配电箱打开。
+
+104 重装运行时使用 `scripts/104_install_rknn_runtime.sh`。脚本默认从 `/tmp` 读取 RKNNLite 2.3.2 arm64 wheel、`librknnrt.so` 和模型，安装后会执行一次 NPU 初始化检查。
 
 ## 现场复盘
 

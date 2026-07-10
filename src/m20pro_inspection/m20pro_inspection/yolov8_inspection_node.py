@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -87,6 +88,10 @@ class M20ProYolov8Inspection(Node):
         self._load_backend()
 
         self.cap = None
+        self.capture_lock = threading.Lock()
+        self.capture_stop = threading.Event()
+        self.capture_thread: Optional[threading.Thread] = None
+        self.latest_capture_frame: Optional[np.ndarray] = None
         self.last_reconnect_time = 0.0
         self.latest_image: Optional[Image] = None
         self.last_event_time = 0.0
@@ -126,6 +131,12 @@ class M20ProYolov8Inspection(Node):
             self.get_logger().info("inspection input: image topic %s" % self.image_topic)
         else:
             self.get_logger().info("inspection input: RTSP %s" % self.rtsp_url)
+            self.capture_thread = threading.Thread(
+                target=self._capture_loop,
+                name="m20pro_inspection_capture",
+                daemon=True,
+            )
+            self.capture_thread.start()
 
         self.create_timer(1.0 / self.publish_rate_hz, self._tick)
         self.create_timer(1.0, self._publish_status)
@@ -135,8 +146,11 @@ class M20ProYolov8Inspection(Node):
         )
 
     def destroy_node(self) -> bool:
+        self.capture_stop.set()
         if self.cap is not None:
             self.cap.release()
+        if self.capture_thread is not None:
+            self.capture_thread.join(timeout=2.0)
         if self.rknn is not None:
             try:
                 self.rknn.release()
@@ -380,26 +394,40 @@ class M20ProYolov8Inspection(Node):
             self.latest_image = None
             return self._image_msg_to_bgr(msg), msg.header.stamp
 
-        now = time.monotonic()
-        if self.cap is None or not self.cap.isOpened():
-            if now - self.last_reconnect_time < self.reconnect_interval_s:
-                return None, self.get_clock().now().to_msg()
-            self.last_reconnect_time = now
-            self.cap = cv2.VideoCapture(self.rtsp_url)
-            if not self.cap.isOpened():
-                self.last_error = "failed to open RTSP stream: %s" % self.rtsp_url
-                self.get_logger().warning(self.last_error)
-                return None, self.get_clock().now().to_msg()
-
-        ok, frame = self.cap.read()
-        if not ok or frame is None:
-            self.last_error = "RTSP frame read failed; reconnecting"
-            self.get_logger().warning(self.last_error)
-            self.cap.release()
-            self.cap = None
+        with self.capture_lock:
+            frame = self.latest_capture_frame
+            self.latest_capture_frame = None
+        if frame is None:
             return None, self.get_clock().now().to_msg()
-        self.last_error = ""
         return frame, self.get_clock().now().to_msg()
+
+    def _capture_loop(self) -> None:
+        os.environ.setdefault(
+            "OPENCV_FFMPEG_CAPTURE_OPTIONS",
+            "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay",
+        )
+        while not self.capture_stop.is_set():
+            if self.cap is None or not self.cap.isOpened():
+                self.last_reconnect_time = time.monotonic()
+                cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                if not cap.isOpened():
+                    cap.release()
+                    self.last_error = "failed to open RTSP stream: %s" % self.rtsp_url
+                    self.capture_stop.wait(max(0.2, self.reconnect_interval_s))
+                    continue
+                self.cap = cap
+
+            ok, frame = self.cap.read()
+            if not ok or frame is None:
+                self.last_error = "RTSP frame read failed; reconnecting"
+                self.cap.release()
+                self.cap = None
+                self.capture_stop.wait(max(0.2, self.reconnect_interval_s))
+                continue
+            with self.capture_lock:
+                self.latest_capture_frame = frame
+            self.last_error = ""
 
     def _image_msg_to_bgr(self, msg: Image) -> np.ndarray:
         encoding = msg.encoding.lower()

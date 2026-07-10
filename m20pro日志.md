@@ -1,10 +1,27 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-07-10 15:42 CST
+Last updated: 2026-07-10 16:40 CST
 
 This file is maintained by Codex as the local M20 Pro project memory for future ChatGPT review. It records the current architecture, important decisions, recent changes, verification status, and next steps.
 
 Naming note: this file replaced the previous local-only `codex.md`. Going forward, maintain this file, `m20pro日志.md`, after every meaningful project change or field diagnosis.
+
+## 2026-07-10 16:40 CST - YOLO 正式切换 RK3588 NPU，并撤除 104 Torch 路线
+
+- 决策修正：模型转换在 x86_64 上位机完成，104 只运行 `.rknn`；昨天在 104 安装 Torch 仅完成了基准验证，不再作为生产依赖。
+- 上位机独立转换环境：`/home/fabu/.venvs/m20pro-rknn`，固定 Ultralytics 8.3.40、CPU Torch 2.4.1、ONNX 1.16.1、RKNN Toolkit2 2.3.2；Torch 只用于读取源 `.pt` 和导出 ONNX。
+- 当前 6 类 `best.pt` 已确认：未戴安全帽、未穿安全背心、跌倒、火灾、现场杂乱、配电箱打开；导出 ONNX 固定输入 640x640、输出 `(1,10,8400)`。
+- 生成 `best_rk3588_fp16.rknn`：目标 `rk3588`，NHWC uint8 RGB 输入，模型内完成 `/255`，非量化 FP16 先建立正确性基准；转换脚本为 `scripts/convert_yolo_to_rknn.py`，元数据和 SHA256 为 `best_rk3588_fp16.json`。
+- 104 运行时：
+  - `/home/user/m20pro_rknn_pydeps` 安装官方 RKNNLite 2.3.2，约 1.7MB；
+  - `/usr/lib/librknnrt.so` 为 Rockchip 官方 aarch64 2.3.2；
+  - 驱动版本 0.9.2，模型确认运行在 RK3588 RKNPU v2；
+  - 零输入连续推理约 89ms，输出 `(1,10,8400)` float32。
+- 完整链路验证：真实 `rtsp://10.21.31.103:8554/video1` -> 最新帧预处理 -> RKNN NPU -> ROS detections/status -> `/api/state` 已通过；生产状态 `backend=rknn`、`model_loaded=true`、`ready=true`、无错误。
+- 精度对照：用数据集中的“配电箱打开”样本比较 Torch 与 RKNN FP16 原始输出，形状均为 `(1,10,8400)`，两者最高置信目标均为 class 5、anchor 8190，置信度分别为 0.99833 和 0.99854，证明类别/输出布局未在转换中错位。
+- RTSP 根治：旧节点在 5Hz 定时器内直接读取 30fps 视频，存在缓冲积压；现改为独立线程持续排空并只保留最新帧，推理消费后清空，同时强制 RTSP/TCP、低延迟和单帧缓冲。稳定后 5Hz 推理、画面年龄约 0.11s、推理约 96ms。
+- 生产切换：`/etc/default/m20pro-real` 已设 `M20PRO_ENABLE_INSPECTION=true`、`M20PRO_INSPECTION_BACKEND=rknn`，模型指向 `best_rk3588_fp16.rknn`；正式服务重启后 `M20PRO REAL OK`。
+- 撤除旧路线：104 删除 `/home/user/m20pro_yolo_pydeps`（587MB）、`/home/user/m20pro_yolo_wheelhouse`（170MB）、104 上 `.pt/.onnx` 副本及旧玩手机 RKNN 模型，共释放约 757MB；launch 不再注入 Torch PYTHONPATH 或 `LD_PRELOAD=libgomp`。
 
 ## 2026-07-10 15:42 CST - 短时定位漂移自行恢复及无法人工重定位根因修复
 

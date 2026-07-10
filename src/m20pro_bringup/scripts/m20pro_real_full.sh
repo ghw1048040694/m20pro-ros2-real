@@ -113,7 +113,7 @@ fi
 SCAN_TOPIC="${M20PRO_SCAN_TOPIC:-/scan}"
 WEB_DASHBOARD_DATA_DIR="${M20PRO_WEB_DASHBOARD_DATA_DIR:-/home/user/.m20pro_web}"
 WEB_DASHBOARD_MAP_ARCHIVE_DIR="${M20PRO_WEB_DASHBOARD_MAP_ARCHIVE_DIR:-/home/user/m20pro_maps}"
-INSPECTION_MODEL_PATH="${M20PRO_INSPECTION_MODEL_PATH:-${WS_DIR}/install/m20pro_inspection/share/m20pro_inspection/models/best.pt}"
+INSPECTION_MODEL_PATH="${M20PRO_INSPECTION_MODEL_PATH:-${WS_DIR}/install/m20pro_inspection/share/m20pro_inspection/models/best_rk3588_fp16.rknn}"
 INSPECTION_CLASS_NAMES_PATH="${M20PRO_INSPECTION_CLASS_NAMES_PATH:-${WS_DIR}/install/m20pro_inspection/share/m20pro_inspection/models/labels_zh.txt}"
 echo "[m20pro_real_full] perception=/scan from 106 edge scan" >&2
 
@@ -183,7 +183,7 @@ COMMON_ARGS=(
   camera_proxy_ffmpeg_mjpeg_qscale:=5
   camera_proxy_max_width:=480
   enable_inspection:="${M20PRO_ENABLE_INSPECTION:-false}"
-  inspection_backend:="${M20PRO_INSPECTION_BACKEND:-auto}"
+  inspection_backend:="${M20PRO_INSPECTION_BACKEND:-rknn}"
   inspection_source_type:="${M20PRO_INSPECTION_SOURCE_TYPE:-rtsp}"
   inspection_rtsp_url:="${M20PRO_INSPECTION_RTSP_URL:-rtsp://10.21.31.103:8554/video1}"
   inspection_camera_name:="${M20PRO_INSPECTION_CAMERA_NAME:-front_wide}"

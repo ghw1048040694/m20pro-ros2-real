@@ -121,7 +121,7 @@ def generate_launch_description():
         DeclareLaunchArgument("inspection_camera_name", default_value="front_wide"),
         DeclareLaunchArgument(
             "inspection_model_path",
-            default_value=os.path.join(inspection_share, "models", "best.pt"),
+            default_value=os.path.join(inspection_share, "models", "best_rk3588_fp16.rknn"),
         ),
         DeclareLaunchArgument(
             "inspection_class_names_path",
