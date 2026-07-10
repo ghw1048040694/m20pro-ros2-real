@@ -570,6 +570,15 @@ class RadarInspectionNode(Node):
                 response = client.start_scan(str(request.get("mode") or self.scan_mode), request)
             except Exception as exc:
                 detail = str(exc).lower()
+                if is_timeout_error(exc):
+                    return self._confirm_u360_start_after_timeout(
+                        client,
+                        key,
+                        active_waypoint,
+                        request,
+                        exc,
+                        attempt,
+                    )
                 if "busy" not in detail and "忙" not in detail:
                     raise
                 response = {"result": "busy", "error": str(exc)}
@@ -594,6 +603,74 @@ class RadarInspectionNode(Node):
             )
             remaining_s = max(0.0, deadline - time.time())
             time.sleep(min(interval_s, remaining_s))
+
+    def _confirm_u360_start_after_timeout(
+        self,
+        client: U360Client,
+        key: str,
+        active_waypoint: Dict[str, Any],
+        request: Dict[str, Any],
+        start_error: Exception,
+        start_attempt: int,
+    ) -> Dict[str, Any]:
+        timeout_s = max(0.0, float(self.get_parameter("start_retry_timeout_s").value))
+        interval_s = max(0.2, float(self.get_parameter("start_retry_interval_s").value))
+        deadline = time.time() + timeout_s
+        query_attempt = 0
+        last_error = str(start_error)
+        while True:
+            query_attempt += 1
+            try:
+                response = client.query_state(request["taskId"])
+            except Exception as exc:
+                last_error = str(exc)
+            else:
+                state, progress = extract_state(response)
+                if state in FAILED_STATES:
+                    raise RuntimeError(
+                        "U360 scan failed after start timeout state=%s response=%s"
+                        % (state, json.dumps(response, ensure_ascii=False))
+                    )
+                if state != "unknown" or progress is not None:
+                    self._publish_status(
+                        key,
+                        "running",
+                        active_waypoint,
+                        request,
+                        state=state,
+                        progress=progress,
+                        start_response_timeout=True,
+                        start_attempt=start_attempt,
+                    )
+                    return {
+                        "result": "success",
+                        "fallback": "start_response_timeout",
+                        "start_error": str(start_error),
+                        "state_response": response,
+                    }
+                last_error = "queryState returned unknown state: %s" % json.dumps(
+                    response,
+                    ensure_ascii=False,
+                )
+            if timeout_s <= 0.0 or time.time() >= deadline:
+                break
+            self._publish_status(
+                key,
+                "communication_retry",
+                active_waypoint,
+                request,
+                state="start_timeout_queryState_retry",
+                progress=None,
+                error="%s; %s" % (start_error, last_error),
+                attempt=query_attempt,
+                retry_after_s=interval_s,
+            )
+            remaining_s = max(0.0, deadline - time.time())
+            time.sleep(min(interval_s, remaining_s))
+        raise RuntimeError(
+            "U360 start response timed out and task state could not be confirmed: %s; last queryState: %s"
+            % (start_error, last_error)
+        )
 
     def _call_u360_with_retry(
         self,
@@ -1026,6 +1103,11 @@ def extract_state(response: Dict[str, Any]) -> Tuple[str, Optional[int]]:
     elif isinstance(parsed, str):
         state = parsed.strip()
     return state or "unknown", progress
+
+
+def is_timeout_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "timed out" in text or "timeout" in text or "超时" in text
 
 
 def summarize_measurement_result(response: Dict[str, Any], request: Dict[str, Any]) -> Dict[str, Any]:
