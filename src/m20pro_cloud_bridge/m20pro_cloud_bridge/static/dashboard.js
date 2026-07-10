@@ -1248,7 +1248,6 @@
     }
     function drawLocalizeDraft() {
       if (!state.localizeDraft) return;
-      if (localizationConfirmedForDisplay()) return;
       drawArrow(state.localizeDraft, {
         color: "#dc2626",
         stroke: "#fef2f2",
@@ -1434,9 +1433,6 @@
       state.selectedMapStatus = s.selected_map_status || null;
       state.workingMapId = s.working_map_id || null;
       state.effectiveMapId = s.effective_map_id || null;
-      if (state.localizeDraft && localizationConfirmedForDisplay(s)) {
-        state.localizeDraft = null;
-      }
       renderLocalizationStatus(s);
       updateFloorDisplay(s);
       updateMarkControls(s);

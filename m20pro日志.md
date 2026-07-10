@@ -1,10 +1,30 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-07-10 15:32 CST
+Last updated: 2026-07-10 15:42 CST
 
 This file is maintained by Codex as the local M20 Pro project memory for future ChatGPT review. It records the current architecture, important decisions, recent changes, verification status, and next steps.
 
 Naming note: this file replaced the previous local-only `codex.md`. Going forward, maintain this file, `m20pro日志.md`, after every meaningful project change or field diagnosis.
+
+## 2026-07-10 15:42 CST - 短时定位漂移自行恢复及无法人工重定位根因修复
+
+- 现场现象：定位偶尔明显漂移，约一段时间后自行回到正确位置；漂移期间网页无法稳定保留人工重定位操作。
+- 104 日志证据：
+  - 正常稳定簇约为 `(-11.2, -3.27, yaw -1.61)`；
+  - 15:22:23 原厂 `map->base_link` 跳到 `(-10.73, -5.90)`；
+  - 15:22:53 又到 `(-11.62, -5.22)`；
+  - 15:23:53 自行恢复到 `(-11.17, -3.28, yaw -1.61)`；
+  - 错误期间原厂状态仍返回 `Location=0`，所以不是网页绘制误差，而是原厂定位短时进入错误匹配假设，随后依靠激光匹配重新收敛。
+- 地图一致性复核：106 `/var/opt/robot/data/maps/active` 仍指向正确的 `map-20260625-164234`，`map_server` 也从该链接加载；不是 2026-07-09 的活动地图误切问题复发。
+- 104 防护缺口：位姿过滤器虽会拒绝首次超过 0.6m 的跳变，但旧逻辑允许错误簇稳定 1.2 秒后自动成为新的可信位姿，导致持续错误定位穿透保护。
+- 根治修改：
+  - `pose_jump_accept_after_s` 默认改为 `0.0`；
+  - 未处于明确重定位授权窗口时，超过 0.6m 的大跳变返回 `jump_requires_relocalization`，不会因持续稳定而自动接管；
+  - 正常连续运动仍按逐帧位姿更新，不受影响；明确人工重定位继续通过目标附近授权窗口接纳大跳；
+  - 错误簇被隔离后，原定位恢复到最后可信簇会自动重新放行。
+- 无法重定位根因：前端状态轮询只要看到原厂仍报定位成功，就立即清除 `localizeDraft` 并隐藏红色定位箭头；错误位姿期间 `Location=0`，所以操作员刚拖出的重定位初值会被下一轮轮询清掉。
+- 前端修复：定位草稿不再由普通状态轮询清除或隐藏，只在本次 `/api/localization/initialpose` 得到确认成功后清除；因此即使原厂错误地维持 `Location=0`，操作员仍能拖箭头并重新执行重定位。
+- 验证：`py_compile`、`node --check`、`git diff --check` 通过；定位 contract 10 项测试全部通过；104 `m20pro_navigation` 和 `m20pro_cloud_bridge` 构建通过，正式服务重启并重新进入 Nav2 active。
 
 ## 2026-07-10 14:53 CST - 网页和原厂手柄同时无画面：103 MPP 推流进程假活，已恢复
 
