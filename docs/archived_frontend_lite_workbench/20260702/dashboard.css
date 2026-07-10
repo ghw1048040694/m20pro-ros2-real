@@ -275,13 +275,17 @@
       padding: 12px;
     }
     .work-mode {
-      display: flex;
+      display: grid;
+      grid-template-columns: auto auto minmax(0, 1fr);
       align-items: center;
       gap: 8px;
       padding: 8px;
       border: 1px solid var(--line);
       border-radius: 6px;
       background: var(--soft);
+    }
+    .work-mode button {
+      white-space: nowrap;
     }
     .panel {
       display: none;
@@ -376,6 +380,58 @@
     .compact-log {
       max-height: 120px;
     }
+    .radar-box {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px;
+      background: #fbfcfe;
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+    .radar-head,
+    .radar-result-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+    .radar-title,
+    .radar-result-head {
+      font-weight: 700;
+      color: var(--text);
+    }
+    .radar-grid {
+      display: grid;
+      grid-template-columns: 64px minmax(0, 1fr);
+      gap: 5px 8px;
+      line-height: 1.45;
+    }
+    .radar-grid div:nth-child(odd),
+    .radar-result-meta {
+      color: var(--muted);
+    }
+    .metric-table {
+      margin-top: 8px;
+      max-height: 140px;
+      overflow: auto;
+    }
+    .radar-results {
+      margin-top: 8px;
+      display: grid;
+      gap: 6px;
+    }
+    .radar-result-row {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 7px;
+      background: #fbfcfe;
+    }
+    .radar-result-meta {
+      margin-top: 4px;
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
     .video-grid {
       display: grid;
       grid-template-columns: 1fr;
@@ -421,11 +477,11 @@
 	      color: #ffffff;
 	      background: var(--accent);
 	    }
-	    .video-card img {
+	    .video-card iframe {
 	      display: block;
 	      width: 100%;
 	      aspect-ratio: 16 / 9;
-	      object-fit: contain;
+          border: 0;
       background: #0b1117;
     }
     .pill {

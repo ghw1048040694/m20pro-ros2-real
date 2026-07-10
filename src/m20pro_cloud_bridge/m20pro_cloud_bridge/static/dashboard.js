@@ -35,8 +35,10 @@
       lastTasksRefreshAt: 0,
       lastTasksPayload: null,
       loadingTasks: false,
+      lastRecordingRefreshAt: 0,
       scanOverlay: true,
       mapModeLabel: "实时 /map",
+      workPointerMode: "localize",
     };
     window.m20proDebug = {
       snapshot() {
@@ -749,6 +751,10 @@
     }
     function renderPreflight(result) {
       state.preflight = result || null;
+      const preflightTop = $("preflightTopStatus");
+      if (preflightTop) {
+        preflightTop.textContent = !result ? "尚未自检" : (result.running ? "自检中" : (result.ok ? "通过" : "异常"));
+      }
       const summaries = [$("preflightSummary"), $("taskPreflightSummary")];
       for (const box of summaries) {
         if (!box) continue;
@@ -1136,6 +1142,26 @@
     function effectiveCurrentMapId() {
       return state.selectedMapId || state.effectiveMapId || state.workingMapId || "";
     }
+    function renderRecordingStatus(payload) {
+      const box = $("recordingStatus");
+      if (!box) return;
+      const recording = payload && payload.recording ? payload.recording : {};
+      const lines = [];
+      lines.push(recording.running ? "正在录包" : (recording.completed ? "录包已完成" : "未录包"));
+      if (recording.prefix) lines.push(`名称: ${recording.prefix}`);
+      if (recording.started_at) lines.push(`开始: ${recording.started_at}`);
+      if (recording.bag_path) lines.push(`路径: ${recording.bag_path}`);
+      if (recording.return_code !== undefined) lines.push(`返回码: ${recording.return_code}`);
+      box.textContent = lines.join("\n");
+      $("startRecordingBtn").disabled = !!recording.running;
+      $("stopRecordingBtn").disabled = !recording.running;
+    }
+    async function loadRecordingStatus() {
+      if (!$("recordingStatus")) return;
+      const payload = await fetchJson("/api/recording/status");
+      state.lastRecordingRefreshAt = Date.now();
+      renderRecordingStatus(payload);
+    }
     function currentAnnotationMapId() {
       return effectiveCurrentMapId() || "live_map";
     }
@@ -1419,6 +1445,23 @@
       const active = document.querySelector("button.tab.active");
       return active ? active.dataset.tab : "";
     }
+    function activePointerMode() {
+      const tab = activeTabName();
+      if (tab === "localize") return "localize";
+      if (tab === "work") return state.workPointerMode === "mark" ? "mark" : "localize";
+      return "mark";
+    }
+    function setWorkPointerMode(mode) {
+      state.workPointerMode = mode === "mark" ? "mark" : "localize";
+      const localizeBtn = $("workModeLocalizeBtn");
+      const markBtn = $("workModeMarkBtn");
+      if (localizeBtn) localizeBtn.classList.toggle("active-tool", state.workPointerMode === "localize");
+      if (markBtn) markBtn.classList.toggle("active-tool", state.workPointerMode === "mark");
+      $("cursor").textContent = state.workPointerMode === "localize"
+        ? "重定位模式：拖拽地图设置位置和朝向"
+        : "标点模式：拖拽地图设置位置和朝向";
+      draw();
+    }
     function drawArrow(pose, options = {}) {
       if (!Number.isFinite(Number(pose.x)) || !Number.isFinite(Number(pose.y))) return;
       const p = worldToCanvas(pose.x, pose.y);
@@ -1563,7 +1606,7 @@
       if (!state.scanOverlay || !state.map || !state.latest || !state.latest.scan) return;
       const points = state.latest.scan.points || [];
       if (!points.length) return;
-      const usingDraft = activeTabName() === "localize" && state.localizeDraft && !localizationConfirmedForDisplay();
+      const usingDraft = activePointerMode() === "localize" && state.localizeDraft && !localizationConfirmedForDisplay();
       if (!usingDraft && !canDrawLiveRobotLayer()) return;
       if (usingDraft && !isViewingRobotFloor()) return;
       const pose = usingDraft ? state.localizeDraft : freshPose();
@@ -1736,6 +1779,15 @@
       renderPoseTracker("livePoseTracker", s);
       renderPoseTracker("taskPoseTracker", s);
       renderRadarInspection(s.radar_inspection);
+      const perceptionTop = $("perceptionTopStatus");
+      if (perceptionTop) perceptionTop.textContent = s.perception_status && s.perception_status.ready === true ? "正常" : "待检查";
+      const taskTop = $("taskTopStatus");
+      if (taskTop) taskTop.textContent = s.active_task && s.active_task.status === "running" ? "执行中" : "空闲";
+      const radarTop = $("radarTopStatus");
+      if (radarTop) {
+        const radarParsed = s.radar_inspection && s.radar_inspection.parsed;
+        radarTop.textContent = radarParsed ? String(radarParsed.status || radarParsed.state || "已接入") : "等待";
+      }
       if ($("scanOverlayStatus")) {
         const scan = s.scan || {};
         const points = scan.points || [];
@@ -1744,7 +1796,7 @@
           const liveBlock = liveRobotLayerBlockedText(s);
           const mode = liveBlock
             ? `${liveBlock}，暂停叠加`
-            : activeTabName() === "localize" && state.localizeDraft && !localizationConfirmedForDisplay(s)
+            : activePointerMode() === "localize" && state.localizeDraft && !localizationConfirmedForDisplay(s)
             ? "红色=待重定位预览"
             : (currentPoseFresh ? "蓝色=当前位姿" : "当前位姿未确认，暂停叠加");
           $("scanOverlayStatus").textContent = `激光轮廓 ${points.length} 点 / ${mode} / ${fmtAge(age)}前`;
@@ -2169,15 +2221,19 @@
       const dot = $("statusDot");
       const label = $("statusText");
       try {
-        const stateUrl = activeTabName() === "live" ? "/api/state" : "/api/state?debug=0";
+        const tabName = activeTabName();
+        const stateUrl = ["live", "detect", "more"].includes(tabName) ? "/api/state" : "/api/state?debug=0";
         const s = await fetchJson(stateUrl);
         await refreshLiveMap(s.map_version);
         updateState(s);
         dot.className = "dot ok";
         label.textContent = "已连接";
         draw();
-        if (activeTabName() === "tasks" && Date.now() - state.lastTasksRefreshAt > 3000) {
+        if (["tasks", "work"].includes(activeTabName()) && Date.now() - state.lastTasksRefreshAt > 3000) {
           loadTasks().catch(console.warn);
+        }
+        if ($("recordingStatus") && Date.now() - state.lastRecordingRefreshAt > 2000) {
+          loadRecordingStatus().catch(console.warn);
         }
       } catch (err) {
         dot.className = "dot warn";
@@ -2213,7 +2269,7 @@
       const p = canvasToWorld(evt.clientX, evt.clientY);
       if (!p) return;
       evt.preventDefault();
-      state.markPointer = {id: evt.pointerId, start: p, moved: false, mode: activeTabName() === "localize" ? "localize" : "mark"};
+      state.markPointer = {id: evt.pointerId, start: p, moved: false, mode: activePointerMode()};
       canvas.setPointerCapture(evt.pointerId);
       if (state.markPointer.mode === "localize") {
         setLocalizeDraft(
@@ -2606,11 +2662,30 @@
 	    $("rearVideoBtn").addEventListener("click", () => toggleVideo("rear"));
 	    $("runPreflightBtn").addEventListener("click", runPreflight);
     $("refreshPreflightBtn").addEventListener("click", loadPreflight);
+    $("startRecordingBtn").addEventListener("click", async () => {
+      try {
+        const duration = Number.parseInt($("recordingDuration").value, 10);
+        const payload = await api("POST", "/api/recording/start", {
+          duration_s: Number.isFinite(duration) ? duration : 300,
+          prefix: $("recordingPrefix").value.trim() || "testfield"
+        });
+        renderRecordingStatus(payload);
+      } catch (err) { setLog("recordingStatus", err); }
+    });
+    $("stopRecordingBtn").addEventListener("click", async () => {
+      try {
+        setLog("recordingStatus", await api("POST", "/api/recording/stop", {}));
+        setTimeout(() => loadRecordingStatus().catch(console.warn), 800);
+      } catch (err) { setLog("recordingStatus", err); }
+    });
     $("taskRunPreflightBtn").addEventListener("click", async () => {
       document.querySelectorAll("button.tab").forEach(item => item.classList.remove("active"));
       document.querySelectorAll(".panel").forEach(item => item.classList.remove("active"));
-      document.querySelector('button.tab[data-tab="preflight"]').classList.add("active");
-      $("tab-preflight").classList.add("active");
+      const targetTab = document.querySelector('button.tab[data-tab="preflight"]')
+        || document.querySelector('button.tab[data-tab="more"]');
+      const targetPanel = $("tab-preflight") || $("tab-more");
+      if (targetTab) targetTab.classList.add("active");
+      if (targetPanel) targetPanel.classList.add("active");
       await runPreflight();
     });
     $("stopTaskBtn").addEventListener("click", async () => {
@@ -2651,7 +2726,12 @@
     window.addEventListener("resize", resizeCanvas);
 	    resizeCanvas();
 	    setVideoActive(null);
+	    if ($("workModeLocalizeBtn")) {
+	      $("workModeLocalizeBtn").addEventListener("click", () => setWorkPointerMode("localize"));
+	      $("workModeMarkBtn").addEventListener("click", () => setWorkPointerMode("mark"));
+	      setWorkPointerMode("localize");
+	    }
 	    updateMapModeUi();
     syncManualDefaults(false);
-    loadMaps().then(loadAnnotations).then(loadPreflight).then(loadTasks).catch(console.warn);
+    loadMaps().then(loadAnnotations).then(loadPreflight).then(loadTasks).then(loadRecordingStatus).catch(console.warn);
     mainLoop();

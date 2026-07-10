@@ -597,6 +597,24 @@ ROS 2 功能包也可以订阅：
 - `wait=true`：同步等待结果，容易阻塞前端，不建议高频使用。
 - 电量只作为展示，不作为软件阻断条件。
 
+## 录包接口
+
+### GET `/api/recording/status`
+
+返回当前录包进程、名称、开始时间和最新 bag 路径。
+
+### POST `/api/recording/start`
+
+```json
+{"duration_s": 300, "prefix": "testfield"}
+```
+
+`duration_s` 限制为 10~3600 秒。后端调用正式 `m20pro_record_real.sh`，不使用 `ros2 bag record -a`。
+
+### POST `/api/recording/stop`
+
+向当前录包进程发送 `SIGINT`，等待 rosbag 完成落盘。
+
 ## 建图和地图导入接口
 
 建图接口主要给开发/现场工程前端使用，甲方业务前端如果不负责建图，可以不接。

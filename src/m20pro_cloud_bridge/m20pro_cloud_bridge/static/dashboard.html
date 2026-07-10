@@ -374,6 +374,16 @@
             <h2>原始结果</h2>
             <div id="preflightRaw" class="mono">等待自检</div>
           </div>
+          <div class="section">
+            <h2>导航录包</h2>
+            <div class="row"><label>最长时间(s)</label><input id="recordingDuration" value="300" /></div>
+            <div class="row"><label>名称</label><input id="recordingPrefix" value="testfield" /></div>
+            <div class="actions">
+              <button class="primary" id="startRecordingBtn">开始录包</button>
+              <button id="stopRecordingBtn">停止录包</button>
+            </div>
+            <div id="recordingStatus" class="mono">未开始</div>
+          </div>
         </section>
 
         <section id="tab-tasks" class="panel">

@@ -85,7 +85,11 @@ guard_topic_has_sample() {
 
 GUARD_TOPIC="${M20PRO_RECORD_GUARD_TOPIC:-/m20pro/recording_scan}"
 GUARD_WAIT_S="${M20PRO_RECORD_GUARD_WAIT_S:-8}"
-guard_topic_has_sample "${GUARD_TOPIC}" "${GUARD_WAIT_S}"
+if [[ "${M20PRO_RECORD_SKIP_CLI_GUARD:-0}" != "1" ]]; then
+  guard_topic_has_sample "${GUARD_TOPIC}" "${GUARD_WAIT_S}"
+else
+  echo "[m20pro_record_real] CLI guard skipped; caller supplied an in-process scan freshness check"
+fi
 
 TOPICS=(
   /m20pro/recording_scan

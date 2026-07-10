@@ -22986,3 +22986,14 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
   - JavaScript 语法检查、Python 编译、全部 `scripts/test_*.py`、5 包全量构建均通过；
   - 104 已同步、构建和重启，`m20pro-real.service=active`；
   - 本轮没有下发新导航目标，修正后的到点稳定性需用户下一次 test2 实测并录包验收。
+
+## 2026-07-10 20:32 CST - 新前端全功能迁移与 Web 录包闭环验收
+
+- 新前端确认为本工程 `docs/archived_frontend_lite_workbench/20260702`，不是 X30Pro 项目；已在 104 并行提供 `http://10.21.31.104:8080/lite`，默认 `/` 在用户验收前保持不变。
+- 架构收口：新旧布局共用唯一维护的 `/static/dashboard.js`，不再复制第二套业务 JS；地图、重定位、点位新增/修改、任务、导航、自检、YOLO、U360 雷达、双路 H.264 视频、调试状态和录包均走同一套 API 与控制逻辑。
+- 新前端作业区收敛为“作业 / 检测 / 更多”三个主标签；雷达支持状态、手工测量、JSON/CSV 导出和附件登记，视频改用 104 的 `video1/video2` 低延迟播放器，录包可直接在前端启停并查看结果。
+- 响应式界面已用真实 Chrome 分别在 `1440x1000` 和 `390x844` 验收：桌面端保持地图优先双栏，移动端状态自动换行、工具栏无溢出、地图和点位正常绘制；重定位/标点模式条改为稳定网格，按钮不再被说明文字挤压拆字。
+- 新增录包接口：`GET /api/recording/status`、`POST /api/recording/start`、`POST /api/recording/stop`；Web 节点用进程内 `/scan` 新鲜度和有效点数拒绝空包，不再依赖不稳定的临时 ROS CLI 图发现做门禁。
+- Web 录包根因修正：瞬态 systemd 单元与正式 root ROS/DDS 服务使用同一运行身份，显式设置 `HOME/USER/LOGNAME/ROS_LOG_DIR`，避免 ROS2 日志目录初始化崩溃和普通用户 DDS 只发现原厂话题；录制完成后自动将 bag 归属修正为 `user:user`。
+- 104 真实验收包 `web_api_acceptance6_20260710_203207`：10.504s、4.6 MiB、1060 条消息；`/m20pro/recording_scan=30`、`map_pose=143`、`/odom=144`、`/tf=249`、`/map=1`，静止状态下 `/cmd_vel=0` 符合预期。
+- 验证状态：JavaScript/Python/Bash 语法、`git diff --check`、20 个 `scripts/test_*.py`、5 个 ROS2 包全量构建通过；104 `m20pro-real.service=active`，系统检查输出 `M20PRO REAL OK`。

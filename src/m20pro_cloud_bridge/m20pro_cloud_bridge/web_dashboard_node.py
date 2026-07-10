@@ -4,6 +4,7 @@ import json
 import math
 import os
 import select
+import signal
 import shlex
 import shutil
 import socket
@@ -249,14 +250,22 @@ def get_cv2() -> Any:
 
 DASHBOARD_STATIC_DIR = FsPath(__file__).resolve().parent / "static"
 DASHBOARD_HTML_PATH = DASHBOARD_STATIC_DIR / "dashboard.html"
+M20PRO_WS_DIR = FsPath(os.environ.get("M20PRO_WS") or FsPath.cwd())
+DASHBOARD_LITE_DIR = M20PRO_WS_DIR / "docs" / "archived_frontend_lite_workbench" / "20260702"
+DASHBOARD_LITE_HTML_PATH = DASHBOARD_LITE_DIR / "dashboard.html"
 DASHBOARD_STATIC_FILES = {
     "/static/dashboard.css": (DASHBOARD_STATIC_DIR / "dashboard.css", "text/css; charset=utf-8"),
     "/static/dashboard.js": (DASHBOARD_STATIC_DIR / "dashboard.js", "application/javascript; charset=utf-8"),
+    "/static/dashboard-lite.css": (DASHBOARD_LITE_DIR / "dashboard.css", "text/css; charset=utf-8"),
 }
 
 
 def _load_dashboard_html() -> bytes:
     return DASHBOARD_HTML_PATH.read_bytes()
+
+
+def _load_dashboard_lite_html() -> bytes:
+    return DASHBOARD_LITE_HTML_PATH.read_bytes()
 
 
 def _load_dashboard_static(path: str) -> Optional[Tuple[bytes, str]]:
@@ -693,6 +702,10 @@ class WebDashboardNode(Node):
         self._preflight_lock = threading.Lock()
         self._preflight_run_lock = threading.Lock()
         self._preflight_running: Optional[Dict[str, Any]] = None
+        self._recording_lock = threading.RLock()
+        self._recording_process: Optional[subprocess.Popen] = None
+        self._recording_state: Optional[Dict[str, Any]] = None
+        self._recording_log_handle = None
         self._map_file_cache_lock = threading.Lock()
         self._map_file_cache: Dict[str, Dict[str, Any]] = {}
         self._map_file_summary_cache: Dict[str, Dict[str, Any]] = {}
@@ -3283,6 +3296,124 @@ class WebDashboardNode(Node):
             default_charge_dwell_s=float(self.get_parameter("default_charge_dwell_s").value),
         )
 
+    def _recording_status_payload(self) -> Dict[str, Any]:
+        with self._recording_lock:
+            process = self._recording_process
+            state = dict(self._recording_state or {})
+            if process is not None:
+                return_code = process.poll()
+                if return_code is None:
+                    state.update({"running": True, "pid": process.pid})
+                else:
+                    state.update(
+                        {
+                            "running": False,
+                            "return_code": return_code,
+                            "completed": return_code in (0, 124, 130),
+                            "finished_at": state.get("finished_at") or now_text(),
+                        }
+                    )
+                    self._recording_process = None
+                    if self._recording_log_handle is not None:
+                        self._recording_log_handle.close()
+                        self._recording_log_handle = None
+                    self._recording_state = dict(state)
+            state.setdefault("running", False)
+            prefix = str(state.get("prefix") or "")
+            bag_dir = FsPath(str(state.get("bag_dir") or "/home/user/bags"))
+            if prefix and bag_dir.exists():
+                matches = sorted(bag_dir.glob(prefix + "_*"), key=lambda item: item.stat().st_mtime, reverse=True)
+                if matches:
+                    state["bag_path"] = str(matches[0])
+            return {"ok": True, "recording": state}
+
+    def _start_recording(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            duration_s = int(float(payload.get("duration_s", 300)))
+        except (TypeError, ValueError):
+            return self._error("录包时长无效")
+        duration_s = max(10, min(3600, duration_s))
+        prefix = sanitize_name(str(payload.get("prefix") or "field_test"), "field_test")
+        with self._lock:
+            scan = dict(self._state.get("scan") or {})
+        scan_age_s = max(0.0, time.time() - float(scan.get("last_update") or 0.0))
+        if int(scan.get("finite_ranges") or 0) < 20 or scan_age_s > 3.0:
+            return self._error("/scan 不新鲜或有效点不足，为避免空包已拒绝开始录制")
+        bag_dir = FsPath("/home/user/bags")
+        bag_dir.mkdir(parents=True, exist_ok=True)
+        with self._recording_lock:
+            if self._recording_process is not None and self._recording_process.poll() is None:
+                return self._error("已有录包任务正在运行")
+            log_path = FsPath("/tmp/m20pro_web_recording.log")
+            log_handle = log_path.open("ab", buffering=0)
+            unit_name = "m20pro-recording-%s" % random_suffix()
+            shell_command = " ".join(
+                [
+                    "set -e;",
+                    "export HOME=/root USER=root LOGNAME=root;",
+                    "export ROS_LOG_DIR=/tmp/m20pro_ros_logs;",
+                    "mkdir -p \"$ROS_LOG_DIR\";",
+                    "source /opt/robot/scripts/setup_ros2.sh >/dev/null;",
+                    "cd %s;" % shlex.quote(str(M20PRO_WS_DIR)),
+                    "source install/setup.bash;",
+                    "export M20PRO_BAG_DIR=%s;" % shlex.quote(str(bag_dir)),
+                    "export M20PRO_RECORD_SKIP_CLI_GUARD=1;",
+                    "set +e; ros2 run m20pro_bringup m20pro_record_real.sh %s %s;"
+                    % (duration_s, shlex.quote(prefix)),
+                    "rc=$?; chown -R user:user \"$M20PRO_BAG_DIR\"; exit $rc",
+                ]
+            )
+            command = [
+                "systemd-run",
+                "--quiet",
+                "--wait",
+                "--pipe",
+                "--collect",
+                "--unit",
+                unit_name,
+                "/bin/bash",
+                "-lc",
+                shell_command,
+            ]
+            try:
+                process = subprocess.Popen(
+                    command,
+                    cwd=str(M20PRO_WS_DIR),
+                    stdout=log_handle,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+            except Exception:
+                log_handle.close()
+                raise
+            self._recording_process = process
+            self._recording_log_handle = log_handle
+            self._recording_state = {
+                "running": True,
+                "pid": process.pid,
+                "prefix": prefix,
+                "duration_s": duration_s,
+                "bag_dir": str(bag_dir),
+                "log_path": str(log_path),
+                "systemd_unit": unit_name,
+                "started_at": now_text(),
+            }
+        return self._recording_status_payload()
+
+    def _stop_recording(self) -> Dict[str, Any]:
+        with self._recording_lock:
+            process = self._recording_process
+            if process is None or process.poll() is not None:
+                return self._error("当前没有正在运行的录包任务")
+            unit_name = str((self._recording_state or {}).get("systemd_unit") or "")
+            if unit_name:
+                subprocess.run(["systemctl", "kill", "--signal=SIGINT", unit_name], check=False)
+            else:
+                os.killpg(process.pid, signal.SIGINT)
+            if self._recording_state is not None:
+                self._recording_state["stop_requested_at"] = now_text()
+        return {"ok": True, "message": "已请求停止录包，正在完成落盘"}
+
     def _delete_annotation(self, annotation_id: str) -> Dict[str, Any]:
         if not annotation_id:
             return self._error("缺少点位 id")
@@ -5795,6 +5926,8 @@ class WebDashboardNode(Node):
                 try:
                     if parsed.path == "/":
                         self._send_bytes(_load_dashboard_html(), "text/html; charset=utf-8")
+                    elif parsed.path in ("/lite", "/lite/"):
+                        self._send_bytes(_load_dashboard_lite_html(), "text/html; charset=utf-8")
                     elif parsed.path in DASHBOARD_STATIC_FILES:
                         static_payload = _load_dashboard_static(parsed.path)
                         if static_payload is None:
@@ -5820,6 +5953,8 @@ class WebDashboardNode(Node):
                         self._send_json(node._tasks_payload(query))
                     elif parsed.path == "/api/preflight":
                         self._send_json(node._preflight_payload())
+                    elif parsed.path == "/api/recording/status":
+                        self._send_json(node._recording_status_payload())
                     elif parsed.path == "/api/radar/status":
                         self._send_json(node._radar_status_payload())
                     elif parsed.path == "/api/radar/results":
@@ -5893,6 +6028,10 @@ class WebDashboardNode(Node):
                         self._send_api(node._stop_task(payload))
                     elif parsed.path == "/api/preflight/run":
                         self._send_api(node._run_preflight(payload))
+                    elif parsed.path == "/api/recording/start":
+                        self._send_api(node._start_recording(payload))
+                    elif parsed.path == "/api/recording/stop":
+                        self._send_api(node._stop_recording())
                     elif parsed.path == "/api/localization/initialpose":
                         self._send_api(node._publish_initialpose(payload))
                     elif parsed.path == "/api/radar/artifact":
@@ -5990,6 +6129,14 @@ class WebDashboardNode(Node):
         return server
 
     def destroy_node(self) -> bool:
+        with getattr(self, "_recording_lock", threading.RLock()):
+            process = getattr(self, "_recording_process", None)
+            if process is not None and process.poll() is None:
+                unit_name = str((getattr(self, "_recording_state", None) or {}).get("systemd_unit") or "")
+                if unit_name:
+                    subprocess.run(["systemctl", "kill", "--signal=SIGINT", unit_name], check=False)
+                else:
+                    os.killpg(process.pid, signal.SIGINT)
         for worker in list(getattr(self, "_camera_workers", {}).values()):
             worker.stop()
         self._camera_workers.clear()
