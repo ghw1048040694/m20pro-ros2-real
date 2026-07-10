@@ -30,10 +30,10 @@ g++ "${cxx_flags[@]}" \
 
 g++ "${cxx_flags[@]}" \
   "${SCRIPT_DIR}/drdds_edge_scan_demo.cpp" \
-  -o "${OUT_DIR}/drdds_edge_scan_demo" \
+  -o "${OUT_DIR}/m20pro_edge_scan" \
   "${link_flags[@]}"
 
 echo "Built ${OUT_DIR}/drdds_lidar_probe"
-echo "Built ${OUT_DIR}/drdds_edge_scan_demo"
+echo "Built ${OUT_DIR}/m20pro_edge_scan"
 echo "Try: ${OUT_DIR}/drdds_lidar_probe /LIDAR/POINTS 0 0 rt 8"
-echo "Try: ${OUT_DIR}/drdds_edge_scan_demo /LIDAR/POINTS /m20pro/scan_edge 20"
+echo "Try: ${OUT_DIR}/m20pro_edge_scan /LIDAR/POINTS /scan 20"

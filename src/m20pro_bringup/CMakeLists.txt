@@ -12,8 +12,6 @@ install(PROGRAMS
   scripts/m20pro_real_full.sh
   scripts/m20pro_real_web.sh
   scripts/m20pro_record_real.sh
-  scripts/m20pro_lidar_guard.sh
-  scripts/m20pro_lidar_relay_guard.sh
   DESTINATION lib/${PROJECT_NAME}
 )
 

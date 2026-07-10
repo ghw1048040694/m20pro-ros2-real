@@ -220,8 +220,7 @@ B 不应该绕过单层任务 contract。跨楼层任务应复用同一个单层
 
 目标模式不能继续上车推进时，先区分前端问题和底层门槛。104 当前以 `/api/state` 和 rosbag 为准，不把历史故障写死成永久阻断；如果现场出现下列状态，再按对应底层链路处理：
 
-- `perception_status.code=factory_lidar_points_publisher_missing`：原厂 `/LIDAR/POINTS` 当前没有 DDS publisher，relay、`/scan` 和避障输入不能视为真实可用。
-- `perception_status.code=scan_unavailable`：relay 可能已有点云，但 `/scan` 没有有效输出；不要只看 relay 状态，要确认 `/LIDAR/POINTS -> lidar_relay -> /scan -> costmap/Nav2` 全链路。
+- `perception_status.code=scan_unavailable`：106 edge scan 或 DDS 轻量 `/scan` 链路没有有效输出；必须恢复后才能导航。
 
 电量通过前端顶栏或 `./scripts/104_goal_mode_battery_gate.py --url http://10.21.31.104:8080` 只读显示给操作员参考，不作为软件自检、部署、重定位或任务启动门槛。
 
@@ -238,7 +237,7 @@ B 不应该绕过单层任务 contract。跨楼层任务应复用同一个单层
    - `selected_map_status.ready=true`;
    - `localization_status` 明确提示当前是否需要重定位；
    - `perception_status` 明确给出当前感知状态。
-4. 如果感知异常，先处理 `factory_lidar_points_publisher_missing` 或 `scan_unavailable`，直到 `/LIDAR/POINTS -> lidar_relay -> /scan -> perception_status` 全链路恢复。若需要重启原厂 `rsdriver.service` / `hsLidar.service`，必须由现场明确授权。
+4. 如果感知异常，先处理 `scan_unavailable`，直到 `106 edge scan -> /scan -> perception_status` 全链路恢复。
 5. 感知恢复后，按开发手册 2101 跑前端重定位。成功判据必须是 TCP `Type=2101`、`Command=1`、`ErrorCode=0`，并且前端显示定位已确认、当前地图和点云状态正常。
 6. 只在当前固定地图上重新标当前地图任务点，创建当前地图任务。不要复用旧地图任务。
 7. 运动前先启动 rosbag 记录，确认网页首点、顺序、地图、pose、scan、lidar 状态都符合现场预期。

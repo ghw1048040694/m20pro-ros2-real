@@ -9,7 +9,7 @@ from nav_msgs.msg import OccupancyGrid, Path
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
-from sensor_msgs.msg import LaserScan, PointCloud2
+from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 from tf2_ros import Buffer, TransformListener
 from visualization_msgs.msg import MarkerArray
@@ -21,10 +21,8 @@ class SystemCheckNode(Node):
     def __init__(self) -> None:
         super().__init__("m20pro_system_check")
         self.declare_parameter("mode", "real")
-        self.declare_parameter("perception_mode", "local_fusion")
         self.declare_parameter("startup_grace_s", 8.0)
         self.declare_parameter("check_period_s", 2.0)
-        self.declare_parameter("cloud_topic", "/cloud_nav")
         self.declare_parameter("require_dynamic_obstacles", False)
         self.declare_parameter("require_scan", True)
         self.declare_parameter("require_costmaps", True)
@@ -32,7 +30,6 @@ class SystemCheckNode(Node):
         self.declare_parameter("require_map", True)
         self.declare_parameter("require_nodes", True)
         self.declare_parameter("require_floor_manager", True)
-        self.declare_parameter("require_cloud_topic", True)
         self.declare_parameter("require_topic_messages", True)
         self.declare_parameter("check_scan_content", False)
         self.declare_parameter("check_local_costmap_content", False)
@@ -40,7 +37,6 @@ class SystemCheckNode(Node):
         self.declare_parameter("tf_global_frame", "odom")
         self.declare_parameter("tf_base_frame", "m20pro_base_link")
         self.declare_parameter("max_abs_base_z", 1.0)
-        self.declare_parameter("cloud_reliability", "best_effort")
         self.declare_parameter("min_scan_finite_bins", 20)
         self.declare_parameter("min_scan_close_bins", 1)
         self.declare_parameter("scan_close_range_m", 2.0)
@@ -99,16 +95,6 @@ class SystemCheckNode(Node):
             scan_qos.reliability = ReliabilityPolicy.BEST_EFFORT
             scan_qos.durability = DurabilityPolicy.VOLATILE
             self.create_subscription(LaserScan, "/scan", self._on_scan, scan_qos)
-
-        cloud_topic = str(self.get_parameter("cloud_topic").value).strip()
-        if require_messages and cloud_topic and self._bool("require_cloud_topic"):
-            cloud_qos = QoSProfile(depth=5)
-            if str(self.get_parameter("cloud_reliability").value).lower() == "reliable":
-                cloud_qos.reliability = ReliabilityPolicy.RELIABLE
-            else:
-                cloud_qos.reliability = ReliabilityPolicy.BEST_EFFORT
-            cloud_qos.durability = DurabilityPolicy.VOLATILE
-            self.create_subscription(PointCloud2, cloud_topic, self._mark(cloud_topic), cloud_qos)
 
         if self._bool("require_costmaps"):
             if require_messages or need_local_costmap_stats:
@@ -196,9 +182,6 @@ class SystemCheckNode(Node):
         topics = []
         if self._bool("require_map"):
             topics.append("/map")
-        cloud_topic = str(self.get_parameter("cloud_topic").value).strip()
-        if cloud_topic and self._bool("require_cloud_topic"):
-            topics.append(cloud_topic)
         if self._bool("require_scan"):
             topics.append("/scan")
         if self._bool("require_costmaps"):
@@ -273,8 +256,6 @@ class SystemCheckNode(Node):
             "planner_server",
             "bt_navigator",
         ]
-        if str(self.get_parameter("perception_mode").value) != "edge_scan":
-            expected.insert(1, "m20pro_pointcloud_fusion")
         if self._bool("require_floor_manager"):
             expected.append("m20pro_floor_manager")
         return expected

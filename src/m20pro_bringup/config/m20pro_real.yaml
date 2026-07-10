@@ -83,25 +83,3 @@ m20pro_path_follower:
     slowdown_gain: 0.7
     scan_obstacle_max_age: 0.5
     scan_sample_step: 2
-
-m20pro_pointcloud_fusion:
-  ros__parameters:
-    input_cloud_topic: "/cloud_nav"
-    front_lidar_topic: "/LIDAR/FRONT/POINTS"
-    rear_lidar_topic: "/LIDAR/REAR/POINTS"
-    output_scan_topic: "/scan"
-    frame_id: "base_link"
-    min_angle: -3.14159
-    max_angle: 3.14159
-    angle_increment: 0.0174533
-    min_range: 0.2
-    max_range: 10.0
-    height_min: -0.25
-    height_max: 0.60
-    robot_radius: 0.28
-    publish_rate_hz: 10.0
-    transform_cloud: true
-    use_latest_tf: true
-    transform_timeout_s: 0.05
-    max_source_age_s: 1.0
-    publish_on_cloud_update: true

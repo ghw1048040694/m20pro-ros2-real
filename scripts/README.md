@@ -36,7 +36,7 @@ source install/setup.bash
 
 ```bash
 ./scripts/104_diagnose_preflight.sh
-./scripts/104_check_lidar.sh
+./scripts/104_check_edge_scan.sh
 ./scripts/104_goal_mode_battery_gate.py
 ./scripts/104_status.sh
 ./scripts/104_start_web.sh
@@ -64,22 +64,20 @@ source install/setup.bash
 
 说明：
 - 真机现场测试只用 `104_start_real_shadow.sh` 或 `104_start_real_move.sh` 全量启动。
-- 全量 real 会同时拉起 tcp_bridge、Nav2、点云融合和网页前端；笔记本/手柄访问 `http://10.21.31.104:8080`。
-- 全量 real 会先启动点云 relay，但默认不因 `/LIDAR/POINTS` 暂时无样本而阻塞网页和 Nav2。只看到 topic 名不算感知通过；任务前仍要通过网页自检、`/api/state` 或 `104_check_lidar.sh` 确认 `/LIDAR/POINTS -> relay -> /scan` 恢复。
-- 全量 real 会尝试把可选第二路 `/LIDAR/POINTS2` relay 到 `/m20pro/lidar_points2_relay` 并融合进 `/scan`；如果当前机器狗没有发布 `/LIDAR/POINTS2`，只记录提示并继续使用主雷达，不阻塞开机自检。
+- 全量 real 会同时拉起 tcp_bridge、Nav2 和网页前端；感知唯一输入是 106 edge scan 发布的 `/scan`。
+- 任务前通过网页自检、`/api/state` 或 `104_check_edge_scan.sh` 确认 `/scan` 新鲜、frame 正确且有效距离足够。
+- 网页“自检”页是开机基础自检主入口；确认全量系统、网页、106 edge scan 和原厂状态链路。
 - U360 雷达巡检默认关闭；需要联动任务点扫描时，启动前设置 `M20PRO_ENABLE_RADAR_INSPECTION=true`、`M20PRO_RADAR_BACKEND=u360_http` 和 `M20PRO_RADAR_DEVICE_URL=http://192.168.107.72:8080`。结果默认写到 `M20PRO_RADAR_OUTPUT_DIR`，未设置时使用 `/home/user/m20pro_radar_results`。
-- 网页“自检”页是开机基础自检主入口；点一次“开机基础自检”，确认全量系统、网页、原始点云和原厂状态链路；电量只显示给操作员参考，不作为软件自检或任务启动条件。
 - 定位、`/scan`、代价地图和 Nav2 生命周期需要到测试场地重定位后再确认；网页自检会把未重定位前的 costmap/Nav2 延后启动显示为信息项，不再作为 WARN 阻塞重定位。
 - `104_preflight_check.sh move` 是终端备用基础自检；网页自检异常、或现场需要保存终端输出时使用。诊断脚本可能临时使用项目轻量 FastDDS 配置观察 relay 点云，用来排除 root 服务和 user 终端之间的 DDS/SHM 观察差异；这不代表 104 正式服务默认改成 `project_udp`。
 - `104_diagnose_preflight.sh` 是只读诊断汇总：会收集网页自检、点云/scan/costmap、新版 Nav2 启动门、辅助模式状态字段和最近日志，不会下发运动、步态或辅助模式命令。
-- `104_diagnose_preflight.sh` 也会打印 104 的默认路由、DNS、git 工作区状态、`/LIDAR/POINTS2` 是否存在、两路 relay/fusion 状态，并可用项目轻量 FastDDS 配置做一次临时订阅探针。若网页和 relay/fusion 都显示点云新鲜，但普通 `ros2 topic echo/info` 显示无样本或 publisher 为 0，优先按 DDS profile/graph 发现问题处理；不要据此把正式服务默认切到混合 DDS。
+- `104_diagnose_preflight.sh` 会打印 104 的默认路由、DNS、Git 状态、`/scan` 和 Nav2 状态。
 - `104_goal_mode_battery_gate.py` 现在只作为电量显示探针：只读查询 `http://10.21.31.104:8080/api/state` 并打印当前电量参考值；不会因为低电或读不到电量返回失败，不会调用 `/api/tasks/start`，不会发布 `/m20pro/floor_goal`，不会重定位，不会发运动命令。
 - 现场任务问题统一录 rosbag 复盘，不再使用前端 watcher、ready-check、失败快照或 smoke 脚本作为正式流程。录包用 `./scripts/104_record_bag.sh 180 <label>`，上位机拉回用 `./scripts/local_pull_bags.sh`。
 - 历史前端 watcher/ready-check/analyzer/smoke 脚本已删除，不再作为维护对象。
 
 - 重定位排查以网页定位页、`localization_status` 和开发手册 TCP `2101/1` 回执为准；不要再用“106 是否收到 `/initialpose`”作为成功判断。
-- `104_start_web.sh` 只用于开发预览网页界面，不会拉起 tcp_bridge/Nav2/点云融合，不能作为重定位、标点、下发任务的现场流程。
-- 如果 `/LIDAR/POINTS` 进入 topic 可见但无样本状态，只停止本工程 real stack；不要手动清 `/dev/shm/fastrtps_*`，不要从本工程脚本重启原厂 multicast/lidar 服务。正式启动脚本只会清理 `fuser` 确认无人占用的陈旧 SHM 文件。
+- `104_start_web.sh` 只用于开发预览网页界面，不会拉起 tcp_bridge/Nav2，不能作为现场任务流程。
 - `127.0.0.1:8080` 只适合在运行前端的那台机器本机自测。
 - `shadow` 不放开运动控制。
 - `move` 会放开运动控制，现场必须有人看护，并准备手柄急停。

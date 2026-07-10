@@ -3,7 +3,6 @@ set -euo pipefail
 
 WS_DIR="${M20PRO_WS:-/home/user/m20pro_real_ros2_ws}"
 MODE="${1:-safe}"
-CLOUD_TOPIC="${M20PRO_CLOUD_TOPIC:-/LIDAR/POINTS}"
 RADAR_ENABLED="${M20PRO_ENABLE_RADAR_INSPECTION:-false}"
 RADAR_BACKEND="${M20PRO_RADAR_BACKEND:-dry_run}"
 RADAR_SCAN_MODE="${M20PRO_RADAR_SCAN_MODE:-measuring}"
@@ -23,7 +22,6 @@ set -u
 
 COMMON_ARGS=(
   mode:=real
-  cloud_topic:="${CLOUD_TOPIC}"
   rviz:=false
   enable_web_dashboard:=false
   enable_camera_proxy:=false

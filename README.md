@@ -102,7 +102,7 @@ source install/setup.bash
 
 ```bash
 ./scripts/104_diagnose_preflight.sh
-./scripts/104_check_lidar.sh
+./scripts/104_check_edge_scan.sh
 ./scripts/104_status.sh
 ./scripts/104_start_web.sh                 # 仅开发预览网页，不用于真机测试
 ./scripts/104_stop_web.sh
@@ -114,13 +114,13 @@ source install/setup.bash
 ./scripts/local_pull_bags.sh
 ```
 
-现场真机测试只走全量 real 启动：`104_start_real_shadow.sh` 或 `104_start_real_move.sh`。全量 real 会同时拉起 tcp_bridge、Nav2、点云融合和网页前端。
+现场真机测试只走全量 real 启动：`104_start_real_shadow.sh` 或 `104_start_real_move.sh`。全量 real 会同时拉起 tcp_bridge、Nav2 和网页前端；二维激光唯一来源是 106 edge scan 发布的 `/scan`。
 
-全量 real 启动会先拉起点云 relay，但默认不等待 `/LIDAR/POINTS` 样本才启动 Nav2 和网页。原因是现场需要网页可用来显示 `perception_status`、地图、定位和任务状态。只看到 topic 名或 publisher count 不算感知通过；任务前在网页自检、`/api/state` 或 `104_check_lidar.sh` 中确认 `/LIDAR/POINTS -> lidar_relay -> /scan` 链路恢复。此时只停止本工程 real stack，不要手动清 `/dev/shm/fastrtps_*`，不要从本工程脚本重启原厂 multicast/lidar 服务。
+任务前必须在网页自检、`/api/state` 或 `104_check_edge_scan.sh` 中确认 106 edge scan 输出的 `/scan` 新鲜、frame 为 `m20pro_base_link` 且有效距离不少于 20。感知不通时网页仍可用，但 Nav2 启动门和任务运行保护会禁止运动。
 
-104 现场默认保持原厂 FastDDS 口径：主栈、Nav2、网页、点云融合和原始点云 relay 均使用 factory profile。2026-07-07 已实测：`project_udp` 主栈 + factory relay 的混合配置虽然能降低 `/dev/shm`，但会让 relay 状态新鲜而 `/scan` 断流，不能作为正式链路默认值。项目内 `m20pro_fastdds_udp.xml` 只保留为 DDS/SHM 专项实验或只读诊断用；strict UDP-only 已实测无法稳定订阅原始 `/LIDAR/POINTS`，不要作为正式链路切换。开机脚本只会用 `fuser` 保护性清理没有进程占用的陈旧 `fastrtps_*` SHM 文件，不清正在使用的通信段。
+104 正式主栈固定使用 `project_udp` profile，只接收 106 发布的轻量 `/scan`，不再订阅跨主机原始点云。开机脚本只会用 `fuser` 保护性清理没有进程占用的陈旧 `fastrtps_*` SHM 文件。
 
-`104_start_real_move.sh` 会放开运动控制，只能在现场有人看护、手柄急停可用时执行。启动后打开网页，在“自检”页点一次“开机基础自检”。基础自检用于确认全量系统、网页、原始点云和原厂状态链路；电量只在界面显示给操作员参考，不作为软件自检或任务启动条件；定位、`/scan`、Nav2 生命周期和代价地图需要到测试场地重定位后再确认。`104_start_web.sh` 只用于开发预览网页界面，不会拉起 tcp_bridge/Nav2/点云融合，不能作为重定位、标点、下发任务的现场流程。
+`104_start_real_move.sh` 会放开运动控制，只能在现场有人看护、手柄急停可用时执行。启动后打开网页，在“自检”页点一次“开机基础自检”。基础自检用于确认全量系统、网页、106 edge scan 和原厂状态链路；定位、Nav2 生命周期和代价地图需要到测试场地重定位后再确认。`104_start_web.sh` 只用于开发预览网页界面，不能作为现场任务流程。
 
 ## 开机自启动
 
@@ -148,13 +148,24 @@ cd /home/user/m20pro_real_ros2_ws
 
 自启动服务只启动本工程，不修改原厂 multicast/FastDDS 服务。`move` 模式会把运动控制链路准备好，但任务仍必须在网页中人工点击开始。
 
-自启动同样会先启动点云 relay，但默认不因 `/LIDAR/POINTS` 暂时无样本而阻塞网页。点云未就绪时，网页仍应起来并在自检/任务页显示感知链路故障；恢复时先用网页状态或 `./scripts/104_check_lidar.sh` 确认样本，再继续重定位、标点和任务启动。默认环境变量应保持：
+自启动只消费 `/scan`。点云未就绪时，网页仍应起来并在自检/任务页显示感知链路故障；恢复时先用 `./scripts/104_check_edge_scan.sh` 确认样本。默认环境变量应保持：
 
 ```text
-M20PRO_FASTDDS_PROFILE=factory
-M20PRO_LIDAR_RELAY_FASTDDS_PROFILE=factory
+M20PRO_FASTDDS_PROFILE=project_udp
 M20PRO_CLEAN_STALE_FASTDDS_SHM=1
+M20PRO_SCAN_TOPIC=/scan
 ```
+
+YOLO 检测默认不随真机全量服务启动，避免在导航调试时抢占 104 算力。需要短期验证 `src/m20pro_inspection/models/best.pt` 时，104 使用独立依赖目录 `/home/user/m20pro_yolo_pydeps`，`m20pro_inspection.launch.py` 只给 YOLO 节点注入 `PYTHONPATH` 和 `LD_PRELOAD=/lib/aarch64-linux-gnu/libgomp.so.1`，不污染 Nav2、web、tcp bridge 等导航节点。确认依赖可用后，再把 `/etc/default/m20pro-real` 中的检测开关改为：
+
+```text
+M20PRO_ENABLE_INSPECTION=true
+M20PRO_INSPECTION_BACKEND=auto
+M20PRO_INSPECTION_MODEL_PATH=/home/user/m20pro_real_ros2_ws/install/m20pro_inspection/share/m20pro_inspection/models/best.pt
+M20PRO_INSPECTION_CLASS_NAMES_PATH=/home/user/m20pro_real_ros2_ws/install/m20pro_inspection/share/m20pro_inspection/models/labels_zh.txt
+```
+
+更适合实机常驻的路线仍然是把 `.pt` 转成 RKNN，用 `M20PRO_INSPECTION_BACKEND=rknn` 指向 RKNN 模型。当前 `best.pt` 类别为：未戴安全帽、未穿安全背心、跌倒、火灾、现场杂乱、配电箱打开。
 
 ## 现场复盘
 
@@ -433,7 +444,7 @@ docs/single_floor_navigation_architecture.md          # 单层导航架构和拆
 | Package | 作用 |
 | --- | --- |
 | `m20pro_bringup` | launch、参数、地图、RViz、脚本 |
-| `m20pro_navigation` | TCP 桥、点云融合、楼层管理、目标桥、健康检查 |
+| `m20pro_navigation` | TCP 桥、楼层管理、目标桥、健康检查 |
 | `m20pro_cloud_bridge` | 网页操作台 |
 | `m20pro_inspection` | YOLOv8/RKNN 巡检检测 |
 | `m20pro_radar_inspection` | U360 雷达任务点扫描与结果导出 |
@@ -442,12 +453,10 @@ docs/single_floor_navigation_architecture.md          # 单层导航架构和拆
 
 ## 常用检查命令
 
-点云：
+edge scan：
 
 ```bash
-./scripts/104_check_lidar.sh 12
-# 或手动确认样本：
-timeout 8 ros2 topic echo /LIDAR/POINTS --no-arr
+./scripts/104_check_edge_scan.sh
 ```
 
 Nav2：

@@ -39,9 +39,7 @@ def generate_launch_description():
     default_map = os.path.join(bringup_share, "maps", "F20", "occ_grid.yaml")
     default_rviz = os.path.join(bringup_share, "rviz", "m20pro_navigation.rviz")
     inspection_launch = os.path.join(inspection_share, "launch", "m20pro_inspection.launch.py")
-    default_inspection_model = os.path.join(
-        inspection_share, "models", "playphone_bg_best_rk3588_int8.rknn"
-    )
+    default_inspection_model = os.path.join(inspection_share, "models", "best.pt")
     default_inspection_classes = os.path.join(inspection_share, "models", "labels_zh.txt")
     radar_launch = os.path.join(radar_share, "launch", "m20pro_radar_inspection.launch.py")
 
@@ -50,12 +48,7 @@ def generate_launch_description():
     floor_config = LaunchConfiguration("floor_config")
     map_manifest = LaunchConfiguration("map_manifest")
     map_yaml = LaunchConfiguration("map")
-    cloud_topic = LaunchConfiguration("cloud_topic")
-    backup_cloud_topic = LaunchConfiguration("backup_cloud_topic")
     scan_topic = LaunchConfiguration("scan_topic")
-    perception_mode = LaunchConfiguration("perception_mode")
-    enable_lidar_points_subscriptions = LaunchConfiguration("enable_lidar_points_subscriptions")
-    use_fusion = LaunchConfiguration("fusion")
     enable_nav2 = LaunchConfiguration("enable_nav2")
     enable_floor_manager = LaunchConfiguration("enable_floor_manager")
     enable_floor_goal_bridge = LaunchConfiguration("enable_floor_goal_bridge")
@@ -125,12 +118,7 @@ def generate_launch_description():
         DeclareLaunchArgument("floor_config", default_value=default_floor_config),
         DeclareLaunchArgument("map_manifest", default_value=default_map_manifest),
         DeclareLaunchArgument("map", default_value=default_map),
-        DeclareLaunchArgument("cloud_topic", default_value="/LIDAR/POINTS"),
-        DeclareLaunchArgument("backup_cloud_topic", default_value=""),
         DeclareLaunchArgument("scan_topic", default_value="/scan"),
-        DeclareLaunchArgument("perception_mode", default_value="local_fusion"),
-        DeclareLaunchArgument("enable_lidar_points_subscriptions", default_value="true"),
-        DeclareLaunchArgument("fusion", default_value="true"),
         DeclareLaunchArgument(
             "enable_nav2",
             default_value="true" if nav2_stack_available else "false",
@@ -172,7 +160,7 @@ def generate_launch_description():
         DeclareLaunchArgument("camera_proxy_max_width", default_value="480"),
         DeclareLaunchArgument("camera_proxy_transport", default_value="tcp"),
         DeclareLaunchArgument("enable_inspection", default_value="false"),
-        DeclareLaunchArgument("inspection_backend", default_value="dry_run"),
+        DeclareLaunchArgument("inspection_backend", default_value="auto"),
         DeclareLaunchArgument("inspection_source_type", default_value="rtsp"),
         DeclareLaunchArgument("inspection_rtsp_url", default_value="rtsp://10.21.31.103:8554/video1"),
         DeclareLaunchArgument("inspection_camera_name", default_value="front_wide"),
@@ -286,43 +274,6 @@ def generate_launch_description():
                 },
             ],
             condition=IfCondition(enable_initialpose_3d_adapter),
-        ),
-        Node(
-            package="m20pro_navigation",
-            executable="pointcloud_fusion",
-            name="m20pro_pointcloud_fusion",
-            output="screen",
-            parameters=[
-                {
-                    "input_cloud_topic": cloud_topic,
-                    "backup_cloud_topic": backup_cloud_topic,
-                    "front_lidar_topic": "",
-                    "rear_lidar_topic": "",
-                    "output_scan_topic": scan_topic,
-                    "frame_id": "m20pro_base_link",
-                    "min_angle": -3.14159,
-                    "max_angle": 3.14159,
-                    "angle_increment": 0.0174533,
-                    "min_range": 0.2,
-                    "max_range": 10.0,
-                    "height_min": -0.25,
-                    "height_max": 0.60,
-                    "robot_radius": 0.28,
-                    "publish_rate_hz": 10.0,
-                    "transform_cloud": False,
-                    "use_latest_tf": True,
-                    "transform_timeout_s": 0.05,
-                    "max_source_age_s": 1.0,
-                    "cloud_reliability": "best_effort",
-                    "scan_reliability": "best_effort",
-                    "max_points_per_cloud": 6000,
-                    "min_cloud_interval_s": 0.05,
-                    "publish_on_cloud_update": False,
-                    "stamp_scan_with_current_time": True,
-                    "diagnostic_period_s": 2.0,
-                },
-            ],
-            condition=IfCondition(use_fusion),
         ),
         *(
             [
@@ -497,16 +448,7 @@ def generate_launch_description():
                         value_type=bool,
                     ),
                     "stair_zones_topic": stair_zones_topic,
-                    "lidar_points_topic": cloud_topic,
-                    "lidar_points_relay_subscribe_topic": cloud_topic,
-                    "enable_lidar_points_subscriptions": ParameterValue(
-                        enable_lidar_points_subscriptions,
-                        value_type=bool,
-                    ),
-                    "enable_lidar_points_relay": False,
-                    "lidar_points_relay_topic": "/m20pro/lidar_points_relay",
                     "scan_topic": scan_topic,
-                    "perception_mode": perception_mode,
                     "startup_sync_selected_map_delay_s": 6.0,
                     "enable_camera_proxy": ParameterValue(enable_camera_proxy, value_type=bool),
                     "front_camera_url": front_camera_url,
@@ -547,11 +489,7 @@ def generate_launch_description():
             parameters=[
                 {
                     "mode": "real",
-                    "perception_mode": perception_mode,
                     "check_period_s": 5.0,
-                    "cloud_topic": cloud_topic,
-                    "cloud_reliability": "best_effort",
-                    "require_cloud_topic": False,
                     "require_topic_messages": False,
                     "require_nav2": nav2_stack_available,
                     "require_costmaps": nav2_stack_available,

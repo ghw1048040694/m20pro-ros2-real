@@ -147,32 +147,14 @@ def preflight_lifecycle_item(node_name: str, lifecycle: Dict[str, Any]) -> Dict[
 
 
 def preflight_perception_items(
-    lidar: Dict[str, Any],
     scan: Dict[str, Any],
     *,
-    lidar_ok: bool,
     scan_ok: bool,
-    lidar_age_text: str,
     scan_age_text: str,
     finite_ranges: int,
 ) -> Dict[str, Any]:
-    lidar_points = 0
-    if isinstance(lidar, dict):
-        lidar_points = _nonnegative_int(lidar.get("width", 0)) * max(1, _nonnegative_int(lidar.get("height", 1), 1))
     scan_ranges = _nonnegative_int(finite_ranges)
-    perception_ok = (lidar_ok and lidar_points > 0) or (scan_ok and scan_ranges > 0)
-    if lidar_ok and lidar_points > 0:
-        lidar_status = "ok"
-        lidar_message = f"{lidar_points} 点 / {lidar_age_text}"
-    elif scan_ok and scan_ranges > 0:
-        lidar_status = "warn"
-        lidar_message = (
-            f"未直接缓存原始点云，但 /scan 新鲜且有效距离 {scan_ranges}；"
-            "工位自检按感知链路可用处理"
-        )
-    else:
-        lidar_status = "fail"
-        lidar_message = "未收到 /LIDAR/POINTS，也没有可用 /scan"
+    perception_ok = bool(scan_ok and scan_ranges > 0)
     scan_message = (
         f"有效距离 {scan_ranges} / {scan_age_text}"
         if scan_age_text
@@ -180,14 +162,17 @@ def preflight_perception_items(
     )
     return {
         "perception_ok": perception_ok,
-        "lidar_points": lidar_points,
         "finite_ranges": scan_ranges,
         "items": [
             {
-                "key": "lidar_points",
-                "label": "原始点云",
-                "status": lidar_status,
-                "message": lidar_message,
+                "key": "edge_scan",
+                "label": "106 边缘激光",
+                "status": "ok" if perception_ok else "fail",
+                "message": (
+                    f"edge scan 已输出 /scan，有效距离 {scan_ranges} / {scan_age_text}"
+                    if perception_ok
+                    else "edge scan 尚未输出可用 /scan；检查 106 m20pro-edge-scan-106.service"
+                ),
                 "group": "base",
             },
             {
@@ -345,7 +330,7 @@ def preflight_result_payload(
             "key": "perception_chain",
             "label": "感知链路",
             "status": "fail",
-            "message": "原始点云和 /scan 都不可用",
+            "message": "106 edge scan 和 /scan 不可用",
             "group": "base",
         }
         output_items.append(perception_failure)

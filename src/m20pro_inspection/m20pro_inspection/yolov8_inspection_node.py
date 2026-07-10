@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -67,6 +68,7 @@ class M20ProYolov8Inspection(Node):
         self.conf_threshold = float(self.get_parameter("conf_threshold").value)
         self.iou_threshold = float(self.get_parameter("iou_threshold").value)
         self.max_detections = int(self.get_parameter("max_detections").value)
+        self.publish_rate_hz = max(0.1, float(self.get_parameter("publish_rate_hz").value))
         self.publish_empty = bool(self.get_parameter("publish_empty_detections").value)
         self.publish_annotated = bool(self.get_parameter("publish_annotated_image").value)
         self.output_has_objectness = bool(self.get_parameter("output_has_objectness").value)
@@ -80,6 +82,8 @@ class M20ProYolov8Inspection(Node):
         self.rknn = None
         self.onnx_session = None
         self.onnx_input_name = ""
+        self.ultralytics_model = None
+        self.ultralytics_device = str(self.get_parameter("ultralytics_device").value).strip()
         self._load_backend()
 
         self.cap = None
@@ -87,6 +91,14 @@ class M20ProYolov8Inspection(Node):
         self.latest_image: Optional[Image] = None
         self.last_event_time = 0.0
         self.warned_decode_shape = False
+        self.started_at = time.time()
+        self.frame_count = 0
+        self.inference_count = 0
+        self.last_frame_time: Optional[float] = None
+        self.last_detection_time: Optional[float] = None
+        self.last_inference_ms: Optional[float] = None
+        self.last_detection_count = 0
+        self.last_error = ""
 
         self.detections_pub = self.create_publisher(
             String,
@@ -96,6 +108,11 @@ class M20ProYolov8Inspection(Node):
         self.events_pub = self.create_publisher(
             String,
             str(self.get_parameter("event_topic").value),
+            10,
+        )
+        self.status_pub = self.create_publisher(
+            String,
+            str(self.get_parameter("status_topic").value),
             10,
         )
         self.annotated_pub = self.create_publisher(
@@ -110,8 +127,8 @@ class M20ProYolov8Inspection(Node):
         else:
             self.get_logger().info("inspection input: RTSP %s" % self.rtsp_url)
 
-        rate = max(0.1, float(self.get_parameter("publish_rate_hz").value))
-        self.create_timer(1.0 / rate, self._tick)
+        self.create_timer(1.0 / self.publish_rate_hz, self._tick)
+        self.create_timer(1.0, self._publish_status)
         self.get_logger().info(
             "YOLOv8 inspection ready: backend=%s model=%s camera=%s"
             % (self.active_backend, self.model_path or "<none>", self.camera_name)
@@ -147,10 +164,12 @@ class M20ProYolov8Inspection(Node):
         self.declare_parameter("detections_topic", "~/detections")
         self.declare_parameter("annotated_image_topic", "~/annotated_image")
         self.declare_parameter("event_topic", "~/events")
+        self.declare_parameter("status_topic", "~/status")
         self.declare_parameter("event_classes", [""])
         self.declare_parameter("event_conf_threshold", 0.60)
         self.declare_parameter("event_min_interval_s", 2.0)
         self.declare_parameter("output_has_objectness", False)
+        self.declare_parameter("ultralytics_device", "cpu")
 
     def _load_class_names(self) -> List[str]:
         names = [str(item) for item in self.get_parameter("class_names").value if str(item)]
@@ -193,16 +212,21 @@ class M20ProYolov8Inspection(Node):
 
     def _load_backend(self) -> None:
         requested = self.backend_name.lower().strip()
+        auto_selected = requested == "auto"
         model_path = self.model_path
 
-        if requested == "auto":
+        if auto_selected:
             ext = os.path.splitext(model_path)[1].lower()
             if ext == ".rknn":
                 requested = "rknn"
             elif ext == ".onnx":
                 requested = "onnx"
+            elif ext in (".pt", ".pth"):
+                requested = "ultralytics"
             else:
                 requested = "dry_run"
+        elif requested in ("pt", "torch", "pytorch"):
+            requested = "ultralytics"
 
         if requested != "dry_run" and (not model_path or not os.path.exists(model_path)):
             self.get_logger().warning(
@@ -211,14 +235,25 @@ class M20ProYolov8Inspection(Node):
             )
             requested = "dry_run"
 
-        if requested == "rknn":
-            self._load_rknn(model_path)
-        elif requested == "onnx":
-            self._load_onnx(model_path)
-        elif requested == "dry_run":
+        try:
+            if requested == "rknn":
+                self._load_rknn(model_path)
+            elif requested == "onnx":
+                self._load_onnx(model_path)
+            elif requested == "ultralytics":
+                self._load_ultralytics(model_path)
+            elif requested == "dry_run":
+                self.active_backend = "dry_run"
+            else:
+                raise RuntimeError("unsupported inspection backend: %s" % requested)
+        except RuntimeError as exc:
+            if not auto_selected:
+                raise
+            self.get_logger().warning(
+                "inspection backend %s unavailable in auto mode: %s; "
+                "node will publish empty dry-run results" % (requested, exc)
+            )
             self.active_backend = "dry_run"
-        else:
-            raise RuntimeError("unsupported inspection backend: %s" % requested)
 
     def _load_rknn(self, model_path: str) -> None:
         try:
@@ -252,30 +287,90 @@ class M20ProYolov8Inspection(Node):
         self.onnx_input_name = self.onnx_session.get_inputs()[0].name
         self.active_backend = "onnx"
 
+    def _load_ultralytics(self, model_path: str) -> None:
+        self._install_numpy_pickle_compat()
+        try:
+            from ultralytics import YOLO
+        except ImportError as exc:
+            raise RuntimeError(
+                "ultralytics is required for .pt inspection inference; "
+                "install torch and ultralytics, or convert the model to RKNN/ONNX"
+            ) from exc
+
+        self.ultralytics_model = YOLO(model_path)
+        self.active_backend = "ultralytics"
+
+    @staticmethod
+    def _install_numpy_pickle_compat() -> None:
+        try:
+            import numpy as _np
+        except Exception:
+            return
+        sys.modules.setdefault("numpy._core", _np.core)
+        for name in (
+            "multiarray",
+            "umath",
+            "_multiarray_umath",
+            "numeric",
+            "fromnumeric",
+            "shape_base",
+        ):
+            try:
+                sys.modules.setdefault(
+                    "numpy._core." + name,
+                    __import__("numpy.core." + name, fromlist=["*"]),
+                )
+            except Exception:
+                pass
+
     def _on_image(self, msg: Image) -> None:
         self.latest_image = msg
 
     def _tick(self) -> None:
         frame, stamp = self._read_frame()
         if frame is None:
+            self._publish_status()
             return
 
+        self.frame_count += 1
+        self.last_frame_time = time.time()
         detections: List[Detection] = []
-        if self.active_backend != "dry_run":
+        if self.active_backend == "ultralytics":
+            try:
+                start = time.monotonic()
+                detections = self._infer_ultralytics(frame)
+                self.last_inference_ms = (time.monotonic() - start) * 1000.0
+                self.inference_count += 1
+                self.last_error = ""
+            except Exception as exc:
+                self.last_error = "inspection inference failed: %s" % exc
+                self.get_logger().warning(self.last_error)
+                self._publish_status()
+                return
+        elif self.active_backend != "dry_run":
             input_tensor, meta = self._preprocess(frame)
             try:
+                start = time.monotonic()
                 outputs = self._infer(input_tensor)
                 detections = self._decode_outputs(outputs, meta, frame.shape[:2])
+                self.last_inference_ms = (time.monotonic() - start) * 1000.0
+                self.inference_count += 1
+                self.last_error = ""
             except Exception as exc:
-                self.get_logger().warning("inspection inference failed: %s" % exc)
+                self.last_error = "inspection inference failed: %s" % exc
+                self.get_logger().warning(self.last_error)
+                self._publish_status()
                 return
 
+        self.last_detection_count = len(detections)
+        self.last_detection_time = time.time()
         if detections or self.publish_empty:
             self._publish_detections(detections, frame.shape, stamp)
         if self.publish_annotated:
             annotated = self._draw_detections(frame.copy(), detections)
             self.annotated_pub.publish(self._bgr_to_msg(annotated, stamp))
         self._publish_event_if_needed(detections, stamp)
+        self._publish_status()
 
     def _read_frame(self) -> Tuple[Optional[np.ndarray], Any]:
         if self.source_type == "image_topic":
@@ -292,15 +387,18 @@ class M20ProYolov8Inspection(Node):
             self.last_reconnect_time = now
             self.cap = cv2.VideoCapture(self.rtsp_url)
             if not self.cap.isOpened():
-                self.get_logger().warning("failed to open RTSP stream: %s" % self.rtsp_url)
+                self.last_error = "failed to open RTSP stream: %s" % self.rtsp_url
+                self.get_logger().warning(self.last_error)
                 return None, self.get_clock().now().to_msg()
 
         ok, frame = self.cap.read()
         if not ok or frame is None:
-            self.get_logger().warning("RTSP frame read failed; reconnecting")
+            self.last_error = "RTSP frame read failed; reconnecting"
+            self.get_logger().warning(self.last_error)
             self.cap.release()
             self.cap = None
             return None, self.get_clock().now().to_msg()
+        self.last_error = ""
         return frame, self.get_clock().now().to_msg()
 
     def _image_msg_to_bgr(self, msg: Image) -> np.ndarray:
@@ -372,6 +470,59 @@ class M20ProYolov8Inspection(Node):
             outputs = self.onnx_session.run(None, {self.onnx_input_name: input_tensor})
             return [np.asarray(output) for output in outputs]
         return []
+
+    @staticmethod
+    def _tensor_to_numpy(value: Any) -> np.ndarray:
+        if hasattr(value, "detach"):
+            value = value.detach()
+        if hasattr(value, "cpu"):
+            value = value.cpu()
+        return np.asarray(value)
+
+    def _infer_ultralytics(self, frame_bgr: np.ndarray) -> List[Detection]:
+        if self.ultralytics_model is None:
+            return []
+
+        kwargs: Dict[str, Any] = {
+            "source": frame_bgr,
+            "imgsz": self.input_size,
+            "conf": self.conf_threshold,
+            "iou": self.iou_threshold,
+            "max_det": self.max_detections,
+            "verbose": False,
+        }
+        if self.ultralytics_device:
+            kwargs["device"] = self.ultralytics_device
+
+        results = self.ultralytics_model.predict(**kwargs)
+        if not results:
+            return []
+
+        boxes = getattr(results[0], "boxes", None)
+        if boxes is None or len(boxes) == 0:
+            return []
+
+        xyxy = self._tensor_to_numpy(boxes.xyxy)
+        conf = self._tensor_to_numpy(boxes.conf)
+        cls = self._tensor_to_numpy(boxes.cls).astype(np.int32)
+
+        detections: List[Detection] = []
+        for idx in range(min(len(xyxy), self.max_detections)):
+            class_id = int(cls[idx])
+            x1, y1, x2, y2 = [float(value) for value in xyxy[idx].tolist()]
+            detections.append(
+                Detection(
+                    class_id=class_id,
+                    class_name=self._class_name(class_id, self._ultralytics_name(class_id)),
+                    confidence=float(conf[idx]),
+                    x1=x1,
+                    y1=y1,
+                    x2=x2,
+                    y2=y2,
+                )
+            )
+        detections.sort(key=lambda item: item.confidence, reverse=True)
+        return detections
 
     def _decode_outputs(
         self,
@@ -553,9 +704,20 @@ class M20ProYolov8Inspection(Node):
             order = order[1:][iou <= self.iou_threshold]
         return keep
 
-    def _class_name(self, class_id: int) -> str:
+    def _ultralytics_name(self, class_id: int) -> str:
+        names = getattr(self.ultralytics_model, "names", None)
+        if isinstance(names, dict):
+            value = names.get(class_id, names.get(str(class_id), ""))
+            return str(value) if value else ""
+        if isinstance(names, (list, tuple)) and 0 <= class_id < len(names):
+            return str(names[class_id])
+        return ""
+
+    def _class_name(self, class_id: int, fallback: str = "") -> str:
         if 0 <= class_id < len(self.class_names):
             return self.class_names[class_id]
+        if fallback:
+            return fallback
         return "class_%d" % class_id
 
     def _publish_detections(self, detections: List[Detection], frame_shape: Sequence[int], stamp: Any) -> None:
@@ -574,6 +736,37 @@ class M20ProYolov8Inspection(Node):
         msg = String()
         msg.data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         self.detections_pub.publish(msg)
+
+    def _publish_status(self) -> None:
+        now = time.time()
+        payload = {
+            "stamp": now,
+            "uptime_s": round(now - self.started_at, 3),
+            "camera": self.camera_name,
+            "source_type": self.source_type,
+            "requested_backend": self.backend_name,
+            "backend": self.active_backend,
+            "model_path": self.model_path,
+            "model_loaded": self.active_backend not in ("dry_run", ""),
+            "ready": True,
+            "publish_rate_hz": self.publish_rate_hz,
+            "frame_count": self.frame_count,
+            "inference_count": self.inference_count,
+            "last_frame_age_s": (
+                round(now - self.last_frame_time, 3) if self.last_frame_time is not None else None
+            ),
+            "last_detection_age_s": (
+                round(now - self.last_detection_time, 3) if self.last_detection_time is not None else None
+            ),
+            "last_inference_ms": (
+                round(self.last_inference_ms, 2) if self.last_inference_ms is not None else None
+            ),
+            "last_detection_count": self.last_detection_count,
+            "last_error": self.last_error or None,
+        }
+        msg = String()
+        msg.data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        self.status_pub.publish(msg)
 
     def _publish_event_if_needed(self, detections: List[Detection], stamp: Any) -> None:
         candidates = [

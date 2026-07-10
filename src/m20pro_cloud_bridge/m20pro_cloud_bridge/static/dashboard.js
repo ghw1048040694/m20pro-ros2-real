@@ -868,13 +868,8 @@
         return;
       }
       box.classList.add("warn");
-      if (perceptionStatus.ready === false && [
-        "factory_lidar_points_publisher_missing",
-        "lidar_relay_no_samples",
-        "lidar_relay_output_unavailable",
-        "scan_unavailable",
-      ].includes(perceptionStatus.code || "")) {
-        box.textContent = `下一步：${perceptionStatus.message || "先恢复点云 relay 和 /scan 感知链路"}`;
+      if (perceptionStatus.ready === false && perceptionStatus.code === "scan_unavailable") {
+        box.textContent = `下一步：${perceptionStatus.message || "先恢复 106 edge scan 和 /scan 感知链路"}`;
       } else if (selectedMapStatus.ready === false) {
         box.textContent = `下一步：${selectedMapStatus.message || "网页选择地图与 Nav2 当前加载地图不一致，请先切换到正确地图并重定位"}`;
       } else if (!currentMapPoints) {

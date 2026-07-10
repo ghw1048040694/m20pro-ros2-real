@@ -6,6 +6,91 @@ This file is maintained by Codex as the local M20 Pro project memory for future 
 
 Naming note: this file replaced the previous local-only `codex.md`. Going forward, maintain this file, `m20pro日志.md`, after every meaningful project change or field diagnosis.
 
+## 2026-07-10 14:53 CST - 网页和原厂手柄同时无画面：103 MPP 推流进程假活，已恢复
+
+- 用户现象：
+  - 104 网页前摄像头无画面；
+  - 后续确认原厂手柄也同时看不到画面。
+- 104 诊断：
+  - camera proxy `enabled=true`, ffmpeg 可用，前端客户请求能触发 worker;
+  - ffmpeg 反复以 code 1 退出；
+  - 手工读取 `rtsp://10.21.31.103:8554/video1` 和 `video2` 均返回 `404 Not Found`;
+  - 103:8554 端口可达，因此不是 104 前端或网络不通。
+- 103 根因：
+  - MediaMTX 进程存活，但日志明确显示 `no one is publishing to path 'video1/video2'`;
+  - 两个原厂 `push_video` 编码进程各占约 50% CPU，但持续报 Rockchip MPP `mpp_frame_deinit invalid NULL pointer`;
+  - 进程存活但已不再向 MediaMTX 注册推流，属于假活。
+- 硬件入口复核：
+  - `/dev/video0` 和 `/dev/video2` 均存在；
+  - `v4l2-ctl` 显示两路 `SM_USB_107X`, `Camera 1: ok`, 1280x720 MJPEG;
+  - 停止故障推流子进程后，ffmpeg 直接从两个 V4L2 设备各读 5 帧均 `rc=0`;
+  - 因此 USB 摄像头本身有帧，故障点是 MPP 编码/推流进程。
+- 恢复处理：
+  - 只终止两路假活编码子进程及守护子进程，未重启整台 103，未动运动控制链路；
+  - 用原厂 `/opt/robot/scripts/board_resources/rtsp_service/push_video.sh` 重新启动两路推流。
+- 恢复验证：
+  - MediaMTX: `video1` 和 `video2` 均 `is publishing`, H265 1 track;
+  - 原厂手柄 `10.21.33.11` 已同时 `is reading from path 'video1/video2'`;
+  - 104 camera proxy 已收到恢复后第一帧，`sequence=1`;
+  - 浏览器视频客户断开后，104 按低负载设计显示 `clients=0/running=false`，重新打开视频页会再次拉流。
+- 结论：
+  - 本次无画面与新点云链路删除无关；
+  - 是 103 原厂 RTSP 源端假活，所以原厂手柄和 104 网页同时受影响。
+
+## 2026-07-10 14:40 CST - 新 edge scan 成为唯一正式点云链路，旧 104 relay/fusion 已归档并根除
+
+- 用户决策：
+  - 不再继续维护 104 跨主机订阅原始点云的旧链路；
+  - 生产感知唯一链路收敛为 `106 DrDDS /LIDAR/POINTS -> 106 m20pro_edge_scan -> /scan -> 104 Nav2/Web`;
+  - 旧链路仅保留在上位机离线归档，不保留 Git/104 回退入口。
+- 旧链路归档：
+  - 目录：`/home/fabu/桌面/M20Pro运行数据/旧点云链路归档_20260710_1420`;
+  - 包含上位机实现、104 现场实现、迁移历史文档、修改前 Git/运行配置快照和 `SHA256SUMS`;
+  - 三个 tar 均已通过 `tar -tzf` 可读性检查。
+- 从正式仓库删除：
+  - `m20pro_navigation/lidar_relay_node.py` 和 console entry;
+  - `m20pro_navigation/pointcloud_fusion.py` 和 console entry;
+  - `m20pro_lidar_guard.sh` / `m20pro_lidar_relay_guard.sh`;
+  - launch 中 `cloud_topic` / `backup_cloud_topic` / `fusion` / `perception_mode` / 原始点云订阅开关；
+  - `M20PRO_SCAN_SOURCE` / relay/FastDDS 双 profile / 第二路 relay 配置；
+  - Web 中 PointCloud2、relay status 订阅与旧感知 payload 字段；
+  - 录包中的 104 raw lidar 可选订阅；
+  - 旧 feasibility/migration/service-trial/rollback 文档和审计脚本。
+- 104 正式收口：
+  - `M20PRO_FASTDDS_PROFILE=project_udp`;
+  - `M20PRO_SCAN_TOPIC=/scan`;
+  - Web 感知合同只根据 `/scan` 新鲜度和有效距离判定；
+  - 预检只显示 `106 边缘激光` 和 `二维激光`;
+  - 新增 `scripts/104_check_edge_scan.sh`，强制检查 `perception_ready`、`edge_scan`、`m20pro_base_link` 和至少 20 个有效距离。
+- 106 生产服务根因修复：
+  - 现场确认原 service 为 `inactive + disabled`，导致 104 当时 `scan_unavailable`;
+  - 改为安装阶段编译固定二进制 `/usr/local/lib/m20pro/m20pro_edge_scan`;
+  - 运行阶段不再每次现场编译；
+  - systemd 改为 `enabled`、`Restart=always`、`RestartSec=3`;
+  - 保留启动时 `source /opt/robot/scripts/setup_ros2.sh`，这是 106 DDS 网卡/profile 选择的必要条件。
+- 实机验证：
+  - 106 service `active + enabled`;
+  - 强制 `kill -9` 主进程后 3 秒自动拉起，`NRestarts=1`，PID 发生变化；
+  - 104 已构建 `m20pro_navigation m20pro_cloud_bridge m20pro_bringup` 并重启正式服务；
+  - 104 源码、build/install 及 `__pycache__` 内旧 relay/fusion 残留已显式删除；
+  - 进程无 `lidar_relay` / `pointcloud_fusion`;
+  - `/api/state`: `perception_ready`, `mode=edge_scan`, frame=`m20pro_base_link`, finite ranges 约 191-192, age 约 0.03-0.15s;
+  - 104 重启初期 `/dev/shm` 约 `201M/7.7G`, `3%`，全栈稳定后约 `1.1G/7.7G`, `14%`;
+  - `active_task=None`;
+  - 本轮未让机器狗运动，短程导航、贴墙轮廓和避障仍需现场人工验收。
+- 本地验证：
+  - Python `py_compile` 通过；
+  - 所有相关 shell `bash -n` 通过；
+  - `scripts/test_perception_contract.py` 通过；
+  - `scripts/test_preflight_contract.py` 通过；
+  - 前端 `node --check` 通过；
+  - `git diff --check` 通过。
+- Git 仓库：
+  - 核心修改已提交 `7ca8fa4 refactor: make edge scan the only perception chain`;
+  - 已推送到公司 GitLab `main`;
+  - 已推送到 GitHub `main`;
+  - 两个远端均已从版本库删除旧 relay/fusion 实现和回退文档。
+
 ## 2026-07-09 17:48 CST - 地图下拉框只显示地图名称
 
 - 用户反馈：
@@ -22555,3 +22640,218 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 维护规则：
   - 后端新增、删除、修改接口字段时，同步更新 `docs/frontend_api_contract.md`;
   - 新版前端和甲方前端不要复制后端判断逻辑，尤其不要自己推断实时 `/map` 属于哪张固定地图。
+
+## 2026-07-09 19:20 CST - 接入 models/best.pt YOLO 快速验证链路
+
+- 用户要求：
+  - 已在 `src/m20pro_inspection/models/` 下放入 `best.pt`;
+  - 希望这两天先让该 YOLO 模型可用。
+- 现状确认：
+  - `best.pt` 约 12 MB，是 PyTorch/Ultralytics 权重文件；
+  - 原 `m20pro_inspection` 节点只自动支持 `.rknn`、`.onnx` 和 `dry_run`;
+  - 因此旧逻辑看到 `.pt` 会退回空跑，前端只能看到空检测结果。
+- 已改动：
+  - `yolov8_inspection_node.py` 新增 `ultralytics` 后端：
+    - `backend:=auto` 遇到 `.pt/.pth` 自动选择 `ultralytics`;
+    - 支持 `backend:=pt/torch/pytorch` 作为别名；
+    - `backend:=auto` 下依赖缺失时退回 `dry_run` 并打 warning，接口不崩；
+    - 显式指定 `backend:=ultralytics/rknn/onnx` 时仍严格报错，方便排查配置；
+    - 直接调用 Ultralytics `YOLO(...).predict(...)`;
+    - 输出继续使用原有 ROS 2 topic 和 JSON 字段：
+      - `/m20pro_yolov8_inspection/detections`;
+      - `/m20pro_yolov8_inspection/events`;
+      - `/m20pro_yolov8_inspection/annotated_image`;
+    - 前端和甲方前端仍从 `/api/state.detections` 读取，不需要改接口。
+  - 接口化边界：
+    - YOLO 节点只负责相机输入、模型推理和标准 JSON 输出；
+    - 前端通过 `/api/state.detections` 消费；
+    - ROS 2 后端包可直接订阅 detections/events；
+    - 若要把检测结果绑定到房间/点位/结果前缀，同时订阅 `/m20pro/active_waypoint`。
+  - `m20pro_inspection.launch.py` 默认模型改为 `models/best.pt`;
+  - `labels_zh.txt` 继续作为类别名文件，目前第 0 类是 `玩手机`;
+  - `m20pro_real.launch.py`、`m20pro.launch.py` 的检测默认后端改为 `auto`;
+  - `m20pro_real_full.sh` 增加显式环境开关：
+    - `M20PRO_ENABLE_INSPECTION`;
+    - `M20PRO_INSPECTION_BACKEND`;
+    - `M20PRO_INSPECTION_MODEL_PATH`;
+    - `M20PRO_INSPECTION_CLASS_NAMES_PATH`;
+    - `M20PRO_INSPECTION_RTSP_URL`;
+    - `M20PRO_INSPECTION_CAMERA_NAME`;
+  - `systemd/m20pro-real.default` 和 `scripts/104_enable_autostart.sh` 同步这些开关。
+- 设计原则：
+  - 默认不随全量 real 服务启动 YOLO，避免当前导航调试阶段抢占 104 算力；
+  - 需要测试时显式打开 `M20PRO_ENABLE_INSPECTION=true`;
+  - 短期用 `.pt + ultralytics` 快速确认模型效果；
+  - 长期实机常驻仍建议转 RKNN，用 RK3588/NPU 跑，避免 CPU 推理影响导航。
+- 文档更新：
+  - `docs/frontend_api_contract.md` 补充 YOLO payload、后端类型和启动方式；
+  - `README.md` 补充 104 上启用 YOLO 的环境变量；
+  - `src/m20pro_inspection/models/README.md` 说明 `best.pt`、`labels_zh.txt` 和 RKNN 推荐路线。
+- 当前限制：
+  - 上位机当前 Python 环境缺少 `torch/ultralytics`;
+  - 上位机 `cv2` 与 NumPy 版本也存在冲突；
+  - 104 为 `aarch64`、Python 3.8.10，`cv2` 可正常 import;
+  - 104 当前缺少 `torch/ultralytics/rknnlite/onnxruntime`;
+  - 104 当前还没有同步 `best.pt`;
+  - 因此本次先完成代码和接口接入，真机/上位机实际推理还需要补齐 Python 依赖后验证。
+- 推荐下一步：
+  - 在 104 或上位机安装匹配环境的 `torch` 和 `ultralytics`;
+  - 单独启动：
+    - `ros2 launch m20pro_inspection m20pro_inspection.launch.py backend:=auto`;
+  - 确认 `/m20pro_yolov8_inspection/detections` 有真实检测；
+  - 再决定是否把 `.pt` 转为 RKNN 并切到 `M20PRO_INSPECTION_BACKEND=rknn`。
+
+## 2026-07-09 20:40 CST - 104 同步 YOLO 接口链路并完成最小测试
+
+- 已同步到 104：
+  - `m20pro_inspection` YOLO 节点、launch、config、package 依赖；
+  - `m20pro_bringup` inspection 启动开关；
+  - `systemd/m20pro-real.default`;
+  - `scripts/104_enable_autostart.sh`;
+  - `src/m20pro_inspection/models/best.pt`;
+  - README/API 文档/日志。
+- 104 构建：
+  - `colcon build --packages-select m20pro_inspection m20pro_bringup --symlink-install` 通过。
+- 现场服务状态：
+  - `m20pro-real.service` 同步前后均保持 `active`;
+  - 本次没有重启正式服务；
+  - 没有把 YOLO 接入正式 real 服务；
+  - 清理了 standalone 测试产生的 YOLO 进程和临时脚本。
+- 发现并修复：
+  - 104 是 ROS 2 Foxy；
+  - 原 inspection launch 用字典参数时生成 `/**` 通配参数文件，在 104/Foxy 下没有覆盖节点参数；
+  - 表现为用户传入 `source_type:=image_topic`、`model_path:=best.pt` 后，节点仍按 YAML 默认 RTSP 和空模型启动；
+  - 已把 `m20pro_inspection.launch.py` 改成 `OpaqueFunction` 生成节点名专属临时参数文件：
+    - `m20pro_yolov8_inspection.ros__parameters`;
+    - Foxy/Humble 都能按节点名读取；
+    - 全量 real 服务传入的 `inspection_*` 参数也能真正生效。
+- 104 最小接口测试：
+  - 按 root ROS 环境执行；
+  - standalone 启动：
+    - `ros2 launch m20pro_inspection m20pro_inspection.launch.py backend:=auto source_type:=image_topic image_topic:=/tmp/m20pro_yolo_test_image`;
+  - 向 `/tmp/m20pro_yolo_test_image` 发布临时 `sensor_msgs/Image`;
+  - 成功从 `/m20pro_yolov8_inspection/detections` 收到 JSON：
+    - `DETECTIONS_MESSAGE=ok`;
+    - `backend=dry_run`;
+    - `count=0`;
+    - `camera=front_wide`;
+    - `source_type=image_topic`。
+- 结论：
+  - 104 上 YOLO 的“接口链路”已经通了；
+  - launch 参数也已在 Foxy 上验证生效；
+  - 由于 104 仍缺少 `torch/ultralytics/rknnlite/onnxruntime`，目前不能做真实模型推理，只能 dry-run 保持接口；
+  - 下一步要实现真实识别，必须补推理运行时或转 RKNN/NPU。
+
+## 2026-07-09 21:45 CST - 104 配置 best.pt 真实 YOLO 推理环境
+
+- 本次目标：
+  - 让 `src/m20pro_inspection/models/best.pt` 在 104 上真实加载并推理；
+  - 保持接口化输出，仍然发布 `/m20pro_yolov8_inspection/detections` 和 `/m20pro_yolov8_inspection/events`;
+  - 不把 YOLO 默认接入正式 `m20pro-real.service`，避免当前导航调试被 CPU 推理影响。
+- 104 依赖配置：
+  - 使用独立目录 `/home/user/m20pro_yolo_pydeps`;
+  - wheel 缓存在 `/home/user/m20pro_yolo_wheelhouse`;
+  - 安装了 `.pt + ultralytics` 路线需要的运行时：
+    - `torch 2.4.1`;
+    - `torchvision 0.19.1`;
+    - `ultralytics 8.3.40`;
+    - `numpy 1.24.4`;
+    - `sympy/mpmath/filelock/typing_extensions/networkx/jinja2/MarkupSafe/fsspec`;
+    - `py-cpuinfo/tqdm/ultralytics-thop`。
+- 发现并处理：
+  - 104 上 torch 导入时报：
+    - `cannot allocate memory in static TLS block`;
+  - 临时验证 `LD_PRELOAD=/lib/aarch64-linux-gnu/libgomp.so.1` 可解决；
+  - 已在 `m20pro_inspection.launch.py` 增加 `ld_preload` 参数，默认只给 YOLO 节点注入该预加载，不影响 Nav2、web、tcp bridge 等节点。
+- 模型类别确认：
+  - `best.pt` 自带类别为：
+    - `no-hardhat`;
+    - `no-safety-vest`;
+    - `falling`;
+    - `fire`;
+    - `site-clutter`;
+    - `electrical-box-open`;
+  - 原 `labels_zh.txt` 只有一行 `玩手机`，会导致前端显示错误；
+  - 已改成 6 行中文类别：
+    - 未戴安全帽；
+    - 未穿安全背心；
+    - 跌倒；
+    - 火灾；
+    - 现场杂乱；
+    - 配电箱打开。
+- 104 真实推理测试：
+  - 使用 `PYTHONPATH=/home/user/m20pro_yolo_pydeps`;
+  - 使用 `LD_PRELOAD=/lib/aarch64-linux-gnu/libgomp.so.1`;
+  - 成功导入 `torch/torchvision/ultralytics/thop`;
+  - 成功加载 `/home/user/m20pro_real_ros2_ws/src/m20pro_inspection/models/best.pt`;
+  - 空图 CPU 推理通过：
+    - `load ok`;
+    - `predict ok`;
+    - 首帧约 5.5 秒，后续真实 RTSP 帧率仍需单独评估。
+- 104 ROS 接口测试：
+  - 普通 `user` 环境下 YOLO 进程能启动，但 ROS graph 仍存在历史问题：CLI 看不到该临时节点；
+  - 按之前经验切到 root ROS 环境后，standalone launch 成功：
+    - `ros2 launch m20pro_inspection m20pro_inspection.launch.py backend:=auto source_type:=image_topic image_topic:=/tmp/m20pro_yolo_test_image`;
+  - 临时发布空 `sensor_msgs/Image`;
+  - 成功订阅到 `/m20pro_yolov8_inspection/detections`;
+  - 收到 JSON 摘要：
+    - `backend=ultralytics`;
+    - `model_path=.../models/best.pt`;
+    - `source_type=image_topic`;
+    - `camera=front_wide`;
+    - `count=0`。
+- 服务状态：
+  - `m20pro-real.service` 保持 `active`;
+  - 本次没有重启正式服务；
+  - 本次没有把 YOLO 打开为全量服务默认节点。
+
+## 2026-07-09 22:05 CST - YOLO 接口化补强
+
+- 用户强调 YOLO 也要接口化，不能只服务某个前端页面。
+- 已补充稳定状态接口：
+  - ROS 2 topic:
+    - `/m20pro_yolov8_inspection/status`;
+  - HTTP state:
+    - `/api/state.inspection_status`。
+- 状态 payload 包含：
+  - `camera`;
+  - `source_type`;
+  - `requested_backend`;
+  - `backend`;
+  - `model_path`;
+  - `model_loaded`;
+  - `ready`;
+  - `frame_count`;
+  - `inference_count`;
+  - `last_frame_age_s`;
+  - `last_inference_ms`;
+  - `last_detection_count`;
+  - `last_error`。
+- 接口边界现在是：
+  - 检测结果：
+    - `/m20pro_yolov8_inspection/detections`;
+    - `/api/state.detections`;
+  - 检测事件：
+    - `/m20pro_yolov8_inspection/events`;
+    - `/api/state.events`;
+  - 检测节点状态：
+    - `/m20pro_yolov8_inspection/status`;
+    - `/api/state.inspection_status`;
+  - 点位/房间/结果前缀关联：
+    - `/m20pro/active_waypoint`;
+    - `/api/state.active_waypoint`。
+- 设计原则：
+  - 前端和甲方系统只读接口，不硬编码模型文件、不硬编码类别表；
+  - 换 `.pt/.onnx/.rknn` 只改 YOLO 节点启动参数；
+  - YOLO 状态不参与导航 readiness，也不阻塞重定位/导航；
+  - 全量 real 服务仍默认不启动 YOLO，避免导航调试阶段抢占算力。
+- 104 验证：
+  - `colcon build --packages-select m20pro_inspection m20pro_cloud_bridge m20pro_bringup --symlink-install` 通过；
+  - root ROS 环境 standalone 启动 YOLO 节点；
+  - Python 订阅 `/m20pro_yolov8_inspection/status` 成功收到 JSON：
+    - `backend=ultralytics`;
+    - `model_loaded=true`;
+    - `ready=true`;
+    - `model_path=.../models/best.pt`;
+  - 临时 YOLO 进程已清理；
+  - `m20pro-real.service` 仍保持 `active`，未重启正式服务。

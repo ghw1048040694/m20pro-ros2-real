@@ -289,111 +289,15 @@ PY
 if command -v ros2 >/dev/null 2>&1; then
   echo "[topics]"
   ros2 topic list 2>/dev/null \
-    | grep -E '^/(LIDAR/POINTS2?|m20pro/lidar_points2?_relay|scan|ODOM|map|tf|local_costmap/costmap|global_costmap/costmap|m20pro/(pointcloud_fusion/status|lidar_relay2?/status)|m20pro_tcp_bridge/(navigation_status|localization_ok|map_pose|usage_mode_result))$' \
+    | grep -E '^/(scan|ODOM|map|tf|local_costmap/costmap|global_costmap/costmap|m20pro_tcp_bridge/(navigation_status|localization_ok|map_pose|usage_mode_result))$' \
     | sort || true
   echo
-  echo "[lidar topic info]"
-  for topic in /LIDAR/POINTS /LIDAR/POINTS2 /m20pro/lidar_points_relay /m20pro/lidar_points2_relay /scan; do
-    if ros2 topic list 2>/dev/null | grep -qx "${topic}"; then
-      echo "-- ${topic}"
-      timeout 5 ros2 topic info "${topic}" 2>/dev/null || true
-    else
-      echo "-- ${topic}: not present"
-    fi
-  done
-  echo
-  echo "[project UDP sample probe]"
-  python3 - <<'PY' 2>/dev/null || echo "sample probe unavailable"
-import time
-
-import rclpy
-from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import LaserScan, PointCloud2
-from std_msgs.msg import String
-
-
-def qos(reliability):
-    profile = QoSProfile(depth=10)
-    profile.history = HistoryPolicy.KEEP_LAST
-    profile.reliability = reliability
-    profile.durability = DurabilityPolicy.VOLATILE
-    return profile
-
-
-class Probe(Node):
-    def __init__(self):
-        super().__init__("m20pro_diag_probe")
-        self.counts = {"relay": 0, "scan": 0, "fusion_status": 0, "relay_status": 0}
-        self.create_subscription(
-            PointCloud2,
-            "/m20pro/lidar_points_relay",
-            lambda msg: self._hit("relay", int(msg.width) * max(1, int(msg.height))),
-            qos(ReliabilityPolicy.RELIABLE),
-        )
-        self.create_subscription(
-            LaserScan,
-            "/scan",
-            lambda msg: self._hit("scan", len(msg.ranges)),
-            qos(ReliabilityPolicy.BEST_EFFORT),
-        )
-        self.create_subscription(
-            String,
-            "/m20pro/pointcloud_fusion/status",
-            lambda msg: self._hit("fusion_status", len(msg.data)),
-            10,
-        )
-        self.create_subscription(
-            String,
-            "/m20pro/lidar_relay/status",
-            lambda msg: self._hit("relay_status", len(msg.data)),
-            10,
-        )
-
-    def _hit(self, key, size):
-        self.counts[key] += 1
-        if self.counts[key] <= 2:
-            print("sample %s #%d size=%d" % (key, self.counts[key], size), flush=True)
-
-
-rclpy.init()
-node = Probe()
-deadline = time.time() + 5.0
-while time.time() < deadline:
-    rclpy.spin_once(node, timeout_sec=0.2)
-print("counts " + " ".join("%s=%d" % item for item in sorted(node.counts.items())), flush=True)
-if node.counts["scan"] == 0:
-    print("WARNING: /scan produced no CLI sample; lidar/scan is not ready for navigation", flush=True)
-if node.counts["relay"] == 0:
-    print("WARNING: relay pointcloud produced no CLI sample; check relay DDS profile, service user, and relay log", flush=True)
-node.destroy_node()
-rclpy.shutdown()
-PY
-  echo
-  echo "[pointcloud fusion status]"
-  if string_topic_sample /m20pro/pointcloud_fusion/status; then
-    true
-  else
-    echo "no /m20pro/pointcloud_fusion/status sample in 5s"
-  fi
-  echo
-  echo "[lidar relay status]"
-  if string_topic_sample /m20pro/lidar_relay/status; then
-    true
-  else
-    echo "no /m20pro/lidar_relay/status sample in 5s"
-  fi
-  echo
-  echo "[lidar2 relay status]"
-  if string_topic_sample /m20pro/lidar_relay2/status; then
-    true
-  else
-    echo "no /m20pro/lidar_relay2/status sample in 5s"
-  fi
+  echo "[edge scan topic info]"
+  timeout 5 ros2 topic info /scan 2>/dev/null || echo "/scan not present"
   echo
   echo "[nodes]"
   ros2 node list 2>/dev/null \
-    | grep -E '^/(m20pro_nav2_startup_gate|m20pro_pointcloud_fusion|m20pro_tcp_bridge|m20pro_web_dashboard|controller_server|planner_server|bt_navigator|map_server|m20pro_floor_manager)$' \
+    | grep -E '^/(m20pro_nav2_startup_gate|m20pro_tcp_bridge|m20pro_web_dashboard|controller_server|planner_server|bt_navigator|map_server|m20pro_floor_manager)$' \
     | sort || true
 else
   echo "ros2 command not available in this shell"
