@@ -54,6 +54,11 @@ Naming note: this file replaced the previous local-only `codex.md`. Going forwar
   - `scripts/test_preflight_contract.py` 通过；
   - 前端 `node --check` 通过；
   - `git diff --check` 通过。
+- Git 仓库：
+  - 核心修改已提交 `7ca8fa4 refactor: make edge scan the only perception chain`;
+  - 已推送到公司 GitLab `main`;
+  - 已推送到 GitHub `main`;
+  - 两个远端均已从版本库删除旧 relay/fusion 实现和回退文档。
 
 ## 2026-07-09 17:48 CST - 地图下拉框只显示地图名称
 
