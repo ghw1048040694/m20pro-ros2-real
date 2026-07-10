@@ -1,10 +1,16 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-07-10 16:40 CST
+Last updated: 2026-07-10 16:44 CST
 
 This file is maintained by Codex as the local M20 Pro project memory for future ChatGPT review. It records the current architecture, important decisions, recent changes, verification status, and next steps.
 
 Naming note: this file replaced the previous local-only `codex.md`. Going forward, maintain this file, `m20pro日志.md`, after every meaningful project change or field diagnosis.
+
+## 2026-07-10 16:44 CST - 生成 7.10 项目周报
+
+- 参照桌面 `周报/耿浩威7.3周报.docx` 的标题、字号和章节结构，生成 `/home/fabu/桌面/周报/耿浩威7.10周报.docx`。
+- 周报面向管理汇报，按导航定位、点云减负、地图与前端、H.264 视频、YOLO NPU 和工程交付归纳本周已完成成果，不采用逐日排障日志写法。
+- LibreOffice 转换检查通过：文档共 4 页，无空白页，标题和正文层级完整。
 
 ## 2026-07-10 16:40 CST - YOLO 正式切换 RK3588 NPU，并撤除 104 Torch 路线
 
