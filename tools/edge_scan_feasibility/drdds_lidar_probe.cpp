@@ -83,4 +83,3 @@ int main(int argc, char **argv) {
   DrDDSManager::Delete();
   return sample_count > 0 ? 0 : 1;
 }
-

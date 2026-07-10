@@ -268,7 +268,7 @@ def test_annotation_semantics_normalization() -> None:
     assert_equal(normalized["scan_point"], "S02", "scan point alias")
     assert_equal(normalized["radar"], {}, "bad radar normalized")
     assert_equal(normalized["target_classes"], ["helmet", "vest"], "target classes")
-    assert_true(normalized["result_file_prefix"].startswith("F20_A区_门口_过渡"), "result prefix")
+    assert_true(normalized["result_file_prefix"].startswith("F20_A区_门口_S02_过渡"), "result prefix")
 
 
 def test_payload_helpers() -> None:

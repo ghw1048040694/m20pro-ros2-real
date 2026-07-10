@@ -105,6 +105,9 @@ def task_waypoint_payload(
     payload["index"] = index
     payload["manual_point_type"] = annotation.get("manual_point_type")
     payload["dwell_s"] = annotation.get("dwell_s")
+    payload["building"] = annotation.get("building")
+    payload["unit"] = annotation.get("unit")
+    payload["house"] = annotation.get("house")
     payload["area"] = annotation.get("area")
     payload["room"] = annotation.get("room")
     payload["scan_point"] = annotation.get("scan_point")

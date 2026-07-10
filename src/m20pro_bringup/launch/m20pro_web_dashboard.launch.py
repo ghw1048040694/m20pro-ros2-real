@@ -36,6 +36,9 @@ def generate_launch_description():
     camera_proxy_transport = LaunchConfiguration("camera_proxy_transport")
     initialpose_topic = LaunchConfiguration("initialpose_topic")
     relocalization_result_topic = LaunchConfiguration("relocalization_result_topic")
+    wait_for_radar_inspection = LaunchConfiguration("wait_for_radar_inspection")
+    radar_inspection_timeout_s = LaunchConfiguration("radar_inspection_timeout_s")
+    radar_results_dir = LaunchConfiguration("radar_results_dir")
 
     return LaunchDescription([
         DeclareLaunchArgument("host", default_value="0.0.0.0"),
@@ -94,6 +97,9 @@ def generate_launch_description():
             "relocalization_result_topic",
             default_value="/m20pro_tcp_bridge/relocalization_result",
         ),
+        DeclareLaunchArgument("wait_for_radar_inspection", default_value="false"),
+        DeclareLaunchArgument("radar_inspection_timeout_s", default_value="1800.0"),
+        DeclareLaunchArgument("radar_results_dir", default_value="~/.m20pro_radar_results"),
         Node(
             package="m20pro_cloud_bridge",
             executable="web_dashboard",
@@ -141,6 +147,15 @@ def generate_launch_description():
                     "camera_proxy_transport": camera_proxy_transport,
                     "initialpose_topic": initialpose_topic,
                     "relocalization_result_topic": relocalization_result_topic,
+                    "wait_for_radar_inspection": ParameterValue(
+                        wait_for_radar_inspection,
+                        value_type=bool,
+                    ),
+                    "radar_inspection_timeout_s": ParameterValue(
+                        radar_inspection_timeout_s,
+                        value_type=float,
+                    ),
+                    "radar_results_dir": radar_results_dir,
                 }
             ],
         ),

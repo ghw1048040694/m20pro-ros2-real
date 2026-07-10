@@ -67,6 +67,7 @@ source install/setup.bash
 - 全量 real 会同时拉起 tcp_bridge、Nav2 和网页前端；感知唯一输入是 106 edge scan 发布的 `/scan`。
 - 任务前通过网页自检、`/api/state` 或 `104_check_edge_scan.sh` 确认 `/scan` 新鲜、frame 正确且有效距离足够。
 - 网页“自检”页是开机基础自检主入口；确认全量系统、网页、106 edge scan 和原厂状态链路。
+- U360 雷达巡检默认关闭；需要联动任务点扫描时，启动前设置 `M20PRO_ENABLE_RADAR_INSPECTION=true`、`M20PRO_RADAR_BACKEND=u360_http` 和 `M20PRO_RADAR_DEVICE_URL=http://192.168.107.72:8080`。结果默认写到 `M20PRO_RADAR_OUTPUT_DIR`，未设置时使用 `/home/user/m20pro_radar_results`。
 - 定位、`/scan`、代价地图和 Nav2 生命周期需要到测试场地重定位后再确认；网页自检会把未重定位前的 costmap/Nav2 延后启动显示为信息项，不再作为 WARN 阻塞重定位。
 - `104_preflight_check.sh move` 是终端备用基础自检；网页自检异常、或现场需要保存终端输出时使用。诊断脚本可能临时使用项目轻量 FastDDS 配置观察 relay 点云，用来排除 root 服务和 user 终端之间的 DDS/SHM 观察差异；这不代表 104 正式服务默认改成 `project_udp`。
 - `104_diagnose_preflight.sh` 是只读诊断汇总：会收集网页自检、点云/scan/costmap、新版 Nav2 启动门、辅助模式状态字段和最近日志，不会下发运动、步态或辅助模式命令。

@@ -95,14 +95,265 @@
       charge: "#15803d",
       transition: "#b45309"
     };
+    const radarPlanLabels = {
+      measuring: "实测实量",
+      modeling: "点云建模",
+      both: "实测实量+点云建模",
+      none: "不触发"
+    };
     const cameraViewers = {
       front: { active: false },
       rear: { active: false }
     };
 
-	    function $(id) { return document.getElementById(id); }
-	    function text(value) { return value === null || value === undefined || value === "" ? "-" : String(value); }
-	    function fmtNumber(value, digits = 2) { return Number.isFinite(value) ? value.toFixed(digits) : "-"; }
+    function $(id) { return document.getElementById(id); }
+    function text(value) { return value === null || value === undefined || value === "" ? "-" : String(value); }
+    function escapeHtml(value) {
+      return text(value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+    function fmtNumber(value, digits = 2) { return Number.isFinite(value) ? value.toFixed(digits) : "-"; }
+    function radarPlanFromSelect(value) {
+      if (value === "none") return {enabled: false, scans: []};
+      const scans = [];
+      if (value === "measuring" || value === "both") {
+        scans.push({
+          mode: "measuring",
+          label: "实测实量",
+          result_suffix: "measure",
+          artifact_policy: "auto_result",
+          manual_measure_required: false
+        });
+      }
+      if (value === "modeling" || value === "both") {
+        scans.push({
+          mode: "modeling",
+          label: "点云建模",
+          result_suffix: "cloud",
+          artifact_policy: "manual_import",
+          manual_measure_required: true
+        });
+      }
+      return {enabled: true, scans};
+    }
+    function radarPlanText(radar) {
+      if (!radar || radar.enabled === false) return "雷达:不触发";
+      const scans = Array.isArray(radar.scans) ? radar.scans : [];
+      if (!scans.length) return "雷达:实测实量";
+      return `雷达:${scans.map(item => item.label || item.mode || "-").join("+")}`;
+    }
+    function renderRadarInspection(record) {
+      const box = $("radarInspection");
+      if (!box) return;
+      const parsed = record && (record.parsed || record.raw);
+      box.className = "radar-box";
+      if (!parsed) {
+        box.textContent = "等待数据";
+        return;
+      }
+      if (typeof parsed === "string") {
+        box.textContent = parsed;
+        return;
+      }
+      const scanResults = Array.isArray(parsed.scan_results) ? parsed.scan_results : [];
+      const displayResult = scanResults.find(item => item && item.summary) || scanResults[0] || {};
+      const summary = parsed.summary || displayResult.summary || {};
+      const metrics = Array.isArray(summary.metrics) ? summary.metrics : [];
+      const status = parsed.status || "-";
+      const stateText = parsed.state || "-";
+      const resultFetchStatus = parsed.result_fetch_status || displayResult.result_fetch_status || "";
+      const resultFetchError = parsed.result_fetch_error || displayResult.result_fetch_error || summary.resultFetchError || "";
+      const taskId = displayResult.taskId || parsed.taskId || summary.taskId || "-";
+      const mode = displayResult.scan_mode || parsed.scan_mode || summary.mode || "-";
+      const backend = parsed.backend || "-";
+      const started = displayResult.started_at || parsed.started_at || "-";
+      const finished = displayResult.finished_at || parsed.finished_at || "-";
+      const released = displayResult.scan_released_at || parsed.scan_released_at || "-";
+      const durationValue = displayResult.duration_s ?? parsed.duration_s;
+      const releaseDurationValue = displayResult.scan_release_duration_s ?? parsed.scan_release_duration_s;
+      const duration = Number.isFinite(Number(durationValue)) ? `${Number(durationValue).toFixed(1)}s` : "-";
+      const releaseDuration = Number.isFinite(Number(releaseDurationValue)) ? `${Number(releaseDurationValue).toFixed(1)}s` : "-";
+      const location = summary.location || {};
+      const place = [location.floor, location.room, location.label].filter(Boolean).join(" / ") || "-";
+      const statusClass = status === "failed"
+        ? "fail"
+        : ((stateText === "result_unavailable" || resultFetchStatus === "failed") ? "warn" : radarStatusClass(status || stateText));
+      box.textContent = "";
+      const head = document.createElement("div");
+      head.className = "radar-head";
+      const title = document.createElement("span");
+      title.className = "radar-title";
+      title.textContent = taskId;
+      const badge = document.createElement("span");
+      badge.className = `check-status ${statusClass}`;
+      badge.textContent = `${status} / ${stateText}`;
+      head.appendChild(title);
+      head.appendChild(badge);
+      box.appendChild(head);
+      const grid = document.createElement("div");
+      grid.className = "radar-grid";
+      const rows = [
+        ["模式", `${mode} / ${backend}`],
+        ["位置", place],
+        ["时间", `${started} -> ${finished} / ${duration}`],
+        ["可离开", `${released} / ${releaseDuration}`],
+        ["指标", `${metrics.length} 项`],
+        ["结果", resultFetchStatus === "failed" ? "暂不可用" : (resultFetchStatus || "-")],
+        ["摘要", parsed.summary_path || displayResult.summary_path || "-"],
+        ["原始", parsed.raw_path || parsed.task_info_path || displayResult.raw_path || displayResult.task_info_path || "-"]
+      ];
+      for (const [label, value] of rows) {
+        const labelEl = document.createElement("div");
+        const valueEl = document.createElement("div");
+        labelEl.textContent = label;
+        valueEl.textContent = value;
+        grid.appendChild(labelEl);
+        grid.appendChild(valueEl);
+      }
+      box.appendChild(grid);
+      if (metrics.length) {
+        const tableWrap = document.createElement("div");
+        tableWrap.className = "metric-table";
+        const table = document.createElement("table");
+        const tbody = document.createElement("tbody");
+        for (const item of metrics) {
+          const row = document.createElement("tr");
+          for (const value of [
+            item.measurementItemId || "",
+            item.measurementItem || "",
+            item.location || "",
+            item.displayValue || item.rawValue || ""
+          ]) {
+            const cell = document.createElement("td");
+            cell.textContent = value;
+            row.appendChild(cell);
+          }
+          tbody.appendChild(row);
+        }
+        table.appendChild(tbody);
+        tableWrap.appendChild(table);
+        box.appendChild(tableWrap);
+      } else if (resultFetchStatus === "failed" || summary.resultUnavailable) {
+        const note = document.createElement("div");
+        note.className = "small";
+        note.textContent = `结果暂不可用${resultFetchError ? `：${resultFetchError}` : ""}`;
+        box.appendChild(note);
+      } else if (parsed.error) {
+        const note = document.createElement("div");
+        note.className = "small";
+        note.textContent = parsed.error;
+        box.appendChild(note);
+      }
+    }
+    function radarStatusClass(value) {
+      const textValue = String(value || "");
+      if (["completed", "finished", "downloaded", "imported", "complete"].includes(textValue)) return "ok";
+      if (["failed", "error"].includes(textValue)) return "fail";
+      return "warn";
+    }
+    function radarTaskResultsHtml(task) {
+      const results = Array.isArray(task.radar_results) ? task.radar_results : [];
+      if (!results.length) return "";
+      const rows = results.map(item => {
+        const waypoint = item.waypoint || {};
+        const summary = item.summary || {};
+        const metrics = Array.isArray(summary.metrics) ? summary.metrics : [];
+        const artifact = item.manual_artifact || {};
+        const manual = item.manual_measurement || {};
+        const manualMeasurements = Array.isArray(manual.measurements) ? manual.measurements : [];
+        const manualValues = manualMeasurements
+          .map(row => `${text(row.name || row.measurementItem || "人工项")}:${text(row.value || row.displayValue || row.rawValue)}`)
+          .join("；");
+        const title = [
+          waypoint.room || waypoint.label || item.waypoint_key || "-",
+          waypoint.scan_point || "",
+          item.scan_label || item.scan_mode || "-"
+        ].filter(Boolean).join(" / ");
+        const artifactText = item.scan_mode === "modeling"
+          ? `点云:${artifact.artifact_path || item.artifact_status || "待导入"}`
+          : "";
+        const manualText = item.manual_measure_required
+          ? `人工:${manual.status || item.manual_measure_status || "待测量"}`
+          : "";
+        const manualValueText = manualValues ? `回填:${manualValues}` : "";
+        const metricText = metrics.length ? `指标:${metrics.length}项` : "";
+        const resultFetchText = item.result_fetch_status === "failed"
+          ? `结果暂不可用:${item.result_fetch_error || ""}`
+          : (item.error ? `错误:${item.error}` : "");
+        const statusText = item.status && item.state && item.state !== item.status
+          ? `${item.status} / ${item.state}`
+          : (item.status || item.state || "-");
+        const statusClass = item.status === "failed"
+          ? "fail"
+          : ((item.state === "result_unavailable" || item.result_fetch_status === "failed") ? "warn" : radarStatusClass(item.status || item.state));
+        const metricRows = metrics.length ? `
+          <div class="metric-table">
+            <table>
+              <tbody>
+                ${metrics.map(metric => `
+                  <tr>
+                    <td>${escapeHtml(metric.measurementItemId || "")}</td>
+                    <td>${escapeHtml(metric.measurementItem || "")}</td>
+                    <td>${escapeHtml(metric.location || "")}</td>
+                    <td>${escapeHtml(metric.displayValue || metric.rawValue || "")}</td>
+                  </tr>
+                `).join("")}
+              </tbody>
+            </table>
+          </div>
+        ` : "";
+        return `
+          <div class="radar-result-row">
+            <div class="radar-result-head">
+              <span>${escapeHtml(title)}</span>
+              <span class="check-status ${statusClass}">${escapeHtml(statusText)}</span>
+            </div>
+            <div class="radar-result-meta">${escapeHtml([item.taskId, item.started_at, item.finished_at].filter(Boolean).join(" / "))}</div>
+            <div class="radar-result-meta">${escapeHtml([metricText, artifactText, manualText, manualValueText, resultFetchText].filter(Boolean).join(" / "))}</div>
+            <div class="actions">
+              ${item.scan_mode === "modeling" ? `<button data-radar-artifact="${escapeHtml(item.run_id)}" data-task-id="${escapeHtml(task.id)}">登记点云</button>` : ""}
+              ${item.manual_measure_required ? `<button data-radar-manual="${escapeHtml(item.run_id)}" data-task-id="${escapeHtml(task.id)}">人工回填</button>` : ""}
+            </div>
+            ${metricRows}
+          </div>
+        `;
+      }).join("");
+      return `<div class="radar-results">${rows}</div>`;
+    }
+    async function recordRadarArtifact(taskId, runId) {
+      const artifactPath = window.prompt("请输入已导入/已拷贝的点云工程包路径", "");
+      if (artifactPath === null) return;
+      const trimmed = artifactPath.trim();
+      if (!trimmed) return;
+      const note = window.prompt("备注，可留空", "") || "";
+      const payload = await api("POST", "/api/radar/artifact", {
+        task_id: taskId,
+        run_id: runId,
+        artifact_path: trimmed,
+        note
+      });
+      setLog("activeTask", payload);
+      await loadTasks();
+    }
+    async function saveRadarManualMeasurement(taskId, runId) {
+      const name = window.prompt("测量项名称，例如 开关高度", "");
+      if (name === null) return;
+      const value = window.prompt("测量值，例如 1.32m", "");
+      if (value === null) return;
+      const note = window.prompt("备注，可留空", "") || "";
+      const payload = await api("POST", "/api/radar/manual_measurement", {
+        task_id: taskId,
+        run_id: runId,
+        measurements: [{name: name.trim(), value: value.trim(), note}],
+        note
+      });
+      setLog("activeTask", payload);
+      await loadTasks();
+    }
 	    function setVideoActive(cameraName) {
 	      for (const name of ["front", "rear"]) {
 	        const frame = $(`${name}Video`);
@@ -1476,6 +1727,7 @@
       $("factoryNav").textContent = text(s.navigation_status);
       renderPoseTracker("livePoseTracker", s);
       renderPoseTracker("taskPoseTracker", s);
+      renderRadarInspection(s.radar_inspection);
       if ($("scanOverlayStatus")) {
         const scan = s.scan || {};
         const points = scan.points || [];
@@ -1505,6 +1757,7 @@
         路径点数: s.path ? s.path.points.length : 0,
         动态障碍物: s.dynamic_obstacles ? s.dynamic_obstacles.length : 0,
         感知链路: s.perception_status || null,
+        雷达扫描: s.radar_inspection || null,
         当前任务: s.active_task || null,
         当前点位: s.active_waypoint || null,
         电量: s.battery && s.battery.primary ? s.battery.primary : null,
@@ -1634,7 +1887,16 @@
       }
       for (const item of state.annotations) {
         const pose = item.pose || {};
-        const place = [item.area, item.room, item.result_file_prefix ? `结果:${item.result_file_prefix}` : ""].filter(Boolean).join(" / ");
+        const place = [
+          item.building,
+          item.unit,
+          item.house,
+          item.area,
+          item.room,
+          item.scan_point,
+          item.result_file_prefix ? `结果:${item.result_file_prefix}` : "",
+          radarPlanText(item.radar)
+        ].filter(Boolean).join(" / ");
         const el = document.createElement("div");
         el.className = "item";
         const typeLabel = annotationTypeLabel(item);
@@ -1669,8 +1931,8 @@
       for (const item of state.annotations) {
         const line = document.createElement("label");
         line.className = "checkline";
-        const place = [item.area, item.room].filter(Boolean).join(" / ");
         const typeLabel = annotationTypeLabel(item);
+        const place = [item.building, item.unit, item.house, item.area, item.room, item.scan_point, radarPlanText(item.radar)].filter(Boolean).join(" / ");
         line.innerHTML = `<input type="checkbox" value="${item.id}"><span>${item.floor || "-"} / ${item.label || item.id}${place ? ` / ${place}` : ""} / ${typeLabel} / 朝向 ${fmtNumber(Number((item.pose || {}).yaw), 2)} / 停留 ${fmtNumber(Number(item.dwell_s || 0), 1)}s</span>`;
         box.appendChild(line);
       }
@@ -1756,6 +2018,7 @@
           const firstTargetText = firstWaypoint
             ? `首点：${firstWaypoint.floor || "-"} / ${firstWaypoint.label || firstWaypoint.id || "-"} / x ${fmtNumber(Number(firstPose.x), 2)}, y ${fmtNumber(Number(firstPose.y), 2)}, 朝向 ${fmtNumber(Number(firstPose.yaw), 2)}`
             : "首点：-";
+          const radarResultsHtml = radarTaskResultsHtml(task);
           const el = document.createElement("div");
           el.className = "item";
           el.innerHTML = `
@@ -1764,8 +2027,11 @@
             <div class="item-meta">${firstTargetText}</div>
             <div class="item-meta">顺序：${waypointOrderText}</div>
             <div class="item-meta">${taskNote}</div>
+            ${radarResultsHtml}
             <div class="actions">
               <button class="primary" data-start-task="${task.id}" title="${taskNote}" ${canStart ? "" : "disabled"}>${startLabel}</button>
+              <button data-export-radar-json="${task.id}">雷达JSON</button>
+              <button data-export-radar-csv="${task.id}">雷达CSV</button>
               <button data-rename-task="${task.id}">改名</button>
               <button class="danger" data-delete-task="${task.id}" ${canDelete ? "" : "disabled"}>删除</button>
             </div>
@@ -1792,6 +2058,30 @@
             } finally {
               await loadTasks();
             }
+          });
+        }
+        for (const btn of box.querySelectorAll("[data-export-radar-json]")) {
+          btn.addEventListener("click", () => {
+            window.open(`/api/radar/task_export?task_id=${encodeURIComponent(btn.dataset.exportRadarJson)}&format=json`, "_blank");
+          });
+        }
+        for (const btn of box.querySelectorAll("[data-export-radar-csv]")) {
+          btn.addEventListener("click", () => {
+            window.open(`/api/radar/task_export?task_id=${encodeURIComponent(btn.dataset.exportRadarCsv)}&format=csv`, "_blank");
+          });
+        }
+        for (const btn of box.querySelectorAll("[data-radar-artifact]")) {
+          btn.addEventListener("click", async () => {
+            try {
+              await recordRadarArtifact(btn.dataset.taskId, btn.dataset.radarArtifact);
+            } catch (err) { setLog("activeTask", err); }
+          });
+        }
+        for (const btn of box.querySelectorAll("[data-radar-manual]")) {
+          btn.addEventListener("click", async () => {
+            try {
+              await saveRadarManualMeasurement(btn.dataset.taskId, btn.dataset.radarManual);
+            } catch (err) { setLog("activeTask", err); }
           });
         }
         for (const btn of box.querySelectorAll("[data-rename-task]")) {
@@ -2176,9 +2466,14 @@
           type: $("markType").value,
           floor: $("markFloor").value.trim(),
           label: $("markLabel").value.trim(),
+          building: $("markBuilding").value.trim(),
+          unit: $("markUnit").value.trim(),
+          house: $("markHouse").value.trim(),
           area: $("markArea").value.trim(),
           room: $("markRoom").value.trim(),
+          scan_point: $("markScanPoint").value.trim(),
           result_file_prefix: $("markResultPrefix").value.trim(),
+          radar: radarPlanFromSelect($("markRadarPlan").value),
           pose: {
             x,
             y,
@@ -2201,6 +2496,7 @@
         draw();
         $("markLabel").value = "";
         $("markResultPrefix").value = "";
+        $("markScanPoint").value = "";
         $("cursor").textContent = `已保存 ${payload.annotation.label || payload.annotation.id}`;
       } catch (err) { $("cursor").textContent = err.message || JSON.stringify(err); }
     });

@@ -1,6 +1,6 @@
 # M20Pro 前端 API 对接契约
 
-更新时间：2026-07-09 18:50 CST
+更新时间：2026-07-10 17:10 CST
 
 本文档是新版前端、甲方前端和外部功能包对接 104 Web 后端的接口契约。接口实现位于 `m20pro_cloud_bridge.web_dashboard_node`。以后新增、删除或修改接口字段时，必须同步更新本文档。
 
@@ -108,6 +108,98 @@ selected_map_status.ready == true
 ```
 
 不要把“调用过 `/api/localization/initialpose`”当成成功。只有后端返回确认成功，且状态接口也确认成功，才算真正重定位成功。
+
+## 雷达接口
+
+雷达前端优先使用以下 JSON API，不需要读取后端结果目录或解析网页 DOM。
+
+### GET `/api/radar/status`
+
+读取雷达模块最新状态、最新结果和结果目录。
+
+稳定字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `ok` | 固定为 `true` |
+| `results_dir` | 雷达结果根目录 |
+| `latest_parsed` | 最新 `/m20pro/radar_inspection/status` 或 result 的解析 JSON |
+| `latest_job` | 最近一次落盘的雷达扫描结果 |
+| `job_count` | 当前结果目录中的扫描结果数量 |
+
+### GET `/api/radar/results`
+
+读取雷达扫描结果列表。
+
+查询参数：
+
+| 参数 | 说明 |
+| --- | --- |
+| `task_id` | Web 任务 ID |
+| `radar_task_id` / `taskId` | 雷达设备任务 ID |
+| `run_id` | 后端生成的单次扫描 ID |
+| `waypoint_key` | `/m20pro/active_waypoint` 对应点位 key |
+| `status` | `completed`、`failed` 等 |
+| `state` | `finished`、`result_unavailable` 等 |
+| `mode` / `scan_mode` | `measuring` 或 `modeling` |
+| `limit` / `offset` | 分页，默认 `limit=50` |
+
+响应核心字段：
+
+```json
+{
+  "ok": true,
+  "total": 1,
+  "count": 1,
+  "results": [
+    {
+      "task_id": "api_radar_test_003",
+      "taskId": "B01_U01_F20_R2008_P01_measure_20260710_164336",
+      "status": "completed",
+      "state": "finished",
+      "scan_mode": "measuring",
+      "metric_count": 12,
+      "result_fetch_status": "success",
+      "summary": {"metrics": []},
+      "summary_path": "/home/user/m20pro_radar_results/summaries/xxx.json",
+      "raw_path": "/home/user/m20pro_radar_results/raw/xxx.json"
+    }
+  ]
+}
+```
+
+### GET `/api/radar/result`
+
+读取单条雷达结果。支持 `run_id`、`radar_task_id`、`taskId`、`waypoint_key` 等参数；没有匹配结果时返回 HTTP 400。
+
+### GET `/api/radar/task`
+
+按 Web 任务 ID 读取雷达任务汇总。
+
+查询参数：
+
+| 参数 | 说明 |
+| --- | --- |
+| `task_id` | 必填，Web 任务 ID |
+
+返回字段包含 `task`、`results`、`summary`。`summary.result_unavailable_count > 0` 表示雷达已触发但后端未拿到结果。
+
+### GET `/api/radar/task_export`
+
+下载任务级雷达结果，兼容人工交付：
+
+```text
+GET /api/radar/task_export?task_id=<task_id>&format=json
+GET /api/radar/task_export?task_id=<task_id>&format=csv
+```
+
+### POST `/api/radar/artifact`
+
+登记点云建模结果文件路径。
+
+### POST `/api/radar/manual_measurement`
+
+登记人工测量回填。
 
 ## 地图接口
 

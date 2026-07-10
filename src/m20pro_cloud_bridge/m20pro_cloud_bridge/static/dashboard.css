@@ -325,6 +325,64 @@
       max-height: 210px;
       overflow: auto;
     }
+    .radar-box {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px;
+      background: #fbfcfe;
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+    .radar-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+    .radar-title {
+      font-weight: 700;
+      color: var(--text);
+    }
+    .radar-grid {
+      display: grid;
+      grid-template-columns: 64px minmax(0, 1fr);
+      gap: 5px 8px;
+      line-height: 1.45;
+    }
+    .radar-grid div:nth-child(odd) {
+      color: var(--muted);
+    }
+    .metric-table {
+      margin-top: 8px;
+      max-height: 140px;
+      overflow: auto;
+    }
+    .radar-results {
+      margin-top: 8px;
+      display: grid;
+      gap: 6px;
+    }
+    .radar-result-row {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 7px;
+      background: #fbfcfe;
+    }
+    .radar-result-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: center;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .radar-result-meta {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
     .video-grid {
       display: grid;
       grid-template-columns: 1fr;

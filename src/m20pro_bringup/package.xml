@@ -10,6 +10,7 @@
 
   <exec_depend>m20pro_navigation</exec_depend>
   <exec_depend>m20pro_inspection</exec_depend>
+  <exec_depend>m20pro_radar_inspection</exec_depend>
   <exec_depend>m20pro_cloud_bridge</exec_depend>
   <exec_depend>nav2_bringup</exec_depend>
   <exec_depend>nav2_dwb_controller</exec_depend>
