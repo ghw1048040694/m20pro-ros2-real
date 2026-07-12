@@ -21,6 +21,7 @@ def main() -> None:
     assert "ObstacleFootprint" in follow["critics"]
     assert "BaseObstacle" not in follow["critics"]
     assert follow["sim_time"] >= 1.5
+    assert follow["publish_local_plan"] is True
     for costmap in (local, global_costmap):
         assert costmap["always_send_full_costmap"] is False
         assert "footprint" in costmap
@@ -60,6 +61,16 @@ def main() -> None:
     assert "OccupancyGridUpdate" in dashboard
     assert '"local_costmap_updates_topic"' in dashboard
     assert '"global_costmap_updates_topic"' in dashboard
+    assert '"local_plan_topic"' in dashboard
+
+    recorder = (
+        ROOT
+        / "src"
+        / "m20pro_bringup"
+        / "scripts"
+        / "m20pro_record_real.sh"
+    ).read_text(encoding="utf-8")
+    assert "/local_plan" in recorder
 
     real_launch = (
         ROOT

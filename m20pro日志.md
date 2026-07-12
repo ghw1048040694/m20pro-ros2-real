@@ -23180,3 +23180,25 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
   - `m20pro-real.service=active`、`NRestarts=0`、`Nav2 lifecycle is active`、`M20PRO REAL OK`;
   - 当前 `pose_fresh=true`、`localization_ok=true`、`factory_localization_ok=true`、没有重定位锁。
 - 106 当前 `active` 仍指向 `/var/opt/robot/data/maps/map-20260625-164234`，`localization.service / planner.service / global_planner.service` 均保持 active；本次不重启原厂定位服务，因为二维栅格坐标系未变，104 Nav2 已加载新图，无需为替换 PGM 破坏当前定位。
+
+## 2026-07-12 20:22 CST - 上位机前端位姿与局部避障轨迹实时化
+
+- 用户长距离实测发现两个显示层改进项：机器狗已从 test6 前往 test7 时前端位姿仍可能停在 test5；真机已局部绕障时，前端规划线仍显示原全局路径。
+- 位姿延迟根因：后端 `map_pose` 约 15Hz 刷新，网页却只每 1.5s 请求一次完整 `/api/state`，且请求串行；实时位姿被人为降频，并会被其他状态组装和前端渲染拖住。
+- 新增轻量 `/api/live`：
+  - 位姿、定位、当前路径和当前点位以 125ms 周期独立拉取，不等待完整状态轮询；
+  - 请求始终串行且页面隐藏时暂停，避免积压；
+  - 路径按 `version` 增量返回，未变化时不重复传输最多 800 个全局路径点；
+  - 完整状态和实时状态依 `last_update` 合并，慢请求不得覆盖更新的位姿或轨迹。
+- 轨迹不变根因：原前端只订阅 NavFn 全局 `/plan`；DWB 绕障使用的是 10Hz `/local_plan`，它不会必然改写全局路径，因此“真机绕开、网页线不变”符合旧实现。
+- 局部轨迹链路修正：
+  - DWB 显式启用 `publish_local_plan`，Web 节点订阅 `/local_plan`；
+  - 由于局部代价地图使用 `odom` 坐标系，后端使用同期 `map_pose + /ODOM` 计算二维刚体变换，将局部轨迹对齐到 `map`；不将 odom 坐标直接画到固定地图上；
+  - 前端将全局路线降为橙色虚线参考，DWB 实时局部轨迹以黄色实线叠加；任务停止、切图和导航会话清理时两类路径一并清空。
+- 录包脚本新增 `/local_plan`，后续现场包可直接核对控制器选中的绕障轨迹，不再只有全局计划。
+- 上位机验证：
+  - 全部 24 个 `scripts/test_*.py`、Python/JavaScript/Bash 语法、`git diff --check` 通过；
+  - Humble `m20pro_cloud_bridge + m20pro_bringup` 构建通过；
+  - 本地 ROS 消息注入实测：机器人地图位姿 `(10,20,90°)` 时，odom 前向轨迹 `(1,2)->(2,2)` 正确转换为地图 `(10,20)->(10,21)`；路径版本相同的第二次请求不再返回路径数组；
+  - Chrome `1440x1000` 新前端验收通过，页面正常加载，无布局重叠。
+- 本轮按用户要求仅修改上位机，未连接、同步或重启 104/103/106；真机充电完成后再部署并做 `/local_plan` 实车验收。

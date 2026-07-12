@@ -102,6 +102,7 @@ TOPICS=(
   /global_costmap/costmap
   /global_costmap/costmap_updates
   /plan
+  /local_plan
   /cmd_vel
   /m20pro/current_floor
   /m20pro/stair_status

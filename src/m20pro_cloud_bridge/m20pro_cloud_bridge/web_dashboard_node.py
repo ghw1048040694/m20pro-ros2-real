@@ -129,6 +129,7 @@ from .navigation_readiness_contract import (
 )
 from .pcd_derived import process_imported_map
 from .perception_contract import perception_status_payload
+from .path_display_contract import path_points_in_map_frame
 from .preflight_contract import (
     preflight_base_topics_item,
     preflight_context,
@@ -773,6 +774,7 @@ class WebDashboardNode(Node):
             "battery": None,
             "pose": None,
             "path": {"version": 0, "points": []},
+            "local_path": {"version": 0, "points": []},
             "pose_history": [],
             "map": None,
             "map_version": 0,
@@ -888,6 +890,7 @@ class WebDashboardNode(Node):
         self.declare_parameter("odom_topic", "/ODOM")
         self.declare_parameter("pose_topic", "/m20pro_tcp_bridge/map_pose")
         self.declare_parameter("plan_topic", "/plan")
+        self.declare_parameter("local_plan_topic", "/local_plan")
         self.declare_parameter("map_topic", "/map")
         self.declare_parameter("local_costmap_topic", "/local_costmap/costmap")
         self.declare_parameter("global_costmap_topic", "/global_costmap/costmap")
@@ -1128,6 +1131,7 @@ class WebDashboardNode(Node):
                 self._state["pose"] = None
                 self._state["pose_history"] = []
                 self._state["path"] = {"version": int(self._state.get("path", {}).get("version", 0) or 0) + 1, "points": []}
+                self._state["local_path"] = {"version": int(self._state.get("local_path", {}).get("version", 0) or 0) + 1, "points": []}
             self._append_event("启动同步固定地图", result)
             self.get_logger().info(
                 "startup selected-map sync loaded Nav2 map: %s" % str(load_result.get("yaml_path") or "")
@@ -1192,6 +1196,7 @@ class WebDashboardNode(Node):
         self.create_subscription(Odometry, self._topic("odom_topic"), self._on_odom, 10)
         self.create_subscription(PoseStamped, self._topic("pose_topic"), self._on_pose, 20)
         self.create_subscription(RosPath, self._topic("plan_topic"), self._on_path, 5)
+        self.create_subscription(RosPath, self._topic("local_plan_topic"), self._on_local_path, 5)
         self.create_subscription(String, self._topic("active_waypoint_topic"), self._on_active_waypoint, 10)
         self.create_subscription(OccupancyGrid, self._topic("map_topic"), self._on_map, map_qos)
         self.create_subscription(OccupancyGrid, self._topic("local_costmap_topic"), self._on_local_costmap, 2)
@@ -1429,16 +1434,14 @@ class WebDashboardNode(Node):
             self._mark_topic("pose")
 
     def _on_path(self, msg: RosPath) -> None:
+        self._store_path("path", msg, transform_to_map=False)
+
+    def _on_local_path(self, msg: RosPath) -> None:
+        self._store_path("local_path", msg, transform_to_map=True)
+
+    def _store_path(self, state_key: str, msg: RosPath, *, transform_to_map: bool) -> None:
         max_points = max(2, int(self.get_parameter("max_path_points").value))
         raw_poses = list(msg.poses)
-        path_last_point = None
-        if raw_poses:
-            last_pose = raw_poses[-1].pose.position
-            path_last_point = {
-                "x": float(last_pose.x),
-                "y": float(last_pose.y),
-                "z": float(last_pose.z),
-            }
         poses = raw_poses
         if len(raw_poses) > max_points:
             step = max(1, math.ceil((len(raw_poses) - 1) / max(1, max_points - 1)))
@@ -1453,17 +1456,42 @@ class WebDashboardNode(Node):
             }
             for item in poses
         ]
+        source_frame = str(msg.header.frame_id or "").strip()
+        transform_source = "identity"
+        output_frame = source_frame
+        if transform_to_map:
+            with self._lock:
+                map_pose = dict(self._state.get("pose") or {})
+                odom_state = dict(self._state.get("odom") or {})
+                odom_pose = dict(odom_state.get("pose") or {})
+            transformed = path_points_in_map_frame(
+                points,
+                frame_id=source_frame,
+                map_pose=map_pose,
+                odom_pose=odom_pose,
+            )
+            if transformed is None:
+                points = []
+                transform_source = "unavailable"
+            else:
+                points = transformed
+                transform_source = "map_pose_odom_alignment" if source_frame.lstrip("/") == "odom" else "identity"
+                output_frame = "map"
+        path_last_point = dict(points[-1]) if points else None
         with self._lock:
-            self._state["path"] = {
-                "version": int(self._state["path"]["version"]) + 1,
-                "frame_id": msg.header.frame_id,
+            current = dict(self._state.get(state_key) or {})
+            self._state[state_key] = {
+                "version": int(current.get("version", 0) or 0) + 1,
+                "frame_id": output_frame,
+                "source_frame_id": source_frame,
+                "transform_source": transform_source,
                 "points": points,
                 "last_point": path_last_point,
                 "point_count": len(points),
                 "raw_point_count": len(raw_poses),
                 "last_update": time.time(),
             }
-            self._mark_topic("path")
+            self._mark_topic(state_key)
 
     def _on_active_waypoint(self, msg: String) -> None:
         with self._lock:
@@ -1669,6 +1697,7 @@ class WebDashboardNode(Node):
         with self._lock:
             snapshot = dict(self._state)
             snapshot["path"] = dict(self._state["path"])
+            snapshot["local_path"] = dict(self._state["local_path"])
             snapshot["pose_history"] = list(self._state.get("pose_history") or [])
             snapshot["dynamic_obstacles"] = list(self._state["dynamic_obstacles"])
             snapshot["events"] = list(self._state["events"])
@@ -1766,6 +1795,46 @@ class WebDashboardNode(Node):
             snapshot["events"] = []
             snapshot["topics"] = {}
         return snapshot
+
+    def _live_snapshot(
+        self,
+        *,
+        path_version: Optional[int] = None,
+        local_path_version: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        now = time.time()
+        with self._lock:
+            pose = dict(self._state.get("pose") or {})
+            active_waypoint = dict(self._state.get("active_waypoint") or {})
+            path = dict(self._state.get("path") or {})
+            local_path = dict(self._state.get("local_path") or {})
+            payload = {
+                "floor": self._state.get("floor"),
+                "localization_ok": self._state.get("localization_ok"),
+                "pose": pose or None,
+                "active_waypoint": active_waypoint or None,
+                "map_version": self._state.get("map_version", 0),
+            }
+        if path_version != int(path.get("version", 0) or 0):
+            payload["path"] = path
+        if local_path_version != int(local_path.get("version", 0) or 0):
+            payload["local_path"] = local_path
+        pose_age = pose_age_sec(pose, now)
+        pose_timeout_s = max(0.5, float(self.get_parameter("task_start_pose_timeout_s").value))
+        payload.update(
+            {
+                "ok": True,
+                "node_time": now,
+                "pose_age_sec": pose_age,
+                "pose_timeout_s": pose_timeout_s,
+                "pose_fresh": bool(
+                    is_plausible_pose_dict(pose)
+                    and pose_age is not None
+                    and pose_age <= pose_timeout_s
+                ),
+            }
+        )
+        return payload
 
     def _map_relocalization_lock_loaded_time(self, lock_payload: Any) -> Optional[float]:
         if not isinstance(lock_payload, dict):
@@ -2483,6 +2552,7 @@ class WebDashboardNode(Node):
                 self._state["pose"] = None
                 self._state["pose_history"] = []
                 self._state["path"] = {"version": int(self._state.get("path", {}).get("version", 0) or 0) + 1, "points": []}
+                self._state["local_path"] = {"version": int(self._state.get("local_path", {}).get("version", 0) or 0) + 1, "points": []}
         effective_map_id = self._effective_map_id()
         self._remember_working_map_id(effective_map_id, reason="select_map_effective_map")
         with self._data_lock:
@@ -4191,6 +4261,16 @@ class WebDashboardNode(Node):
             current_version = int(self._state.get("path", {}).get("version", 0) or 0)
             self._state["path"] = {
                 "version": current_version + 1,
+                "points": [],
+                "point_count": 0,
+                "raw_point_count": 0,
+                "last_point": None,
+                "cleared_reason": reason,
+                "last_update": time.time(),
+            }
+            local_version = int(self._state.get("local_path", {}).get("version", 0) or 0)
+            self._state["local_path"] = {
+                "version": local_version + 1,
                 "points": [],
                 "point_count": 0,
                 "raw_point_count": 0,
@@ -5999,6 +6079,20 @@ class WebDashboardNode(Node):
                     elif parsed.path == "/api/state":
                         include_debug = node._as_bool((query.get("debug") or ["1"])[0])
                         self._send_json(node._snapshot(include_debug=include_debug))
+                    elif parsed.path == "/api/live":
+                        def optional_version(name: str) -> Optional[int]:
+                            raw = (query.get(name) or [None])[0]
+                            try:
+                                return int(raw) if raw is not None else None
+                            except (TypeError, ValueError):
+                                return None
+
+                        self._send_json(
+                            node._live_snapshot(
+                                path_version=optional_version("path_version"),
+                                local_path_version=optional_version("local_path_version"),
+                            )
+                        )
                     elif parsed.path == "/api/map":
                         self._send_json(node._map_snapshot())
                     elif parsed.path == "/api/map_file":

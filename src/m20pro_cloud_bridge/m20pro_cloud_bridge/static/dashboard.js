@@ -40,6 +40,7 @@
       mapModeLabel: "实时 /map",
       workPointerMode: "localize",
       mapSwitching: false,
+      liveRequestInFlight: false,
     };
     window.m20proDebug = {
       snapshot() {
@@ -1498,11 +1499,14 @@
         ctx.restore();
       }
     }
-    function drawPath(path) {
+    function drawPath(path, options = {}) {
       if (!path || !path.points || path.points.length < 2) return;
       ctx.save();
-      ctx.strokeStyle = "#f97316";
-      ctx.lineWidth = 3;
+      ctx.strokeStyle = options.color || "#f97316";
+      ctx.lineWidth = options.lineWidth || 3;
+      if (options.dash) ctx.setLineDash(options.dash);
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
       ctx.beginPath();
       let started = false;
       for (const point of path.points) {
@@ -1665,7 +1669,8 @@
       const canDrawLive = canDrawLiveRobotLayer(latest);
       if (!canDrawLive || !hasFreshPose(latest)) state.robotDisplayPose = null;
       if (canDrawLive) {
-        drawPath(latest.path);
+        drawPath(latest.path, {color: "rgba(249, 115, 22, 0.58)", lineWidth: 2.5, dash: [8, 6]});
+        drawPath(latest.local_path, {color: "#facc15", lineWidth: 4});
         drawObstacles(latest.dynamic_obstacles);
       }
       drawScanOverlay();
@@ -1737,6 +1742,7 @@
       resizeCanvas();
     }
     function updateState(s) {
+      preserveNewerLiveSamples(s, state.latest);
       state.latest = s;
       state.selectedMapStatus = s.selected_map_status || null;
       state.workingMapId = s.working_map_id || null;
@@ -2242,6 +2248,51 @@
       } finally {
         setTimeout(mainLoop, 1500);
       }
+    }
+    function sampleUpdateTime(sample) {
+      const value = sample && Number(sample.last_update);
+      return Number.isFinite(value) ? value : -1;
+    }
+    function preserveNewerLiveSamples(target, current) {
+      if (!target || !current) return target;
+      for (const key of ["pose", "path", "local_path", "active_waypoint"]) {
+        if (sampleUpdateTime(current[key]) > sampleUpdateTime(target[key])) target[key] = current[key];
+      }
+      return target;
+    }
+    function mergeLiveState(live) {
+      if (!live || !state.latest) return;
+      const merged = {...state.latest};
+      for (const key of ["pose", "path", "local_path", "active_waypoint"]) {
+        if (live[key] && sampleUpdateTime(live[key]) >= sampleUpdateTime(merged[key])) merged[key] = live[key];
+      }
+      for (const key of ["floor", "localization_ok", "map_version", "node_time", "pose_age_sec", "pose_timeout_s", "pose_fresh"]) {
+        if (live[key] !== undefined) merged[key] = live[key];
+      }
+      state.latest = merged;
+    }
+    function liveStateUrl() {
+      const pathVersion = state.latest && state.latest.path ? Number(state.latest.path.version) : -1;
+      const localPathVersion = state.latest && state.latest.local_path ? Number(state.latest.local_path.version) : -1;
+      const query = new URLSearchParams({
+        path_version: Number.isFinite(pathVersion) ? String(pathVersion) : "-1",
+        local_path_version: Number.isFinite(localPathVersion) ? String(localPathVersion) : "-1"
+      });
+      return `/api/live?${query.toString()}`;
+    }
+    async function liveLoop() {
+      if (!document.hidden && !state.liveRequestInFlight) {
+        state.liveRequestInFlight = true;
+        try {
+          mergeLiveState(await fetchJson(liveStateUrl()));
+          draw();
+        } catch (err) {
+          console.warn(err);
+        } finally {
+          state.liveRequestInFlight = false;
+        }
+      }
+      setTimeout(liveLoop, 125);
     }
     for (const btn of document.querySelectorAll("button.tab")) {
       btn.addEventListener("click", () => {
@@ -2751,3 +2802,4 @@
     syncManualDefaults(false);
     loadMaps().then(loadAnnotations).then(loadPreflight).then(loadTasks).then(loadRecordingStatus).catch(console.warn);
     mainLoop();
+    liveLoop();
