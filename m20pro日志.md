@@ -23153,3 +23153,30 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
   - `occ_grid_id_map.toml=16f9190b47eb952d30141e947c194abcbb1d705fbf4036faed878404cdb0ecc4`。
 - 本轮只拉取二维编辑必需文件，不将原厂 `.blocks`、`full_cloud.pcd` 和 `derived` 缓存复制进源码目录。
 - 本轮没有切换地图、没有修改 104/106 正式地图，也没有重启服务；等用户修图完成后再单独做指纹对比、空闲区检查、同步和切图验收。
+
+## 2026-07-12 20:03 CST - 用 map_editor 编辑图替换 F20（带工位）三端正式栅格
+
+- 用户完成编辑结果：`src/m20pro_bringup/maps/DESK_20260625_164234_edit_edited`；已收口回项目跟踪目录 `src/m20pro_bringup/maps/DESK_20260625_164234_edit`，使 Git 以原始基线直接显示 PGM 像素变化。
+- 部署前地图合同校验：
+  - 原图和编辑图均为 423x500、max value 255、分辨率 0.1m、原点 `(-19.1,-13.4,0)`;
+  - 共修改 2320 个像素，占全图 1.0969%，修改边界为像素 `x=35..321 / y=56..435`;
+  - 新图占用 7307 格、自由 44440 格、未知 159753 格；
+  - 当前 `F20（带工位）` 的 test1~test9 共 9 个已保存点位在新图中仍全部为自由格，最小障碍净距为 0.5m，未因修图封死既有点位。
+- 旧图备份：
+  - 104：`/home/user/m20pro_map_backups/DESK_20260625_164234_before_map_editor_20260712_195538`;
+  - 106：`/home/user/m20pro_map_backups/map-20260625-164234_before_map_editor_20260712_200059`;
+  - 旧 PGM SHA-256 均为 `9073ba3027533036960c79af94ee5f2956f8fb9c05395f86ba0541fa83738ae1`。
+- 正式替换范围：
+  - 上位机项目编辑基线；
+  - 104 `/home/user/m20pro_maps/DESK_20260625_164234/occ_grid.pgm` 及相对路径 YAML;
+  - 104 正式 workspace 中的项目源文件；
+  - 106 `/var/opt/robot/data/maps/map-20260625-164234/occ_grid.pgm`;
+  - 106 原厂 YAML 使用绝对图像路径，已保留原文不覆盖，避免把 104/编辑器的相对路径 YAML 误写进原厂地图包。
+- 三端新 PGM SHA-256 统一为 `693982a440615a0faf3b249994ad6f2b01cd7b047260ef6e0760c61b8636c71b`。
+- 104 加载与运行验证：
+  - `m20pro_bringup` Foxy 构建通过，重启后 map server 明确从 `/home/user/m20pro_maps/DESK_20260625_164234/occ_grid.pgm` 读取 423x500@0.1m 新图；
+  - 104 `/api/map_file` 和上位机编辑图的 211500 个占用值数量及顺序哈希完全一致，运行数据哈希为 `501284bb07621fca8f000edfc8fbc1b6f5ad70958b2d8eaaf064e2035f8cf0fd`;
+  - `selected_map_id / working_map_id / effective_map_id` 仍统一为 `map_1782442183242_ee7c6b76`，前端仍显示 `F20（带工位）`;
+  - `m20pro-real.service=active`、`NRestarts=0`、`Nav2 lifecycle is active`、`M20PRO REAL OK`;
+  - 当前 `pose_fresh=true`、`localization_ok=true`、`factory_localization_ok=true`、没有重定位锁。
+- 106 当前 `active` 仍指向 `/var/opt/robot/data/maps/map-20260625-164234`，`localization.service / planner.service / global_planner.service` 均保持 active；本次不重启原厂定位服务，因为二维栅格坐标系未变，104 Nav2 已加载新图，无需为替换 PGM 破坏当前定位。
