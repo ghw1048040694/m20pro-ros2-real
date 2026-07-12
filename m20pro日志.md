@@ -23071,3 +23071,35 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 待现场动态验收：
   - 重跑两点任务，确认第一点到达后进入停留并自动下发第二点；
   - 设置可控障碍物进行低速绕障验收，必须同步录包，不用静态链路健康代替真实运动结果。
+
+## 2026-07-12 18:47 CST - 新录包锁定 Foxy 10ms 假失败，补齐低矮障碍物感知
+
+- 用户实测结果：
+  - 多点导航仍只执行第一点；
+  - 盒子竖放时前端能显示激光轮廓，实际导航成功绕开，证明 `/scan -> costmap -> DWB` 避障执行链路已生效；
+  - 同一盒子横放时较矮，前端不显示激光轮廓，当时未做真实绕障测试。
+- 新录包：`/home/user/bags/testfield_20260712_182648`：
+  - 时长 103.23s，6.4MiB，11815 条消息；
+  - `/m20pro/recording_scan=344`、`local_costmap=63`、`cmd_vel=136`，感知和控制证据完整；
+  - 仅 `/m20pro/floor_goal=1`、`/plan=1`，第二点确实没有下发，不是只下发后没运动。
+- 多点导航新根因：
+  - 18:27:21 第一点 `(-0.69,-1.28)` 已被 `controller_server` 接收并开始控制；
+  - 仅约 22ms 后 `bt_navigator` 抛出 `send_goal failed`，对外返回 `status=6`，Web 因此按 `navigation_error` 终止整个多点任务；
+  - 但已接收目标的 `controller_server` 继续运动，18:27:27 记录 `Reached the goal!`，证明不是路径、定位或到点判定失败，而是动作接收回执超时造成的孤儿控制目标；
+  - Foxy `BtActionNode` 在黑板中将 `server_timeout` 硬编码为 10ms，新的 UDP-only 链路下本次 22ms 的正常回执被提前误判失败。
+- 多点修正：
+  - 不放宽 Web 任务成功判定，也不忽略 `status=6`；
+  - 在项目 Foxy 行为树中为 `ComputePathToPose`、`FollowPath`、`ClearEntireCostmap`、`BackUp`、`Spin`、`Wait` 全部显式设置 `server_timeout=500ms`；
+  - 合同测试要求行为树所有 action/service 节点都必须保留该超时下限，防止后续合并回退到 Foxy 10ms 默认值。
+- 低矮障碍物根因：
+  - 106 edge scan 原配置只保留 `z=-0.05..0.55m`，机身中心以下的矮盒子点会在生成 `/scan` 之前被直接丢弃；
+  - 原配置 `MAX_POINTS=12000` 还会对每帧约 3 万到 5 万个点做固定步长抽样，小障碍物本就很少的回波可能再次被丢掉；
+  - 旧 104 实机点云转换器曾验证使用 `height_min=-0.25 / height_max=0.60`，新 edge scan 已恢复同一高度带，并以 `MAX_POINTS=0` 处理每帧全部点。
+- 部署与静态验证：
+  - 104 已同步、Foxy 构建并重启，`m20pro-real.service=active`、`NRestarts=0`、`Nav2 lifecycle is active`、`M20PRO REAL OK`；
+  - 106 `/etc/m20pro-edge-scan-106.env` 已切到 `-0.25..0.60 / MAX_POINTS=0`，`m20pro-edge-scan-106.service=active`、`NRestarts=0`；
+  - 106 实时处理约 3.3 万到 4.8 万点/帧，有效 scan 约 243~245 束，104 `/scan`、local/global costmap 持续新鲜；
+  - 106 edge scan CPU 约从 5.6% 增至 11.3%，仍在可接受范围；当前 scan 最近有效点约 0.43m，未出现降低高度下限后的贴地近距离满屏障碍。
+- 待用户动态验收：
+  - 用同一盒子横放，先确认前端出现激光轮廓，再进行低速绕障；
+  - 重跑两点任务，确认第一点不再出现 `send_goal failed/status=6`，并真正下发第二个 `/m20pro/floor_goal`。

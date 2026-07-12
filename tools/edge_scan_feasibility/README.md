@@ -26,6 +26,15 @@ Production acceptance requires:
 - 104 has no relay/fusion process and does not subscribe to raw point clouds;
 - `/dev/shm` remains below the system warning threshold.
 
+The production height band is `-0.25..0.60 m` in the vendor point coordinate
+interpretation. It matches the previously field-tested real pointcloud
+converter and includes obstacles below the body center while rejecting the
+floor. Production uses the full cloud (`MAX_POINTS=0`); stride sampling is not
+allowed because it can discard the few returns from a small, low obstacle.
+After a lidar mounting or posture change, verify both a low obstacle and a tall
+obstacle before navigation. Do not lower the minimum height further without a
+ground-return test, since floor points can otherwise make free space occupied.
+
 The input cloud reports `lidar_link`, while the vendor point coordinates used by
 the previous deployed converter were already consumed as body coordinates with
 TF conversion disabled. The edge node preserves that field interpretation and

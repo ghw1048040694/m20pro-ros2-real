@@ -37,6 +37,18 @@ def main() -> None:
     root = ET.parse(tree_path).getroot()
     assert root.find(".//ReactiveFallback[@name='FollowPathFallback']") is not None
     assert root.find(".//BackUp") is not None
+    timed_bt_tags = {
+        "ComputePathToPose",
+        "FollowPath",
+        "ClearEntireCostmap",
+        "BackUp",
+        "Spin",
+        "Wait",
+    }
+    timed_nodes = [node for node in root.iter() if node.tag in timed_bt_tags]
+    assert timed_nodes
+    for node in timed_nodes:
+        assert int(node.attrib.get("server_timeout", "0")) >= 500
 
     dashboard = (
         ROOT
@@ -102,6 +114,24 @@ def main() -> None:
         / "m20pro_real_full.sh"
     ).read_text(encoding="utf-8")
     assert "export PYTHONDONTWRITEBYTECODE=1" in real_start
+
+    edge_env_path = (
+        ROOT
+        / "tools"
+        / "edge_scan_feasibility"
+        / "service"
+        / "m20pro-edge-scan-106.env.edge_scan"
+    )
+    edge_env = {}
+    for raw_line in edge_env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        edge_env[key] = value
+    assert float(edge_env["HEIGHT_MIN"]) <= -0.25
+    assert float(edge_env["HEIGHT_MAX"]) >= 0.60
+    assert int(edge_env["MAX_POINTS"]) == 0
 
     print("real Nav2 configuration contract tests passed")
 
