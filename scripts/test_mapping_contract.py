@@ -12,11 +12,14 @@ sys.path.insert(0, str(ROOT / "src/m20pro_cloud_bridge"))
 
 from m20pro_cloud_bridge.mapping_contract import (  # noqa: E402
     apply_mapping_command_result,
+    floor_map_name,
+    mark_mapping_floor_imported,
     mapping_command_context,
     mapping_command_status,
     normalize_mapping_session_request,
     prepare_mapping_session_create,
     sanitize_mapping_name,
+    select_mapping_floor,
 )
 
 
@@ -76,6 +79,95 @@ def test_prepare_mapping_session_create_reuses_project() -> None:
     assert_equal(prepared["session"]["id"], "map_session_1", "session id")
     assert_equal(prepared["session"]["map_name"], "F20_stamp", "map name")
     assert_equal(prepared["session"]["status"], "created", "status")
+    assert_equal(
+        prepared["session"]["floor_steps"],
+        [{"floor": "F20", "map_name": "F20_stamp", "status": "ready", "updated_at": "2026-06-29 10:20:00"}],
+        "single-floor step",
+    )
+
+
+def test_multi_floor_steps_and_selection() -> None:
+    prepared = prepare_mapping_session_create(
+        {
+            "project_name": "Project",
+            "building": "B1",
+            "floors": ["F19", "F20", "F21"],
+            "active_floor": "F20",
+            "map_name": "F20_site",
+        },
+        projects=[{"id": "project_existing", "name": "Project", "building": "B1"}],
+        id_factory=IdFactory(),
+        now_text=lambda: "created",
+        default_project_name="default",
+        default_map_name="{active_floor}_stamp",
+    )
+    session = prepared["session"]
+    assert_equal(
+        [item["map_name"] for item in session["floor_steps"]],
+        ["F19_site", "F20_site", "F21_site"],
+        "floor-specific names",
+    )
+    assert_equal(floor_map_name("site", "F20", "F21", True), "site_F21", "generic base name")
+
+    selected = select_mapping_floor(session, "F21", updated_at="selected")
+    assert_equal(selected["ok"], True, "select floor")
+    assert_equal(selected["session"]["active_floor"], "F21", "active floor after selection")
+    assert_equal(selected["session"]["map_name"], "F21_site", "active map name after selection")
+    assert_equal(selected["session"]["status"], "pending", "selected step status")
+    assert_equal(select_mapping_floor(session, "F22", updated_at="now")["code"], "mapping_floor_missing", "missing floor")
+
+    busy = dict(session)
+    busy["status"] = "mapping"
+    assert_equal(select_mapping_floor(busy, "F21", updated_at="now")["code"], "mapping_floor_busy", "busy floor")
+
+    legacy = {
+        "id": "legacy",
+        "floors": ["F20", "F21"],
+        "active_floor": "F20",
+        "map_name": "F20_legacy",
+        "status": "saved",
+        "updated_at": "old",
+    }
+    migrated = select_mapping_floor(legacy, "F21", updated_at="migrated")
+    assert_equal(migrated["ok"], True, "legacy session selection")
+    assert_equal(migrated["session"]["map_name"], "F21_legacy", "legacy step map name")
+    assert_equal(len(migrated["session"]["floor_steps"]), 2, "legacy steps persisted")
+
+
+def test_per_floor_mapping_lifecycle() -> None:
+    session = {
+        "id": "s1",
+        "active_floor": "F20",
+        "map_name": "F20_site",
+        "status": "created",
+        "floor_steps": [
+            {"floor": "F20", "map_name": "F20_site", "status": "ready"},
+            {"floor": "F21", "map_name": "F21_site", "status": "pending"},
+        ],
+    }
+    mapping = apply_mapping_command_result(
+        session,
+        param_name="factory_mapping_start_command",
+        result={"ok": True},
+        updated_at="mapping",
+    )
+    assert_equal(mapping["status"], "mapping", "session mapping")
+    assert_equal(mapping["floor_steps"][0]["status"], "mapping", "step mapping")
+    saved = apply_mapping_command_result(
+        mapping,
+        param_name="factory_mapping_finish_command",
+        result={"ok": True},
+        updated_at="saved",
+    )
+    assert_equal(saved["floor_steps"][0]["status"], "saved", "step saved")
+    imported = mark_mapping_floor_imported(
+        saved,
+        floor="F20",
+        map_id="map_20",
+        updated_at="imported",
+    )
+    assert_equal(imported["floor_steps"][0]["status"], "imported", "step imported")
+    assert_equal(imported["floor_steps"][0]["map_id"], "map_20", "step imported map")
 
 
 def test_prepare_mapping_session_create_adds_project() -> None:
@@ -142,6 +234,8 @@ def main() -> int:
         test_sanitize_mapping_name,
         test_normalize_mapping_session_request,
         test_prepare_mapping_session_create_reuses_project,
+        test_multi_floor_steps_and_selection,
+        test_per_floor_mapping_lifecycle,
         test_prepare_mapping_session_create_adds_project,
         test_mapping_command_status,
         test_apply_mapping_command_result,

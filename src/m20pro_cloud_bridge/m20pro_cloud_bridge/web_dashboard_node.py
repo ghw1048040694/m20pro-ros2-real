@@ -11,6 +11,7 @@ import socket
 import subprocess
 import threading
 import time
+import yaml
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path as FsPath
@@ -102,8 +103,15 @@ from .map_selection_contract import (
 )
 from .mapping_contract import (
     apply_mapping_command_result,
+    mark_mapping_floor_imported,
     mapping_command_context,
     prepare_mapping_session_create,
+    select_mapping_floor,
+)
+from .multi_floor_contract import (
+    build_multi_floor_workspace,
+    cross_floor_task_context,
+    stair_routes_from_config,
 )
 from .nav_status_contract import (
     apply_ignored_nav_status_state,
@@ -2113,6 +2121,55 @@ class WebDashboardNode(Node):
                 "effective_map_id": effective_map_id,
             }
 
+    def _floor_config_payload(self) -> Dict[str, Any]:
+        path = self._floor_config_path()
+        if path is None or not path.is_file():
+            return {
+                "ok": False,
+                "config": {},
+                "message": "跨楼层配置 inspection_waypoints.yaml 不可用",
+                "path": str(path or ""),
+            }
+        try:
+            with path.open("r", encoding="utf-8") as file:
+                config = yaml.safe_load(file) or {}
+            if not isinstance(config, dict):
+                raise ValueError("配置根节点必须是对象")
+            return {"ok": True, "config": config, "path": str(path)}
+        except Exception as exc:
+            return {
+                "ok": False,
+                "config": {},
+                "message": "读取跨楼层配置失败",
+                "path": str(path),
+                "error": str(exc),
+            }
+
+    def _multi_floor_payload(self) -> Dict[str, Any]:
+        config_payload = self._floor_config_payload()
+        with self._lock:
+            current_floor = self._state.get("floor")
+        with self._data_lock:
+            maps = [dict(item) for item in self._all_maps_unlocked()]
+            annotations = [dict(item) for item in self._annotations]
+            sessions = [dict(item) for item in self._sessions]
+            selected_map_id = self._settings.get("selected_map_id")
+        workspace = build_multi_floor_workspace(
+            floor_config=config_payload["config"],
+            maps=maps,
+            annotations=annotations,
+            sessions=sessions,
+            current_floor=current_floor,
+            selected_map_id=selected_map_id,
+        )
+        workspace["config_available"] = bool(config_payload.get("ok"))
+        workspace["config_path"] = config_payload.get("path")
+        if not config_payload.get("ok"):
+            workspace["ready"] = False
+            workspace["message"] = config_payload.get("message")
+            workspace["config_error"] = config_payload.get("error")
+        return workspace
+
     def _preflight_payload(self) -> Dict[str, Any]:
         with self._preflight_lock:
             running = self._preflight_running_payload_unlocked()
@@ -2720,6 +2777,25 @@ class WebDashboardNode(Node):
         )
         return {"ok": True, "session": session}
 
+    def _select_mapping_session_floor(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        session_id = str(payload.get("session_id") or "").strip()
+        floor = str(payload.get("floor") or "").strip()
+        session = self._find_session(session_id or None)
+        if session is None:
+            return self._error("建图任务不存在，请先建立建图任务", {"code": "mapping_session_missing"})
+        result = select_mapping_floor(session, floor, updated_at=now_text())
+        if not result.get("ok"):
+            return self._error(
+                str(result.get("message") or "无法切换建图楼层"),
+                {key: value for key, value in result.items() if key not in ("ok", "message")},
+            )
+        with self._data_lock:
+            session.clear()
+            session.update(result["session"])
+            self._save_json("mapping_sessions.json", self._sessions)
+        self._append_event("切换建图楼层步骤", {"session_id": session["id"], "floor": floor})
+        return {"ok": True, "session": session, "step": result.get("step")}
+
     def _mapping_command(self, param_name: str, session_id: Optional[str]) -> Dict[str, Any]:
         session = self._find_session(session_id)
         if session is None:
@@ -3152,8 +3228,14 @@ class WebDashboardNode(Node):
         with self._data_lock:
             self._maps.append(map_record)
             if session:
-                session["status"] = "imported"
-                session["updated_at"] = now_text()
+                updated_session = mark_mapping_floor_imported(
+                    session,
+                    floor=floor,
+                    map_id=str(map_record["id"]),
+                    updated_at=now_text(),
+                )
+                session.clear()
+                session.update(updated_session)
             self._save_json("maps.json", self._maps)
             self._save_json("mapping_sessions.json", self._sessions)
             selected_map_id = self._settings.get("selected_map_id")
@@ -4650,7 +4732,11 @@ class WebDashboardNode(Node):
             dict(event_payload["operator_payload"]),
         )
 
-    def _create_task(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _create_task(
+        self,
+        payload: Dict[str, Any],
+        task_metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         with self._lock:
             runtime_state = {"map": dict(self._state.get("map") or {})}
         selected_map_id = self._effective_map_id(runtime_state=runtime_state)
@@ -4696,9 +4782,63 @@ class WebDashboardNode(Node):
                 task_id=new_id("task"),
                 now_text_value=now_text(),
             )
+            if task_metadata:
+                task.update(task_metadata)
             self._tasks.append(task)
             self._save_json("tasks.json", self._tasks)
         return {"ok": True, "task": task}
+
+    def _create_cross_floor_task(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        config_payload = self._floor_config_payload()
+        if not config_payload.get("ok"):
+            return self._error(
+                str(config_payload.get("message") or "跨楼层配置不可用"),
+                {
+                    "code": "cross_floor_config_unavailable",
+                    "path": config_payload.get("path"),
+                    "error": config_payload.get("error"),
+                },
+            )
+        with self._data_lock:
+            known = {
+                str(item.get("id")): dict(item)
+                for item in self._annotations
+                if item.get("id")
+            }
+        context = cross_floor_task_context(
+            payload,
+            annotations_by_id=known,
+            routes=stair_routes_from_config(config_payload["config"]),
+        )
+        if not context.get("ok"):
+            return self._error(
+                str(context.get("message") or "跨楼层任务无效"),
+                {key: value for key, value in context.items() if key not in ("ok", "message")},
+            )
+        created = self._create_task(
+            {
+                "name": context["name"],
+                "annotation_ids": context["annotation_ids"],
+                "map_id": context["task_map_id"],
+            },
+            task_metadata={
+                "multi_floor": True,
+                "floor_sequence": list(context["floor_sequence"]),
+                "route_plans": list(context["route_plans"]),
+            },
+        )
+        if not created.get("ok"):
+            return created
+        task = created["task"]
+        self._append_event(
+            "建立跨楼层任务",
+            {
+                "task_id": task.get("id"),
+                "floors": context["floor_sequence"],
+                "waypoint_count": len(context["annotation_ids"]),
+            },
+        )
+        return {"ok": True, "task": task, "route_plans": context["route_plans"]}
 
     def _task_start_pre_runtime_context(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         task_id = str(payload.get("task_id") or "").strip()
@@ -6102,6 +6242,8 @@ class WebDashboardNode(Node):
                         self._send_json(node._projects_payload())
                     elif parsed.path == "/api/maps":
                         self._send_json(node._maps_payload())
+                    elif parsed.path == "/api/multi_floor":
+                        self._send_json(node._multi_floor_payload())
                     elif parsed.path == "/api/annotations":
                         self._send_json(node._annotations_payload(query))
                     elif parsed.path == "/api/tasks":
@@ -6159,6 +6301,8 @@ class WebDashboardNode(Node):
                         self._send_api(node._select_map(payload))
                     elif parsed.path == "/api/mapping/session":
                         self._send_api(node._create_mapping_session(payload))
+                    elif parsed.path == "/api/mapping/select_floor":
+                        self._send_api(node._select_mapping_session_floor(payload))
                     elif parsed.path == "/api/mapping/check_environment":
                         self._send_api(node._check_mapping_environment())
                     elif parsed.path == "/api/mapping/start":
@@ -6175,6 +6319,8 @@ class WebDashboardNode(Node):
                         self._send_api(node._update_annotation(payload))
                     elif parsed.path == "/api/tasks":
                         self._send_api(node._create_task(payload))
+                    elif parsed.path == "/api/tasks/cross_floor":
+                        self._send_api(node._create_cross_floor_task(payload))
                     elif parsed.path == "/api/tasks/update":
                         self._send_api(node._update_task(payload))
                     elif parsed.path == "/api/tasks/start":

@@ -254,6 +254,14 @@
               <button id="reloadTasksBtn">刷新任务</button>
               <button id="taskRunPreflightBtn">重新自检</button>
             </div>
+            <h2 class="inline-heading">跨楼层编排</h2>
+            <div id="multiFloorSummary" class="multi-floor-summary">正在读取楼层配置</div>
+            <div id="crossFloorPointPool" class="floor-point-pool"></div>
+            <div id="crossFloorDraft" class="ordered-waypoints"></div>
+            <div class="actions">
+              <button class="primary" id="createCrossFloorTaskBtn" disabled>生成跨楼层任务</button>
+              <button id="clearCrossFloorDraftBtn">清空顺序</button>
+            </div>
             <h2 class="inline-heading">任务列表</h2>
             <div id="taskList" class="list"></div>
           </div>
@@ -357,6 +365,7 @@
                 <button id="startMappingBtn">启动 106 建图</button>
                 <button id="finishMappingBtn">完成/保存建图</button>
               </div>
+              <div id="mappingFloorSteps" class="mapping-floor-steps">尚未建立建图任务</div>
               <div class="small">默认按《M20 Pro 软件使用手册》通过 106 的 drmap -b 建图；保存后不会立即用于导航，需要拉取后手动切换地图生效。</div>
               <div class="row">
                 <label>地图楼层</label>

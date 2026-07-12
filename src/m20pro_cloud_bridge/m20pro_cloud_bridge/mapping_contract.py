@@ -71,19 +71,92 @@ def build_mapping_session_record(
     request: Dict[str, Any],
     created_at: str,
 ) -> Dict[str, Any]:
+    floors = list(request.get("floors") or [])
+    active_floor = str(request.get("active_floor") or "")
+    base_map_name = str(request.get("map_name") or "")
+    floor_steps = [
+        {
+            "floor": str(floor),
+            "map_name": floor_map_name(base_map_name, active_floor, str(floor), len(floors) > 1),
+            "status": "ready" if str(floor) == active_floor else "pending",
+            "updated_at": str(created_at or ""),
+        }
+        for floor in floors
+    ]
     return {
         "id": str(session_id or ""),
         "project_id": str(project.get("id") or ""),
         "project_name": str(request.get("project_name") or ""),
         "building": str(request.get("building") or ""),
         "mode": str(request.get("mode") or ""),
-        "floors": list(request.get("floors") or []),
-        "active_floor": str(request.get("active_floor") or ""),
-        "map_name": str(request.get("map_name") or ""),
+        "floors": floors,
+        "active_floor": active_floor,
+        "map_name": active_mapping_step(floor_steps, active_floor).get("map_name") or base_map_name,
+        "floor_steps": floor_steps,
         "status": "created",
         "created_at": str(created_at or ""),
         "updated_at": str(created_at or ""),
     }
+
+
+def floor_map_name(base_name: str, active_floor: str, floor: str, multi_floor: bool) -> str:
+    base_name = sanitize_mapping_name(base_name, floor or "map")
+    if not multi_floor:
+        return base_name
+    active_floor = str(active_floor or "").strip()
+    floor = str(floor or "").strip()
+    if active_floor and base_name.startswith(active_floor + "_"):
+        return sanitize_mapping_name(floor + base_name[len(active_floor):], floor)
+    if base_name.endswith("_" + active_floor) and active_floor:
+        return sanitize_mapping_name(base_name[: -len(active_floor)] + floor, floor)
+    return sanitize_mapping_name(f"{base_name}_{floor}", floor)
+
+
+def active_mapping_step(steps: Any, active_floor: Any) -> Dict[str, Any]:
+    floor = str(active_floor or "").strip()
+    for item in steps if isinstance(steps, list) else []:
+        if isinstance(item, dict) and str(item.get("floor") or "").strip() == floor:
+            return item
+    return {}
+
+
+def mapping_floor_steps(session: Dict[str, Any]) -> List[Dict[str, Any]]:
+    existing = session.get("floor_steps")
+    if isinstance(existing, list) and existing:
+        return [dict(item) for item in existing if isinstance(item, dict)]
+    floors = [str(item).strip() for item in (session.get("floors") or []) if str(item).strip()]
+    active_floor = str(session.get("active_floor") or "").strip()
+    base_map_name = str(session.get("map_name") or "")
+    return [
+        {
+            "floor": floor,
+            "map_name": (
+                sanitize_mapping_name(base_map_name, floor or "map")
+                if floor == active_floor
+                else floor_map_name(base_map_name, active_floor, floor, len(floors) > 1)
+            ),
+            "status": str(session.get("status") or "ready") if floor == active_floor else "pending",
+            "updated_at": str(session.get("updated_at") or session.get("created_at") or ""),
+        }
+        for floor in floors
+    ]
+
+
+def select_mapping_floor(session: Dict[str, Any], floor: Any, *, updated_at: str) -> Dict[str, Any]:
+    floor = str(floor or "").strip()
+    steps = mapping_floor_steps(session)
+    step = active_mapping_step(steps, floor)
+    if not step:
+        return {"ok": False, "code": "mapping_floor_missing", "message": "建图任务中没有该楼层"}
+    if str(session.get("status") or "") == "mapping":
+        return {"ok": False, "code": "mapping_floor_busy", "message": "当前楼层正在建图，完成或取消后才能切换步骤"}
+    updated = dict(session)
+    updated["floor_steps"] = steps
+    updated["active_floor"] = floor
+    updated["map_name"] = str(step.get("map_name") or "")
+    updated["status"] = str(step.get("status") or "ready")
+    updated["updated_at"] = str(updated_at or "")
+    return {"ok": True, "session": updated, "step": step}
 
 
 def prepare_mapping_session_create(
@@ -146,6 +219,34 @@ def apply_mapping_command_result(
     updated = dict(session)
     updated["status"] = mapping_command_status(param_name, session.get("status"), result)
     updated["updated_at"] = str(updated_at or "")
+    steps = mapping_floor_steps(session)
+    step = active_mapping_step(steps, session.get("active_floor"))
+    if step:
+        step["status"] = updated["status"]
+        step["updated_at"] = str(updated_at or "")
+        updated["floor_steps"] = steps
+    return updated
+
+
+def mark_mapping_floor_imported(
+    session: Dict[str, Any],
+    *,
+    floor: str,
+    map_id: str,
+    updated_at: str,
+) -> Dict[str, Any]:
+    updated = dict(session)
+    steps = mapping_floor_steps(session)
+    step = active_mapping_step(steps, floor)
+    if step:
+        step["status"] = "imported"
+        step["map_id"] = str(map_id or "")
+        step["updated_at"] = str(updated_at or "")
+    updated["floor_steps"] = steps
+    updated["active_floor"] = str(floor or "")
+    updated["map_name"] = str(step.get("map_name") or updated.get("map_name") or "")
+    updated["status"] = "imported"
+    updated["updated_at"] = str(updated_at or "")
     return updated
 
 
@@ -157,6 +258,7 @@ def mapping_command_context(
     factory_active_map: str,
     map_archive_dir: str,
 ) -> Dict[str, str]:
+    step = active_mapping_step(mapping_floor_steps(session), session.get("active_floor"))
     return {
         "session_id": str(session.get("id", "")),
         "project_name": str(session.get("project_name", "")),
@@ -164,7 +266,7 @@ def mapping_command_context(
         "mode": str(session.get("mode", "")),
         "active_floor": str(session.get("active_floor", "")),
         "map_name": sanitize_mapping_name(
-            str(session.get("map_name") or ""),
+            str(step.get("map_name") or session.get("map_name") or ""),
             str(session.get("id", "map")),
         ),
         "floors": ",".join(str(item) for item in session.get("floors") or []),

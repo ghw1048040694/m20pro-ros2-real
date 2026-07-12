@@ -604,6 +604,53 @@
       font-size: 13px;
     }
     .checkline input { width: 16px; min-height: 16px; margin-top: 2px; }
+    .multi-floor-summary {
+      margin-top: 8px;
+      padding: 8px 0;
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .multi-floor-summary strong { color: var(--text); }
+    .floor-point-pool, .mapping-floor-steps { margin-top: 8px; }
+    .floor-group, .mapping-floor-row {
+      display: grid;
+      grid-template-columns: 62px minmax(0, 1fr);
+      gap: 8px;
+      padding: 8px 0;
+      border-top: 1px solid var(--line);
+    }
+    .floor-group:first-child, .mapping-floor-row:first-child { border-top: 0; }
+    .floor-group-name { font-size: 12px; font-weight: 700; color: var(--text); }
+    .floor-group-points { display: flex; flex-wrap: wrap; gap: 6px; }
+    .floor-point-pool button { min-height: 30px; padding: 4px 8px; font-size: 12px; }
+    .ordered-waypoints { margin-top: 8px; }
+    .ordered-waypoint {
+      display: grid;
+      grid-template-columns: 26px minmax(0, 1fr) auto;
+      gap: 7px;
+      align-items: center;
+      min-height: 38px;
+      border-top: 1px solid var(--line);
+      font-size: 12px;
+    }
+    .ordered-waypoint:first-child { border-top: 0; }
+    .waypoint-order { color: var(--muted); text-align: center; }
+    .waypoint-actions { display: flex; gap: 4px; }
+    .waypoint-actions button {
+      width: 30px;
+      min-width: 30px;
+      min-height: 30px;
+      padding: 0;
+      font-size: 15px;
+    }
+    .route-preview { color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .mapping-floor-row.active { background: var(--accent-soft); }
+    .mapping-floor-main { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .mapping-floor-main button { min-height: 30px; padding: 3px 8px; font-size: 12px; }
+    .mapping-floor-meta { margin-top: 3px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
     table {
       width: 100%;
       border-collapse: collapse;

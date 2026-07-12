@@ -41,6 +41,10 @@
       workPointerMode: "localize",
       mapSwitching: false,
       liveRequestInFlight: false,
+      multiFloor: null,
+      mappingSession: null,
+      crossFloorDraftIds: [],
+      lastMultiFloorRefreshAt: 0,
     };
     window.m20proDebug = {
       snapshot() {
@@ -56,6 +60,9 @@
           lastTasksPayload: state.lastTasksPayload,
           preflight: state.preflight,
           followRobot: state.followRobot,
+          multiFloor: state.multiFloor,
+          mappingSession: state.mappingSession,
+          crossFloorDraftIds: state.crossFloorDraftIds.slice(),
           view: state.view
         };
       }
@@ -2075,6 +2082,227 @@
       btn.disabled = false;
       btn.title = "用已勾选的当前地图点位生成任务";
     }
+    function multiFloorAnnotations() {
+      const floors = (state.multiFloor && state.multiFloor.floors) || [];
+      return floors.flatMap(floor => Array.isArray(floor.annotations) ? floor.annotations : []);
+    }
+    function multiFloorAnnotationById(annotationId) {
+      return multiFloorAnnotations().find(item => String(item.id) === String(annotationId)) || null;
+    }
+    function draftFloorSequence() {
+      const sequence = [];
+      for (const annotationId of state.crossFloorDraftIds) {
+        const annotation = multiFloorAnnotationById(annotationId);
+        const floor = String((annotation && annotation.floor) || "");
+        if (floor && sequence[sequence.length - 1] !== floor) sequence.push(floor);
+      }
+      return sequence;
+    }
+    function configuredFloorPath(source, target) {
+      if (source === target) return [source];
+      const routes = ((state.multiFloor && state.multiFloor.routes) || []).filter(item => item.configured);
+      const queue = [[source, [source]]];
+      const visited = new Set([source]);
+      while (queue.length) {
+        const [floor, path] = queue.shift();
+        for (const route of routes.filter(item => String(item.source_floor) === floor)) {
+          const next = String(route.target_floor || "");
+          if (!next || visited.has(next)) continue;
+          if (next === target) return path.concat(next);
+          visited.add(next);
+          queue.push([next, path.concat(next)]);
+        }
+      }
+      return null;
+    }
+    function crossFloorRoutePreview() {
+      const floors = draftFloorSequence();
+      const paths = [];
+      for (let index = 0; index < floors.length - 1; index += 1) {
+        const path = configuredFloorPath(floors[index], floors[index + 1]);
+        if (!path) return {ok: false, floors, text: `缺少路线 ${floors[index]} -> ${floors[index + 1]}`};
+        paths.push(path);
+      }
+      return {ok: true, floors, text: paths.length ? paths.map(path => path.join(" -> ")).join(" / ") : "至少加入两个楼层的点位"};
+    }
+    function renderMultiFloorSummary() {
+      const box = $("multiFloorSummary");
+      if (!box) return;
+      const workspace = state.multiFloor;
+      if (!workspace) {
+        box.textContent = "正在读取楼层配置";
+        return;
+      }
+      const current = workspace.current_floor || "未知";
+      const selectedFloor = (workspace.floors || []).find(item => item.selected);
+      const selected = selectedFloor ? selectedFloor.id : "未选择";
+      const status = workspace.config_available
+        ? `${workspace.floor_count} 层 / ${workspace.configured_route_count} 条路线 / 就绪 ${workspace.ready_floor_count}`
+        : (workspace.message || "楼层配置不可用");
+      box.innerHTML = `<strong>当前 ${escapeHtml(current)}</strong> / 起始地图 ${escapeHtml(selected)} / ${escapeHtml(status)}`;
+    }
+    function renderCrossFloorComposer() {
+      const pool = $("crossFloorPointPool");
+      const draft = $("crossFloorDraft");
+      const createButton = $("createCrossFloorTaskBtn");
+      if (!pool || !draft || !createButton) return;
+      const workspace = state.multiFloor;
+      pool.innerHTML = "";
+      if (!workspace || !(workspace.floors || []).length) {
+        pool.innerHTML = `<div class="small">没有可用楼层或点位</div>`;
+      } else {
+        for (const floor of workspace.floors) {
+          const row = document.createElement("div");
+          row.className = "floor-group";
+          const name = document.createElement("div");
+          name.className = "floor-group-name";
+          name.textContent = floor.id || "-";
+          name.title = [
+            floor.preferred_map_name ? `地图 ${floor.preferred_map_name}` : "",
+            floor.historical_annotation_count ? `已排除 ${floor.historical_annotation_count} 个历史地图点位` : "",
+            ...(floor.warnings || [])
+          ].filter(Boolean).join(" / ");
+          const points = document.createElement("div");
+          points.className = "floor-group-points";
+          for (const item of floor.annotations || []) {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.dataset.addCrossFloorPoint = item.id;
+            button.textContent = `+ ${item.label || item.id}`;
+            button.title = `${floor.id} / ${item.label || item.id}`;
+            button.disabled = state.crossFloorDraftIds.includes(String(item.id));
+            points.appendChild(button);
+          }
+          if (!(floor.annotations || []).length) points.innerHTML = `<span class="small">无已保存点位</span>`;
+          row.append(name, points);
+          pool.appendChild(row);
+        }
+      }
+      for (const button of pool.querySelectorAll("[data-add-cross-floor-point]")) {
+        button.addEventListener("click", () => {
+          state.crossFloorDraftIds.push(String(button.dataset.addCrossFloorPoint));
+          renderCrossFloorComposer();
+        });
+      }
+
+      state.crossFloorDraftIds = state.crossFloorDraftIds.filter(id => multiFloorAnnotationById(id));
+      draft.innerHTML = "";
+      for (const [index, annotationId] of state.crossFloorDraftIds.entries()) {
+        const item = multiFloorAnnotationById(annotationId);
+        const row = document.createElement("div");
+        row.className = "ordered-waypoint";
+        row.innerHTML = `
+          <span class="waypoint-order">${index + 1}</span>
+          <span>${escapeHtml(item.floor)} / ${escapeHtml(item.label || item.id)}</span>
+          <span class="waypoint-actions">
+            <button type="button" data-move-cross-point="${index}:-1" title="上移" ${index === 0 ? "disabled" : ""}>↑</button>
+            <button type="button" data-move-cross-point="${index}:1" title="下移" ${index === state.crossFloorDraftIds.length - 1 ? "disabled" : ""}>↓</button>
+            <button type="button" data-remove-cross-point="${index}" title="移除">×</button>
+          </span>`;
+        draft.appendChild(row);
+      }
+      if (!state.crossFloorDraftIds.length) draft.innerHTML = `<div class="small">从各楼层依次加入任务点</div>`;
+      const route = crossFloorRoutePreview();
+      const routeLine = document.createElement("div");
+      routeLine.className = "route-preview";
+      routeLine.textContent = `楼层路径：${route.text}`;
+      draft.appendChild(routeLine);
+      for (const button of draft.querySelectorAll("[data-move-cross-point]")) {
+        button.addEventListener("click", () => {
+          const [from, offset] = button.dataset.moveCrossPoint.split(":").map(Number);
+          const to = from + offset;
+          [state.crossFloorDraftIds[from], state.crossFloorDraftIds[to]] = [state.crossFloorDraftIds[to], state.crossFloorDraftIds[from]];
+          renderCrossFloorComposer();
+        });
+      }
+      for (const button of draft.querySelectorAll("[data-remove-cross-point]")) {
+        button.addEventListener("click", () => {
+          state.crossFloorDraftIds.splice(Number(button.dataset.removeCrossPoint), 1);
+          renderCrossFloorComposer();
+        });
+      }
+      const first = multiFloorAnnotationById(state.crossFloorDraftIds[0]);
+      const selectedMapId = String((workspace && workspace.selected_map_id) || state.selectedMapId || "");
+      const distinctFloors = new Set(route.floors);
+      const startMapReady = !!first && String(first.map_id || "") === selectedMapId;
+      const localizationReady = !state.selectedMapStatus || state.selectedMapStatus.ready !== false;
+      createButton.disabled = !(route.ok && distinctFloors.size >= 2 && startMapReady && localizationReady);
+      createButton.title = !startMapReady
+        ? "顺序中的首点必须属于当前已加载地图"
+        : (!route.ok
+          ? route.text
+          : (distinctFloors.size < 2
+            ? "至少选择两个楼层"
+            : (!localizationReady
+              ? ((state.selectedMapStatus && state.selectedMapStatus.message) || "当前地图尚未完成重定位")
+              : "生成跨楼层任务")));
+    }
+    function mappingStatusText(status) {
+      return ({pending: "待开始", ready: "可开始", created: "已建立", mapping: "建图中", saved: "已保存", imported: "已拉取", cancelled: "已取消", waiting_manual: "待人工处理"})[status] || status || "待开始";
+    }
+    function renderMappingFloorSteps() {
+      const box = $("mappingFloorSteps");
+      if (!box) return;
+      const workspace = state.multiFloor;
+      const session = state.mappingSession || (workspace && workspace.latest_mapping_session);
+      if (!session) {
+        box.textContent = "尚未建立建图任务";
+        return;
+      }
+      state.mappingSession = session;
+      state.sessionId = session.id || state.sessionId;
+      box.innerHTML = "";
+      const floorRows = (workspace && workspace.floors || []).filter(item => item.mapping_step && item.mapping_step.floor);
+      for (const floor of floorRows) {
+        const step = floor.mapping_step;
+        const active = String(session.active_floor || "") === String(floor.id || "");
+        const row = document.createElement("div");
+        row.className = `mapping-floor-row${active ? " active" : ""}`;
+        row.innerHTML = `
+          <div class="floor-group-name">${escapeHtml(floor.id)}</div>
+          <div>
+            <div class="mapping-floor-main">
+              <span>${escapeHtml(mappingStatusText(step.status))}</span>
+              <button type="button" data-select-mapping-floor="${escapeHtml(floor.id)}" ${active || session.status === "mapping" ? "disabled" : ""}>${active ? "当前步骤" : "切换"}</button>
+            </div>
+            <div class="mapping-floor-meta">${escapeHtml(step.map_name || "-")}${step.map_id ? ` / ${escapeHtml(step.map_id)}` : ""}</div>
+          </div>`;
+        box.appendChild(row);
+      }
+      for (const button of box.querySelectorAll("[data-select-mapping-floor]")) {
+        button.addEventListener("click", async () => {
+          try {
+            const payload = await api("POST", "/api/mapping/select_floor", {
+              session_id: state.sessionId,
+              floor: button.dataset.selectMappingFloor
+            });
+            state.mappingSession = payload.session;
+            $("mappingActiveFloor").value = payload.session.active_floor || "";
+            $("importFloor").value = payload.session.active_floor || "";
+            $("importName").value = payload.session.map_name || "";
+            setLog("mappingLog", payload);
+            await loadMultiFloorWorkspace();
+          } catch (err) { setLog("mappingLog", err); }
+        });
+      }
+    }
+    async function loadMultiFloorWorkspace() {
+      const payload = await fetchJson("/api/multi_floor");
+      state.multiFloor = payload;
+      state.mappingSession = payload.latest_mapping_session || state.mappingSession;
+      state.lastMultiFloorRefreshAt = Date.now();
+      if (state.mappingSession && state.mappingSession.id) {
+        state.sessionId = state.mappingSession.id;
+        $("mappingActiveFloor").value = state.mappingSession.active_floor || "";
+        $("mappingMapName").value = state.mappingSession.map_name || "";
+        $("importFloor").value = state.mappingSession.active_floor || "";
+        $("importName").value = state.mappingSession.map_name || "";
+      }
+      renderMultiFloorSummary();
+      renderCrossFloorComposer();
+      renderMappingFloorSteps();
+      return payload;
+    }
     async function loadTasks() {
       if (state.loadingTasks) return;
       state.loadingTasks = true;
@@ -2086,6 +2314,7 @@
         state.lastTasksPayload = payload;
         if (payload.selected_map_status) state.selectedMapStatus = payload.selected_map_status;
         state.tasks = payload.tasks || [];
+        if (Date.now() - state.lastMultiFloorRefreshAt > 10000) loadMultiFloorWorkspace().catch(console.warn);
         renderTaskNextStep();
         const box = $("taskList");
         box.innerHTML = "";
@@ -2537,18 +2766,31 @@
           map_name: $("mappingMapName").value.trim()
         });
         state.sessionId = payload.session.id;
+        state.mappingSession = payload.session;
         if (!$("importName").value.trim()) $("importName").value = payload.session.map_name || "";
+        $("importFloor").value = payload.session.active_floor || $("importFloor").value;
         setLog("mappingLog", payload);
+        await loadMultiFloorWorkspace();
       } catch (err) { setLog("mappingLog", err); }
     });
     $("startMappingBtn").addEventListener("click", async () => {
       if (!window.confirm("启动 106 真实建图；本流程使用 -b，只建图，不立即切换为导航地图。确认现在开始？")) return;
-      try { setLog("mappingLog", await api("POST", "/api/mapping/start", {session_id: state.sessionId})); }
+      try {
+        const payload = await api("POST", "/api/mapping/start", {session_id: state.sessionId});
+        state.mappingSession = payload.session || state.mappingSession;
+        setLog("mappingLog", payload);
+        await loadMultiFloorWorkspace();
+      }
       catch (err) { setLog("mappingLog", err); }
     });
     $("finishMappingBtn").addEventListener("click", async () => {
       if (!window.confirm("完成/保存建图会调用 106 drmap stop_mapping；保存后请先拉取建图结果，再手动切换地图生效。确认保存？")) return;
-      try { setLog("mappingLog", await api("POST", "/api/mapping/finish", {session_id: state.sessionId})); }
+      try {
+        const payload = await api("POST", "/api/mapping/finish", {session_id: state.sessionId});
+        state.mappingSession = payload.session || state.mappingSession;
+        setLog("mappingLog", payload);
+        await loadMultiFloorWorkspace();
+      }
       catch (err) { setLog("mappingLog", err); }
     });
     $("importMapBtn").addEventListener("click", async () => {
@@ -2560,6 +2802,7 @@
         });
         setLog("mappingLog", payload);
         await loadMaps();
+        await loadMultiFloorWorkspace();
       } catch (err) { setLog("mappingLog", err); }
     });
     async function applySelectedMap() {
@@ -2724,7 +2967,23 @@
         setLog("activeTask", "任务已生成；启动前确认首点、顺序和现场状态后再开始");
       } catch (err) { setLog("activeTask", err); }
     });
-	    $("reloadTasksBtn").addEventListener("click", loadTasks);
+    $("createCrossFloorTaskBtn").addEventListener("click", async () => {
+      try {
+        const payload = await api("POST", "/api/tasks/cross_floor", {
+          name: $("taskName").value.trim() || "跨楼层巡检任务",
+          annotation_ids: state.crossFloorDraftIds.slice()
+        });
+        state.crossFloorDraftIds = [];
+        renderCrossFloorComposer();
+        await loadTasks();
+        setLog("activeTask", payload);
+      } catch (err) { setLog("activeTask", err); }
+    });
+    $("clearCrossFloorDraftBtn").addEventListener("click", () => {
+      state.crossFloorDraftIds = [];
+      renderCrossFloorComposer();
+    });
+	    $("reloadTasksBtn").addEventListener("click", () => Promise.all([loadTasks(), loadMultiFloorWorkspace()]));
 	    $("frontVideoBtn").addEventListener("click", () => toggleVideo("front"));
 	    $("rearVideoBtn").addEventListener("click", () => toggleVideo("rear"));
 	    $("runPreflightBtn").addEventListener("click", runPreflight);
@@ -2800,6 +3059,6 @@
 	    }
 	    updateMapModeUi();
     syncManualDefaults(false);
-    loadMaps().then(loadAnnotations).then(loadPreflight).then(loadTasks).then(loadRecordingStatus).catch(console.warn);
+    loadMaps().then(loadAnnotations).then(loadMultiFloorWorkspace).then(loadPreflight).then(loadTasks).then(loadRecordingStatus).catch(console.warn);
     mainLoop();
     liveLoop();
