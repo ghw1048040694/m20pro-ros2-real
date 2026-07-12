@@ -23133,3 +23133,23 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 下一次动态录包验收口径：
   - 任务起步时 `navigation_status` 不应再出现 `location=None`；
   - `localization_ok` 应在整个导航中连续为 true；如果仍出现 false，则必须继续区分真实 `Location!=0`、位姿跳变或 TCP 超时，不再允许用缺字段的其他回执替代状态响应。
+
+## 2026-07-12 19:30 CST - 拉取 F20（带工位）二维地图到上位机供 map_editor 清理
+
+- 用户认为当前 `F20（带工位）` 栅格图杂点过多，要求拉到上位机工程 `src/m20pro_bringup/maps` 下使用 `map_editor` 人工修图。
+- 通过 104 `/api/state` 和 `/api/maps` 确认当前选中/工作/生效地图均为：
+  - `map_id=map_1782442183242_ee7c6b76`;
+  - 显示名 `F20（带工位）`;
+  - 104 目录 `/home/user/m20pro_maps/DESK_20260625_164234`;
+  - 106 原厂源 `/var/opt/robot/data/maps/map-20260625-164234`;
+  - 栅格 423x500，分辨率 0.1m，原点 `(-19.1,-13.4,0)`。
+- 已将地图编辑副本放到：
+  - `src/m20pro_bringup/maps/DESK_20260625_164234_edit/occ_grid.pgm`;
+  - `src/m20pro_bringup/maps/DESK_20260625_164234_edit/occ_grid.yaml`;
+  - `src/m20pro_bringup/maps/DESK_20260625_164234_edit/occ_grid_id_map.toml`。
+- 上位机副本与 104 当前地图 SHA-256 一致：
+  - `occ_grid.pgm=9073ba3027533036960c79af94ee5f2956f8fb9c05395f86ba0541fa83738ae1`;
+  - `occ_grid.yaml=c3e0b4f51b115cba763094754eb8b0d263d07160f6b3d0f5a5784525364757c4`;
+  - `occ_grid_id_map.toml=16f9190b47eb952d30141e947c194abcbb1d705fbf4036faed878404cdb0ecc4`。
+- 本轮只拉取二维编辑必需文件，不将原厂 `.blocks`、`full_cloud.pcd` 和 `derived` 缓存复制进源码目录。
+- 本轮没有切换地图、没有修改 104/106 正式地图，也没有重启服务；等用户修图完成后再单独做指纹对比、空闲区检查、同步和切图验收。
