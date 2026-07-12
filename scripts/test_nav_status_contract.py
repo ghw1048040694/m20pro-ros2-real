@@ -198,6 +198,32 @@ def test_nav_success_completion_decision() -> None:
     assert_true(complete["match"]["matches"], "completion match evidence")
     assert_equal(complete["event_extra"]["nav_status"], status_text, "completion event keeps raw status")
 
+    fresh_pose_wins = nav_success_completion_decision(
+        active(last_nav_goal_status="accepted", last_nav_distance_remaining_m=0.93),
+        annotation(),
+        status_text,
+        goal_tolerance_m=0.3,
+        fresh_pose_distance_m=0.06,
+        fresh_pose_age_s=0.04,
+    )
+    assert_equal(fresh_pose_wins["action"], "complete", "fresh pose overrides stale far feedback")
+    assert_equal(
+        fresh_pose_wins["event_extra"]["completion_distance_source"],
+        "fresh_map_pose",
+        "completion records fresh pose evidence",
+    )
+
+    fresh_pose_far = nav_success_completion_decision(
+        active(last_nav_goal_status="accepted", last_nav_distance_remaining_m=0.05),
+        annotation(),
+        status_text,
+        goal_tolerance_m=0.3,
+        fresh_pose_distance_m=1.2,
+        fresh_pose_age_s=0.04,
+    )
+    assert_equal(fresh_pose_far["action"], "fail", "fresh far pose overrides stale near feedback")
+    assert_equal(fresh_pose_far["reason"], "premature_nav_success", "fresh far pose fails safely")
+
     not_sent = nav_success_completion_decision(
         active(last_nav_goal_status="idle"),
         annotation(),

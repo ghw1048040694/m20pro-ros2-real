@@ -462,6 +462,8 @@ def nav_success_completion_decision(
     *,
     goal_tolerance_m: float = 0.3,
     success_slack_m: float = 0.2,
+    fresh_pose_distance_m: Optional[float] = None,
+    fresh_pose_age_s: Optional[float] = None,
 ) -> Dict[str, Any]:
     status_payload = parse_key_value_status(status_text)
     match = nav_status_matches_active_goal(active, annotation, status_payload)
@@ -513,15 +515,24 @@ def nav_success_completion_decision(
             "match": match,
             "event_extra": event_extra,
         }
+    live_pose_distance = _finite_float(fresh_pose_distance_m)
     feedback_distance = _finite_float(active.get("last_nav_distance_remaining_m"))
     pose_distance = _finite_float(active.get("last_distance_m"))
-    distance_source = "nav_feedback" if feedback_distance is not None else "map_pose"
-    distance_m = feedback_distance if feedback_distance is not None else pose_distance
+    if live_pose_distance is not None:
+        distance_source = "fresh_map_pose"
+        distance_m = live_pose_distance
+    elif feedback_distance is not None:
+        distance_source = "nav_feedback"
+        distance_m = feedback_distance
+    else:
+        distance_source = "map_pose"
+        distance_m = pose_distance
     finish_tolerance = max(0.0, float(goal_tolerance_m)) + max(0.0, float(success_slack_m))
     event_extra.update(
         {
             "completion_distance_m": distance_m,
             "completion_distance_source": distance_source if distance_m is not None else None,
+            "completion_pose_age_s": _finite_float(fresh_pose_age_s),
             "completion_tolerance_m": finish_tolerance,
         }
     )

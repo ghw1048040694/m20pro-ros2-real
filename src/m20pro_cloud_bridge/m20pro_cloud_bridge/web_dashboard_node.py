@@ -167,6 +167,7 @@ from .task_contract import (
     is_plausible_pose_dict,
     map_metadata_mismatch_error,
     normalize_startup_task_runtime_state,
+    pose_distance_m,
     validate_task_annotations_for_map as contract_validate_task_annotations_for_map,
     stop_stale_running_tasks,
     task_create_map_metadata_mismatch_payload,
@@ -4457,11 +4458,24 @@ class WebDashboardNode(Node):
             failure = active_annotation_missing_failure(active)
             self._fail_active_task_from_payload(failure, task_id=active.get("task_id"))
             return
+        with self._lock:
+            current_pose = dict(self._state.get("pose") or {})
+        current_pose_age_s = pose_age_sec(current_pose, time.time())
+        pose_timeout_s = max(0.5, float(self.get_parameter("task_start_pose_timeout_s").value))
+        fresh_pose_distance_m = None
+        if (
+            is_plausible_pose_dict(current_pose)
+            and current_pose_age_s is not None
+            and current_pose_age_s <= pose_timeout_s
+        ):
+            fresh_pose_distance_m = pose_distance_m(current_pose, annotation.get("pose"))
         decision = nav_success_completion_decision(
             active,
             annotation,
             status_text,
             goal_tolerance_m=float(self.get_parameter("goal_reached_tolerance_m").value),
+            fresh_pose_distance_m=fresh_pose_distance_m,
+            fresh_pose_age_s=current_pose_age_s,
         )
         if decision.get("action") == "fail":
             extra = decision.get("event_extra") if isinstance(decision.get("event_extra"), dict) else {}

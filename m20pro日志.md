@@ -23017,3 +23017,16 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
   - 点击确认后，前端标题、104 `selected/working/effective_map_id`、Nav2 `/map` 和 106 `active` 均切到 Test Field；
   - 再通过前端切回 F20，上述四层均恢复 F20，按钮正常解锁。
 - JavaScript 语法、`git diff --check`、5 个 ROS2 包全量构建通过；104 `m20pro-real.service=active`，当前地图已恢复 F20，切图后按规则需重新定位。
+
+## 2026-07-12 15:40 CST - 多点任务第一点误停根因修正
+
+- 用户录包：`/home/user/bags/testfield_20260712_153217`，时长 213.25s、87.1 MiB、25052 条消息；其中录制点云 709、定位位姿 3196、里程计 3197、TF 5328、导航状态 1065、速度指令 500，数据链完整。
+- 现象不是第二点未规划：第一点 test1 的 Nav2 于 15:35:19 明确返回 `Reached the goal` 和 `Navigation succeeded`，但 Web 任务线程立即将任务标记为 `navigation_error`并发布停止，因此第二点从未下发。
+- 根因：Nav2 成功前最后一条约 1 Hz 反馈中距离仍为 `0.932m`；成功回执在下一条反馈前到达，任务安全门仍使用这条旧反馈，于是误报“当前距离 0.93m 大于 0.50m”。单点任务之前能成功，只是因为成功前恰好收到 `0.177m` 的反馈。
+- 根治不放宽到点容差：Nav2 成功事件到达时，Web 节点立即读取最新官方 `map_pose`，只有位姿数值有效且时龄在任务位姿门限内时才重新计算到目标距离；没有新鲜位姿时才回退到 Nav2 反馈或任务进度距离。
+- 新的安全证据优先级：`新鲜 map_pose > Nav2 distance_remaining > 上次任务进度`；仍使用原 `goal_tolerance + success_slack` 判定真实提前成功，不跳过、不扩大安全边界。
+- 回归测试覆盖：
+  - 旧反馈 `0.93m`、新鲜位姿距离 `0.06m` 时必须完成当前点；
+  - 旧反馈 `0.05m`、新鲜位姿距离 `1.2m` 时必须仍拒绝并报提前成功。
+- 验证：20 个 `scripts/test_*.py`、Python 编译、`git diff --check`、5 个 ROS2 包全量构建通过；104 已同步、全量构建和重启，Nav2 lifecycle active，系统检查输出 `M20PRO REAL OK`。
+- 本轮不自动下发任务；修正后的“第一点到达 -> 停留 -> 第二点下发”需用户在现场重跑两点任务验收。
