@@ -11,6 +11,7 @@ from tf2_msgs.msg import TFMessage
 from tf2_ros import TransformBroadcaster
 
 from .geometry import quaternion_to_yaw, yaw_to_quaternion
+from .pose_stability_contract import stable_jump_decision
 from .tcp_protocol import M20TcpClient, patrol_items
 
 
@@ -41,8 +42,9 @@ class M20TcpBridge(Node):
         self.declare_parameter("reject_origin_placeholder_pose", True)
         self.declare_parameter("origin_placeholder_radius_m", 0.05)
         self.declare_parameter("pose_jump_reject_m", 0.6)
-        # A persistent wrong hypothesis must not become trusted merely because it is stable.
-        self.declare_parameter("pose_jump_accept_after_s", 0.0)
+        self.declare_parameter("pose_jump_accept_after_s", 8.0)
+        self.declare_parameter("pose_jump_candidate_radius_m", 0.30)
+        self.declare_parameter("pose_jump_candidate_yaw_tolerance_rad", 0.35)
         self.declare_parameter("pose_filter_hold_last_good_s", 1.0)
         self.declare_parameter("pose_relocalization_jump_grace_s", 3.0)
         self.declare_parameter("pose_relocalization_jump_grace_radius_m", 1.0)
@@ -313,12 +315,24 @@ class M20TcpBridge(Node):
             return
         self.last_relocalization_attempt_monotonic = time.monotonic()
         self.last_relocalization_attempt_target = dict(items)
+        # Arm pose verification before waiting for the reply. Firmware on this
+        # robot can execute 2101/1 while returning ErrorCode=0xFFFF.
+        self.last_relocalization_request_time = self.get_clock().now()
+        self.last_relocalization_target = {
+            "x": float(pose.position.x),
+            "y": float(pose.position.y),
+            "z": float(pose.position.z),
+            "yaw": float(items["Yaw"]),
+        }
+        self.pending_jump_pose = None
         timeout_s = max(0.1, float(self.get_parameter("relocalization_response_timeout_s").value))
         try:
             response = self.client.request(2101, 1, items, response_timeout=timeout_s)
             result = patrol_items(response)
             error_code = int(result.get("ErrorCode", -1))
         except Exception as exc:
+            self.last_relocalization_request_time = None
+            self.last_relocalization_target = None
             text = "failed: %s" % exc
             self.get_logger().warning("vendor relocalization request failed: %s" % exc)
             self._publish_relocalization_result(text)
@@ -329,17 +343,22 @@ class M20TcpBridge(Node):
                 pose.position.x, pose.position.y, pose.position.z, items["Yaw"]
             )
             self.get_logger().info("vendor relocalization reset accepted: %s" % text)
-            self.last_relocalization_request_time = self.get_clock().now()
-            self.last_relocalization_target = {
-                "x": float(pose.position.x),
-                "y": float(pose.position.y),
-                "z": float(pose.position.z),
-                "yaw": float(items["Yaw"]),
-            }
-            self.pending_jump_pose = None
+            self._publish_map_pose()
+            self._publish_navigation_status()
+        elif (error_code & 0xFFFF) == 0xFFFF:
+            text = (
+                "pending_verification: ErrorCode=0xFFFF firmware reply ambiguous "
+                "x=%.3f y=%.3f z=%.3f yaw=%.3f"
+                % (items["PosX"], items["PosY"], items["PosZ"], items["Yaw"])
+            )
+            self.get_logger().warning(
+                "vendor relocalization reply is ambiguous; verifying official pose: %s" % text
+            )
             self._publish_map_pose()
             self._publish_navigation_status()
         else:
+            self.last_relocalization_request_time = None
+            self.last_relocalization_target = None
             meaning = "初始化定位失败" if error_code == 1 else "原厂返回错误"
             text = "failed: ErrorCode=0x%04X %s x=%.3f y=%.3f z=%.3f yaw=%.3f" % (
                 error_code & 0xFFFF,
@@ -636,6 +655,7 @@ class M20TcpBridge(Node):
             fallback["y"],
             fallback["z"],
             fallback["yaw"],
+            allow_stable_recovery=location_ok,
         )
         if not valid_by_filter:
             self._warn_throttled(
@@ -650,7 +670,8 @@ class M20TcpBridge(Node):
                 ),
                 2.0,
             )
-            self._publish_localization_ok(location_ok)
+            # Location=0 without an accepted fresh map pose is not navigation-ready.
+            self._publish_localization_ok(False)
             return False
         self.last_good_map_pose = {
             "x": fallback["x"],
@@ -793,7 +814,15 @@ class M20TcpBridge(Node):
 
         self._publish_localization_ok(bool(localization_ok))
 
-    def _map_pose_passes_stability_filter(self, x: float, y: float, z: float, yaw: float):
+    def _map_pose_passes_stability_filter(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        yaw: float,
+        *,
+        allow_stable_recovery: bool = True,
+    ):
         now = self.get_clock().now()
         last = self.last_good_map_pose
 
@@ -808,39 +837,34 @@ class M20TcpBridge(Node):
                 return False, "origin_placeholder_after_good_pose"
 
         jump_limit = max(0.0, float(self.get_parameter("pose_jump_reject_m").value))
-        if last is not None and jump_limit > 0.0:
-            distance = math.hypot(x - float(last["x"]), y - float(last["y"]))
-            if distance > jump_limit and not self._within_relocalization_jump_grace(now, x, y):
-                accept_after_s = max(0.0, float(self.get_parameter("pose_jump_accept_after_s").value))
-                if accept_after_s <= 0.0:
-                    return False, "jump_requires_relocalization distance=%.2f" % distance
-                pending = self.pending_jump_pose
-                if (
-                    pending is not None
-                    and math.hypot(x - float(pending["x"]), y - float(pending["y"])) <= min(0.25, jump_limit * 0.5)
-                ):
-                    first_seen = pending.get("first_seen")
-                    stable_for = (
-                        (now - first_seen).nanoseconds * 1e-9
-                        if first_seen is not None
-                        else 0.0
-                    )
-                    if stable_for < accept_after_s:
-                        return False, "jump_waiting_for_stability distance=%.2f stable_for=%.1fs" % (
-                            distance,
-                            stable_for,
-                        )
-                else:
-                    self.pending_jump_pose = {
-                        "x": x,
-                        "y": y,
-                        "z": z,
-                        "yaw": yaw,
-                        "first_seen": now,
-                    }
-                    return False, "jump_from_last_good distance=%.2f" % distance
-            elif self.pending_jump_pose is not None:
-                self.pending_jump_pose = None
+        if last is not None and jump_limit > 0.0 and not self._within_relocalization_jump_grace(now, x, y):
+            decision = stable_jump_decision(
+                last_pose=last,
+                pending_pose=self.pending_jump_pose,
+                candidate={"x": x, "y": y, "z": z, "yaw": yaw},
+                now_s=now.nanoseconds * 1e-9,
+                jump_limit_m=jump_limit,
+                accept_after_s=max(
+                    0.0,
+                    float(self.get_parameter("pose_jump_accept_after_s").value),
+                ),
+                candidate_radius_m=max(
+                    0.01,
+                    float(self.get_parameter("pose_jump_candidate_radius_m").value),
+                ),
+                candidate_yaw_tolerance_rad=max(
+                    0.01,
+                    float(
+                        self.get_parameter("pose_jump_candidate_yaw_tolerance_rad").value
+                    ),
+                ),
+                allow_stable_recovery=allow_stable_recovery,
+            )
+            self.pending_jump_pose = decision.get("pending_pose")
+            if not decision["accept"]:
+                return False, str(decision["reason"])
+            if decision.get("reason"):
+                self.get_logger().warning(str(decision["reason"]))
 
         self.last_good_map_pose = {"x": x, "y": y, "z": z, "yaw": yaw, "stamp": now}
         self.pending_jump_pose = None

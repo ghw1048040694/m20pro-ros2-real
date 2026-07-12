@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, urlparse
 import rclpy
 from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
+from map_msgs.msg import OccupancyGridUpdate
 from nav_msgs.msg import OccupancyGrid, Odometry, Path as RosPath
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -890,6 +891,8 @@ class WebDashboardNode(Node):
         self.declare_parameter("map_topic", "/map")
         self.declare_parameter("local_costmap_topic", "/local_costmap/costmap")
         self.declare_parameter("global_costmap_topic", "/global_costmap/costmap")
+        self.declare_parameter("local_costmap_updates_topic", "/local_costmap/costmap_updates")
+        self.declare_parameter("global_costmap_updates_topic", "/global_costmap/costmap_updates")
         self.declare_parameter("dynamic_obstacle_topic", "/dynamic_obstacle_markers")
         self.declare_parameter("relocalization_result_topic", "/m20pro_tcp_bridge/relocalization_result")
         self.declare_parameter("detections_topic", "/m20pro_yolov8_inspection/detections")
@@ -1193,6 +1196,18 @@ class WebDashboardNode(Node):
         self.create_subscription(OccupancyGrid, self._topic("map_topic"), self._on_map, map_qos)
         self.create_subscription(OccupancyGrid, self._topic("local_costmap_topic"), self._on_local_costmap, 2)
         self.create_subscription(OccupancyGrid, self._topic("global_costmap_topic"), self._on_global_costmap, 2)
+        self.create_subscription(
+            OccupancyGridUpdate,
+            self._topic("local_costmap_updates_topic"),
+            self._on_local_costmap_update,
+            10,
+        )
+        self.create_subscription(
+            OccupancyGridUpdate,
+            self._topic("global_costmap_updates_topic"),
+            self._on_global_costmap_update,
+            10,
+        )
         self.create_subscription(MarkerArray, self._topic("dynamic_obstacle_topic"), self._on_markers, 10)
         self.create_subscription(
             String,
@@ -1504,6 +1519,30 @@ class WebDashboardNode(Node):
                 "resolution": float(info.resolution),
             }
             self._mark_topic("global_costmap")
+
+    def _on_local_costmap_update(self, msg: OccupancyGridUpdate) -> None:
+        self._on_costmap_update("local_costmap", msg)
+
+    def _on_global_costmap_update(self, msg: OccupancyGridUpdate) -> None:
+        self._on_costmap_update("global_costmap", msg)
+
+    def _on_costmap_update(self, state_key: str, msg: OccupancyGridUpdate) -> None:
+        with self._lock:
+            payload = dict(self._state.get(state_key) or {})
+            payload.update(
+                {
+                    "last_update": time.time(),
+                    "stamp": stamp_to_float(msg.header.stamp),
+                    "frame_id": msg.header.frame_id or payload.get("frame_id", ""),
+                    "last_update_kind": "incremental",
+                    "update_x": int(msg.x),
+                    "update_y": int(msg.y),
+                    "update_width": int(msg.width),
+                    "update_height": int(msg.height),
+                }
+            )
+            self._state[state_key] = payload
+            self._mark_topic(state_key)
 
     def _on_markers(self, msg: MarkerArray) -> None:
         markers: List[Dict[str, Any]] = []
@@ -2274,7 +2313,13 @@ class WebDashboardNode(Node):
             items.append(preflight_lifecycle_deferred_item())
         else:
             lifecycle_results = self._check_lifecycle_nodes(
-                ["/map_server", "/controller_server", "/planner_server", "/bt_navigator"]
+                [
+                    "/map_server",
+                    "/controller_server",
+                    "/planner_server",
+                    "/recoveries_server",
+                    "/bt_navigator",
+                ]
             )
             for node_name, lifecycle in lifecycle_results.items():
                 items.append(preflight_lifecycle_item(node_name, lifecycle))
@@ -4053,7 +4098,7 @@ class WebDashboardNode(Node):
         lifecycle = None
         if check_lifecycle:
             lifecycle = self._check_lifecycle_nodes(
-                ["/map_server", "/controller_server", "/planner_server", "/bt_navigator", "/waypoint_follower"]
+                ["/map_server", "/controller_server", "/planner_server", "/bt_navigator"]
             )
         return navigation_readiness_payload(
             scan=scan,
@@ -4826,6 +4871,7 @@ class WebDashboardNode(Node):
         deadline = time.time() + timeout_s
         evidence: Dict[str, Any] = {
             "tcp_2101_accepted": False,
+            "tcp_2101_ambiguous": False,
             "tcp_2101_result": "",
             "tcp_2101_fresh": False,
             "localization_ok": False,
@@ -4866,6 +4912,7 @@ class WebDashboardNode(Node):
         navigation_readiness = self._navigation_readiness_payload(check_lifecycle=False)
         return manual_relocalization_verification_payload(
             tcp_2101_accepted=bool(evidence.get("tcp_2101_accepted")),
+            tcp_2101_ambiguous=bool(evidence.get("tcp_2101_ambiguous")),
             tcp_2101_result=(
                 str(evidence.get("tcp_2101_result") or "")
                 if evidence.get("tcp_2101_fresh")

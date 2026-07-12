@@ -86,6 +86,7 @@ class M20ProYolov8Inspection(Node):
         self.ultralytics_model = None
         self.ultralytics_device = str(self.get_parameter("ultralytics_device").value).strip()
         self._load_backend()
+        self._apply_process_nice_level()
 
         self.cap = None
         self.capture_lock = threading.Lock()
@@ -184,6 +185,14 @@ class M20ProYolov8Inspection(Node):
         self.declare_parameter("event_min_interval_s", 2.0)
         self.declare_parameter("output_has_objectness", False)
         self.declare_parameter("ultralytics_device", "cpu")
+        self.declare_parameter("process_nice_level", 10)
+
+    def _apply_process_nice_level(self) -> None:
+        nice_level = max(0, min(19, int(self.get_parameter("process_nice_level").value)))
+        try:
+            os.setpriority(os.PRIO_PROCESS, 0, nice_level)
+        except (AttributeError, OSError) as exc:
+            self.get_logger().warning("failed to set inspection nice level %d: %s" % (nice_level, exc))
 
     def _load_class_names(self) -> List[str]:
         names = [str(item) for item in self.get_parameter("class_names").value if str(item)]

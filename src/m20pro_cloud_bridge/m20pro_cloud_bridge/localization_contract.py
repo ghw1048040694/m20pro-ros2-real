@@ -58,6 +58,7 @@ def relocalization_result_evidence(
         "tcp_2101_age_sec": age_sec,
         "tcp_2101_recent": recent,
         "tcp_2101_accepted": raw.startswith("success"),
+        "tcp_2101_ambiguous": raw.startswith("pending_verification:"),
         "tcp_2101_failed": raw.startswith("failed:"),
     }
 
@@ -289,6 +290,8 @@ def relocalization_sample_evidence(
 ) -> Dict[str, Any]:
     result_age_ok = float(relocalization.get("last_update", 0.0) or 0.0) >= request_started_at
     result_text = str(relocalization.get("raw") or "") if result_age_ok else ""
+    reply_accepted = result_text.startswith("success")
+    reply_ambiguous = result_text.startswith("pending_verification:")
     pose_update = float(pose.get("last_update", pose.get("stamp", 0.0)) or 0.0)
     pose_ok = pose_update >= request_started_at and pose_is_plausible(pose)
     pose_error_m = None
@@ -322,7 +325,8 @@ def relocalization_sample_evidence(
         and bool(global_costmap.get("height"))
     )
     return {
-        "tcp_2101_accepted": result_text.startswith("success") if result_age_ok else False,
+        "tcp_2101_accepted": reply_accepted if result_age_ok else False,
+        "tcp_2101_ambiguous": reply_ambiguous if result_age_ok else False,
         "tcp_2101_result": result_text,
         "tcp_2101_fresh": result_age_ok,
         "localization_ok": localization_ok is True,
@@ -335,7 +339,7 @@ def relocalization_sample_evidence(
         "yaw_error_rad": yaw_error_rad,
         "ready_to_finish_wait": bool(
             result_age_ok
-            and result_text.startswith("success")
+            and (reply_accepted or reply_ambiguous)
             and localization_ok is True
             and pose_ok
             and pose_near_request
@@ -347,6 +351,7 @@ def manual_relocalization_verification_payload(
     *,
     tcp_2101_accepted: bool,
     tcp_2101_result: str,
+    tcp_2101_ambiguous: bool,
     localization_ok: bool,
     pose_ok: bool,
     pose_near_request: bool,
@@ -369,13 +374,18 @@ def manual_relocalization_verification_payload(
     result_text = str(tcp_2101_result or "")
     manual_reference = "山猫M20系列软件开发手册V0.0.9 1.4.1 Type=2101 Command=1"
     manual_ok = bool(tcp_2101_accepted)
-    factory_pose_accepted = bool(manual_ok and localization_ok and pose_ok and pose_near_request)
+    ambiguous_verified = bool(
+        tcp_2101_ambiguous and localization_ok and pose_ok and pose_near_request
+    )
+    factory_pose_accepted = bool(
+        (manual_ok or ambiguous_verified) and localization_ok and pose_ok and pose_near_request
+    )
     navigation_ready = bool(
         factory_pose_accepted and scan_ok and local_costmap_ok and global_costmap_ok
     )
     checks = {
         "initialpose_published": "ok",
-        "manual_tcp_2101": "ok" if manual_ok else "fail",
+        "manual_tcp_2101": "ok" if manual_ok else ("warn" if tcp_2101_ambiguous else "fail"),
         "localization": "ok" if localization_ok else "warn",
         "map_pose": "ok" if pose_ok else "warn",
         "pose_near_request": "ok" if pose_near_request else "warn",
@@ -383,8 +393,12 @@ def manual_relocalization_verification_payload(
         "local_costmap": "ok" if local_costmap_ok else "warn",
         "global_costmap": "ok" if global_costmap_ok else "warn",
     }
-    if navigation_ready:
+    if navigation_ready and ambiguous_verified:
+        message = "2101/1 的 0xFFFF 回执与原厂执行结果不一致，但目标位姿证据已确认，导航链路已恢复"
+    elif navigation_ready:
         message = "开发手册 2101/1 重定位已成功，原厂定位和导航链路已恢复"
+    elif factory_pose_accepted and ambiguous_verified:
+        message = "2101/1 回执异常，但原厂定位位姿已更新到请求位置；导航链路尚未全部恢复"
     elif factory_pose_accepted:
         message = "开发手册 2101/1 已成功，原厂定位位姿已更新，但导航链路尚未全部恢复"
     elif manual_ok:
@@ -399,6 +413,8 @@ def manual_relocalization_verification_payload(
         "initialpose_published": True,
         "tcp_2101_required": True,
         "tcp_2101_accepted": manual_ok,
+        "tcp_2101_ambiguous": bool(tcp_2101_ambiguous),
+        "tcp_2101_verified_by_pose": ambiguous_verified,
         "tcp_2101_diagnostic_only": False,
         "manual_reference": manual_reference,
         "factory_pose_accepted": factory_pose_accepted,

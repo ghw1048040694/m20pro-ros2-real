@@ -190,6 +190,24 @@ def test_relocalization_sample_evidence() -> None:
     assert_equal(no_2101["tcp_2101_accepted"], False, "blank 2101 is not accepted")
     assert_equal(no_2101["ready_to_finish_wait"], False, "wait does not finish before 2101 success")
 
+    ambiguous = relocalization_sample_evidence(
+        request_started_at=10.0,
+        requested_pose={"x": 1.0, "y": 2.0, "z": 0.0, "yaw": 0.0},
+        relocalization={
+            "last_update": 10.2,
+            "raw": "pending_verification: ErrorCode=0xFFFF firmware reply ambiguous",
+        },
+        pose={"last_update": 10.3, "x": 1.1, "y": 2.0, "z": 0.0, "yaw": 0.0},
+        localization_ok=True,
+        scan={"last_update": 10.1, "finite_ranges": 25},
+        local_costmap={"last_update": 10.1, "width": 10, "height": 10},
+        global_costmap={"last_update": 10.1, "width": 20, "height": 20},
+        pose_tolerance_m=0.5,
+    )
+    assert_equal(ambiguous["tcp_2101_accepted"], False, "0xFFFF is not a success reply")
+    assert_equal(ambiguous["tcp_2101_ambiguous"], True, "0xFFFF enters verification")
+    assert_equal(ambiguous["ready_to_finish_wait"], True, "target pose verifies ambiguous reply")
+
 
 def test_map_relocalization_clearance_uses_strong_current_evidence() -> None:
     raw = "success: x=1.000 y=2.000 z=0.000 yaw=0.100"
@@ -381,6 +399,7 @@ def test_manual_relocalization_requires_tcp_2101_success() -> None:
     failed = manual_relocalization_verification_payload(
         tcp_2101_accepted=False,
         tcp_2101_result="failed: ErrorCode=0x0001 初始化定位失败",
+        tcp_2101_ambiguous=False,
         localization_ok=True,
         pose_ok=True,
         pose_near_request=True,
@@ -396,6 +415,7 @@ def test_manual_relocalization_requires_tcp_2101_success() -> None:
     ok = manual_relocalization_verification_payload(
         tcp_2101_accepted=True,
         tcp_2101_result="success: x=1.000 y=2.000 z=0.000 yaw=0.100",
+        tcp_2101_ambiguous=False,
         localization_ok=True,
         pose_ok=True,
         pose_near_request=True,
@@ -410,6 +430,7 @@ def test_manual_relocalization_requires_tcp_2101_success() -> None:
     reply_only = manual_relocalization_verification_payload(
         tcp_2101_accepted=True,
         tcp_2101_result="success: x=1.000 y=2.000 z=0.000 yaw=0.100",
+        tcp_2101_ambiguous=False,
         localization_ok=False,
         pose_ok=True,
         pose_near_request=True,
@@ -420,6 +441,22 @@ def test_manual_relocalization_requires_tcp_2101_success() -> None:
     assert_equal(reply_only["tcp_2101_accepted"], True, "2101 reply is preserved")
     assert_equal(reply_only["factory_pose_accepted"], False, "2101 reply alone does not confirm localization")
     assert_true("返回成功" in reply_only["message"], "partial success message is explicit")
+
+    ambiguous = manual_relocalization_verification_payload(
+        tcp_2101_accepted=False,
+        tcp_2101_result="pending_verification: ErrorCode=0xFFFF firmware reply ambiguous",
+        tcp_2101_ambiguous=True,
+        localization_ok=True,
+        pose_ok=True,
+        pose_near_request=True,
+        scan_ok=True,
+        local_costmap_ok=True,
+        global_costmap_ok=True,
+    )
+    assert_equal(ambiguous["factory_pose_accepted"], True, "fresh target pose verifies 0xFFFF")
+    assert_equal(ambiguous["tcp_2101_accepted"], False, "ambiguous reply remains diagnostic")
+    assert_equal(ambiguous["tcp_2101_verified_by_pose"], True, "pose evidence is explicit")
+    assert_equal(ambiguous["checks"]["manual_tcp_2101"], "warn", "reply mismatch stays visible")
 
 
 def main() -> int:

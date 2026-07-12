@@ -28,10 +28,6 @@ def generate_launch_description():
         and has_package("nav2_map_server")
         and has_package("nav2_lifecycle_manager")
     )
-    nav2_bringup_share = (
-        get_package_share_directory("nav2_bringup") if nav2_stack_available else ""
-    )
-
     default_params = os.path.join(bringup_share, "config", "m20pro_real.yaml")
     default_nav2_params = os.path.join(bringup_share, "config", "nav2_params_real.yaml")
     default_floor_config = os.path.join(bringup_share, "config", "inspection_waypoints.yaml")
@@ -369,7 +365,7 @@ def generate_launch_description():
             [
                 IncludeLaunchDescription(
                     PythonLaunchDescriptionSource(
-                        os.path.join(nav2_bringup_share, "launch", "navigation_launch.py")
+                        os.path.join(bringup_share, "launch", "nav2_navigation_real_foxy.launch.py")
                     ),
                     launch_arguments={
                         "params_file": nav2_params_file,

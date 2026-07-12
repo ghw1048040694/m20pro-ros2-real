@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# The production service runs as root while field builds run as user. Avoid
+# root-owned __pycache__ files inside the symlink install tree blocking rebuilds.
+export PYTHONDONTWRITEBYTECODE=1
+
 WS_DIR="${M20PRO_WS:-/home/user/m20pro_real_ros2_ws}"
 MODE="${1:-shadow}"
 RADAR_ENABLED="${M20PRO_ENABLE_RADAR_INSPECTION:-false}"

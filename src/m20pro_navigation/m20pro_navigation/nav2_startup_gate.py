@@ -34,8 +34,8 @@ class Nav2StartupGate(Node):
             [
                 "/controller_server",
                 "/planner_server",
+                "/recoveries_server",
                 "/bt_navigator",
-                "/waypoint_follower",
             ],
         )
         self.declare_parameter("tf_global_frame", "map")

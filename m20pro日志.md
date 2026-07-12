@@ -23030,3 +23030,44 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
   - 旧反馈 `0.05m`、新鲜位姿距离 `1.2m` 时必须仍拒绝并报提前成功。
 - 验证：20 个 `scripts/test_*.py`、Python 编译、`git diff --check`、5 个 ROS2 包全量构建通过；104 已同步、全量构建和重启，Nav2 lifecycle active，系统检查输出 `M20PRO REAL OK`。
 - 本轮不自动下发任务；修正后的“第一点到达 -> 停留 -> 第二点下发”需用户在现场重跑两点任务验收。
+
+## 2026-07-12 18:07 CST - 定位跳变、多点中止与避障链路根因收口
+
+- 用户补充的故障边界：
+  - 最新录包和多点/避障实测期间定位正常，不将任务失败归因于定位漂移；
+  - 定位漂移和重定位失败是机器狗回到工位后的独立问题；
+  - 本轮不处理 U360 雷达，不自动下发导航或运动指令。
+- 多点任务根因：
+  - 包 `/home/user/bags/testfield_20260712_163329` 显示第一点 Nav2 多次返回 `status=6` (ABORTED)，任务没有进入有效到点/停留阶段，因此第二点不会下发；
+  - Foxy `SimpleProgressChecker` 只计算平移，原参数要求 6 秒内平移 0.25m，机器狗到点后原地调整朝向会被误判为无进展；
+  - 已改为 `0.10m / 12s`，控制频率收口为 10Hz，速度上限收口为 `0.45m/s / 0.75rad/s`，并使用 Foxy 原生结构的恢复行为树。
+- 避障根因：
+  - 录包回放已证明 `/scan` 正常进入 local costmap，且存在 lethal/inflation cells，不是 106 新点云链路缺数据；
+  - 历史 `robot_radius=0.25` 严重低估机体，厂家 URDF 显示机身长约 0.75m、轮腿横向外廓约 0.51m；
+  - 已改为 `0.80m x 0.54m` 矩形 footprint，DWB 使用 `ObstacleFootprint` critic，inflation 为 0.62m；
+  - global costmap 改为 1Hz 更新/0.5Hz 发布，costmap 改为增量发布，Web 同步订阅 updates，不再用高频全图发布拖垮 104。
+- 工位定位漂移与重定位根因：
+  - 历史跳变保护为 `pose_jump_reject_m=0.6` 且 `pose_jump_accept_after_s=0`，单帧跳变后会永久拒绝后续正确位姿，造成旧 `map_pose` 冻结，却可能继续报 `localization_ok=true`；
+  - 现改为先拒绝单帧跳变，原厂 `Location=0` 且候选位姿在 0.30m/0.35rad 内连续稳定 8 秒后自动恢复；未接受到新鲜位姿时强制 `localization_ok=false`；
+  - 104 曾将 TCP 2101 回执 `0xFFFF` 显示为原厂失败，但 106 `/var/opt/robot/log/2026_0712/localization.2026_0712.log` 明确记录请求已执行，证明回执层与实际执行结果不一致；
+  - 现保留 `0x0001` 等明确失败，仅将 `0xFFFF` 标为 `pending_verification`，必须看到请求后的新鲜位姿落入目标容差内才向前端报成功。
+- Nav2 启动链路根治：
+  - 项目多点任务由 `Web task loop -> floor_manager -> NavigateToPose` 串行执行，不使用 Nav2 `FollowWaypoints`；
+  - 新增项目自有 `nav2_navigation_real_foxy.launch.py`，不再沿用系统 launch 启动无关的 `waypoint_follower`；
+  - lifecycle manager、启动门、系统自检和 Web readiness 统一以 `controller_server / planner_server / recoveries_server / bt_navigator` 为实机导航必需节点。
+- 104 DDS 启动随机卡死根治：
+  - 项目 `m20pro_fastdds_udp.xml` 名称是 UDP，但历史为旧大点云链路重新加入了 64MB SHM；本次重启时四个 C++ Nav2 进程同时卡在 DDS 端点初始化；
+  - 106 现已直接发布 `/scan`，104 不再处理 raw 大点云，costmap 也已降频并增量发布，因此项目 profile 已恢复为真正 UDP-only；
+  - 重启后 Nav2 约 4 秒完成配置和激活，`/dev/shm` 由 16% 降到 3%；
+  - 正式 root 服务增加 `PYTHONDONTWRITEBYTECODE=1`，防止在 symlink install 中生成 root-owned `__pycache__` 导致后续 user 构建失败。
+- YOLO 资源隔离：
+  - RKNN runtime 初始化会把推理主线程提升到 `nice=-19`，已在 RKNN 初始化后重置进程优先级；
+  - 104 实测 `yolov8_inspection NI=10`、`backend=rknn`、`ready=true`，不再以高优先级抢占 Nav2。
+- 部署验证：
+  - 全部 22 个 `scripts/test_*.py`、Python 编译、`git diff --check`、上位机 Humble 5 包构建和 104 Foxy 5 包构建通过；
+  - 104 `m20pro-real.service=active`、`NRestarts=0`，日志输出 `Nav2 lifecycle is active` 和 `M20PRO REAL OK`；
+  - 104 节点时间 18:06:52 时：`pose_age=0.05s`、`localization_ok=true`、`factory Location=0`，`/scan`、local/global costmap 时龄均小于 0.22s；
+  - 当时位姿约 `(-12.20, -4.65, 160.8°)`，这只证明位姿链路新鲜且未冻结；该坐标/朝向是否与工位物理位置一致，仍需用户目视确认。
+- 待现场动态验收：
+  - 重跑两点任务，确认第一点到达后进入停留并自动下发第二点；
+  - 设置可控障碍物进行低速绕障验收，必须同步录包，不用静态链路健康代替真实运动结果。

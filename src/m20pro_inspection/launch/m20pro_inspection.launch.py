@@ -54,6 +54,7 @@ def _launch_setup(context, *args, **kwargs):
             output="screen",
             parameters=[config_file, override_file.name],
             additional_env=node_env,
+            prefix="nice -n 10",
         )
     ]
 

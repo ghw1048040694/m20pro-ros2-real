@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+from pathlib import Path
+import xml.etree.ElementTree as ET
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def main() -> None:
+    config_path = ROOT / "src" / "m20pro_bringup" / "config" / "nav2_params_real.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    controller = config["controller_server"]["ros__parameters"]
+    follow = controller["FollowPath"]
+    local = config["local_costmap"]["local_costmap"]["ros__parameters"]
+    global_costmap = config["global_costmap"]["global_costmap"]["ros__parameters"]
+
+    assert controller["controller_frequency"] <= 10.0
+    assert controller["progress_checker"]["movement_time_allowance"] >= 12.0
+    assert "ObstacleFootprint" in follow["critics"]
+    assert "BaseObstacle" not in follow["critics"]
+    assert follow["sim_time"] >= 1.5
+    for costmap in (local, global_costmap):
+        assert costmap["always_send_full_costmap"] is False
+        assert "footprint" in costmap
+        assert "robot_radius" not in costmap
+        assert costmap["inflation_layer"]["inflation_radius"] >= 0.60
+
+    tree_path = (
+        ROOT
+        / "src"
+        / "m20pro_bringup"
+        / "behavior_trees"
+        / "m20pro_navigate_to_pose_foxy.xml"
+    )
+    root = ET.parse(tree_path).getroot()
+    assert root.find(".//ReactiveFallback[@name='FollowPathFallback']") is not None
+    assert root.find(".//BackUp") is not None
+
+    dashboard = (
+        ROOT
+        / "src"
+        / "m20pro_cloud_bridge"
+        / "m20pro_cloud_bridge"
+        / "web_dashboard_node.py"
+    ).read_text(encoding="utf-8")
+    assert "OccupancyGridUpdate" in dashboard
+    assert '"local_costmap_updates_topic"' in dashboard
+    assert '"global_costmap_updates_topic"' in dashboard
+
+    real_launch = (
+        ROOT
+        / "src"
+        / "m20pro_bringup"
+        / "launch"
+        / "m20pro_real.launch.py"
+    ).read_text(encoding="utf-8")
+    nav_launch = (
+        ROOT
+        / "src"
+        / "m20pro_bringup"
+        / "launch"
+        / "nav2_navigation_real_foxy.launch.py"
+    ).read_text(encoding="utf-8")
+    startup_gate = (
+        ROOT
+        / "src"
+        / "m20pro_navigation"
+        / "m20pro_navigation"
+        / "nav2_startup_gate.py"
+    ).read_text(encoding="utf-8")
+    system_check = (
+        ROOT
+        / "src"
+        / "m20pro_navigation"
+        / "m20pro_navigation"
+        / "system_check_node.py"
+    ).read_text(encoding="utf-8")
+    assert "nav2_navigation_real_foxy.launch.py" in real_launch
+    assert 'executable="waypoint_follower"' not in nav_launch
+    assert '"waypoint_follower"' not in startup_gate
+    assert '"/waypoint_follower"' not in system_check
+    assert '"/waypoint_follower"' not in dashboard
+
+    fastdds_profile = (
+        ROOT
+        / "src"
+        / "m20pro_bringup"
+        / "config"
+        / "m20pro_fastdds_udp.xml"
+    ).read_text(encoding="utf-8")
+    assert "<type>UDPv4</type>" in fastdds_profile
+    assert "<type>SHM</type>" not in fastdds_profile
+    assert "m20pro_shm_transport" not in fastdds_profile
+
+    real_start = (
+        ROOT
+        / "src"
+        / "m20pro_bringup"
+        / "scripts"
+        / "m20pro_real_full.sh"
+    ).read_text(encoding="utf-8")
+    assert "export PYTHONDONTWRITEBYTECODE=1" in real_start
+
+    print("real Nav2 configuration contract tests passed")
+
+
+if __name__ == "__main__":
+    main()
