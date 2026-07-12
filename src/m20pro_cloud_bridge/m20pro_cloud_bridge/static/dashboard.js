@@ -39,6 +39,7 @@
       scanOverlay: true,
       mapModeLabel: "实时 /map",
       workPointerMode: "localize",
+      mapSwitching: false,
     };
     window.m20proDebug = {
       snapshot() {
@@ -1904,12 +1905,6 @@
       }
       select.value = selected;
       if (selected && selected !== state.selectedMapId) {
-        try {
-          const result = await api("POST", "/api/maps/select", {map_id: selected});
-          setLog("mapsLog", result);
-        } catch (err) {
-          console.warn(err);
-        }
         await loadFileMap(selected);
       } else if (!selected && state.selectedMapId) {
         await loadFileMap("");
@@ -2517,32 +2512,47 @@
       } catch (err) { setLog("mappingLog", err); }
     });
     async function applySelectedMap() {
+      if (state.mapSwitching) return;
       const mapId = $("mapSelect").value;
+      const previousMapId = state.selectedMapId || "";
+      const select = $("mapSelect");
+      const button = $("selectMapBtn");
+      state.mapSwitching = true;
+      select.disabled = true;
+      button.disabled = true;
+      button.textContent = "切换中...";
       try {
         const result = await api("POST", "/api/maps/select", {map_id: mapId});
         setLog("mapsLog", result);
+        const acceptedMapId = result.selected_map_id === undefined ? mapId : String(result.selected_map_id || "");
+        if (acceptedMapId !== mapId) throw {message: `后端未确认目标地图 ${mapId || "实时 /map"}`};
+        if (mapId) await loadFileMap(mapId);
+        else {
+          await loadFileMap("");
+          state.liveMapVersion = -1;
+        }
+        setMarkEditMode(null);
+        $("cursor").textContent = mapId
+          ? `已切换工作地图：${displayedMapFloor() || mapId}；请重新定位后再执行任务`
+          : "已切换到实时 /map";
+        try {
+          updateState(await fetchJson("/api/state"));
+        } catch (err) {
+          console.warn(err);
+        }
+        await loadAnnotations();
+        draw();
       } catch (err) {
         setLog("mapsLog", err);
-        $("mapSelect").value = state.selectedMapId || "";
+        select.value = previousMapId;
         $("cursor").textContent = `地图切换失败，已保持当前工作地图：${err.message || JSON.stringify(err)}`;
         throw err;
+      } finally {
+        state.mapSwitching = false;
+        select.disabled = false;
+        button.disabled = false;
+        button.textContent = "设为当前地图";
       }
-      if (mapId) await loadFileMap(mapId);
-      else {
-        await loadFileMap("");
-        state.liveMapVersion = -1;
-      }
-      setMarkEditMode(null);
-      $("cursor").textContent = mapId
-        ? `已切换工作地图：${displayedMapFloor() || mapId}；请重新定位后再执行任务`
-        : "已切换到实时 /map";
-      try {
-        updateState(await fetchJson("/api/state"));
-      } catch (err) {
-        console.warn(err);
-      }
-      await loadAnnotations();
-      draw();
     }
     $("selectMapBtn").addEventListener("click", async () => {
       try {
@@ -2552,13 +2562,11 @@
         $("cursor").textContent = err.message || JSON.stringify(err);
       }
     });
-    $("mapSelect").addEventListener("change", async () => {
-      try {
-        await applySelectedMap();
-      } catch (err) {
-        console.warn(err);
-        $("cursor").textContent = err.message || JSON.stringify(err);
-      }
+    $("mapSelect").addEventListener("change", () => {
+      const map = mapRecordById($("mapSelect").value);
+      $("cursor").textContent = map
+        ? `已选择 ${map.name || map.id}，点击“设为当前地图”后生效`
+        : "已选择实时 /map，点击“设为当前地图”后生效";
     });
     $("reloadMapsBtn").addEventListener("click", loadMaps);
     $("markType").addEventListener("change", () => {

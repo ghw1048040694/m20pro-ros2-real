@@ -23005,3 +23005,15 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 交互提示同步收口：仅标点/定位取点模式显示十字光标，其余状态使用普通光标。
 - 104 真实 Chrome PointerEvent 验收：看板页点击后点位坐标仍为空；进入“标点”后点击成功写入 `-12.970, 19.100`；切换到“任务”后点击其他位置，坐标保持不变。
 - JavaScript 语法、`git diff --check`、5 个 ROS2 包全量构建通过；104 静态资源已同步，`m20pro-real.service=active`。
+
+## 2026-07-12 15:21 CST - 地图切换事务与 106 原厂地图权限根治
+
+- 运行记录显示 104 Nav2 曾成功加载 F21，但 1.6s 后前端又提交 F20；根因是地图下拉框 `change`、确认按钮和初始化 `loadMaps()` 同时拥有切图权，会并发重复请求。
+- 前端切图收口为单一事务：“选择候选地图 -> 点击设为当前地图 -> 后端/Nav2 确认 -> 画布切换”；列表刷新只读取状态，不再隐式切图；切换期间锁定下拉框和按钮，失败恢复原选择。
+- 前端竞态消除后暴露真实后端错误：104 调用 106 `sudo -n drmap apply` 返回 `sudo: a password is required`；106 已配置最小 sudoers，仅允许 `user` 免密执行 `/usr/local/bin/drmap apply *`，不将密码写入 Web/API 代码。
+- F20 历史地图记录只保存 106 `active` 软链接，无法从 Test Field 真正切回；通过 SHA-256 确认 104 `DESK_20260625_164234/occ_grid.pgm` 与 106 `map-20260625-164234/occ_grid.pgm` 完全一致，已将 F20 `factory_apply_path` 固定为 `/var/opt/robot/data/maps/map-20260625-164234`。
+- 真实 Chrome 前端闭环验收：
+  - 仅在下拉框选择 Test Field 时，后端仍保持 F20；
+  - 点击确认后，前端标题、104 `selected/working/effective_map_id`、Nav2 `/map` 和 106 `active` 均切到 Test Field；
+  - 再通过前端切回 F20，上述四层均恢复 F20，按钮正常解锁。
+- JavaScript 语法、`git diff --check`、5 个 ROS2 包全量构建通过；104 `m20pro-real.service=active`，当前地图已恢复 F20，切图后按规则需重新定位。
