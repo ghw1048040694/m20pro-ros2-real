@@ -23103,3 +23103,33 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 待用户动态验收：
   - 用同一盒子横放，先确认前端出现激光轮廓，再进行低速绕障；
   - 重跑两点任务，确认第一点不再出现 `send_goal failed/status=6`，并真正下发第二个 `/m20pro/floor_goal`。
+
+## 2026-07-12 19:10 CST - 多点任务动态验收通过，TCP 回执按消息 ID 根治假失定位
+
+- 用户新录包：`/home/user/bags/testfield_20260712_185440`：
+  - 时长 74.57s，5.2MiB，8468 条消息；
+  - 共两个 `/m20pro/floor_goal`，两个目标均明确记录 `Navigation succeeded / nav_goal_succeeded`；
+  - 第一段 5.88s 完成，到点距离误差约 0.176m；停留约 5.6s 后自动下发第二点；
+  - 第二段 4.11s 完成，到点距离误差约 0.252m；停留约 5.9s 后任务以 `task_completed` 结束；
+  - 两段到点后均没有残留非零 `/cmd_vel`，停留和下一点衔接正常；
+  - 第一段靠近障碍时 DWB 两次报 `No valid trajectories`，行为树清除 local costmap/执行恢复后继续到点；这是恢复链路实际生效，本次不再放宽避障参数。
+- 录包发现的隐患：
+  - 每次开始运动后都出现约 0.2s 的 `localization_ok=false`，分别是相对录包时间 `45.817~46.003s` 和 `57.420~57.587s`；
+  - 该时段 `map_pose` 仍持续且运动轨迹连续，导航状态却从 `location=0` 短暂变为 `location=None`，随后恢复 `location=0`，不是原厂真实定位丢失。
+- TCP 协议根因：
+  - 轴控制 `Type=2/Command=21` 以 20Hz 使用 `wait_response=false` 发送，原客户端不读取该异步请求的回执；
+  - 后续 `Type=2002/Command=1` 状态请求只读 TCP 队列中第一帧，且完全不校验 16 位消息 ID，因此会把前一个轴命令回执误当为导航状态；轴命令回执没有 `Location`，最终形成 `Location=None` 假阴性；
+  - 对 103 进行纯只读协议探针，连续查询 2002 和 1007，确认响应头字节 6~7 会原样回显每个请求的消息 ID，协议层具备可靠关联条件。
+- 协议层修正：
+  - `M20TcpClient.send()` 在发送同步请求后，将本次 `msg_id` 传入接收循环；
+  - 接收循环完整读取每个头和 body，只将 ID 与本次请求相同的响应返回上层，其他积压异步回执计数后丢弃；
+  - 整个读取循环共享一个绝对超时截止点，不会因连续收到旧帧而无限延长同步请求。
+- 测试与部署：
+  - 新增 `scripts/test_tcp_protocol_contract.py`，用 `socketpair` 复现“异步轴命令旧回执先到，导航状态正确回执后到”，必须丢弃前者并返回 `Location=0`；
+  - 全部 23 个 `scripts/test_*.py`、Python 编译、`git diff --check`、本机 Humble 构建通过；
+  - 修正后的客户端在上位机对 103 纯只读实测：`discarded_responses=1`、`location=0`、`has_pose=true`；
+  - 104 已同步，Foxy 合同测试和 `m20pro_navigation` 构建通过，安装态再次对 103 纯只读验证得到 `discarded=1 location=0 has_pose=True`；
+  - 104 `m20pro-real.service=active`、`NRestarts=0`、`Nav2 lifecycle is active`、`M20PRO REAL OK`，位姿、定位、scan 和 costmap 新鲜；本轮未下发导航或速度。
+- 下一次动态录包验收口径：
+  - 任务起步时 `navigation_status` 不应再出现 `location=None`；
+  - `localization_ok` 应在整个导航中连续为 true；如果仍出现 false，则必须继续区分真实 `Location!=0`、位姿跳变或 TCP 超时，不再允许用缺字段的其他回执替代状态响应。
