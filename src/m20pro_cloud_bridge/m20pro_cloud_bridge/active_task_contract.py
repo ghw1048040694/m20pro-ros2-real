@@ -121,6 +121,44 @@ def waypoint_goal_failure_extra(annotation: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def resolve_runtime_floor_goal(
+    goal: Dict[str, Any],
+    *,
+    current_floor: Any,
+    multi_floor: bool,
+) -> Dict[str, Any]:
+    """Use the runtime floor-manager label for a same-map, single-floor goal."""
+    resolved = dict(goal)
+    annotation_floor = str(goal.get("floor") or "").strip()
+    runtime_floor = str(current_floor or "").strip()
+    if not multi_floor and runtime_floor:
+        resolved["floor"] = runtime_floor
+    target_floor = str(resolved.get("floor") or "").strip()
+    return {
+        "goal": resolved,
+        "annotation_floor": annotation_floor or None,
+        "runtime_floor": target_floor or None,
+        "floor_overridden": bool(
+            annotation_floor and target_floor and annotation_floor != target_floor
+        ),
+        "multi_floor": bool(multi_floor),
+    }
+
+
+def task_uses_multiple_floors(
+    task: Dict[str, Any],
+    annotations: Any,
+) -> bool:
+    if bool(task.get("multi_floor")):
+        return True
+    floors = {
+        str(item.get("floor") or "").strip()
+        for item in annotations if isinstance(item, dict)
+        if str(item.get("floor") or "").strip()
+    }
+    return len(floors) > 1
+
+
 def goal_dispatch_decision(
     active: Dict[str, Any],
     annotation: Optional[Dict[str, Any]],
@@ -190,6 +228,7 @@ def create_active_task_state(
         "task_id": task.get("id"),
         "task_name": task.get("name"),
         "map_id": task_map_id,
+        "multi_floor": bool(task.get("multi_floor")),
         "status": "running",
         "index": 0,
         "annotation_ids": list(task.get("annotation_ids") or []),

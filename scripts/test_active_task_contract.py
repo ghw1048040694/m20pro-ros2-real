@@ -34,9 +34,11 @@ from m20pro_cloud_bridge.active_task_contract import (  # noqa: E402
     normalize_stop_task_request,
     prepare_goal_send_state,
     remaining_dwell_s,
+    resolve_runtime_floor_goal,
     stale_goal_dispatch_payload,
     stop_task_state,
     stop_task_operator_event_payload,
+    task_uses_multiple_floors,
     task_terminal_event_payload,
     waypoint_goal_failure_extra,
     waypoint_goal_payload,
@@ -98,6 +100,53 @@ def test_goal_payload() -> None:
     assert_equal(extra["annotation_id"], "p1", "bad waypoint extra annotation id")
     assert_equal(extra["label"], "点p1", "bad waypoint extra label")
     assert_equal(extra["pose"], {"x": 1.0, "y": 2.0, "z": 0.0, "yaw": 0.3}, "bad waypoint extra pose")
+
+
+def test_resolve_runtime_floor_goal() -> None:
+    goal = waypoint_goal_payload({**annotation(), "floor": "F1"})
+    single_floor = resolve_runtime_floor_goal(
+        goal,
+        current_floor="F20",
+        multi_floor=False,
+    )
+    assert_equal(single_floor["goal"]["floor"], "F20", "single-floor goal uses runtime floor")
+    assert_equal(single_floor["annotation_floor"], "F1", "annotation floor is retained as evidence")
+    assert_true(single_floor["floor_overridden"], "single-floor mismatch is explicit")
+
+    cross_floor = resolve_runtime_floor_goal(
+        goal,
+        current_floor="F20",
+        multi_floor=True,
+    )
+    assert_equal(cross_floor["goal"]["floor"], "F1", "cross-floor goal preserves target floor")
+    assert_true(not cross_floor["floor_overridden"], "cross-floor goal is not rewritten")
+
+    unknown_runtime = resolve_runtime_floor_goal(goal, current_floor="", multi_floor=False)
+    assert_equal(unknown_runtime["goal"]["floor"], "F1", "missing runtime floor keeps annotation floor")
+
+
+def test_task_uses_multiple_floors() -> None:
+    assert_true(
+        task_uses_multiple_floors(
+            {"id": "legacy"},
+            [{"floor": "F19"}, {"floor": "F20"}],
+        ),
+        "legacy cross-floor task is inferred from annotations",
+    )
+    assert_true(
+        not task_uses_multiple_floors(
+            {"id": "single"},
+            [{"floor": "F20"}, {"floor": "F20"}],
+        ),
+        "single-floor task remains single-floor",
+    )
+    assert_true(
+        task_uses_multiple_floors(
+            {"id": "declared", "multi_floor": True},
+            [{"floor": "F20"}],
+        ),
+        "declared cross-floor semantics are preserved",
+    )
 
 
 def test_dispatch_decision() -> None:
@@ -314,7 +363,7 @@ def test_mark_floor_goal_published_state() -> None:
 
 
 def test_create_active_task_state() -> None:
-    task = {"id": "task_1", "name": "巡检", "annotation_ids": ["p1", "p2"]}
+    task = {"id": "task_1", "name": "巡检", "annotation_ids": ["p1", "p2"], "multi_floor": True}
     result = create_active_task_state(
         task,
         task_map_id="map_a",
@@ -329,6 +378,7 @@ def test_create_active_task_state() -> None:
     assert_equal(created["task_id"], "task_1", "created task id")
     assert_equal(created["task_name"], "巡检", "created task name")
     assert_equal(created["map_id"], "map_a", "created map id")
+    assert_equal(created["multi_floor"], True, "created task keeps multi-floor semantics")
     assert_equal(created["status"], "running", "created status")
     assert_equal(created["index"], 0, "created index")
     assert_equal(created["annotation_ids"], ["p1", "p2"], "created annotation ids")
@@ -693,6 +743,8 @@ def test_advance_active_task_state() -> None:
 def main() -> int:
     tests = [
         test_goal_payload,
+        test_resolve_runtime_floor_goal,
+        test_task_uses_multiple_floors,
         test_dispatch_decision,
         test_mark_goal_sent_new_and_resend,
         test_prepare_goal_send_state,

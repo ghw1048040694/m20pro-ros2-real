@@ -2,12 +2,76 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any, Callable, Dict, Optional
 
 from .task_contract import readiness_failure, readiness_success
 
 
 NowText = Callable[[], str]
+
+
+def local_costmap_odom_alignment_payload(
+    *,
+    local_costmap: Dict[str, Any],
+    odom: Dict[str, Any],
+    tolerance_m: float,
+) -> Dict[str, Any]:
+    """Check that Nav2's rolling local costmap is centered on its odom pose."""
+    local_frame = str(local_costmap.get("frame_id") or "").strip().lstrip("/")
+    odom_frame = str(odom.get("frame_id") or "").strip().lstrip("/")
+    origin = local_costmap.get("origin") if isinstance(local_costmap.get("origin"), dict) else {}
+    odom_pose = odom.get("pose") if isinstance(odom.get("pose"), dict) else {}
+    try:
+        resolution = float(local_costmap["resolution"])
+        width = int(local_costmap["width"])
+        height = int(local_costmap["height"])
+        center_x = float(origin["x"]) + width * resolution * 0.5
+        center_y = float(origin["y"]) + height * resolution * 0.5
+        odom_x = float(odom_pose["x"])
+        odom_y = float(odom_pose["y"])
+    except (KeyError, TypeError, ValueError):
+        return {
+            "ready": False,
+            "code": "local_costmap_alignment_unavailable",
+            "message": "局部代价地图缺少滚动窗口原点，不能确认重定位后的里程计对齐",
+        }
+    values = (resolution, center_x, center_y, odom_x, odom_y)
+    if (
+        not all(math.isfinite(value) for value in values)
+        or resolution <= 0.0
+        or width <= 0
+        or height <= 0
+        or not local_frame
+        or local_frame != odom_frame
+    ):
+        return {
+            "ready": False,
+            "code": "local_costmap_alignment_unavailable",
+            "message": "局部代价地图与 /odom 坐标系信息不完整，不能安全启动任务",
+            "local_costmap_frame": local_frame,
+            "odom_frame": odom_frame,
+        }
+    error_m = math.hypot(center_x - odom_x, center_y - odom_y)
+    tolerance = max(0.05, float(tolerance_m))
+    payload = {
+        "ready": error_m <= tolerance,
+        "code": "ready" if error_m <= tolerance else "local_costmap_odom_mismatch",
+        "local_costmap_frame": local_frame,
+        "odom_frame": odom_frame,
+        "local_costmap_center": {"x": center_x, "y": center_y},
+        "odom_pose": {"x": odom_x, "y": odom_y},
+        "error_m": error_m,
+        "tolerance_m": tolerance,
+    }
+    if payload["ready"]:
+        payload["message"] = "局部代价地图与 /odom 已对齐"
+    else:
+        payload["message"] = (
+            "局部代价地图仍停留在重定位前位置，与 /odom 相差 %.2f m；未下发任务目标"
+            % error_m
+        )
+    return payload
 
 
 def _fresh_payload(

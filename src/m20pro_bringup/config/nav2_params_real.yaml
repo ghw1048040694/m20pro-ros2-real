@@ -96,7 +96,9 @@ controller_server:
       plugin: "nav2_controller::SimpleGoalChecker"
       xy_goal_tolerance: 0.35
       yaw_goal_tolerance: 0.35
-      stateful: true
+      # Foxy can retain the XY-reached latch across back-to-back goals. Recheck
+      # position for every control cycle so a matching yaw cannot finish a far goal.
+      stateful: false
 
     FollowPath:
       plugin: "dwb_core::DWBLocalPlanner"
@@ -126,7 +128,7 @@ controller_server:
       xy_goal_tolerance: 0.35
       trans_stopped_velocity: 0.12
       short_circuit_trajectory_evaluation: true
-      stateful: true
+      stateful: false
       critics: ["RotateToGoal", "Oscillation", "ObstacleFootprint", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
       ObstacleFootprint.scale: 0.05
       PathAlign.scale: 24.0
@@ -177,7 +179,9 @@ local_costmap:
         cost_scaling_factor: 4.0
         inflation_radius: 0.62
 
-      always_send_full_costmap: false
+      # A rolling costmap update does not carry its changed origin. Publish the
+      # full 100x100 grid so task-start alignment checks see the current center.
+      always_send_full_costmap: true
 
 global_costmap:
   global_costmap:

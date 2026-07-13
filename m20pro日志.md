@@ -23252,3 +23252,43 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
   - 全部 25 个 `scripts/test_*.py`、Python/JavaScript 语法和 `git diff --check` 通过；
   - Humble `m20pro_cloud_bridge + m20pro_bringup` 构建通过；安装态实测 `/api/multi_floor` 返回 3 层/4 条有向路线且不携带精确楼梯位姿，建图任务可从 F20 切到 F21 并使用 `F21_*` 地图名；
   - 本轮只修改上位机工程并做本机临时服务验收，没有连接或部署 104/103/106，没有修改上位机或机器狗网络。
+
+## 2026-07-13 12:33 CST - 工地实测修正重定位后任务规划起点沿用旧 odom
+
+- 分析包：
+  - `/home/zjx/bags/m20pro/20260713_1050/展厅1_20260713_105724`；
+  - `/home/zjx/bags/m20pro/20260713_1050/工地1_20260713_105838`。
+- 两包共同证据：
+  - 第一个 `/m20pro/floor_goal` 发布前后，`map_pose` 跳变量分别只有 0.0023m 和 0.0000m，官方 `map->base_link`、桥接 `/odom` 和地图位姿连续；用户看到的偏移不是任务启动触发了新的重定位；
+  - local costmap 记录的滚动窗口中心均为 `(-0.900, 1.450)`，任务下发时 `/odom` 分别为 `(-2.603, -10.437)` 和 `(-3.810, -10.012)`，错位分别为 12.009m 和 11.825m；
+  - 第二包中 NavFn `/plan` 起点为 `(-0.900, 1.400)`，终点为正确任务点 `(-5.433, -13.473)`，确认 planner 使用了重定位前的旧 odom/costmap 起点；
+  - 两包均在 21~28ms 内重复发布两次相同 `/m20pro/floor_goal`，属于 Web 定时 tick 与启动线程并发下发竞态。
+- 根因：
+  - `m20pro_tcp_bridge` 原来固定发布 `map->odom=identity`，并把绝对地图位姿直接写入 `odom->m20pro_base_link` 和 `/odom`；
+  - 重定位时绝对地图位姿变化被错误表现为 odom 跳变。Nav2 local costmap 以 `odom` 为连续坐标系，仍保留旧滚动窗口，planner 因此从旧位置生成路径；
+  - Web 又订阅原厂大写 `/ODOM`，而不是 Nav2 实际使用的小写 `/odom`，导致网页的 odom 对齐诊断和局部路径转换使用错误来源。
+- 工地目录中的修正：
+  - 新增 `odom_alignment_contract.py`，正常运动保持固定 `map->odom` 并更新连续 odom；确认重定位或接受稳定的大幅地图修正时保持上一帧 `odom->base` 不跳，只重算 `map->odom`；
+  - Web 改订阅 `/odom`，保存 local/global costmap 原点；任务启动清理 costmap 后校验 local costmap 中心与 `/odom`，误差超过 0.75m 时返回 `local_costmap_odom_mismatch`，不发布目标；
+  - local costmap 恢复 `always_send_full_costmap=true`，确保滚动窗口变化后的原点可被 Web 和 rosbag 观察；global costmap 仍保留增量发布；
+  - `_dispatch_active_goal` 增加串行锁，消除启动线程与定时 tick 同时发布相同目标的竞态。
+
+## 2026-07-13 19:34 CST - 将 0713 工地稳定性改进整合到正式 main
+
+- 来源审计：
+  - 用户带回目录为 `桌面/M20Pro/m20pro-ros2-real0713stability/m20pro-ros2-real`；外层不是仓库，内层仓库停在旧 `Unre=22cd1e4`，实际改进全部在未提交工作区；
+  - 通过内容哈希与当前 `main=30eb2e9` 直接比较，剥离旧分支历史、build/install/log、现场地图和缓存后，只移植有实质变化的代码、配置、测试和 API 文档；
+  - 没有整目录覆盖主线，也没有合入现场部署脚本的 `*.pcd` 全局排除项；该临时提速会阻止新点云地图部署，不适合作为正式规则。
+- 主线整合：
+  - `m20pro_tcp_bridge` 现在维护真实 SE(2) `map->odom`，正常运动连续更新 `odom->base`，重定位/稳定大修正只重基准 `map->odom`，并持续保证 `T_map_base = T_map_odom * T_odom_base`；
+  - Web 的 odom、局部轨迹对齐和任务启动门禁统一使用小写 `/odom`；local costmap 完整帧保留滚动原点，任务启动前验证窗口中心误差；
+  - Web 目标下发改为单入口串行，解决现场包中 21~28ms 内重复发两次目标的竞态；
+  - Web 的 `/scan` 门禁改接 104 本机 reliable 镜像 `/m20pro/recording_scan`，Nav2 仍直接消费 `/scan`，没有增加跨主机点云负载；
+  - Foxy `SimpleGoalChecker` 和 DWB 的 `stateful` 关闭，连续点位每个控制周期重新核对位置，避免上一点的 XY 到达锁存影响远处下一点；
+  - 单层任务的下发楼层以 `floor_manager` 当前运行楼层为准，避免历史点位错误楼层标签触发无意义切层；跨楼层任务保留目标楼层；
+  - 额外补充旧任务兼容：即使历史跨楼层任务没有 `multi_floor` 字段，启动时也会从实际点位楼层集合重新推导，不会被误当成单层任务。
+- 验证：
+  - 新增 `scripts/test_odom_alignment_contract.py`，扩展 active-task、navigation-readiness 和 Nav2 配置合同测试；
+  - 全部 26 个 `scripts/test_*.py` 通过；所有 Python/JavaScript/Shell 语法和 `git diff --check` 通过；
+  - Humble `m20pro_navigation + m20pro_cloud_bridge + m20pro_bringup + m20pro_inspection + m20pro_radar_inspection` 5 包构建通过，安装态可导入新增契约；
+  - 本轮未连接或部署 104/103/106，未修改上位机或机器狗网络；实车生效必须完整重启 real stack，不能只热替换 Web 节点。

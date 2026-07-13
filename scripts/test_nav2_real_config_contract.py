@@ -18,12 +18,15 @@ def main() -> None:
 
     assert controller["controller_frequency"] <= 10.0
     assert controller["progress_checker"]["movement_time_allowance"] >= 12.0
+    assert controller["goal_checker"]["stateful"] is False
     assert "ObstacleFootprint" in follow["critics"]
     assert "BaseObstacle" not in follow["critics"]
     assert follow["sim_time"] >= 1.5
     assert follow["publish_local_plan"] is True
+    assert follow["stateful"] is False
+    assert local["always_send_full_costmap"] is True
+    assert global_costmap["always_send_full_costmap"] is False
     for costmap in (local, global_costmap):
-        assert costmap["always_send_full_costmap"] is False
         assert "footprint" in costmap
         assert "robot_radius" not in costmap
         assert costmap["inflation_layer"]["inflation_radius"] >= 0.60
@@ -62,6 +65,8 @@ def main() -> None:
     assert '"local_costmap_updates_topic"' in dashboard
     assert '"global_costmap_updates_topic"' in dashboard
     assert '"local_plan_topic"' in dashboard
+    assert '"odom_topic", "/odom"' in dashboard
+    assert "local_costmap_odom_alignment_payload" in dashboard
 
     recorder = (
         ROOT
@@ -105,6 +110,8 @@ def main() -> None:
     assert '"waypoint_follower"' not in startup_gate
     assert '"/waypoint_follower"' not in system_check
     assert '"/waypoint_follower"' not in dashboard
+    assert 'default_value="/m20pro/recording_scan"' in real_launch
+    assert '"scan_topic": web_scan_topic' in real_launch
 
     fastdds_profile = (
         ROOT

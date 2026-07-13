@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src/m20pro_cloud_bridge"))
 
 from m20pro_cloud_bridge.navigation_readiness_contract import (  # noqa: E402
+    local_costmap_odom_alignment_payload,
     navigation_readiness_disabled_payload,
     navigation_readiness_payload,
     navigation_readiness_wait_timeout_payload,
@@ -94,6 +95,42 @@ def test_lifecycle_check_can_be_disabled() -> None:
     result = payload(lifecycle=None, check_lifecycle=False)
     assert_equal(result["ready"], True, "ready without lifecycle check")
     assert_equal("lifecycle" in result["checks"], False, "lifecycle omitted")
+
+
+def test_local_costmap_matches_continuous_odom() -> None:
+    local_costmap = {
+        "frame_id": "odom",
+        "width": 100,
+        "height": 100,
+        "resolution": 0.05,
+        "origin": {"x": -3.4, "y": -1.05},
+    }
+    aligned = local_costmap_odom_alignment_payload(
+        local_costmap=local_costmap,
+        odom={"frame_id": "odom", "pose": {"x": -0.9, "y": 1.4}},
+        tolerance_m=0.75,
+    )
+    assert_equal(aligned["ready"], True, "continuous odom alignment")
+    assert aligned["error_m"] < 0.1
+
+    bag_mismatch = local_costmap_odom_alignment_payload(
+        local_costmap=local_costmap,
+        odom={"frame_id": "odom", "pose": {"x": -3.81, "y": -10.01}},
+        tolerance_m=0.75,
+    )
+    assert_equal(bag_mismatch["ready"], False, "bag mismatch rejected")
+    assert_equal(bag_mismatch["code"], "local_costmap_odom_mismatch", "bag mismatch code")
+    assert bag_mismatch["error_m"] > 10.0
+
+
+def test_local_costmap_alignment_requires_origin() -> None:
+    result = local_costmap_odom_alignment_payload(
+        local_costmap={"frame_id": "odom", "width": 100, "height": 100, "resolution": 0.05},
+        odom={"frame_id": "odom", "pose": {"x": 0.0, "y": 0.0}},
+        tolerance_m=0.75,
+    )
+    assert_equal(result["ready"], False, "missing origin rejected")
+    assert_equal(result["code"], "local_costmap_alignment_unavailable", "missing origin code")
 
 
 def test_should_check_navigation_readiness() -> None:
@@ -197,6 +234,8 @@ def main() -> int:
         test_lifecycle_inactive,
         test_waits_for_post_reset_data,
         test_lifecycle_check_can_be_disabled,
+        test_local_costmap_matches_continuous_odom,
+        test_local_costmap_alignment_requires_origin,
         test_should_check_navigation_readiness,
         test_navigation_readiness_disabled_payload,
         test_navigation_readiness_wait_timeout_payload,

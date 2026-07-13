@@ -45,6 +45,7 @@ def generate_launch_description():
     map_manifest = LaunchConfiguration("map_manifest")
     map_yaml = LaunchConfiguration("map")
     scan_topic = LaunchConfiguration("scan_topic")
+    web_scan_topic = LaunchConfiguration("web_scan_topic")
     enable_nav2 = LaunchConfiguration("enable_nav2")
     enable_floor_manager = LaunchConfiguration("enable_floor_manager")
     enable_floor_goal_bridge = LaunchConfiguration("enable_floor_goal_bridge")
@@ -118,6 +119,11 @@ def generate_launch_description():
         DeclareLaunchArgument("map_manifest", default_value=default_map_manifest),
         DeclareLaunchArgument("map", default_value=default_map),
         DeclareLaunchArgument("scan_topic", default_value="/scan"),
+        DeclareLaunchArgument(
+            "web_scan_topic",
+            default_value="/m20pro/recording_scan",
+            description="Reliable local mirror used by web preflight and task scan guards.",
+        ),
         DeclareLaunchArgument(
             "enable_nav2",
             default_value="true" if nav2_stack_available else "false",
@@ -460,7 +466,7 @@ def generate_launch_description():
                         value_type=bool,
                     ),
                     "stair_zones_topic": stair_zones_topic,
-                    "scan_topic": scan_topic,
+                    "scan_topic": web_scan_topic,
                     "startup_sync_selected_map_delay_s": 6.0,
                     "enable_camera_proxy": ParameterValue(enable_camera_proxy, value_type=bool),
                     "front_camera_url": front_camera_url,

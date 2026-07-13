@@ -11,6 +11,7 @@ from tf2_msgs.msg import TFMessage
 from tf2_ros import TransformBroadcaster
 
 from .geometry import quaternion_to_yaw, yaw_to_quaternion
+from .odom_alignment_contract import odom_alignment_update
 from .pose_stability_contract import stable_jump_decision
 from .tcp_protocol import M20TcpClient, patrol_items
 
@@ -48,6 +49,8 @@ class M20TcpBridge(Node):
         self.declare_parameter("pose_filter_hold_last_good_s", 1.0)
         self.declare_parameter("pose_relocalization_jump_grace_s", 3.0)
         self.declare_parameter("pose_relocalization_jump_grace_radius_m", 1.0)
+        self.declare_parameter("odom_rebase_jump_m", 0.6)
+        self.declare_parameter("odom_rebase_jump_yaw_rad", 0.75)
         self.declare_parameter("enable_tf_pose_fallback", True)
         self.declare_parameter("tf_pose_fallback_topic", "/tf")
         self.declare_parameter("tf_pose_fallback_map_frame", "map")
@@ -100,6 +103,10 @@ class M20TcpBridge(Node):
         self.last_navigation_location_ok = None
         self.last_navigation_status_time = None
         self.official_tf_pose_unlocked = False
+        self.last_published_map_pose = None
+        self.last_published_odom_pose = None
+        self.map_to_odom_pose = None
+        self.pending_odom_rebase = False
 
         self.pose_pub = self.create_publisher(PoseStamped, "~/map_pose", 10)
         self.odom_pub = self.create_publisher(Odometry, "/odom", 10)
@@ -325,6 +332,7 @@ class M20TcpBridge(Node):
             "yaw": float(items["Yaw"]),
         }
         self.pending_jump_pose = None
+        self.pending_odom_rebase = True
         timeout_s = max(0.1, float(self.get_parameter("relocalization_response_timeout_s").value))
         try:
             response = self.client.request(2101, 1, items, response_timeout=timeout_s)
@@ -333,6 +341,7 @@ class M20TcpBridge(Node):
         except Exception as exc:
             self.last_relocalization_request_time = None
             self.last_relocalization_target = None
+            self.pending_odom_rebase = False
             text = "failed: %s" % exc
             self.get_logger().warning("vendor relocalization request failed: %s" % exc)
             self._publish_relocalization_result(text)
@@ -359,6 +368,7 @@ class M20TcpBridge(Node):
         else:
             self.last_relocalization_request_time = None
             self.last_relocalization_target = None
+            self.pending_odom_rebase = False
             meaning = "初始化定位失败" if error_code == 1 else "原厂返回错误"
             text = "failed: ErrorCode=0x%04X %s x=%.3f y=%.3f z=%.3f yaw=%.3f" % (
                 error_code & 0xFFFF,
@@ -769,11 +779,49 @@ class M20TcpBridge(Node):
         *,
         localization_ok: bool = True,
     ) -> None:
-        now = self.get_clock().now().to_msg()
+        clock_now = self.get_clock().now()
+        now = clock_now.to_msg()
         map_frame = str(self.get_parameter("map_frame").value)
         odom_frame = str(self.get_parameter("odom_frame").value)
         base_frame = str(self.get_parameter("base_frame").value)
-        quat = yaw_to_quaternion(yaw)
+        map_quat = yaw_to_quaternion(yaw)
+        force_odom_rebase = bool(
+            self.pending_odom_rebase
+            and self._within_relocalization_jump_grace(clock_now, x, y)
+        )
+        alignment = odom_alignment_update(
+            map_pose={"x": x, "y": y, "yaw": yaw},
+            previous_map_pose=self.last_published_map_pose,
+            previous_odom_pose=self.last_published_odom_pose,
+            map_to_odom=self.map_to_odom_pose,
+            force_rebase=force_odom_rebase,
+            jump_threshold_m=max(
+                0.0,
+                float(self.get_parameter("odom_rebase_jump_m").value),
+            ),
+            yaw_threshold_rad=max(
+                0.0,
+                float(self.get_parameter("odom_rebase_jump_yaw_rad").value),
+            ),
+        )
+        odom_pose = dict(alignment["odom_pose"])
+        map_to_odom_pose = dict(alignment["map_to_odom"])
+        self.last_published_map_pose = dict(alignment["map_pose"])
+        self.last_published_odom_pose = odom_pose
+        self.map_to_odom_pose = map_to_odom_pose
+        if force_odom_rebase:
+            self.pending_odom_rebase = False
+        if alignment.get("rebased"):
+            self.get_logger().warning(
+                "rebased map->odom after %s; map_step=%.3fm yaw_step=%.3frad"
+                % (
+                    alignment.get("reason"),
+                    float(alignment.get("map_step_distance_m", 0.0)),
+                    float(alignment.get("map_step_yaw_rad", 0.0)),
+                )
+            )
+        odom_quat = yaw_to_quaternion(float(odom_pose["yaw"]))
+        map_to_odom_quat = yaw_to_quaternion(float(map_to_odom_pose["yaw"]))
 
         pose = PoseStamped()
         pose.header.stamp = now
@@ -781,7 +829,7 @@ class M20TcpBridge(Node):
         pose.pose.position.x = x
         pose.pose.position.y = y
         pose.pose.position.z = z
-        pose.pose.orientation = quat
+        pose.pose.orientation = map_quat
         self.pose_pub.publish(pose)
 
         odom = Odometry()
@@ -789,28 +837,30 @@ class M20TcpBridge(Node):
         odom.header.frame_id = odom_frame
         odom.child_frame_id = base_frame
         odom_z = self._odom_z(z)
-        odom.pose.pose.position.x = x
-        odom.pose.pose.position.y = y
+        odom.pose.pose.position.x = float(odom_pose["x"])
+        odom.pose.pose.position.y = float(odom_pose["y"])
         odom.pose.pose.position.z = odom_z
-        odom.pose.pose.orientation = quat
+        odom.pose.pose.orientation = odom_quat
         self.odom_pub.publish(odom)
 
         if bool(self.get_parameter("publish_tf").value):
-            map_to_odom = TransformStamped()
-            map_to_odom.header.stamp = now
-            map_to_odom.header.frame_id = map_frame
-            map_to_odom.child_frame_id = odom_frame
-            map_to_odom.transform.rotation.w = 1.0
+            map_to_odom_tf = TransformStamped()
+            map_to_odom_tf.header.stamp = now
+            map_to_odom_tf.header.frame_id = map_frame
+            map_to_odom_tf.child_frame_id = odom_frame
+            map_to_odom_tf.transform.translation.x = float(map_to_odom_pose["x"])
+            map_to_odom_tf.transform.translation.y = float(map_to_odom_pose["y"])
+            map_to_odom_tf.transform.rotation = map_to_odom_quat
 
             odom_to_base = TransformStamped()
             odom_to_base.header.stamp = now
             odom_to_base.header.frame_id = odom_frame
             odom_to_base.child_frame_id = base_frame
-            odom_to_base.transform.translation.x = x
-            odom_to_base.transform.translation.y = y
+            odom_to_base.transform.translation.x = float(odom_pose["x"])
+            odom_to_base.transform.translation.y = float(odom_pose["y"])
             odom_to_base.transform.translation.z = odom_z
-            odom_to_base.transform.rotation = quat
-            self.tf_broadcaster.sendTransform([map_to_odom, odom_to_base])
+            odom_to_base.transform.rotation = odom_quat
+            self.tf_broadcaster.sendTransform([map_to_odom_tf, odom_to_base])
 
         self._publish_localization_ok(bool(localization_ok))
 

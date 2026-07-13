@@ -476,6 +476,25 @@ GET /api/tasks?map_id=live_map
 /api/preflight 或最近自检没有基础链路错误
 ```
 
+后端在发送第一个 `/m20pro/floor_goal` 前还会核对 Nav2 local costmap
+滚动窗口中心与小写 `/odom`。重定位后两者未对齐时任务不会启动：
+
+```json
+{
+  "ok": false,
+  "code": "local_costmap_odom_mismatch",
+  "message": "局部代价地图仍停留在重定位前位置，与 /odom 相差 12.01 m；未下发任务目标",
+  "odom_alignment": {
+    "ready": false,
+    "error_m": 12.009,
+    "tolerance_m": 0.75
+  }
+}
+```
+
+`local_costmap_alignment_unavailable` 表示尚未收到带滚动窗口原点的完整
+local costmap 或 `/odom` 信息不完整。两种情况都应保持任务停止，等待导航链路恢复或重新重定位，不能由前端绕过。
+
 ### POST `/api/tasks/stop`
 
 停止或复位当前任务。

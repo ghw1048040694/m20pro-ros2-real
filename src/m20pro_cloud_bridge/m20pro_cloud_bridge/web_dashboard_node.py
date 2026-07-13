@@ -45,6 +45,8 @@ from .active_task_contract import (
     mark_active_task_waiting_state,
     normalize_stop_task_request,
     prepare_goal_send_state,
+    resolve_runtime_floor_goal,
+    task_uses_multiple_floors,
     stop_task_state,
     stop_task_operator_event_payload,
     waypoint_goal_failure_extra,
@@ -133,6 +135,7 @@ from .nav_status_contract import (
     transition_nav_status_event_payload,
 )
 from .navigation_readiness_contract import (
+    local_costmap_odom_alignment_payload,
     navigation_readiness_payload,
 )
 from .pcd_derived import process_imported_map
@@ -684,6 +687,7 @@ class WebDashboardNode(Node):
         # Task callbacks often reuse small helpers that also inspect saved web data.
         # Keep this lock reentrant so a status update cannot deadlock the dispatcher.
         self._data_lock = threading.RLock()
+        self._goal_dispatch_lock = threading.Lock()
         self.data_dir = FsPath(
             os.path.expandvars(os.path.expanduser(str(self.get_parameter("data_dir").value)))
         )
@@ -851,6 +855,7 @@ class WebDashboardNode(Node):
         self.declare_parameter("task_timeline_max_events", 80)
         self.declare_parameter("task_start_settle_s", 0.5)
         self.declare_parameter("task_start_pose_timeout_s", 3.0)
+        self.declare_parameter("task_start_costmap_odom_tolerance_m", 0.75)
         self.declare_parameter("task_runtime_localization_lost_stop_s", 2.0)
         self.declare_parameter("task_runtime_scan_lost_stop_s", 2.0)
         self.declare_parameter("task_runtime_scan_timeout_s", 1.0)
@@ -895,7 +900,7 @@ class WebDashboardNode(Node):
         self.declare_parameter("scan_overlay_offset_x_m", 0.0)
         self.declare_parameter("scan_overlay_offset_y_m", 0.0)
         self.declare_parameter("scan_overlay_offset_yaw_rad", 0.0)
-        self.declare_parameter("odom_topic", "/ODOM")
+        self.declare_parameter("odom_topic", "/odom")
         self.declare_parameter("pose_topic", "/m20pro_tcp_bridge/map_pose")
         self.declare_parameter("plan_topic", "/plan")
         self.declare_parameter("local_plan_topic", "/local_plan")
@@ -1532,6 +1537,7 @@ class WebDashboardNode(Node):
 
     def _on_local_costmap(self, msg: OccupancyGrid) -> None:
         info = msg.info
+        origin = pose_to_dict(info.origin)
         with self._lock:
             self._state["local_costmap"] = {
                 "last_update": time.time(),
@@ -1540,11 +1546,13 @@ class WebDashboardNode(Node):
                 "width": int(info.width),
                 "height": int(info.height),
                 "resolution": float(info.resolution),
+                "origin": origin,
             }
             self._mark_topic("local_costmap")
 
     def _on_global_costmap(self, msg: OccupancyGrid) -> None:
         info = msg.info
+        origin = pose_to_dict(info.origin)
         with self._lock:
             self._state["global_costmap"] = {
                 "last_update": time.time(),
@@ -1553,6 +1561,7 @@ class WebDashboardNode(Node):
                 "width": int(info.width),
                 "height": int(info.height),
                 "resolution": float(info.resolution),
+                "origin": origin,
             }
             self._mark_topic("global_costmap")
 
@@ -4840,7 +4849,37 @@ class WebDashboardNode(Node):
         )
         return {"ok": True, "task": task, "route_plans": context["route_plans"]}
 
-    def _task_start_pre_runtime_context(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _task_start_pre_runtime_context(
+        self,
+        payload: Dict[str, Any],
+        *,
+        require_nav_alignment: bool = False,
+    ) -> Dict[str, Any]:
+        odom_alignment = None
+        if require_nav_alignment:
+            with self._lock:
+                local_costmap = dict(self._state.get("local_costmap") or {})
+                odom = dict(self._state.get("odom") or {})
+                if isinstance(odom.get("pose"), dict):
+                    odom["pose"] = dict(odom["pose"])
+            odom_alignment = local_costmap_odom_alignment_payload(
+                local_costmap=local_costmap,
+                odom=odom,
+                tolerance_m=float(
+                    self.get_parameter("task_start_costmap_odom_tolerance_m").value
+                ),
+            )
+            if not odom_alignment.get("ready"):
+                return self._error(
+                    str(odom_alignment.get("message") or "Nav2 里程计与局部代价地图未对齐"),
+                    {
+                        "code": str(
+                            odom_alignment.get("code")
+                            or "local_costmap_alignment_unavailable"
+                        ),
+                        "odom_alignment": odom_alignment,
+                    },
+                )
         task_id = str(payload.get("task_id") or "").strip()
         selected_map_id = self._effective_map_id() or "live_map"
         self._remember_working_map_id(selected_map_id, reason="start_task")
@@ -4926,6 +4965,8 @@ class WebDashboardNode(Node):
                 "task_map_id": task_map_id,
                 "selected_map_id": selected_map_id,
                 "first_annotation": first_annotation,
+                "annotations": list(static_context.get("annotations") or []),
+                "odom_alignment": odom_alignment,
             }
 
     def _start_task(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -4936,15 +4977,23 @@ class WebDashboardNode(Node):
         settle_s = max(0.0, float(self.get_parameter("task_start_settle_s").value))
         if settle_s > 0.0:
             time.sleep(min(settle_s, 2.0))
-        context = self._task_start_pre_runtime_context(payload)
+        context = self._task_start_pre_runtime_context(
+            payload,
+            require_nav_alignment=True,
+        )
         if not context.get("ok"):
             return context
         task = context.get("task")
         task_id = str(context.get("task_id") or "")
         task_map_id = str(context.get("task_map_id") or "live_map")
+        task_for_start = dict(task or {})
+        task_for_start["multi_floor"] = task_uses_multiple_floors(
+            task_for_start,
+            context.get("annotations") or [],
+        )
         with self._data_lock:
             created = create_active_task_state(
-                task,
+                task_for_start,
                 task_map_id=task_map_id,
                 now_text=now_text(),
             )
@@ -5799,6 +5848,10 @@ class WebDashboardNode(Node):
         return state == "analyzing" and bool(parsed.get("analysis_pending"))
 
     def _dispatch_active_goal(self, force: bool) -> None:
+        with self._goal_dispatch_lock:
+            self._dispatch_active_goal_once(force)
+
+    def _dispatch_active_goal_once(self, force: bool) -> None:
         with self._data_lock:
             active = self._settings.get("active_task") or {}
         if active.get("status") != "running":
@@ -5837,6 +5890,22 @@ class WebDashboardNode(Node):
             return
         with self._lock:
             current_path = dict(self._state.get("path") or {})
+            source_floor = str(self._state.get("floor") or "").strip()
+        floor_resolution = resolve_runtime_floor_goal(
+            goal,
+            current_floor=source_floor,
+            multi_floor=bool(active.get("multi_floor")),
+        )
+        goal = dict(floor_resolution["goal"])
+        if floor_resolution["floor_overridden"]:
+            self.get_logger().warning(
+                "single-floor task map label %s differs from floor_manager %s; "
+                "dispatching the same-map goal with the runtime floor label"
+                % (
+                    str(floor_resolution["annotation_floor"]),
+                    str(floor_resolution["runtime_floor"]),
+                )
+            )
         goal_sent_path_version = current_path.get("version")
         missing_failure = None
         with self._data_lock:
@@ -5884,8 +5953,6 @@ class WebDashboardNode(Node):
         if missing_failure is not None:
             self._fail_active_task_from_payload(missing_failure)
             return
-        with self._lock:
-            source_floor = str(self._state.get("floor") or "").strip()
         self._publish_floor_goal(str(goal["floor"]), float(goal["x"]), float(goal["y"]), float(goal["yaw"]), float(goal["z"]))
         with self._data_lock:
             current = dict(self._settings.get("active_task") or {})
