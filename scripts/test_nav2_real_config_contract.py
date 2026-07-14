@@ -41,6 +41,22 @@ def main() -> None:
     root = ET.parse(tree_path).getroot()
     assert root.find(".//ReactiveFallback[@name='FollowPathFallback']") is not None
     assert root.find(".//BackUp") is not None
+    navigate_recovery = root.find(".//RecoveryNode[@name='NavigateRecovery']")
+    follow_recovery = root.find(".//RecoveryNode[@name='FollowPath']")
+    assert navigate_recovery is not None
+    assert follow_recovery is not None
+    assert int(navigate_recovery.attrib["number_of_retries"]) >= 4
+    assert int(follow_recovery.attrib["number_of_retries"]) >= 8
+    controller_actions = root.find(".//RoundRobin[@name='ControllerRecoveryActions']")
+    navigation_actions = root.find(".//RoundRobin[@name='NavigationRecoveryActions']")
+    assert controller_actions is not None
+    assert navigation_actions is not None
+    controller_children = list(controller_actions)
+    navigation_children = list(navigation_actions)
+    assert controller_children[0].tag == "Wait"
+    assert navigation_children[0].tag == "Wait"
+    assert int(controller_children[0].attrib["wait_duration"]) >= 5
+    assert int(navigation_children[0].attrib["wait_duration"]) >= 5
     timed_bt_tags = {
         "ComputePathToPose",
         "FollowPath",

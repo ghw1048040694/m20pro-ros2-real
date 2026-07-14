@@ -5,7 +5,7 @@
 -->
 <root main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
-    <RecoveryNode number_of_retries="2" name="NavigateRecovery">
+    <RecoveryNode number_of_retries="4" name="NavigateRecovery">
       <PipelineSequence name="NavigateWithReplanning">
         <RateController hz="1.0">
           <RecoveryNode number_of_retries="4" name="ComputePathToPose">
@@ -19,11 +19,19 @@
             </ReactiveFallback>
           </RecoveryNode>
         </RateController>
-        <RecoveryNode number_of_retries="4" name="FollowPath">
+        <!--
+          A person can temporarily block every valid DWB trajectory without
+          making the navigation goal invalid. Keep the goal alive long enough
+          for the scene to clear, and prefer a stationary wait before any
+          motion recovery. The bounded retry count still terminates persistent
+          obstructions instead of retrying forever.
+        -->
+        <RecoveryNode number_of_retries="8" name="FollowPath">
           <FollowPath path="{path}" controller_id="FollowPath" server_timeout="500"/>
           <ReactiveFallback name="FollowPathFallback">
             <GoalUpdated/>
             <RoundRobin name="ControllerRecoveryActions">
+              <Wait wait_duration="5" server_timeout="500"/>
               <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap" server_timeout="500"/>
               <BackUp backup_dist="0.20" backup_speed="0.07" server_timeout="500"/>
               <Spin spin_dist="0.80" server_timeout="500"/>
@@ -33,7 +41,13 @@
       </PipelineSequence>
       <ReactiveFallback name="RecoveryFallback">
         <GoalUpdated/>
-        <Wait wait_duration="3" server_timeout="500"/>
+        <RoundRobin name="NavigationRecoveryActions">
+          <Wait wait_duration="5" server_timeout="500"/>
+          <Sequence name="ClearNavigationCostmaps">
+            <ClearEntireCostmap name="ClearLocalCostmap-Navigation" service_name="local_costmap/clear_entirely_local_costmap" server_timeout="500"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Navigation" service_name="global_costmap/clear_entirely_global_costmap" server_timeout="500"/>
+          </Sequence>
+        </RoundRobin>
       </ReactiveFallback>
     </RecoveryNode>
   </BehaviorTree>
