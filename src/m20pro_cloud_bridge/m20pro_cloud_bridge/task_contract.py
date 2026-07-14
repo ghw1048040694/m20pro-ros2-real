@@ -103,6 +103,7 @@ def task_waypoint_payload(
         return {"id": annotation_id, "index": index, "missing": True}
     payload = readiness_waypoint_payload(annotation) or {"id": annotation_id}
     payload["index"] = index
+    payload["type"] = annotation.get("type")
     payload["manual_point_type"] = annotation.get("manual_point_type")
     payload["dwell_s"] = annotation.get("dwell_s")
     payload["building"] = annotation.get("building")
@@ -113,6 +114,11 @@ def task_waypoint_payload(
     payload["scan_point"] = annotation.get("scan_point")
     payload["result_file_prefix"] = annotation.get("result_file_prefix")
     payload["radar"] = annotation.get("radar") if isinstance(annotation.get("radar"), dict) else {}
+    payload["vendor_navigation"] = (
+        dict(annotation.get("vendor_navigation"))
+        if isinstance(annotation.get("vendor_navigation"), dict)
+        else {}
+    )
     return payload
 
 

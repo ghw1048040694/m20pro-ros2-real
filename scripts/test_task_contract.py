@@ -65,10 +65,12 @@ def sample_annotation(annotation_id: str = "p1") -> dict:
     return {
         "id": annotation_id,
         "label": "工位点",
+        "type": "patrol",
         "floor": "F20",
         "map_id": "builtin_F20",
         "pose": {"x": 1.0, "y": 2.0, "z": 0.0, "yaw": 0.2},
         "manual_point_type": "task",
+        "vendor_navigation": {"Gait": 12, "Speed": 1, "Manner": 0, "ObsMode": 0, "NavMode": 1},
         "dwell_s": 5.0,
         "area": "A",
         "room": "R1",
@@ -137,6 +139,7 @@ def test_waypoint_payloads() -> None:
     assert_equal(missing, {"id": "missing", "index": 3, "missing": True}, "missing waypoint")
 
     payload = task_waypoint_payload("p1", annotation, 0)
+    assert_equal(payload["type"], "patrol", "point role")
     assert_equal(payload["manual_point_type"], "task", "manual point type")
     assert_equal(payload["dwell_s"], 5.0, "dwell")
     assert_equal(payload["area"], "A", "area")
@@ -144,6 +147,7 @@ def test_waypoint_payloads() -> None:
     assert_equal(payload["scan_point"], "P01", "scan point")
     assert_equal(payload["result_file_prefix"], "B03_U01_H2008_F20_R1_P01", "result prefix")
     assert_equal(payload["radar"]["enabled"], True, "radar plan")
+    assert_equal(payload["vendor_navigation"]["NavMode"], 1, "fixed navigation policy")
 
 
 def test_pose_map_bounds_error() -> None:

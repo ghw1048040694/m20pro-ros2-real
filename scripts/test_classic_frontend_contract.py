@@ -28,7 +28,19 @@ def main() -> None:
         'id="tab-localize"',
         'id="tab-maps"',
         'id="tab-preflight"',
+        'id="mapFloorBadge"',
+        'id="mapMode"',
+        'id="manualPointType"',
+        'id="markXY"',
+        'id="markYaw"',
+        'id="markManner"',
+        'id="markObsMode"',
+        'id="markNavMode"',
+        'id="mappingActiveFloor"',
+        'id="mappingActiveFloorRow"',
         "作业前状态",
+        "尚未建立建图任务",
+        "当前地图还没有任务；",
         'class="mono"',
     ):
         assert removed not in html
@@ -47,16 +59,50 @@ def main() -> None:
         "radarInspection",
         "radarResultList",
         "operationFeedbackDialog",
+        "markPoseSummary",
     ):
         assert f'id="{element_id}"' in html
 
     assert "status-popover" in css
+    assert "floor-badge" not in css
+    assert ".pill" not in css
+    assert ".status-chip > span:not(.dot)" in css
+    assert "button.status-chip {\n      font: inherit;" not in css
+    assert "button.status-chip {\n      appearance: none;" in css
     assert "task-execution-flow" in css
     assert "detection-results" in css
     assert "renderTaskExecutionFlow" in script
     assert "renderYoloWorkspace" in script
     assert "localizationPopoverOpen" in script
+    assert "mapModeLabel" not in script
+    assert "renderTaskNextStep" not in script
     assert 'setStatusPopover("", false)' in script
+    point_type_order = [
+        '<option value="patrol">任务点</option>',
+        '<option value="transition">过渡点</option>',
+        '<option value="charge">充电点</option>',
+        '<option value="stair_entry">爬楼梯点</option>',
+        '<option value="stair_exit">出楼梯点</option>',
+        '<option value="stair_switch">楼层切换点</option>',
+    ]
+    assert all(item in html for item in point_type_order)
+    assert [html.index(item) for item in point_type_order] == sorted(html.index(item) for item in point_type_order)
+    assert '<option value="14">爬楼梯（14）</option>' in html
+    assert "renderMarkPoseSummary" in script
+    assert "syncMappingActiveFloorOptions" not in script
+    assert 'active_floor: $("mappingActiveFloor")' not in script
+    assert 'id="createSessionBtn"' not in html
+    assert 'id="checkMappingEnvBtn"' not in html
+    assert 'id="startMappingBtn"' in html
+    assert 'id="finishMappingBtn"' in html
+    assert 'async function ensureMappingSession()' in script
+    assert '"/api/mapping/check_environment"' in script
+    assert 'await ensureMappingSession();' in script
+    assert "mapping-actions" in css
+    assert "grid-template-columns: repeat(2, minmax(0, 1fr));" in css
+    assert '<button class="danger" id="resetTaskSessionBtn"' in html
+    assert "清理导航会话" in html
+    assert "复位导航状态" not in html
 
     assert "DASHBOARD_LITE_DIR" not in backend
     assert 'parsed.path in ("/lite", "/lite/")' in backend

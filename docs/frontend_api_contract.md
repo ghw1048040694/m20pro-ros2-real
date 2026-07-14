@@ -358,10 +358,7 @@ GET /api/annotations?map_id=live_map
   "dwell_s": 5,
   "vendor_navigation": {
     "Gait": 12,
-    "Speed": 1,
-    "Manner": 0,
-    "ObsMode": 0,
-    "NavMode": 1
+    "Speed": 1
   },
   "radar": {
     "enabled": true,
@@ -379,6 +376,10 @@ GET /api/annotations?map_id=live_map
 - 后端会把 `live_map` 解析成当前有效固定地图。
 - 如果当前实时 `/map` 不能匹配固定地图，保存会失败。
 - 如果 `map_relocalization_required` 未清除，使用机器人实时位姿保存点位会被阻止。
+- `type` 的正式前端取值依次为 `patrol`（任务点）、`transition`、`charge`、`stair_entry`（爬楼梯点）、`stair_exit`、`stair_switch`。
+- `manual_point_type` 由 `type` 推导；外部调用可以显式传入，但不能与 `type` 表达相反的业务含义。
+- `vendor_navigation` 只接受 `Gait` 和 `Speed` 调整；后端始终固定 `Manner=0`、`ObsMode=0`、`NavMode=1`，并根据点位语义生成 `PointInfo`。
+- `stair_entry` 未显式传 `Gait` 时默认 `14`，其他点位默认 `12`。实际跨楼层上下楼方向及步态切换由 `floor_manager` 路线配置负责。
 
 ### DELETE `/api/annotations?id=<annotation_id>`
 
@@ -650,14 +651,15 @@ ROS 2 功能包也可以订阅：
 {
   "project_name": "M20Pro 工地巡检",
   "building": "3栋",
-  "mode": "single",
-  "floors": ["7层"],
-  "active_floor": "7",
-  "map_name": "7层现场图"
+  "mode": "multi",
+  "floors": ["7", "8", "9"],
+  "map_name": "3栋现场图"
 }
 ```
 
-`mode` 取 `single` 或 `multi`。楼层可写数字、`F` 编号或地下层编号，例如 `7`、`F7`、`B1`；接口会统一保存为 `F7`、`B1`。创建建图会话是登记新项目楼层的唯一入口，历史地图和点位不会反向创建楼层。登记楼层不会创建跨楼层路线，跨层任务仍要求 `inspection_waypoints.yaml` 中存在实测路线配置。
+`mode` 取 `single` 或 `multi`。楼层可写数字、`F` 编号或地下层编号，例如 `7`、`F7`、`B1`；接口会统一保存为 `F7`、`B1`。`floors` 在多楼层模式下表示本次项目要建立的全部现场楼层，不表示机器狗当前实时楼层。正式前端不提交 `active_floor`，后端按 `floors` 顺序选择第一层作为初始步骤；API 自动化工具可以显式传入 `active_floor`，但必须属于 `floors`。后续步骤切换使用建图会话的逐层状态，不在创建表单重复选择。
+
+创建建图会话是登记新项目楼层的唯一入口，历史地图和点位不会反向创建楼层。登记楼层不会创建跨楼层路线，跨层任务仍要求 `inspection_waypoints.yaml` 中存在实测路线配置。
 
 ### POST `/api/mapping/start`
 

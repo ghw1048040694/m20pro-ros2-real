@@ -261,7 +261,7 @@ def test_annotation_semantics_normalization() -> None:
     normalized = normalize_annotation_semantics(item)
     assert_equal(normalized["manual_point_type"], "transition", "manual point type")
     assert_equal(normalized["vendor_navigation"]["PointInfo"], 0, "transition point info")
-    assert_equal(normalized["vendor_navigation"]["NavMode"], 0, "transition nav mode")
+    assert_equal(normalized["vendor_navigation"]["NavMode"], 1, "transition uses autonomous nav")
     assert_equal(normalized["vendor_navigation"]["Gait"], 13, "vendor gait")
     assert_equal(normalized["dwell_s"], 2.5, "dwell from legacy duration")
     assert_equal(normalized["area"], "A区", "area alias")
@@ -294,10 +294,25 @@ def test_payload_helpers() -> None:
         7.0,
         "explicit dwell",
     )
-    vendor = vendor_navigation_from_payload({"manual_point_type": "charge", "speed": "2", "nav_mode": "0"})
+    vendor = vendor_navigation_from_payload(
+        {
+            "manual_point_type": "charge",
+            "speed": "2",
+            "nav_mode": "0",
+            "manner": "1",
+            "obs_mode": "1",
+            "vendor_navigation": {"Gait": 14, "Manner": 1, "ObsMode": 1, "NavMode": 0},
+        }
+    )
     assert_equal(vendor["PointInfo"], 3, "charge point info")
     assert_equal(vendor["Speed"], 2, "speed alias")
-    assert_equal(vendor["NavMode"], 0, "nav mode alias")
+    assert_equal(vendor["Gait"], 14, "gait remains configurable")
+    assert_equal(vendor["Manner"], 0, "walking direction is fixed forward")
+    assert_equal(vendor["ObsMode"], 0, "obstacle avoidance is fixed enabled")
+    assert_equal(vendor["NavMode"], 1, "navigation mode is fixed autonomous")
+    stair = vendor_navigation_from_payload({"type": "stair_entry", "manual_point_type": "transition"})
+    assert_equal(stair["Gait"], 14, "stair entry defaults to stair gait")
+    assert_equal(stair["NavMode"], 1, "stair entry keeps autonomous nav")
     assert_equal(string_list([" a ", "", 3]), ["a", "3"], "list strings")
 
 
@@ -316,7 +331,7 @@ def test_annotation_semantics_payload() -> None:
     payload = annotation_semantics_payload(annotation)
     assert_equal(payload["manual_point_type"], "task", "task type")
     assert_equal(payload["manual_point_type_label"], "任务点", "type label")
-    assert_true("type" not in payload, "legacy type is omitted from semantic payload")
+    assert_equal(payload["type"], "patrol", "point role remains available to task consumers")
     assert_equal(payload["dwell_s"], 4.0, "payload dwell")
     assert_equal(payload["vendor_navigation"]["PosX"], 1.0, "vendor pos x")
     assert_equal(payload["vendor_navigation"]["AngleYaw"], 0.2, "vendor yaw")

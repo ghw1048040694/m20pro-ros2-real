@@ -16,19 +16,16 @@ MANUAL_POINT_TYPES: Dict[str, Dict[str, Any]] = {
         "label": "过渡点",
         "point_info": 0,
         "default_dwell_s": 0.0,
-        "default_nav_mode": 0,
     },
     "task": {
         "label": "任务点",
         "point_info": 1,
         "default_dwell_s": 5.0,
-        "default_nav_mode": 1,
     },
     "charge": {
         "label": "充电点",
         "point_info": 3,
         "default_dwell_s": 0.0,
-        "default_nav_mode": 1,
     },
 }
 
@@ -172,24 +169,21 @@ def vendor_navigation_from_payload(payload: Dict[str, Any]) -> Dict[str, int]:
     manual_type = manual_point_type_from_payload(payload)
     defaults = dict(DEFAULT_VENDOR_NAVIGATION)
     defaults["PointInfo"] = int(MANUAL_POINT_TYPES[manual_type]["point_info"])
-    defaults["NavMode"] = int(MANUAL_POINT_TYPES[manual_type]["default_nav_mode"])
+    if str(payload.get("type") or "").strip() == "stair_entry":
+        defaults["Gait"] = 14
     raw = payload.get("vendor_navigation") or {}
     if not isinstance(raw, dict):
         raw = {}
+    else:
+        raw = dict(raw)
     aliases = {
-        "value": "Value",
-        "map_id": "MapID",
-        "point_info": "PointInfo",
         "gait": "Gait",
         "speed": "Speed",
-        "manner": "Manner",
-        "obs_mode": "ObsMode",
-        "nav_mode": "NavMode",
     }
     for key, canonical in aliases.items():
         if key in payload:
             raw[canonical] = payload[key]
-    for key in list(defaults.keys()) + ["PointInfo"]:
+    for key in ("Gait", "Speed"):
         if key not in raw:
             continue
         try:
@@ -345,20 +339,13 @@ def normalize_annotation_semantics(item: Dict[str, Any]) -> Dict[str, Any]:
         manual_type = UI_TYPE_TO_MANUAL_POINT_TYPE.get(legacy_type, "task")
     item["manual_point_type"] = manual_type
 
-    vendor = item.get("vendor_navigation")
-    if not isinstance(vendor, dict):
-        vendor = {}
-    merged = dict(DEFAULT_VENDOR_NAVIGATION)
-    merged["PointInfo"] = int(MANUAL_POINT_TYPES[manual_type]["point_info"])
-    merged["NavMode"] = int(MANUAL_POINT_TYPES[manual_type]["default_nav_mode"])
-    for key in merged:
-        if key not in vendor:
-            continue
-        try:
-            merged[key] = int(vendor[key])
-        except (TypeError, ValueError):
-            pass
-    item["vendor_navigation"] = merged
+    item["vendor_navigation"] = vendor_navigation_from_payload(
+        {
+            "type": legacy_type,
+            "manual_point_type": manual_type,
+            "vendor_navigation": item.get("vendor_navigation"),
+        }
+    )
 
     if "dwell_s" not in item and "inspect_duration_s" in item:
         item["dwell_s"] = item.get("inspect_duration_s")
@@ -421,6 +408,7 @@ def annotation_semantics_payload(annotation: Dict[str, Any]) -> Dict[str, Any]:
         "scan_point": annotation.get("scan_point"),
         "result_file_prefix": annotation.get("result_file_prefix"),
         "floor": annotation.get("floor"),
+        "type": annotation.get("type"),
         "manual_point_type": annotation.get("manual_point_type"),
         "manual_point_type_label": MANUAL_POINT_TYPES[annotation["manual_point_type"]]["label"],
         "pose": dict(pose),
