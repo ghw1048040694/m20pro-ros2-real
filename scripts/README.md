@@ -52,7 +52,7 @@ source install/setup.bash
 第二台测试机代码同步：
 
 ```bash
-# 当前可用：先在上位机 git pull，再同步到第二台 104 并编译
+# 先在上位机 git pull；该入口会部署 106 edge scan，再事务更新 104
 ./scripts/local_deploy_to_test_robot.sh
 
 # 未来当 104 能直接访问公司 GitLab 后，在 104 上执行
@@ -69,7 +69,7 @@ source install/setup.bash
 - 网页“自检”页是开机基础自检主入口；确认全量系统、网页、106 edge scan 和原厂状态链路。
 - U360 雷达巡检默认关闭；需要联动任务点扫描时，启动前设置 `M20PRO_ENABLE_RADAR_INSPECTION=true`、`M20PRO_RADAR_BACKEND=u360_http` 和 `M20PRO_RADAR_DEVICE_URL=http://192.168.107.72:8080`。结果默认写到 `M20PRO_RADAR_OUTPUT_DIR`，未设置时使用 `/home/user/m20pro_radar_results`。
 - 定位、`/scan`、代价地图和 Nav2 生命周期需要到测试场地重定位后再确认；网页自检会把未重定位前的 costmap/Nav2 延后启动显示为信息项，不再作为 WARN 阻塞重定位。
-- `104_preflight_check.sh move` 是终端备用基础自检；网页自检异常、或现场需要保存终端输出时使用。诊断脚本可能临时使用项目轻量 FastDDS 配置观察 relay 点云，用来排除 root 服务和 user 终端之间的 DDS/SHM 观察差异；这不代表 104 正式服务默认改成 `project_udp`。
+- `104_preflight_check.sh move` 是终端备用基础自检；网页自检异常、或现场需要保存终端输出时使用。104 正式服务和诊断终端都应使用项目 UDP-only FastDDS 配置；104 不再观察或转发原始点云。
 - `104_diagnose_preflight.sh` 是只读诊断汇总：会收集网页自检、点云/scan/costmap、新版 Nav2 启动门、辅助模式状态字段和最近日志，不会下发运动、步态或辅助模式命令。
 - `104_diagnose_preflight.sh` 会打印 104 的默认路由、DNS、Git 状态、`/scan` 和 Nav2 状态。
 - `104_goal_mode_battery_gate.py` 现在只作为电量显示探针：只读查询 `http://10.21.31.104:8080/api/state` 并打印当前电量参考值；不会因为低电或读不到电量返回失败，不会调用 `/api/tasks/start`，不会发布 `/m20pro/floor_goal`，不会重定位，不会发运动命令。
@@ -88,7 +88,9 @@ source install/setup.bash
 - `104_enable_autostart.sh move` 安装开机自启动全量 real；服务只拉起系统和网页，不会自动执行任务。
 - `104_autostart_status.sh` 查看自启动服务、8080 端口和最近日志。
 - `104_disable_autostart.sh` 停止并移除自启动服务。
-- `local_deploy_to_test_robot.sh` 从上位机同步当前工作区到测试机，不同步 `.git/build/install/log/bags`。
+- `local_deploy_to_test_robot.sh` 是整狗部署入口：先用最小文件集在 106 编译、安装并启用 edge scan，再把上位机源码同步到 104 暂存目录；停服务切换后只在最终 `/home/user/m20pro_real_ros2_ws` 路径执行 `colcon --symlink-install`，失败自动恢复上一工作区和 systemd 配置。
+- 104 网页订阅者起来后，部署入口会重启一次 106 edge publisher，并要求 `/api/state` 明确返回 `edge_scan`、`m20pro_base_link` 和至少 20 个有效距离才算完成。不要只同步 104，也不要把暂存目录中的 symlink install 直接改名投入运行。
+- `local_deploy_edge_scan_to_106.sh` 是只补装 106 edge 组件的维护入口；正常整狗更新直接运行 `local_deploy_to_test_robot.sh`。
 - 如果 104 上 `/home/user/m20pro_real_ros2_ws` 不是 git 工作区，`git pull` 不会工作；先用 `104_diagnose_preflight.sh` 确认 `git_repo=yes/no`，非 git 工作区继续用上位机 `local_deploy_to_test_robot.sh`，或在网络稳定后用 `104_update_from_gitlab.sh`/`104_update_from_mirror.sh` 转成 git 工作区。
 - 如果 104 需要通过 103 上网，104 必须能拿到默认路由和 DNS，103 自己也必须有 Wi-Fi/上游默认路由、IPv4 转发、NAT 和 dnsmasq；只看到 104 能 ping 到 `10.21.31.103` 不等于能访问 GitHub。
 - `104_update_from_gitlab.sh` 是 104 直连 GitLab 后使用的更新入口；如果当前网络访问不到 `git.fabu.ai`，先不要用它。

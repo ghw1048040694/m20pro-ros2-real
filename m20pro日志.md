@@ -1,6 +1,6 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-07-10 16:44 CST
+Last updated: 2026-07-14 14:15 CST
 
 This file is maintained by Codex as the local M20 Pro project memory for future ChatGPT review. It records the current architecture, important decisions, recent changes, verification status, and next steps.
 
@@ -23292,3 +23292,36 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
   - 全部 26 个 `scripts/test_*.py` 通过；所有 Python/JavaScript/Shell 语法和 `git diff --check` 通过；
   - Humble `m20pro_navigation + m20pro_cloud_bridge + m20pro_bringup + m20pro_inspection + m20pro_radar_inspection` 5 包构建通过，安装态可导入新增契约；
   - 本轮未连接或部署 104/103/106，未修改上位机或机器狗网络；实车生效必须完整重启 real stack，不能只热替换 Web 节点。
+
+## 2026-07-14 14:15 CST - 将正式主线完整部署到另一台测试机器狗
+
+- 网络和目标识别：
+  - 上位机仅使用已有 `enp4s0=10.21.31.200/24` 有线直连，未修改网卡、路由、DNS、Wi-Fi 或公司 VPN；
+  - ARP/SSH 确认测试狗三台主机为 `103=10.21.31.103`、`104=10.21.31.104`、`106=10.21.31.106`；
+  - 104 正式 service 明确引用 `/home/user/m20pro_real_ros2_ws`，部署前磁盘约 18GB 可用且没有活动任务。
+- 部署过程中发现并消除两个流程级问题：
+  - `colcon --symlink-install` 产物记录绝对 build 路径，不能在暂存目录编译后直接改名到正式目录；首次切换因此报 `m20pro_bringup local_setup.bash not found`，自动恢复旧目录和服务；
+  - 原厂 `/opt/robot/scripts/setup_ros2.sh` 不能在 `set -u` 下 source，第二次原地构建被 `ROS_DISTRO: unbound variable` 拦截后同样自动回滚；最终流程固定为“暂存只放源码 -> 停服务切到最终目录 -> 关闭 nounset source 原厂环境 -> 在最终目录构建”。
+- 106 新点云链路补齐：
+  - 测试狗 106 起初没有 `/usr/local/lib/m20pro/m20pro_edge_scan`、env 或 systemd unit，这才是只部署新 104 后没有 `/scan`、Nav2 无法激活的根因；
+  - 仅同步 `tools/edge_scan_feasibility` 和安装脚本，在 106 ARM64 本机构建并安装固定二进制；
+  - `m20pro-edge-scan-106.service` 已设为 `enabled + active`，`NRestarts=0`；
+  - 正式参数为 `/LIDAR/POINTS -> /scan`、`height=-0.25..0.60m`、`MAX_POINTS=0`、`4Hz`、frame=`m20pro_base_link`；实测每帧约 4.0 万到 6.4 万输入点、约 264-281 束有效距离。
+- 104 正式切换：
+  - 主线运行代码为 `e3e7e8319ac264a6505daa1d8d732cf2c121a27f`，5 个 ROS 包在最终 `/home/user/m20pro_real_ros2_ws` 路径完成 Foxy symlink build；
+  - `/etc/default/m20pro-real` 从遗留的 `factory + local_fusion` 收口为 `M20PRO_FASTDDS_PROFILE=project_udp`、`M20PRO_SCAN_TOPIC=/scan`；
+  - 104 新订阅者起来后重启一次 106 edge publisher，规避 106 裸 DDS 发布端对后加入订阅者不稳定的已知发现时序；
+  - `m20pro-real.service=active/running`、`NRestarts=0`，未自动下发导航、速度或重定位命令。
+- 最终静态运行验收：
+  - `/api/state.perception_status=perception_ready`、`mode=edge_scan`、frame=`m20pro_base_link`、有效距离约 270-275、时龄约 0.26s；
+  - controller/planner/recoveries/bt_navigator 四个 lifecycle 节点均为 `active [3]`；
+  - 日志明确出现 `Nav2 lifecycle is active` 和 `M20PRO REAL OK`；
+  - reliable `/m20pro/recording_scan` 约 3.35Hz，后加入录包进程仍有稳定样本；
+  - `/dev/shm=201MB/7.7GB (3%)`，104 无 `lidar_relay` / `pointcloud_fusion` 进程和源码文件；
+  - 清除了 104 上临时回退目录、旧 `/home/user/m20pro_ros2_ws`、`m20pro_ros2_ws.before_git.*` 和旧 relay PID/log，`/home/user` 只剩当前正式工作区，不把老链路备份留在 104。
+- 部署入口根治：
+  - 新增 `scripts/local_deploy_edge_scan_to_106.sh`，只向 106 同步和安装最小 edge 组件；
+  - 新增 `scripts/104_install_staged_workspace.sh`，负责最终路径构建、systemd 配置事务切换和失败回滚；
+  - `scripts/local_deploy_to_test_robot.sh` 现为整狗入口：106 安装 -> 104 暂存同步 -> 最终路径构建 -> 104 启动 -> 106 按序重启 -> edge API 验收；
+  - 新增 `scripts/test_deploy_contract.py`，锁定 106 先部署、最终路径先切后构建、回滚和 edge 验收合同；
+  - 全部 27 个 `scripts/test_*.py`、Shell/Python/JavaScript 语法和 `git diff --check` 通过。
