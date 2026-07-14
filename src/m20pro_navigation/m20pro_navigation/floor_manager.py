@@ -18,6 +18,11 @@ from rclpy.node import Node
 from std_msgs.msg import String
 
 from .geometry import quaternion_to_yaw, yaw_to_quaternion
+from .terrain_segment_contract import (
+    terrain_entry_gait,
+    terrain_segment_at_pose,
+    terrain_segments_from_config,
+)
 
 
 class FloorManager(Node):
@@ -103,6 +108,8 @@ class FloorManager(Node):
         self.post_switch_goal_timer = None
         self.robot_pose: Optional[PoseStamped] = None
         self.stair_zones_by_floor: Dict[str, List[Dict[str, Any]]] = {}
+        self.terrain_segments_by_floor = terrain_segments_from_config(self.config)
+        self.active_terrain_segment: Optional[Dict[str, Any]] = None
         self.initialpose_repeats_left = 0
         self.pending_initialpose: Optional[PoseWithCovarianceStamped] = None
         self.initial_floor_timer = None
@@ -309,6 +316,12 @@ class FloorManager(Node):
                         "stair route %s/%s entry_margin_m %.2f is below the X30 recommended 0.8m"
                         % (floor_id, stair_name, margin)
                     )
+            for segment in self.terrain_segments_by_floor.get(str(floor_id), []):
+                if not segment.get("configured"):
+                    self.get_logger().warning(
+                        "terrain segment %s is invalid: %s"
+                        % (segment.get("id"), segment.get("error"))
+                    )
 
     def _resolve_path(self, value: str) -> str:
         path = os.path.expandvars(os.path.expanduser(value))
@@ -417,6 +430,40 @@ class FloorManager(Node):
 
     def _on_robot_pose(self, msg: PoseStamped) -> None:
         self.robot_pose = msg
+        self._update_terrain_segment_gait(msg)
+
+    def _update_terrain_segment_gait(self, pose: PoseStamped) -> None:
+        if not self.current_floor:
+            return
+        x = float(pose.pose.position.x)
+        y = float(pose.pose.position.y)
+        segment = terrain_segment_at_pose(self.terrain_segments_by_floor, self.current_floor, x, y)
+        active_id = str((self.active_terrain_segment or {}).get("id") or "")
+        segment_id = str((segment or {}).get("id") or "")
+        if active_id == segment_id:
+            return
+        self._leave_active_terrain_segment("pose_exit")
+        if segment is None:
+            return
+        gait, direction = terrain_entry_gait(segment, x, y)
+        self.active_terrain_segment = dict(segment)
+        self._publish_gait(gait)
+        self._publish_stair_status(
+            "terrain_enter floor=%s segment=%s terrain=%s direction=%s gait=%s"
+            % (self.current_floor, segment.get("name"), segment.get("terrain"), direction, gait)
+        )
+
+    def _leave_active_terrain_segment(self, reason: str) -> None:
+        if self.active_terrain_segment is None:
+            return
+        previous = self.active_terrain_segment
+        self.active_terrain_segment = None
+        exit_gait = str(previous.get("exit_gait") or self.get_parameter("flat_gait_label").value)
+        self._publish_gait(exit_gait)
+        self._publish_stair_status(
+            "terrain_exit floor=%s segment=%s terrain=%s gait=%s reason=%s"
+            % (self.current_floor, previous.get("name"), previous.get("terrain"), exit_gait, reason)
+        )
 
     def _on_stair_zones(self, msg: String) -> None:
         try:
@@ -509,6 +556,7 @@ class FloorManager(Node):
             self.get_logger().error("load_map returned result code %d" % result)
             return
 
+        self._leave_active_terrain_segment("floor_switch")
         self.current_floor = target_floor
         self.pending_floor = None
         pose_override = self.pending_pose_override

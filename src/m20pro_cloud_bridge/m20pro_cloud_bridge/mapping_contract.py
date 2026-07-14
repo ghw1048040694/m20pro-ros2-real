@@ -55,13 +55,26 @@ def build_mapping_project_record(
     name: str,
     building: str,
     created_at: str,
+    floors: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     return {
         "id": str(project_id or ""),
         "name": str(name or ""),
         "building": str(building or ""),
+        "floors": list(dict.fromkeys(str(item).strip() for item in (floors or []) if str(item).strip())),
         "created_at": str(created_at or ""),
     }
+
+
+def register_mapping_project_floors(project: Dict[str, Any], floors: List[str]) -> Dict[str, Any]:
+    updated = dict(project)
+    registered = [str(item).strip() for item in (project.get("floors") or []) if str(item).strip()]
+    for floor in floors:
+        floor_id = str(floor or "").strip()
+        if floor_id and floor_id not in registered:
+            registered.append(floor_id)
+    updated["floors"] = registered
+    return updated
 
 
 def build_mapping_session_record(
@@ -175,14 +188,21 @@ def prepare_mapping_session_create(
     )
     project = find_mapping_project(projects, request["project_name"], request["building"])
     created_project = None
+    updated_project = None
     if project is None:
         project = build_mapping_project_record(
             project_id=id_factory("project"),
             name=request["project_name"],
             building=request["building"],
             created_at=now_text(),
+            floors=request["floors"],
         )
         created_project = project
+    else:
+        registered = register_mapping_project_floors(project, request["floors"])
+        if registered != project:
+            updated_project = registered
+        project = registered
     session = build_mapping_session_record(
         session_id=id_factory("map_session"),
         project=project,
@@ -193,6 +213,7 @@ def prepare_mapping_session_create(
         "request": request,
         "project": project,
         "created_project": created_project,
+        "updated_project": updated_project,
         "session": session,
     }
 

@@ -39,11 +39,28 @@
       scanOverlay: true,
       mapModeLabel: "实时 /map",
       workPointerMode: "localize",
+      localizationPopoverOpen: false,
       mapSwitching: false,
       liveRequestInFlight: false,
       multiFloor: null,
       mappingSession: null,
+      mappingCompletedStages: [],
+      taskDraftIds: [],
       crossFloorDraftIds: [],
+      annotationQuery: "",
+      annotationPage: 0,
+      taskQuery: "",
+      taskPage: 0,
+      taskPointQuery: "",
+      crossFloorPointQuery: "",
+      radarResults: [],
+      radarResultQuery: "",
+      radarResultMode: "",
+      radarResultPage: 0,
+      radarResultTotal: 0,
+      lastRadarResultsRefreshAt: 0,
+      loadingRadarResults: false,
+      floorControlsInitialized: false,
       lastMultiFloorRefreshAt: 0,
     };
     window.m20proDebug = {
@@ -62,7 +79,9 @@
           followRobot: state.followRobot,
           multiFloor: state.multiFloor,
           mappingSession: state.mappingSession,
+          taskDraftIds: state.taskDraftIds.slice(),
           crossFloorDraftIds: state.crossFloorDraftIds.slice(),
+          radarResults: state.radarResults,
           view: state.view
         };
       }
@@ -165,6 +184,62 @@
       if (modes.has("modeling")) return "modeling";
       return "measuring";
     }
+    function radarScalarText(value) {
+      if (value === null || value === undefined || value === "") return "-";
+      if (typeof value === "object") {
+        try { return JSON.stringify(value); } catch (_err) { return String(value); }
+      }
+      return String(value);
+    }
+    function radarMetricName(metric) {
+      const name = metric.measurementItem ?? metric.name ?? metric.label ?? metric.metricName ?? metric.metric;
+      if (name !== null && name !== undefined && name !== "") return radarScalarText(name);
+      if (metric.path) return radarScalarText(metric.path);
+      if (metric.measurementItemId !== null && metric.measurementItemId !== undefined && metric.measurementItemId !== "") {
+        return `指标 ${metric.measurementItemId}`;
+      }
+      return "未命名指标";
+    }
+    function radarMetricValue(metric) {
+      const display = metric.displayValue ?? metric.value ?? metric.rawValue ?? metric.numericValue ?? metric.result;
+      const value = radarScalarText(display);
+      const unit = radarScalarText(metric.unit ?? metric.measurementUnit ?? "");
+      return unit !== "-" && !value.includes(unit) ? `${value} ${unit}` : value;
+    }
+    function radarMetricVerdict(metric) {
+      const explicit = metric.conclusion ?? metric.verdict ?? metric.judgement ?? metric.statusText ?? metric.status;
+      if (explicit !== null && explicit !== undefined && explicit !== "") return radarScalarText(explicit);
+      const qualified = metric.qualified ?? metric.isQualified ?? metric.pass;
+      if (qualified === true || String(qualified).toLowerCase() === "true") return "合格";
+      if (qualified === false || String(qualified).toLowerCase() === "false") return "不合格";
+      return "-";
+    }
+    function radarResultMetrics(result) {
+      const summary = result && typeof result.summary === "object" ? result.summary : {};
+      const automatic = Array.isArray(summary.metrics) ? summary.metrics.filter(item => item && typeof item === "object") : [];
+      const manual = result && typeof result.manual_measurement === "object" ? result.manual_measurement : {};
+      const manualRows = Array.isArray(manual.measurements)
+        ? manual.measurements.filter(item => item && typeof item === "object").map(item => ({...item, source: "人工回填"}))
+        : [];
+      return automatic.concat(manualRows);
+    }
+    function radarMetricTableHtml(metrics) {
+      if (!metrics.length) return "";
+      return `
+        <table class="radar-metric-table">
+          <thead><tr><th>测量项目</th><th>位置</th><th>结果</th><th>判定</th></tr></thead>
+          <tbody>
+            ${metrics.map(metric => `
+              <tr>
+                <td>${escapeHtml(radarMetricName(metric))}</td>
+                <td>${escapeHtml(metric.location || metric.source || "-")}</td>
+                <td>${escapeHtml(radarMetricValue(metric))}</td>
+                <td>${escapeHtml(radarMetricVerdict(metric))}</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>`;
+    }
     function renderRadarInspection(record) {
       const box = $("radarInspection");
       if (!box) return;
@@ -181,7 +256,7 @@
       const scanResults = Array.isArray(parsed.scan_results) ? parsed.scan_results : [];
       const displayResult = scanResults.find(item => item && item.summary) || scanResults[0] || {};
       const summary = parsed.summary || displayResult.summary || {};
-      const metrics = Array.isArray(summary.metrics) ? summary.metrics : [];
+      const metrics = radarResultMetrics(displayResult.summary ? displayResult : parsed);
       const status = parsed.status || "-";
       const stateText = parsed.state || "-";
       const resultFetchStatus = parsed.result_fetch_status || displayResult.result_fetch_status || "";
@@ -237,24 +312,7 @@
       if (metrics.length) {
         const tableWrap = document.createElement("div");
         tableWrap.className = "metric-table";
-        const table = document.createElement("table");
-        const tbody = document.createElement("tbody");
-        for (const item of metrics) {
-          const row = document.createElement("tr");
-          for (const value of [
-            item.measurementItemId || "",
-            item.measurementItem || "",
-            item.location || "",
-            item.displayValue || item.rawValue || ""
-          ]) {
-            const cell = document.createElement("td");
-            cell.textContent = value;
-            row.appendChild(cell);
-          }
-          tbody.appendChild(row);
-        }
-        table.appendChild(tbody);
-        tableWrap.appendChild(table);
+        tableWrap.innerHTML = radarMetricTableHtml(metrics);
         box.appendChild(tableWrap);
       } else if (resultFetchStatus === "failed" || summary.resultUnavailable) {
         const note = document.createElement("div");
@@ -280,7 +338,7 @@
       const rows = results.map(item => {
         const waypoint = item.waypoint || {};
         const summary = item.summary || {};
-        const metrics = Array.isArray(summary.metrics) ? summary.metrics : [];
+        const metrics = radarResultMetrics(item);
         const artifact = item.manual_artifact || {};
         const manual = item.manual_measurement || {};
         const manualMeasurements = Array.isArray(manual.measurements) ? manual.measurements : [];
@@ -309,22 +367,7 @@
         const statusClass = item.status === "failed"
           ? "fail"
           : ((item.state === "result_unavailable" || item.result_fetch_status === "failed") ? "warn" : radarStatusClass(item.status || item.state));
-        const metricRows = metrics.length ? `
-          <div class="metric-table">
-            <table>
-              <tbody>
-                ${metrics.map(metric => `
-                  <tr>
-                    <td>${escapeHtml(metric.measurementItemId || "")}</td>
-                    <td>${escapeHtml(metric.measurementItem || "")}</td>
-                    <td>${escapeHtml(metric.location || "")}</td>
-                    <td>${escapeHtml(metric.displayValue || metric.rawValue || "")}</td>
-                  </tr>
-                `).join("")}
-              </tbody>
-            </table>
-          </div>
-        ` : "";
+        const metricRows = metrics.length ? `<div class="metric-table">${radarMetricTableHtml(metrics)}</div>` : "";
         return `
           <div class="radar-result-row">
             <div class="radar-result-head">
@@ -342,6 +385,130 @@
         `;
       }).join("");
       return `<div class="radar-results">${rows}</div>`;
+    }
+    function radarResultLocation(item) {
+      const waypoint = item.waypoint && typeof item.waypoint === "object" ? item.waypoint : {};
+      const summary = item.summary && typeof item.summary === "object" ? item.summary : {};
+      const location = summary.location && typeof summary.location === "object" ? summary.location : {};
+      return [
+        waypoint.floor || location.floor,
+        waypoint.room || waypoint.house || location.room,
+        waypoint.scan_point || location.scanPoint,
+        waypoint.label || location.label
+      ].filter(Boolean).join(" / ") || "未标注位置";
+    }
+    function renderRadarResultWorkspace() {
+      const box = $("radarResultList");
+      if (!box) return;
+      box.innerHTML = "";
+      if ($("radarResultCount")) $("radarResultCount").textContent = String(state.radarResultTotal);
+      renderCollectionPager("radarResultPager", state.radarResultPage, state.radarResultTotal, page => {
+        state.radarResultPage = page;
+        loadRadarResults().catch(console.warn);
+      });
+      if (!state.radarResults.length) {
+        box.innerHTML = '<div class="small">没有匹配的雷达测量结果</div>';
+        return;
+      }
+      for (const item of state.radarResults) {
+        const metrics = radarResultMetrics(item);
+        const statusText = item.status && item.state && item.status !== item.state
+          ? `${item.status} / ${item.state}`
+          : (item.status || item.state || "-");
+        const statusClass = item.status === "failed"
+          ? "fail"
+          : ((item.state === "result_unavailable" || item.result_fetch_status === "failed")
+            ? "warn"
+            : radarStatusClass(item.status || item.state));
+        const mode = item.scan_mode || (item.summary || {}).mode || "-";
+        const taskId = item.task_id || "";
+        const deviceTaskId = item.taskId || "";
+        const artifact = item.manual_artifact || {};
+        const artifactText = mode === "modeling"
+          ? `点云产物：${artifact.artifact_path || item.artifact_status || "待登记"}`
+          : "";
+        const unavailableText = item.result_fetch_status === "failed" || item.state === "result_unavailable"
+          ? `结果暂不可用：${item.result_fetch_error || item.error || "设备结果接口未返回"}`
+          : "";
+        const emptyText = !metrics.length && !unavailableText
+          ? (mode === "modeling" ? artifactText : "该次结果没有结构化指标，可查看原始 JSON")
+          : "";
+        const row = document.createElement("div");
+        row.className = "radar-result-row";
+        row.innerHTML = `
+          <div class="radar-result-head">
+            <span>${escapeHtml(radarResultLocation(item))}</span>
+            <span class="check-status ${statusClass}">${escapeHtml(statusText)}</span>
+          </div>
+          <div class="radar-result-meta">${escapeHtml([
+            radarPlanLabels[mode] || item.scan_label || mode,
+            `${metrics.length} 项指标`,
+            item.finished_at || item.started_at || ""
+          ].filter(Boolean).join(" / "))}</div>
+          <div class="radar-result-meta">${escapeHtml([taskId ? `任务 ${taskId}` : "", deviceTaskId ? `设备 ${deviceTaskId}` : "", artifactText].filter(Boolean).join(" / "))}</div>
+          ${metrics.length ? `<div class="metric-table">${radarMetricTableHtml(metrics)}</div>` : ""}
+          ${unavailableText || emptyText ? `<div class="radar-result-notice">${escapeHtml(unavailableText || emptyText)}</div>` : ""}
+          <div class="actions radar-result-actions">
+            <button type="button" data-radar-open-json="${escapeHtml(item.run_id || "")}" ${item.run_id ? "" : "disabled"}>查看 JSON</button>
+            ${taskId ? `<button type="button" data-radar-task-json="${escapeHtml(taskId)}">任务 JSON</button>` : ""}
+            ${taskId ? `<button type="button" data-radar-task-csv="${escapeHtml(taskId)}">任务 CSV</button>` : ""}
+            ${mode === "modeling" && taskId && item.run_id ? `<button type="button" data-radar-result-artifact="${escapeHtml(item.run_id)}" data-task-id="${escapeHtml(taskId)}">登记点云</button>` : ""}
+            ${item.manual_measure_required && taskId && item.run_id ? `<button type="button" data-radar-result-manual="${escapeHtml(item.run_id)}" data-task-id="${escapeHtml(taskId)}">人工回填</button>` : ""}
+          </div>`;
+        box.appendChild(row);
+      }
+      for (const button of box.querySelectorAll("[data-radar-open-json]")) {
+        button.addEventListener("click", () => window.open(`/api/radar/result?run_id=${encodeURIComponent(button.dataset.radarOpenJson)}`, "_blank"));
+      }
+      for (const button of box.querySelectorAll("[data-radar-task-json]")) {
+        button.addEventListener("click", () => window.open(`/api/radar/task_export?task_id=${encodeURIComponent(button.dataset.radarTaskJson)}&format=json`, "_blank"));
+      }
+      for (const button of box.querySelectorAll("[data-radar-task-csv]")) {
+        button.addEventListener("click", () => window.open(`/api/radar/task_export?task_id=${encodeURIComponent(button.dataset.radarTaskCsv)}&format=csv`, "_blank"));
+      }
+      for (const button of box.querySelectorAll("[data-radar-result-artifact]")) {
+        button.addEventListener("click", async () => {
+          await recordRadarArtifact(button.dataset.taskId, button.dataset.radarResultArtifact);
+          await loadRadarResults();
+        });
+      }
+      for (const button of box.querySelectorAll("[data-radar-result-manual]")) {
+        button.addEventListener("click", async () => {
+          await saveRadarManualMeasurement(button.dataset.taskId, button.dataset.radarResultManual);
+          await loadRadarResults();
+        });
+      }
+    }
+    async function loadRadarResults() {
+      if (!$("radarResultList") || state.loadingRadarResults) return;
+      state.loadingRadarResults = true;
+      try {
+        const query = new URLSearchParams({
+          offset: String(state.radarResultPage * collectionPageSize),
+          limit: String(collectionPageSize)
+        });
+        if (state.radarResultQuery.trim()) query.set("q", state.radarResultQuery.trim());
+        if (state.radarResultMode) query.set("mode", state.radarResultMode);
+        let payload = await fetchJson(`/api/radar/results?${query.toString()}`);
+        state.radarResults = Array.isArray(payload.results) ? payload.results : [];
+        state.radarResultTotal = Number(payload.total || 0);
+        state.lastRadarResultsRefreshAt = Date.now();
+        const pageCount = Math.max(1, Math.ceil(state.radarResultTotal / collectionPageSize));
+        if (state.radarResultPage >= pageCount) {
+          state.radarResultPage = pageCount - 1;
+          if (state.radarResultTotal) {
+            query.set("offset", String(state.radarResultPage * collectionPageSize));
+            payload = await fetchJson(`/api/radar/results?${query.toString()}`);
+            state.radarResults = Array.isArray(payload.results) ? payload.results : [];
+          }
+        }
+        renderRadarResultWorkspace();
+      } catch (err) {
+        const box = $("radarResultList");
+        if (box) box.innerHTML = `<div class="radar-result-notice fail">${escapeHtml(err.message || err)}</div>`;
+      } finally {
+        state.loadingRadarResults = false;
+      }
     }
     async function recordRadarArtifact(taskId, runId) {
       const artifactPath = window.prompt("请输入已导入/已拷贝的点云工程包路径", "");
@@ -743,8 +910,62 @@
       const label = Number.isFinite(key) && Object.prototype.hasOwnProperty.call(map, key) ? map[key] : String(value);
       return `辅助避障 ${label}`;
     }
+    function payloadMessage(payload, fallback = "操作已完成") {
+      if (typeof payload === "string") return payload;
+      if (!payload || typeof payload !== "object") return fallback;
+      if (payload["最终结论"]) {
+        return [payload["最终结论"], payload["判定依据"] || payload["失败原因"], payload["更新时间"]].filter(Boolean).join(" / ");
+      }
+      return String(payload.message || payload.summary || payload.error || payload.code || fallback);
+    }
+    function showOperationFeedback(title, payload, failed = false, context = "") {
+      const dialog = $("operationFeedbackDialog");
+      if (!dialog) return;
+      $("operationFeedbackTitle").textContent = title || (failed ? "操作失败" : "操作完成");
+      $("operationFeedbackContext").textContent = context;
+      const message = $("operationFeedbackMessage");
+      message.className = `operation-message${failed ? " fail" : ""}`;
+      message.textContent = payloadMessage(payload, failed ? "操作失败" : "操作已完成");
+      if (dialog.open) dialog.close();
+      dialog.showModal();
+    }
     function setLog(id, payload) {
-      $(id).textContent = typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
+      const box = $(id);
+      if (box) box.textContent = payloadMessage(payload, "等待状态更新");
+      if (id === "activeTask") showOperationFeedback("任务操作", payload, Boolean(payload && payload.ok === false));
+      if (id === "mapsLog") showOperationFeedback("地图操作", payload, Boolean(payload && payload.ok === false));
+    }
+    const statusPopoverIds = {
+      map: "mapStatusPopover",
+      localization: "localizationStatusPopover",
+      recording: "recordingStatusPopover"
+    };
+    const statusButtonIds = {
+      map: "mapStatusBtn",
+      localization: "localizationStatusBtn",
+      recording: "recordingStatusBtn"
+    };
+    function setStatusPopover(name, open) {
+      for (const [key, id] of Object.entries(statusPopoverIds)) {
+        const popover = $(id);
+        const button = $(statusButtonIds[key]);
+        if (!popover || !button) continue;
+        const visible = key === name && open;
+        popover.hidden = !visible;
+        button.setAttribute("aria-expanded", visible ? "true" : "false");
+      }
+      state.localizationPopoverOpen = name === "localization" && open;
+      if (state.localizationPopoverOpen) {
+        state.view.panMode = false;
+        $("panModeBtn").classList.remove("active-tool");
+        $("cursor").textContent = "重定位取点：在地图上拖拽设置位置和朝向";
+      }
+      updatePointerModeUi();
+      draw();
+    }
+    function toggleStatusPopover(name) {
+      const popover = $(statusPopoverIds[name]);
+      setStatusPopover(name, !popover || popover.hidden);
     }
     function sleepMs(ms) {
       return new Promise(resolve => setTimeout(resolve, ms));
@@ -763,6 +984,7 @@
       const preflightTop = $("preflightTopStatus");
       if (preflightTop) {
         preflightTop.textContent = !result ? "尚未自检" : (result.running ? "自检中" : (result.ok ? "通过" : "异常"));
+        preflightTop.title = preflightStatusText(result);
       }
       const summaries = [$("preflightSummary"), $("taskPreflightSummary")];
       for (const box of summaries) {
@@ -920,6 +1142,18 @@
       if (wp.label) parts.push(`点位 ${wp.label}`);
       if (Number.isFinite(Number(source.index))) parts.push(`序号 ${Number(source.index) + 1}`);
       if (source.phase) parts.push(source.phase === "dwelling" ? "停留中" : "导航中");
+      const radarPlan = wp.radar && typeof wp.radar === "object" ? wp.radar : {};
+      if (source.phase === "dwelling" && radarPlan.enabled === true) {
+        const radar = state.latest && state.latest.radar_inspection && state.latest.radar_inspection.parsed;
+        const radarStatus = radar && String(radar.status || radar.state || "");
+        if (!radarStatus || radarStatus === "starting") parts.push("等待雷达启动");
+        else if (radarStatus === "running") {
+          const progress = Number(radar.progress);
+          parts.push(Number.isFinite(progress) ? `雷达扫描中 ${progress}%` : "雷达扫描中");
+        } else if (["scan_complete", "analysis_pending", "analyzing"].includes(radarStatus)) parts.push("雷达扫描完成，等待结果");
+        else if (radarStatus === "failed") parts.push("雷达扫描失败");
+        else parts.push(`雷达 ${radarStatus}`);
+      }
       if (source.nav_goal_status) parts.push(`Nav2 ${source.nav_goal_status}`);
       if (Number.isFinite(Number(source.distance_m))) parts.push(`距离 ${fmtNumber(Number(source.distance_m), 2)}m`);
       const navFeedback = source.nav_feedback || (activeTask && activeTask.last_nav_feedback) || null;
@@ -1098,6 +1332,82 @@
       addRow("任务阶段", phaseParts.length ? phaseParts.join(" / ") : "无活动任务", activeTask || waypoint ? "ok" : "");
       box.innerHTML = rows.join("");
     }
+    function topicPayload(sample) {
+      if (!sample) return null;
+      if (sample.parsed && typeof sample.parsed === "object") return sample.parsed;
+      if (sample.raw && typeof sample.raw === "object") return sample.raw;
+      if (typeof sample.raw === "string") {
+        try { return JSON.parse(sample.raw); } catch (_err) { return null; }
+      }
+      return typeof sample === "object" ? sample : null;
+    }
+    function renderYoloWorkspace(snapshot) {
+      const statusBox = $("yoloStatus");
+      const resultBox = $("detections");
+      if (!statusBox || !resultBox) return;
+      const status = topicPayload(snapshot && snapshot.inspection_status) || {};
+      const detectionPayload = topicPayload(snapshot && snapshot.detections) || {};
+      const rows = Array.isArray(detectionPayload.detections)
+        ? detectionPayload.detections
+        : (Array.isArray(detectionPayload) ? detectionPayload : []);
+      const ready = status.ready === true;
+      const backend = status.backend || detectionPayload.backend || "未接入";
+      const inferenceMs = Number(status.last_inference_ms);
+      const frameAge = Number(status.last_frame_age_s);
+      statusBox.textContent = [
+        ready ? "YOLO 已就绪" : "YOLO 未就绪",
+        `后端 ${backend}`,
+        Number.isFinite(inferenceMs) ? `推理 ${fmtNumber(inferenceMs, 1)}ms` : "",
+        Number.isFinite(frameAge) ? `画面 ${fmtAge(frameAge)}前` : "",
+        status.last_error ? `异常 ${status.last_error}` : ""
+      ].filter(Boolean).join(" / ");
+      statusBox.classList.toggle("fail", Boolean(status.last_error) || status.ready === false);
+      resultBox.innerHTML = "";
+      if (!rows.length) {
+        resultBox.innerHTML = `<div class="small">${ready ? "当前画面没有检测目标" : "等待 YOLO 检测结果"}</div>`;
+        return;
+      }
+      for (const item of rows.slice(0, 50)) {
+        const confidence = Number(item.confidence);
+        const bbox = Array.isArray(item.bbox_xyxy) ? item.bbox_xyxy : [];
+        const row = document.createElement("div");
+        row.className = "detection-row";
+        row.innerHTML = `
+          <div><div class="detection-name">${escapeHtml(item.class_name || `类别 ${item.class_id ?? "-"}`)}</div><div class="detection-meta">${escapeHtml(bbox.length === 4 ? `区域 ${bbox.map(value => fmtNumber(Number(value), 0)).join(", ")}` : `摄像头 ${detectionPayload.camera || status.camera || "-"}`)}</div></div>
+          <div class="detection-confidence">${Number.isFinite(confidence) ? `${fmtNumber(confidence * 100, 1)}%` : "-"}</div>`;
+        resultBox.appendChild(row);
+      }
+    }
+    function renderTaskExecutionFlow(activeTask, waypoint) {
+      const box = $("taskExecutionFlow");
+      if (!box) return;
+      if (!activeTask || activeTask.status !== "running") {
+        box.innerHTML = '<div class="small">暂无执行任务</div>';
+        return;
+      }
+      const task = state.tasks.find(item => String(item.id || "") === String(activeTask.task_id || ""));
+      const waypoints = task && Array.isArray(task.waypoints)
+        ? task.waypoints
+        : (Array.isArray(activeTask.annotation_ids)
+          ? activeTask.annotation_ids.map(id => state.annotations.find(item => String(item.id || "") === String(id)) || {id})
+          : []);
+      const total = Math.max(waypoints.length, Array.isArray(activeTask.annotation_ids) ? activeTask.annotation_ids.length : 0);
+      const current = Math.max(0, Math.min(Math.max(0, total - 1), Number(activeTask.index) || 0));
+      const phase = String((waypoint && waypoint.phase) || activeTask.phase || "navigating");
+      const phaseText = phase === "dwelling" ? "停留/检测" : (phase === "cross_floor" ? "跨层切换" : "导航中");
+      const progress = total ? Math.max(0, Math.min(100, current / total * 100)) : 0;
+      const rows = waypoints.map((item, index) => {
+        const label = item && (item.label || item.id) || `点位 ${index + 1}`;
+        const floor = item && item.floor ? ` / ${item.floor}` : "";
+        const stateClass = index < current ? "done" : (index === current ? "active" : "pending");
+        const stateText = index < current ? "已完成" : (index === current ? phaseText : "等待");
+        return `<div class="task-flow-row ${stateClass}"><span class="task-flow-index">${index + 1}</span><span>${escapeHtml(label + floor)}</span><span class="task-flow-state">${stateText}</span></div>`;
+      }).join("");
+      box.innerHTML = `
+        <div class="task-flow-head"><strong>${escapeHtml(activeTask.task_name || activeTask.task_id || "执行任务")}</strong><span>${total ? `${current + 1} / ${total}` : phaseText}</span></div>
+        <div class="task-progress-track"><div class="task-progress-fill" style="width:${progress}%"></div></div>
+        <div class="task-flow-list">${rows || `<div class="small">${escapeHtml(activeTask.status_message || phaseText)}</div>`}</div>`;
+    }
     async function loadPreflight() {
       try {
         const payload = await fetchJson("/api/preflight");
@@ -1157,11 +1467,16 @@
       const recording = payload && payload.recording ? payload.recording : {};
       const lines = [];
       lines.push(recording.running ? "正在录包" : (recording.completed ? "录包已完成" : "未录包"));
-      if (recording.prefix) lines.push(`名称: ${recording.prefix}`);
-      if (recording.started_at) lines.push(`开始: ${recording.started_at}`);
-      if (recording.bag_path) lines.push(`路径: ${recording.bag_path}`);
-      if (recording.return_code !== undefined) lines.push(`返回码: ${recording.return_code}`);
-      box.textContent = lines.join("\n");
+      if (recording.prefix) lines.push(`名称 ${recording.prefix}`);
+      if (recording.started_at) lines.push(`开始 ${recording.started_at}`);
+      if (recording.bag_path) lines.push(`路径 ${recording.bag_path}`);
+      if (recording.return_code !== undefined) lines.push(`返回码 ${recording.return_code}`);
+      box.textContent = lines.join(" / ");
+      if ($("recordingTopStatus")) {
+        $("recordingTopStatus").textContent = recording.running
+          ? "录制中"
+          : (recording.completed ? "已完成" : "未录制");
+      }
       $("startRecordingBtn").disabled = !!recording.running;
       $("stopRecordingBtn").disabled = !recording.running;
     }
@@ -1432,7 +1747,7 @@
       };
       state.markDraftSource = source;
       const shownFloor = displayedMapFloor();
-      if (source === "map_click" && shownFloor && $("markFloor")) $("markFloor").value = shownFloor;
+      if (source === "map_click" && shownFloor) setFloorControlValue("markFloor", shownFloor);
       $("markXY").value = `${state.markDraft.x.toFixed(3)}, ${state.markDraft.y.toFixed(3)}`;
       $("markYaw").value = state.markDraft.yaw.toFixed(4);
       $("cursor").textContent = message || `x ${state.markDraft.x.toFixed(3)} / y ${state.markDraft.y.toFixed(3)} / 朝向 ${state.markDraft.yaw.toFixed(3)} rad`;
@@ -1455,8 +1770,8 @@
       return active ? active.dataset.tab : "";
     }
     function activePointerMode() {
+      if (state.localizationPopoverOpen) return "localize";
       const tab = activeTabName();
-      if (tab === "localize") return "localize";
       if (tab === "marks") return "mark";
       if (tab === "work") return state.workPointerMode === "mark" ? "mark" : "localize";
       return null;
@@ -1702,6 +2017,8 @@
       state.liveMapVersion = map.version;
       $("mapTitle").textContent = `实时地图版本 ${map.version}`;
       $("mapMeta").textContent = `${map.width} x ${map.height}, ${map.resolution.toFixed(3)} m/格`;
+      if ($("mapTopStatus")) $("mapTopStatus").textContent = "实时 /map";
+      if ($("mapStatusDetail")) $("mapStatusDetail").textContent = `${map.width} x ${map.height} / ${map.resolution.toFixed(3)} m/格`;
       state.mapModeLabel = "实时 /map";
       updateMapModeUi();
       updateMarkControls();
@@ -1717,6 +2034,8 @@
         state.mapImage = null;
         $("mapTitle").textContent = "实时地图";
         $("mapMeta").textContent = "等待 /map 数据";
+        if ($("mapTopStatus")) $("mapTopStatus").textContent = "实时 /map";
+        if ($("mapStatusDetail")) $("mapStatusDetail").textContent = "等待实时 /map 数据";
         state.mapModeLabel = "实时 /map";
         updateMapModeUi();
         updateMarkControls();
@@ -1740,7 +2059,9 @@
       if (select && select.value !== mapId) select.value = mapId;
       $("mapTitle").textContent = map.name || `固定地图 ${mapId}`;
       $("mapMeta").textContent = `${map.floor || "-"} / ${map.width} x ${map.height}, ${map.resolution.toFixed(3)} m/格`;
-      if ($("markFloor") && map.floor) $("markFloor").value = map.floor;
+      if ($("mapTopStatus")) $("mapTopStatus").textContent = map.name || mapId;
+      if ($("mapStatusDetail")) $("mapStatusDetail").textContent = `${map.name || mapId} / ${map.floor || "未标楼层"} / ${map.width} x ${map.height}`;
+      if (map.floor) setFloorControlValue("markFloor", map.floor);
       state.mapModeLabel = map.source === "project_builtin" ? "项目内置地图" : "固定地图";
       updateMapModeUi();
       await loadAnnotations();
@@ -1755,10 +2076,11 @@
       state.workingMapId = s.working_map_id || null;
       state.effectiveMapId = s.effective_map_id || null;
       renderLocalizationStatus(s);
+      renderPreflight(s.preflight || state.preflight);
       updateFloorDisplay(s);
       updateMarkControls(s);
       $("floor").textContent = text(s.floor);
-      $("stair").textContent = text(s.stair_status);
+      if ($("stair")) $("stair").textContent = text(s.stair_status);
       const gaitParts = [];
       if (s.usage_mode_result) gaitParts.push(text(s.usage_mode_result));
       if (s.gait_result) gaitParts.push(text(s.gait_result));
@@ -1769,7 +2091,7 @@
       const ooaText = formatOoa(ooa);
       if (usageModeText) gaitParts.push(usageModeText);
       if (ooaText) gaitParts.push(ooaText);
-      $("gait").textContent = gaitParts.length ? gaitParts.join(" / ") : "-";
+      if ($("gait")) $("gait").textContent = gaitParts.length ? gaitParts.join(" / ") : "-";
       const currentPoseFresh = hasFreshPose(s);
       const currentPoseAge = poseAgeSec(s);
       if (s.pose) {
@@ -1779,22 +2101,23 @@
         const offsetDeg = Number(s.pose.display_yaw_offset_deg || 0);
         const offsetText = Math.abs(offsetDeg) > 0.01 ? ` / 显示偏置 ${fmtNumber(offsetDeg, 0)}°` : "";
         const ageText = currentPoseAge === null || currentPoseAge === undefined ? "" : ` / ${currentPoseFresh ? "实时" : "最后"} ${fmtAge(currentPoseAge)}前`;
-        $("pose").textContent = `x ${fmtNumber(s.pose.x)} / y ${fmtNumber(s.pose.y)} / 朝向 ${shownYaw}° / 原始 ${rawYaw}°${offsetText}${ageText}`;
+        if ($("pose")) $("pose").textContent = `x ${fmtNumber(s.pose.x)} / y ${fmtNumber(s.pose.y)} / 朝向 ${shownYaw}° / 原始 ${rawYaw}°${offsetText}${ageText}`;
       }
       else {
         const navPose = latestNavFeedbackPose(s);
         if (navPose) {
           const ageText = navPose.age_s === null || navPose.age_s === undefined ? "" : ` / ${fmtAge(navPose.age_s)}前`;
-          $("pose").textContent = `Nav2反馈 x ${fmtNumber(navPose.x)} / y ${fmtNumber(navPose.y)} / 朝向 ${fmtNumber(navPose.yaw * 180 / Math.PI, 0)}°${ageText}`;
+          if ($("pose")) $("pose").textContent = `Nav2反馈 x ${fmtNumber(navPose.x)} / y ${fmtNumber(navPose.y)} / 朝向 ${fmtNumber(navPose.yaw * 180 / Math.PI, 0)}°${ageText}`;
         } else {
-          $("pose").textContent = poseUnavailableText(s);
+          if ($("pose")) $("pose").textContent = poseUnavailableText(s);
         }
       }
       if (s.localization_ok === true && currentPoseFresh) $("localization").textContent = "正常";
       else if (s.localization_ok === true) $("localization").textContent = "位姿过期";
       else if (s.localization_ok === false) $("localization").textContent = "异常/未定位";
       else $("localization").textContent = "-";
-      $("factoryNav").textContent = text(s.navigation_status);
+      $("localization").title = (s.localization_status && s.localization_status.message) || text(s.navigation_status);
+      if ($("factoryNav")) $("factoryNav").textContent = text(s.navigation_status);
       renderPoseTracker("livePoseTracker", s);
       renderPoseTracker("taskPoseTracker", s);
       renderRadarInspection(s.radar_inspection);
@@ -1828,25 +2151,12 @@
       if (s.battery && s.battery.primary) {
         const pack = s.battery.primary;
         const tempText = Number.isFinite(Number(pack.temperature_c)) ? ` / ${fmtNumber(Number(pack.temperature_c), 1)}℃` : "";
-        $("battery").textContent = `${text(pack.level)}% / ${fmtNumber(Number(pack.voltage_v), 1)}V / ${fmtNumber(Number(pack.current_a), 1)}A${tempText}`;
+        $("battery").textContent = `${text(pack.level)}%`;
+        $("battery").title = `${text(pack.level)}% / ${fmtNumber(Number(pack.voltage_v), 1)}V / ${fmtNumber(Number(pack.current_a), 1)}A${tempText}`;
       } else {
         $("battery").textContent = "-";
       }
-      $("nav").textContent = JSON.stringify({
-        路径点数: s.path ? s.path.points.length : 0,
-        动态障碍物: s.dynamic_obstacles ? s.dynamic_obstacles.length : 0,
-        感知链路: s.perception_status || null,
-        雷达扫描: s.radar_inspection || null,
-        当前任务: s.active_task || null,
-        当前点位: s.active_waypoint || null,
-        电量: s.battery && s.battery.primary ? s.battery.primary : null,
-        定位状态: s.localization_ok,
-        原厂导航: s.navigation_status || null,
-        更新时间: s.node_time_text
-      }, null, 2);
-      const det = s.detections && (s.detections.parsed || s.detections.raw);
-      $("detections").textContent = det ? JSON.stringify(det, null, 2) : "等待数据";
-      $("events").textContent = s.events && s.events.length ? JSON.stringify(s.events.slice(-5), null, 2) : "等待数据";
+      renderYoloWorkspace(s);
       if (
         s.relocalization_result
         && s.relocalization_result.last_update !== state.lastRelocalizationStamp
@@ -1874,28 +2184,25 @@
         const waypoint = s.active_waypoint && s.active_waypoint.parsed ? s.active_waypoint.parsed : null;
         followRobotIfNeeded(s.active_task || null);
         renderActiveTaskSummary(s.active_task || null, waypoint || null);
-        $("activeTask").textContent = JSON.stringify({
-          task: s.active_task || null,
-          waypoint,
-          stair_status: s.stair_status || null,
-          navigation_status: s.navigation_status || null
-        }, null, 2);
+        renderTaskExecutionFlow(s.active_task || null, waypoint || null);
       } else if (Date.now() > state.activeTaskLogUntil) {
         renderActiveTaskSummary(null, null);
-        $("activeTask").textContent = "无任务";
+        renderTaskExecutionFlow(null, null);
       }
       updateTaskControlButtons(s);
       const table = $("topics");
-      table.innerHTML = "";
-      for (const [name, info] of Object.entries(s.topics || {})) {
-        const tr = document.createElement("tr");
-        const left = document.createElement("td");
-        const right = document.createElement("td");
-        left.textContent = name;
-        right.textContent = info.available ? fmtAge(info.age_sec) : "无数据";
-        tr.appendChild(left);
-        tr.appendChild(right);
-        table.appendChild(tr);
+      if (table) {
+        table.innerHTML = "";
+        for (const [name, info] of Object.entries(s.topics || {})) {
+          const tr = document.createElement("tr");
+          const left = document.createElement("td");
+          const right = document.createElement("td");
+          left.textContent = name;
+          right.textContent = info.available ? fmtAge(info.age_sec) : "无数据";
+          tr.appendChild(left);
+          tr.appendChild(right);
+          table.appendChild(tr);
+        }
       }
     }
     async function loadMaps() {
@@ -1923,10 +2230,18 @@
         await loadFileMap("");
       }
       updateMarkControls();
+      const selectedRecord = state.maps.find(item => String(item.id || "") === String(selected || ""));
+      if ($("mapTopStatus")) $("mapTopStatus").textContent = selectedRecord ? (selectedRecord.name || selectedRecord.id) : "实时 /map";
+      if ($("mapStatusDetail")) {
+        $("mapStatusDetail").textContent = selectedRecord
+          ? `${selectedRecord.name || selectedRecord.id} / ${selectedRecord.floor || "未标楼层"}`
+          : "当前显示实时 /map";
+      }
       renderMapList();
     }
     function renderMapList() {
       const box = $("mapList");
+      if (!box) return;
       box.innerHTML = "";
       if (!state.maps.length) {
         box.innerHTML = `<div class="small">当前没有可选固定地图，可先使用实时 /map 或从 106 拉取地图。</div>`;
@@ -1944,6 +2259,24 @@
         box.appendChild(el);
       }
     }
+    const collectionPageSize = 12;
+    function collectionMatches(item, query, fields) {
+      const needle = String(query || "").trim().toLowerCase();
+      if (!needle) return true;
+      return fields.some(field => String(item && item[field] || "").toLowerCase().includes(needle));
+    }
+    function renderCollectionPager(id, page, total, onPage) {
+      const box = $(id);
+      if (!box) return;
+      const pageCount = Math.max(1, Math.ceil(total / collectionPageSize));
+      box.innerHTML = `
+        <button type="button" data-page-offset="-1" title="上一页" ${page <= 0 ? "disabled" : ""}>←</button>
+        <span>${total ? `${page + 1} / ${pageCount}` : "0 / 0"}</span>
+        <button type="button" data-page-offset="1" title="下一页" ${page + 1 >= pageCount ? "disabled" : ""}>→</button>`;
+      for (const button of box.querySelectorAll("[data-page-offset]")) {
+        button.addEventListener("click", () => onPage(Math.max(0, Math.min(pageCount - 1, page + Number(button.dataset.pageOffset)))));
+      }
+    }
     async function loadAnnotations() {
       const mapId = currentAnnotationMapId();
       const payload = await fetchJson(`/api/annotations${mapId ? `?map_id=${encodeURIComponent(mapId)}` : ""}`);
@@ -1955,10 +2288,29 @@
       const box = $("annotationList");
       box.innerHTML = "";
       if (!state.annotations.length) {
+        if ($("annotationCount")) $("annotationCount").textContent = "0";
+        renderCollectionPager("annotationPager", 0, 0, () => {});
         box.innerHTML = `<div class="small">当前地图还没有点位。</div>`;
         return;
       }
-      for (const item of state.annotations) {
+      const filtered = state.annotations.filter(item => collectionMatches(
+        item,
+        state.annotationQuery,
+        ["label", "floor", "building", "unit", "house", "area", "room", "scan_point"]
+      ));
+      const pageCount = Math.max(1, Math.ceil(filtered.length / collectionPageSize));
+      state.annotationPage = Math.min(state.annotationPage, pageCount - 1);
+      const visible = filtered.slice(
+        state.annotationPage * collectionPageSize,
+        (state.annotationPage + 1) * collectionPageSize
+      );
+      if ($("annotationCount")) $("annotationCount").textContent = `${filtered.length} / ${state.annotations.length}`;
+      renderCollectionPager("annotationPager", state.annotationPage, filtered.length, page => {
+        state.annotationPage = page;
+        renderAnnotations();
+      });
+      if (!visible.length) box.innerHTML = `<div class="small">没有匹配的点位</div>`;
+      for (const item of visible) {
         const pose = item.pose || {};
         const place = [
           item.building,
@@ -1992,9 +2344,14 @@
       }
       for (const btn of box.querySelectorAll("[data-delete-mark]")) {
         btn.addEventListener("click", async () => {
-          await api("DELETE", `/api/annotations?id=${encodeURIComponent(btn.dataset.deleteMark)}`);
-          await loadAnnotations();
-          draw();
+          try {
+            await api("DELETE", `/api/annotations?id=${encodeURIComponent(btn.dataset.deleteMark)}`);
+            await loadAnnotations();
+            draw();
+            showOperationFeedback("点位已删除", "点位已从当前地图移除。任务数据会按后端合同保持一致。 ");
+          } catch (err) {
+            showOperationFeedback("删除点位失败", err, true);
+          }
         });
       }
     }
@@ -2010,7 +2367,7 @@
       setMarkEditMode(item.id);
       $("markType").value = item.type || "patrol";
       $("manualPointType").value = item.manual_point_type || manualTypeByUiType[item.type] || "task";
-      $("markFloor").value = item.floor || displayedMapFloor();
+      setFloorControlValue("markFloor", item.floor || displayedMapFloor());
       $("markLabel").value = item.label || "";
       $("markBuilding").value = item.building || "";
       $("markUnit").value = item.unit || "";
@@ -2034,26 +2391,83 @@
       $("cursor").textContent = `正在修改 ${item.label || item.id}`;
       draw();
     }
+    function renderOrderedWaypointRows(container, ids, resolveItem, onChange, emptyText) {
+      container.innerHTML = "";
+      for (const [index, annotationId] of ids.entries()) {
+        const item = resolveItem(annotationId);
+        if (!item) continue;
+        const row = document.createElement("div");
+        row.className = "ordered-waypoint";
+        row.innerHTML = `
+          <span class="waypoint-order">${index + 1}</span>
+          <span>${escapeHtml(item.floor || "-")} / ${escapeHtml(item.label || item.id)}</span>
+          <span class="waypoint-actions">
+            <button type="button" data-order-move="${index}:-1" title="上移" ${index === 0 ? "disabled" : ""}>↑</button>
+            <button type="button" data-order-move="${index}:1" title="下移" ${index === ids.length - 1 ? "disabled" : ""}>↓</button>
+            <button type="button" data-order-remove="${index}" title="移除">×</button>
+          </span>`;
+        container.appendChild(row);
+      }
+      if (!ids.length) container.innerHTML = `<div class="small">${escapeHtml(emptyText)}</div>`;
+      for (const button of container.querySelectorAll("[data-order-move]")) {
+        button.addEventListener("click", () => {
+          const [from, offset] = button.dataset.orderMove.split(":").map(Number);
+          const updated = ids.slice();
+          const to = from + offset;
+          [updated[from], updated[to]] = [updated[to], updated[from]];
+          onChange(updated);
+        });
+      }
+      for (const button of container.querySelectorAll("[data-order-remove]")) {
+        button.addEventListener("click", () => {
+          const updated = ids.slice();
+          updated.splice(Number(button.dataset.orderRemove), 1);
+          onChange(updated);
+        });
+      }
+    }
     function renderTaskPoints() {
       const box = $("taskPointList");
+      state.taskDraftIds = state.taskDraftIds.filter(id => state.annotations.some(item => String(item.id) === id));
       if (!state.annotations.length) {
+        if ($("taskPointCount")) $("taskPointCount").textContent = "0";
         box.textContent = "请先选择地图并标点";
         updateCreateTaskButton();
         renderTaskNextStep();
         return;
       }
-      box.innerHTML = "";
-      for (const item of state.annotations) {
-        const line = document.createElement("label");
-        line.className = "checkline";
-        const typeLabel = annotationTypeLabel(item);
-        const place = [item.building, item.unit, item.house, item.area, item.room, item.scan_point, radarPlanText(item.radar)].filter(Boolean).join(" / ");
-        line.innerHTML = `<input type="checkbox" value="${item.id}"><span>${item.floor || "-"} / ${item.label || item.id}${place ? ` / ${place}` : ""} / ${typeLabel} / 朝向 ${fmtNumber(Number((item.pose || {}).yaw), 2)} / 停留 ${fmtNumber(Number(item.dwell_s || 0), 1)}s</span>`;
-        box.appendChild(line);
+      box.innerHTML = '<div class="floor-point-pool"></div><div class="ordered-waypoints"></div>';
+      const pool = box.querySelector(".floor-point-pool");
+      const draft = box.querySelector(".ordered-waypoints");
+      const matching = state.annotations.filter(item => collectionMatches(
+        item,
+        state.taskPointQuery,
+        ["label", "floor", "building", "unit", "house", "area", "room", "scan_point"]
+      ));
+      if ($("taskPointCount")) $("taskPointCount").textContent = `${matching.length} / ${state.annotations.length}`;
+      for (const item of matching.slice(0, 50)) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.dataset.addTaskPoint = item.id;
+        button.textContent = `+ ${item.label || item.id}`;
+        button.title = `${item.floor || "-"} / ${annotationTypeLabel(item)} / ${radarPlanText(item.radar)}`;
+        button.disabled = state.taskDraftIds.includes(String(item.id));
+        pool.appendChild(button);
       }
-      for (const input of box.querySelectorAll("input[type='checkbox']")) {
-        input.addEventListener("change", updateCreateTaskButton);
+      if (!matching.length) pool.innerHTML = '<span class="small">没有匹配的点位</span>';
+      for (const button of pool.querySelectorAll("[data-add-task-point]")) {
+        button.addEventListener("click", () => {
+          state.taskDraftIds.push(String(button.dataset.addTaskPoint));
+          renderTaskPoints();
+        });
       }
+      renderOrderedWaypointRows(
+        draft,
+        state.taskDraftIds,
+        id => state.annotations.find(item => String(item.id) === String(id)),
+        updated => { state.taskDraftIds = updated; renderTaskPoints(); },
+        "按执行顺序加入点位"
+      );
       updateCreateTaskButton();
       renderTaskNextStep();
     }
@@ -2067,20 +2481,18 @@
         btn.title = selectedMapStatus.message || "网页选择地图与 Nav2 当前加载地图不一致，请先切换到正确地图并重定位";
         return;
       }
-      const total = box.querySelectorAll("input[type='checkbox']").length;
-      const checked = box.querySelectorAll("input[type='checkbox']:checked").length;
-      if (!total) {
+      if (!state.annotations.length) {
         btn.disabled = true;
         btn.title = "当前地图还没有任务点；先在当前地图标点";
         return;
       }
-      if (!checked) {
+      if (!state.taskDraftIds.length) {
         btn.disabled = true;
-        btn.title = "先勾选当前地图点位";
+        btn.title = "请按执行顺序加入当前地图点位";
         return;
       }
       btn.disabled = false;
-      btn.title = "用已勾选的当前地图点位生成任务";
+      btn.title = "按当前显示顺序生成任务";
     }
     function multiFloorAnnotations() {
       const floors = (state.multiFloor && state.multiFloor.floors) || [];
@@ -2125,6 +2537,79 @@
       }
       return {ok: true, floors, text: paths.length ? paths.map(path => path.join(" -> ")).join(" / ") : "至少加入两个楼层的点位"};
     }
+    function selectedMappingFloors() {
+      return String($("mappingFloors").value || "")
+        .split(/[,，、;；\s]+/)
+        .map(item => item.trim())
+        .filter(Boolean);
+    }
+    function setFloorControlValue(id, floor) {
+      const control = $(id);
+      const value = String(floor || "").trim();
+      if (!control || !value) return false;
+      if (!Array.from(control.options || []).some(option => option.value === value)) return false;
+      control.value = value;
+      return true;
+    }
+    function replaceFloorOptions(select, floorIds, preferred, multiple = false) {
+      if (!select) return;
+      const previous = multiple
+        ? new Set(Array.from(select.selectedOptions || []).map(option => option.value))
+        : new Set([select.value]);
+      select.innerHTML = "";
+      for (const floor of floorIds) {
+        const option = document.createElement("option");
+        option.value = floor;
+        option.textContent = floor;
+        option.selected = previous.has(floor) || (!previous.size && floor === preferred);
+        select.appendChild(option);
+      }
+      if (!multiple && floorIds.length && !floorIds.includes(select.value)) {
+        select.value = floorIds.includes(preferred) ? preferred : floorIds[0];
+      }
+    }
+    function syncMappingActiveFloorOptions(preferred = "") {
+      const floors = selectedMappingFloors();
+      replaceFloorOptions($("mappingActiveFloor"), floors, preferred || floors[0]);
+      replaceFloorOptions($("importFloor"), floors, $("mappingActiveFloor").value || preferred || floors[0]);
+      if ($("mappingActiveFloor").value) $("importFloor").value = $("mappingActiveFloor").value;
+    }
+    function updateMappingModeUi() {
+      const multi = $("mappingMode").value === "multi";
+      $("mappingActiveFloorRow").hidden = !multi;
+      $("mappingFloors").placeholder = multi
+        ? "例如 7, 8, 9"
+        : "例如 7、F7 或 B1";
+      const floors = selectedMappingFloors();
+      if (!multi && floors.length > 1) {
+        const preferred = $("mappingActiveFloor").value || floors[0];
+        $("mappingFloors").value = preferred;
+      }
+      syncMappingActiveFloorOptions($("mappingActiveFloor").value);
+    }
+    function populateFloorControls(workspace) {
+      const floorIds = (workspace && workspace.floors || []).map(item => String(item.id || "")).filter(Boolean);
+      if (!floorIds.length) return;
+      const mapFloor = displayedMapFloor();
+      const currentFloor = String((workspace && workspace.current_floor) || "");
+      const preferred = floorIds.includes(mapFloor) ? mapFloor : (floorIds.includes(currentFloor) ? currentFloor : floorIds[0]);
+      if (!state.floorControlsInitialized) {
+        const session = state.mappingSession || (workspace && workspace.latest_mapping_session);
+        const sessionFloors = session && Array.isArray(session.floors) ? session.floors.filter(Boolean) : [];
+        if (sessionFloors.length) {
+          $("mappingMode").value = session.mode === "multi" ? "multi" : "single";
+          $("mappingFloors").value = sessionFloors.join(session.mode === "multi" ? ", " : "");
+        }
+      }
+      updateMappingModeUi();
+      setFloorControlValue("mappingActiveFloor", (state.mappingSession || {}).active_floor || preferred);
+      setFloorControlValue("importFloor", $("mappingActiveFloor").value);
+      replaceFloorOptions($("locFloor"), floorIds, preferred);
+      replaceFloorOptions($("markFloor"), floorIds, preferred);
+      $("locFloor").value = preferred;
+      $("markFloor").value = preferred;
+      state.floorControlsInitialized = true;
+    }
     function renderMultiFloorSummary() {
       const box = $("multiFloorSummary");
       if (!box) return;
@@ -2139,7 +2624,9 @@
       const status = workspace.config_available
         ? `${workspace.floor_count} 层 / ${workspace.configured_route_count} 条路线 / 就绪 ${workspace.ready_floor_count}`
         : (workspace.message || "楼层配置不可用");
-      box.innerHTML = `<strong>当前 ${escapeHtml(current)}</strong> / 起始地图 ${escapeHtml(selected)} / ${escapeHtml(status)}`;
+      const terrainCount = (workspace.floors || []).reduce((total, floor) => total + Number(floor.terrain_segment_count || 0), 0);
+      const identityText = workspace.identity_issue_count ? ` / 未注册历史数据 ${workspace.identity_issue_count}` : "";
+      box.innerHTML = `<strong>当前 ${escapeHtml(current)}</strong> / 起始地图 ${escapeHtml(selected)} / ${escapeHtml(status)} / 同层地形段 ${terrainCount}${escapeHtml(identityText)}`;
     }
     function renderCrossFloorComposer() {
       const pool = $("crossFloorPointPool");
@@ -2149,9 +2636,19 @@
       const workspace = state.multiFloor;
       pool.innerHTML = "";
       if (!workspace || !(workspace.floors || []).length) {
+        if ($("crossFloorPointCount")) $("crossFloorPointCount").textContent = "0";
         pool.innerHTML = `<div class="small">没有可用楼层或点位</div>`;
       } else {
+        let remaining = 60;
+        let matchCount = 0;
         for (const floor of workspace.floors) {
+          const floorMatches = (floor.annotations || []).filter(item => collectionMatches(
+            item,
+            state.crossFloorPointQuery,
+            ["label", "floor", "type", "manual_point_type"]
+          ));
+          matchCount += floorMatches.length;
+          if (!floorMatches.length || remaining <= 0) continue;
           const row = document.createElement("div");
           row.className = "floor-group";
           const name = document.createElement("div");
@@ -2164,7 +2661,7 @@
           ].filter(Boolean).join(" / ");
           const points = document.createElement("div");
           points.className = "floor-group-points";
-          for (const item of floor.annotations || []) {
+          for (const item of floorMatches.slice(0, Math.max(0, remaining))) {
             const button = document.createElement("button");
             button.type = "button";
             button.dataset.addCrossFloorPoint = item.id;
@@ -2173,10 +2670,12 @@
             button.disabled = state.crossFloorDraftIds.includes(String(item.id));
             points.appendChild(button);
           }
-          if (!(floor.annotations || []).length) points.innerHTML = `<span class="small">无已保存点位</span>`;
+          remaining -= Math.min(remaining, floorMatches.length);
           row.append(name, points);
           pool.appendChild(row);
         }
+        if ($("crossFloorPointCount")) $("crossFloorPointCount").textContent = String(matchCount);
+        if (!matchCount) pool.innerHTML = `<div class="small">没有匹配的跨楼层点位</div>`;
       }
       for (const button of pool.querySelectorAll("[data-add-cross-floor-point]")) {
         button.addEventListener("click", () => {
@@ -2186,41 +2685,18 @@
       }
 
       state.crossFloorDraftIds = state.crossFloorDraftIds.filter(id => multiFloorAnnotationById(id));
-      draft.innerHTML = "";
-      for (const [index, annotationId] of state.crossFloorDraftIds.entries()) {
-        const item = multiFloorAnnotationById(annotationId);
-        const row = document.createElement("div");
-        row.className = "ordered-waypoint";
-        row.innerHTML = `
-          <span class="waypoint-order">${index + 1}</span>
-          <span>${escapeHtml(item.floor)} / ${escapeHtml(item.label || item.id)}</span>
-          <span class="waypoint-actions">
-            <button type="button" data-move-cross-point="${index}:-1" title="上移" ${index === 0 ? "disabled" : ""}>↑</button>
-            <button type="button" data-move-cross-point="${index}:1" title="下移" ${index === state.crossFloorDraftIds.length - 1 ? "disabled" : ""}>↓</button>
-            <button type="button" data-remove-cross-point="${index}" title="移除">×</button>
-          </span>`;
-        draft.appendChild(row);
-      }
-      if (!state.crossFloorDraftIds.length) draft.innerHTML = `<div class="small">从各楼层依次加入任务点</div>`;
+      renderOrderedWaypointRows(
+        draft,
+        state.crossFloorDraftIds,
+        multiFloorAnnotationById,
+        updated => { state.crossFloorDraftIds = updated; renderCrossFloorComposer(); },
+        "从各楼层依次加入任务点"
+      );
       const route = crossFloorRoutePreview();
       const routeLine = document.createElement("div");
       routeLine.className = "route-preview";
       routeLine.textContent = `楼层路径：${route.text}`;
       draft.appendChild(routeLine);
-      for (const button of draft.querySelectorAll("[data-move-cross-point]")) {
-        button.addEventListener("click", () => {
-          const [from, offset] = button.dataset.moveCrossPoint.split(":").map(Number);
-          const to = from + offset;
-          [state.crossFloorDraftIds[from], state.crossFloorDraftIds[to]] = [state.crossFloorDraftIds[to], state.crossFloorDraftIds[from]];
-          renderCrossFloorComposer();
-        });
-      }
-      for (const button of draft.querySelectorAll("[data-remove-cross-point]")) {
-        button.addEventListener("click", () => {
-          state.crossFloorDraftIds.splice(Number(button.dataset.removeCrossPoint), 1);
-          renderCrossFloorComposer();
-        });
-      }
       const first = multiFloorAnnotationById(state.crossFloorDraftIds[0]);
       const selectedMapId = String((workspace && workspace.selected_map_id) || state.selectedMapId || "");
       const distinctFloors = new Set(route.floors);
@@ -2239,6 +2715,68 @@
     }
     function mappingStatusText(status) {
       return ({pending: "待开始", ready: "可开始", created: "已建立", mapping: "建图中", saved: "已保存", imported: "已拉取", cancelled: "已取消", waiting_manual: "待人工处理"})[status] || status || "待开始";
+    }
+    const mappingProgressStages = [
+      ["environment", "106 环境就绪"],
+      ["session", "建图任务已创建"],
+      ["mapping", "106 正在建图"],
+      ["saved", "建图结果已保存"],
+      ["imported", "地图已拉取到 104"]
+    ];
+    function rememberMappingSessionProgress(session) {
+      if (!session || !session.id) return;
+      const completed = new Set(state.mappingCompletedStages);
+      completed.add("session");
+      const status = String(session.status || "");
+      if (["mapping", "saved", "imported"].includes(status)) completed.add("mapping");
+      if (["saved", "imported"].includes(status)) completed.add("saved");
+      if (status === "imported") completed.add("imported");
+      state.mappingCompletedStages = Array.from(completed);
+    }
+    function showMappingProgress(stage, payload = null, error = false, inProgress = false) {
+      const dialog = $("mappingProgressDialog");
+      if (!dialog) return;
+      const session = (payload && payload.session) || state.mappingSession || {};
+      rememberMappingSessionProgress(session);
+      if (!error && !inProgress) {
+        state.mappingCompletedStages = Array.from(new Set(state.mappingCompletedStages.concat(stage)));
+      }
+      const index = Math.max(0, mappingProgressStages.findIndex(item => item[0] === stage));
+      $("mappingProgressTitle").textContent = error
+        ? "建图流程未完成"
+        : (inProgress ? mappingProgressStages[index][1] : mappingProgressStages[index][1]);
+      $("mappingProgressContext").textContent = [
+        session.map_name || $("mappingMapName").value.trim(),
+        session.active_floor || $("mappingActiveFloor").value
+      ].filter(Boolean).join(" / ");
+      const steps = $("mappingProgressSteps");
+      steps.innerHTML = "";
+      for (const [stepIndex, [, label]] of mappingProgressStages.entries()) {
+        const row = document.createElement("div");
+        const stepKey = mappingProgressStages[stepIndex][0];
+        const status = stepIndex === index && error
+          ? "fail"
+          : (stepIndex === index && inProgress
+            ? "active"
+            : (state.mappingCompletedStages.includes(stepKey) ? "done" : ""));
+        row.className = `operation-step ${status}`.trim();
+        const mark = status === "done" ? "✓" : (status === "fail" ? "!" : String(stepIndex + 1));
+        row.innerHTML = `<span class="operation-step-mark">${mark}</span><span>${escapeHtml(label)}</span>`;
+        steps.appendChild(row);
+      }
+      const defaults = {
+        environment: "104 已确认可以访问 106 建图环境",
+        session: "建图任务及楼层步骤已建立",
+        mapping: "106 建图进程已启动",
+        saved: "106 已完成并保存本次建图结果",
+        imported: "地图文件已归档到 104，可在地图页选择"
+      };
+      const message = error
+        ? String((payload && payload.message) || "操作失败，请检查当前阶段后重试")
+        : (inProgress ? "正在处理，请稍候" : defaults[stage]);
+      $("mappingProgressMessage").textContent = message;
+      $("mappingProgressMessage").className = `operation-message${error ? " fail" : ""}`;
+      if (!dialog.open && typeof dialog.showModal === "function") dialog.showModal();
     }
     function renderMappingFloorSteps() {
       const box = $("mappingFloorSteps");
@@ -2277,12 +2815,11 @@
               floor: button.dataset.selectMappingFloor
             });
             state.mappingSession = payload.session;
-            $("mappingActiveFloor").value = payload.session.active_floor || "";
-            $("importFloor").value = payload.session.active_floor || "";
+            setFloorControlValue("mappingActiveFloor", payload.session.active_floor);
+            setFloorControlValue("importFloor", payload.session.active_floor);
             $("importName").value = payload.session.map_name || "";
-            setLog("mappingLog", payload);
             await loadMultiFloorWorkspace();
-          } catch (err) { setLog("mappingLog", err); }
+          } catch (err) { showMappingProgress("session", err, true); }
         });
       }
     }
@@ -2290,12 +2827,14 @@
       const payload = await fetchJson("/api/multi_floor");
       state.multiFloor = payload;
       state.mappingSession = payload.latest_mapping_session || state.mappingSession;
+      rememberMappingSessionProgress(state.mappingSession);
       state.lastMultiFloorRefreshAt = Date.now();
+      populateFloorControls(payload);
       if (state.mappingSession && state.mappingSession.id) {
         state.sessionId = state.mappingSession.id;
-        $("mappingActiveFloor").value = state.mappingSession.active_floor || "";
+        setFloorControlValue("mappingActiveFloor", state.mappingSession.active_floor);
         $("mappingMapName").value = state.mappingSession.map_name || "";
-        $("importFloor").value = state.mappingSession.active_floor || "";
+        setFloorControlValue("importFloor", state.mappingSession.active_floor);
         $("importName").value = state.mappingSession.map_name || "";
       }
       renderMultiFloorSummary();
@@ -2319,6 +2858,8 @@
         const box = $("taskList");
         box.innerHTML = "";
         if (!state.tasks.length) {
+          if ($("taskCount")) $("taskCount").textContent = "0";
+          renderCollectionPager("taskPager", 0, 0, () => {});
           const hiddenOldTaskCount = Number(payload.hidden_task_count || 0);
           const hiddenText = hiddenOldTaskCount > 0 ? `旧地图任务已隐藏 ${hiddenOldTaskCount} 个，` : "";
           box.innerHTML = `<div class="preflight-summary warn">当前地图还没有任务；${hiddenText}只保留为历史审计，默认接口不会返回，不能用于本次现场执行。请先在当前地图标点并生成任务。</div>`;
@@ -2333,7 +2874,23 @@
           notice.textContent = `当前地图还没有任务；${hiddenText}只保留为历史审计，默认接口不会返回，不能用于本次现场执行。请先在当前地图标点并生成任务。`;
           box.appendChild(notice);
         }
-        for (const task of currentMapTasks) {
+        const filteredTasks = currentMapTasks.filter(task => {
+          if (collectionMatches(task, state.taskQuery, ["name", "id", "status", "created_at"])) return true;
+          return (task.waypoints || []).some(point => collectionMatches(point, state.taskQuery, ["label", "floor", "room", "scan_point"]));
+        });
+        const taskPageCount = Math.max(1, Math.ceil(filteredTasks.length / collectionPageSize));
+        state.taskPage = Math.min(state.taskPage, taskPageCount - 1);
+        const visibleTasks = filteredTasks.slice(
+          state.taskPage * collectionPageSize,
+          (state.taskPage + 1) * collectionPageSize
+        );
+        if ($("taskCount")) $("taskCount").textContent = `${filteredTasks.length} / ${currentMapTasks.length}`;
+        renderCollectionPager("taskPager", state.taskPage, filteredTasks.length, page => {
+          state.taskPage = page;
+          loadTasks().catch(console.warn);
+        });
+        if (currentMapTasks.length && !visibleTasks.length) box.innerHTML = '<div class="small">没有匹配的任务</div>';
+        for (const task of visibleTasks) {
           const activeTask = payload.active_task && payload.active_task.status === "running" ? payload.active_task : null;
           const active = !!activeTask;
           const isRunning = !!(activeTask && activeTask.task_id === task.id);
@@ -2362,9 +2919,12 @@
             <div class="item-head"><span>${task.name || task.id}</span><span class="tag">${displayStatus}</span></div>
             <div class="item-meta">${(task.annotation_ids || []).length} 个点 / ${task.created_at || ""}${task.updated_at ? ` / 更新 ${task.updated_at}` : ""}</div>
             <div class="item-meta">${firstTargetText}</div>
-            <div class="item-meta">顺序：${waypointOrderText}</div>
-            <div class="item-meta">${taskNote}</div>
-            ${radarResultsHtml}
+            <details class="item-details">
+              <summary>点位顺序（${waypointDetails.length}）</summary>
+              <div class="item-meta">${waypointOrderText}</div>
+              <div class="item-meta">${taskNote}</div>
+              ${radarResultsHtml}
+            </details>
             <div class="actions">
               <button class="primary" data-start-task="${task.id}" title="${taskNote}" ${canStart ? "" : "disabled"}>${startLabel}</button>
               <button data-export-radar-json="${task.id}">雷达JSON</button>
@@ -2387,11 +2947,12 @@
               btn.textContent = "启动中...";
               const payload = await api("POST", "/api/tasks/start", taskStartRequest(task));
               state.activeTaskLogUntil = Date.now() + 20000;
-              setLog("activeTask", payload.active_task || payload);
+              renderActiveTaskSummary(payload.active_task || null, null);
+              renderTaskExecutionFlow(payload.active_task || null, null);
               await loadTasks();
             } catch (err) {
               state.activeTaskLogUntil = Date.now() + 30000;
-              setLog("activeTask", err);
+              showOperationFeedback("任务启动失败", err, true);
             } finally {
               await loadTasks();
             }
@@ -2432,6 +2993,7 @@
             try {
               await api("POST", "/api/tasks/update", {task_id: task.id, name: trimmed});
               await loadTasks();
+              showOperationFeedback("任务已更新", `任务名称已改为“${trimmed}”`);
             } catch (err) { setLog("activeTask", err); }
           });
         }
@@ -2443,11 +3005,17 @@
             try {
               await api("DELETE", `/api/tasks?id=${encodeURIComponent(task.id)}`);
               await loadTasks();
+              showOperationFeedback("任务已删除", `已删除“${task.name || task.id}”，点位数据仍保留。`);
             } catch (err) { setLog("activeTask", err); }
           });
         }
       } catch (err) {
-        setLog("activeTask", err);
+        const summary = $("activeTaskSummary");
+        if (summary) {
+          summary.className = "preflight-summary fail";
+          summary.textContent = payloadMessage(err, "任务列表加载失败");
+        }
+        console.warn(err);
       } finally {
         state.loadingTasks = false;
       }
@@ -2466,6 +3034,9 @@
         draw();
         if (["tasks", "work"].includes(activeTabName()) && Date.now() - state.lastTasksRefreshAt > 3000) {
           loadTasks().catch(console.warn);
+        }
+        if (["live", "detect"].includes(tabName) && Date.now() - state.lastRadarResultsRefreshAt > 10000) {
+          loadRadarResults().catch(console.warn);
         }
         if ($("recordingStatus") && Date.now() - state.lastRecordingRefreshAt > 2000) {
           loadRecordingStatus().catch(console.warn);
@@ -2525,10 +3096,12 @@
     }
     for (const btn of document.querySelectorAll("button.tab")) {
       btn.addEventListener("click", () => {
+        setStatusPopover("", false);
         document.querySelectorAll("button.tab").forEach(item => item.classList.remove("active"));
         document.querySelectorAll(".panel").forEach(item => item.classList.remove("active"));
         btn.classList.add("active");
         $(`tab-${btn.dataset.tab}`).classList.add("active");
+        if (["live", "detect"].includes(btn.dataset.tab)) loadRadarResults().catch(console.warn);
         updatePointerModeUi();
         draw();
       });
@@ -2745,65 +3318,80 @@
         return;
       }
       setLocalizeDraft({x: pose.x, y: pose.y, yaw: pose.yaw}, "已取当前机器人位姿");
-      if (state.latest.floor) $("locFloor").value = state.latest.floor;
+      setFloorControlValue("locFloor", displayedMapFloor());
     });
     $("scanOverlayToggle").addEventListener("change", () => {
       state.scanOverlay = $("scanOverlayToggle").checked;
       draw();
     });
+    $("closeMappingProgressBtn").addEventListener("click", () => $("mappingProgressDialog").close());
+    $("mappingFloors").addEventListener("input", () => syncMappingActiveFloorOptions($("mappingActiveFloor").value));
+    $("mappingActiveFloor").addEventListener("change", () => setFloorControlValue("importFloor", $("mappingActiveFloor").value));
+    $("mappingMode").addEventListener("change", updateMappingModeUi);
     $("checkMappingEnvBtn").addEventListener("click", async () => {
-      try { setLog("mappingLog", await api("POST", "/api/mapping/check_environment", {})); }
-      catch (err) { setLog("mappingLog", err); }
+      showMappingProgress("environment", null, false, true);
+      try {
+        const payload = await api("POST", "/api/mapping/check_environment", {});
+        showMappingProgress("environment", payload);
+      } catch (err) { showMappingProgress("environment", err, true); }
     });
     $("createSessionBtn").addEventListener("click", async () => {
+      showMappingProgress("session", null, false, true);
       try {
         const payload = await api("POST", "/api/mapping/session", {
           project_name: $("projectName").value,
           building: $("buildingName").value,
           mode: $("mappingMode").value,
-          floors: $("mappingFloors").value.split(",").map(v => v.trim()).filter(Boolean),
+          floors: selectedMappingFloors(),
           active_floor: $("mappingActiveFloor").value.trim(),
           map_name: $("mappingMapName").value.trim()
         });
         state.sessionId = payload.session.id;
         state.mappingSession = payload.session;
+        $("mappingMode").value = payload.session.mode;
+        $("mappingFloors").value = (payload.session.floors || []).join(payload.session.mode === "multi" ? ", " : "");
+        updateMappingModeUi();
+        setFloorControlValue("mappingActiveFloor", payload.session.active_floor);
         if (!$("importName").value.trim()) $("importName").value = payload.session.map_name || "";
-        $("importFloor").value = payload.session.active_floor || $("importFloor").value;
-        setLog("mappingLog", payload);
+        setFloorControlValue("importFloor", payload.session.active_floor);
+        showMappingProgress("session", payload);
         await loadMultiFloorWorkspace();
-      } catch (err) { setLog("mappingLog", err); }
+      } catch (err) { showMappingProgress("session", err, true); }
     });
     $("startMappingBtn").addEventListener("click", async () => {
       if (!window.confirm("启动 106 真实建图；本流程使用 -b，只建图，不立即切换为导航地图。确认现在开始？")) return;
+      showMappingProgress("mapping", null, false, true);
       try {
         const payload = await api("POST", "/api/mapping/start", {session_id: state.sessionId});
         state.mappingSession = payload.session || state.mappingSession;
-        setLog("mappingLog", payload);
+        showMappingProgress("mapping", payload);
         await loadMultiFloorWorkspace();
       }
-      catch (err) { setLog("mappingLog", err); }
+      catch (err) { showMappingProgress("mapping", err, true); }
     });
     $("finishMappingBtn").addEventListener("click", async () => {
       if (!window.confirm("完成/保存建图会调用 106 drmap stop_mapping；保存后请先拉取建图结果，再手动切换地图生效。确认保存？")) return;
+      showMappingProgress("saved", null, false, true);
       try {
         const payload = await api("POST", "/api/mapping/finish", {session_id: state.sessionId});
         state.mappingSession = payload.session || state.mappingSession;
-        setLog("mappingLog", payload);
+        showMappingProgress("saved", payload);
         await loadMultiFloorWorkspace();
       }
-      catch (err) { setLog("mappingLog", err); }
+      catch (err) { showMappingProgress("saved", err, true); }
     });
     $("importMapBtn").addEventListener("click", async () => {
+      showMappingProgress("imported", null, false, true);
       try {
         const payload = await api("POST", "/api/mapping/import_active_map", {
           session_id: state.sessionId,
           floor: $("importFloor").value.trim(),
           map_name: $("importName").value.trim()
         });
-        setLog("mappingLog", payload);
+        showMappingProgress("imported", payload);
         await loadMaps();
         await loadMultiFloorWorkspace();
-      } catch (err) { setLog("mappingLog", err); }
+      } catch (err) { showMappingProgress("imported", err, true); }
     });
     async function applySelectedMap() {
       if (state.mapSwitching) return;
@@ -2817,7 +3405,6 @@
       button.textContent = "切换中...";
       try {
         const result = await api("POST", "/api/maps/select", {map_id: mapId});
-        setLog("mapsLog", result);
         const acceptedMapId = result.selected_map_id === undefined ? mapId : String(result.selected_map_id || "");
         if (acceptedMapId !== mapId) throw {message: `后端未确认目标地图 ${mapId || "实时 /map"}`};
         if (mapId) await loadFileMap(mapId);
@@ -2835,9 +3422,12 @@
           console.warn(err);
         }
         await loadAnnotations();
+        await loadMultiFloorWorkspace();
         draw();
+        setStatusPopover("", false);
+        showOperationFeedback("地图已切换", result.message || `当前地图已切换为 ${mapRecordById(mapId)?.name || mapId || "实时 /map"}`);
       } catch (err) {
-        setLog("mapsLog", err);
+        showOperationFeedback("地图切换失败", err, true);
         select.value = previousMapId;
         $("cursor").textContent = `地图切换失败，已保持当前工作地图：${err.message || JSON.stringify(err)}`;
         throw err;
@@ -2927,7 +3517,11 @@
         $("markResultPrefix").value = "";
         $("markScanPoint").value = "";
         $("cursor").textContent = `已保存 ${payload.annotation.label || payload.annotation.id}`;
-      } catch (err) { $("cursor").textContent = err.message || JSON.stringify(err); }
+        showOperationFeedback(editingId ? "点位已修改" : "点位已保存", payload.message || `${payload.annotation.label || payload.annotation.id} 已保存到当前地图`);
+      } catch (err) {
+        $("cursor").textContent = err.message || JSON.stringify(err);
+        showOperationFeedback("点位保存失败", err, true);
+      }
     });
     $("useRobotPoseBtn").addEventListener("click", () => {
       const blocked = markBlockedReason();
@@ -2952,17 +3546,19 @@
       state.markDraft = {x: pose.x, y: pose.y, yaw: normalizeYaw(pose.yaw)};
       state.markDraftSource = "robot_pose";
       draw();
-      if (state.latest.floor) $("markFloor").value = state.latest.floor;
+      setFloorControlValue("markFloor", displayedMapFloor());
     });
     $("createTaskBtn").addEventListener("click", async () => {
       try {
-        const ids = Array.from($("taskPointList").querySelectorAll("input:checked")).map(item => item.value);
-        if (!ids.length) throw {message: "当前地图还没有选中的任务点，请先在当前地图标点并勾选点位"};
+        const ids = state.taskDraftIds.slice();
+        if (!ids.length) throw {message: "请先按执行顺序加入当前地图点位"};
         await api("POST", "/api/tasks", {
           name: $("taskName").value.trim(),
           map_id: currentAnnotationMapId(),
           annotation_ids: ids
         });
+        state.taskDraftIds = [];
+        renderTaskPoints();
         await loadTasks();
         setLog("activeTask", "任务已生成；启动前确认首点、顺序和现场状态后再开始");
       } catch (err) { setLog("activeTask", err); }
@@ -2983,11 +3579,44 @@
       state.crossFloorDraftIds = [];
       renderCrossFloorComposer();
     });
-	    $("reloadTasksBtn").addEventListener("click", () => Promise.all([loadTasks(), loadMultiFloorWorkspace()]));
-	    $("frontVideoBtn").addEventListener("click", () => toggleVideo("front"));
-	    $("rearVideoBtn").addEventListener("click", () => toggleVideo("rear"));
-	    $("runPreflightBtn").addEventListener("click", runPreflight);
-    $("refreshPreflightBtn").addEventListener("click", loadPreflight);
+    $("annotationSearch").addEventListener("input", event => {
+      state.annotationQuery = event.target.value;
+      state.annotationPage = 0;
+      renderAnnotations();
+    });
+    $("taskPointSearch").addEventListener("input", event => {
+      state.taskPointQuery = event.target.value;
+      renderTaskPoints();
+    });
+    $("crossFloorPointSearch").addEventListener("input", event => {
+      state.crossFloorPointQuery = event.target.value;
+      renderCrossFloorComposer();
+    });
+    let taskSearchTimer = null;
+    $("taskSearch").addEventListener("input", event => {
+      state.taskQuery = event.target.value;
+      state.taskPage = 0;
+      if (taskSearchTimer) clearTimeout(taskSearchTimer);
+      taskSearchTimer = setTimeout(() => loadTasks().catch(console.warn), 180);
+    });
+    let radarResultSearchTimer = null;
+    $("radarResultSearch").addEventListener("input", event => {
+      state.radarResultQuery = event.target.value;
+      state.radarResultPage = 0;
+      if (radarResultSearchTimer) clearTimeout(radarResultSearchTimer);
+      radarResultSearchTimer = setTimeout(() => loadRadarResults().catch(console.warn), 180);
+    });
+    $("radarResultMode").addEventListener("change", event => {
+      state.radarResultMode = event.target.value;
+      state.radarResultPage = 0;
+      loadRadarResults().catch(console.warn);
+    });
+    $("refreshRadarResultsBtn").addEventListener("click", () => loadRadarResults().catch(console.warn));
+    $("reloadTasksBtn").addEventListener("click", () => Promise.all([loadTasks(), loadMultiFloorWorkspace()]));
+    $("frontVideoBtn").addEventListener("click", () => toggleVideo("front"));
+    $("rearVideoBtn").addEventListener("click", () => toggleVideo("rear"));
+    if ($("runPreflightBtn")) $("runPreflightBtn").addEventListener("click", runPreflight);
+    if ($("refreshPreflightBtn")) $("refreshPreflightBtn").addEventListener("click", loadPreflight);
     $("startRecordingBtn").addEventListener("click", async () => {
       try {
         const duration = Number.parseInt($("recordingDuration").value, 10);
@@ -3004,16 +3633,7 @@
         setTimeout(() => loadRecordingStatus().catch(console.warn), 800);
       } catch (err) { setLog("recordingStatus", err); }
     });
-    $("taskRunPreflightBtn").addEventListener("click", async () => {
-      document.querySelectorAll("button.tab").forEach(item => item.classList.remove("active"));
-      document.querySelectorAll(".panel").forEach(item => item.classList.remove("active"));
-      const targetTab = document.querySelector('button.tab[data-tab="preflight"]')
-        || document.querySelector('button.tab[data-tab="more"]');
-      const targetPanel = $("tab-preflight") || $("tab-more");
-      if (targetTab) targetTab.classList.add("active");
-      if (targetPanel) targetPanel.classList.add("active");
-      await runPreflight();
-    });
+    if ($("taskRunPreflightBtn")) $("taskRunPreflightBtn").addEventListener("click", runPreflight);
     $("stopTaskBtn").addEventListener("click", async () => {
       const btn = $("stopTaskBtn");
       const oldText = btn.textContent;
@@ -3021,10 +3641,12 @@
       btn.textContent = "停止中...";
       try {
         const payload = await api("POST", "/api/tasks/stop", {reason: "web_manual_stop"});
-        setLog("activeTask", payload.message || payload.active_task || "已发送停止指令");
+        renderActiveTaskSummary(null, null);
+        renderTaskExecutionFlow(null, null);
+        $("cursor").textContent = payload.message || "已发送停止指令";
         await loadTasks();
       } catch (err) {
-        setLog("activeTask", err);
+        showOperationFeedback("停止任务失败", err, true);
       } finally {
         btn.disabled = false;
         btn.textContent = oldText;
@@ -3040,16 +3662,26 @@
       btn.textContent = "复位中...";
       try {
         const payload = await api("POST", "/api/tasks/stop", {reason: "web_manual_reset"});
-        setLog("activeTask", payload.message || payload.active_task || "已复位导航状态");
+        renderActiveTaskSummary(null, null);
+        renderTaskExecutionFlow(null, null);
+        $("cursor").textContent = payload.message || "已复位导航状态";
         await loadTasks();
       } catch (err) {
-        setLog("activeTask", err);
+        showOperationFeedback("复位导航失败", err, true);
       } finally {
         btn.disabled = false;
         btn.textContent = oldText;
       }
     });
     window.addEventListener("resize", resizeCanvas);
+	    $("mapStatusBtn").addEventListener("click", () => toggleStatusPopover("map"));
+	    $("localizationStatusBtn").addEventListener("click", () => toggleStatusPopover("localization"));
+	    $("recordingStatusBtn").addEventListener("click", () => toggleStatusPopover("recording"));
+	    $("closeMapStatusBtn").addEventListener("click", () => setStatusPopover("", false));
+	    $("closeLocalizationStatusBtn").addEventListener("click", () => setStatusPopover("", false));
+	    $("closeRecordingStatusBtn").addEventListener("click", () => setStatusPopover("", false));
+	    $("closeOperationFeedbackBtn").addEventListener("click", () => $("operationFeedbackDialog").close());
+	    $("confirmOperationFeedbackBtn").addEventListener("click", () => $("operationFeedbackDialog").close());
 	    resizeCanvas();
 	    setVideoActive(null);
 	    if ($("workModeLocalizeBtn")) {
@@ -3059,6 +3691,12 @@
 	    }
 	    updateMapModeUi();
     syncManualDefaults(false);
-    loadMaps().then(loadAnnotations).then(loadMultiFloorWorkspace).then(loadPreflight).then(loadTasks).then(loadRecordingStatus).catch(console.warn);
+    loadMaps()
+      .then(loadAnnotations)
+      .then(loadMultiFloorWorkspace)
+      .then(loadPreflight)
+      .then(loadTasks)
+      .then(() => Promise.all([loadRadarResults(), loadRecordingStatus()]))
+      .catch(console.warn);
     mainLoop();
     liveLoop();

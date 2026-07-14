@@ -38,6 +38,11 @@ mission:
     obstacle_policy: "stop_only"
     entry_margin_m: 0.8
 
+  # Same-floor ramps/stairs belong under floors.<id>.terrain_segments.
+  # They switch gait while the robot is inside the segment, but never switch
+  # current_floor or maps. A segment requires entry/exit (or polygon), width_m,
+  # gait_forward and gait_reverse. Keep it empty until field coordinates exist.
+
 floors:
   F19:
     level: 19
@@ -47,6 +52,7 @@ floors:
       y: 0.0
       z: 0.0
       yaw: 0.0
+    terrain_segments: {}
     stairs:
       stair_A_up_to_F20:
         direction: "up"
@@ -168,6 +174,7 @@ floors:
       y: 0.0
       z: 0.0
       yaw: 0.0
+    terrain_segments: {}
     stairs:
       stair_A_down_to_F19:
         direction: "down"
@@ -286,6 +293,7 @@ floors:
       y: 0.0
       z: 0.0
       yaw: 0.0
+    terrain_segments: {}
     stairs:
       stair_A_down_to_F20:
         direction: "down"

@@ -1379,7 +1379,9 @@ def scan_plan_from_waypoint(active: Dict[str, Any], default_mode: str, default_d
     radar = waypoint.get("radar") if isinstance(waypoint, dict) else None
     if not isinstance(radar, dict):
         radar = {}
-    enabled = radar.get("enabled", True)
+    # A navigation waypoint only starts the external device when the task
+    # explicitly opted in. Missing legacy metadata must remain navigation-only.
+    enabled = radar.get("enabled", False)
     if isinstance(enabled, str):
         enabled = enabled.strip().lower() not in ("0", "false", "no", "off", "disabled")
     scans: List[Dict[str, Any]] = []

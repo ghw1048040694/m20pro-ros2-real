@@ -1,18 +1,14 @@
 # Archived Lite Workbench
 
-This folder contains the compact frontend layout. It is served as the parallel
-`/lite` workbench and shares the maintained `/static/dashboard.js` controller
-with the field dashboard.
+This folder contains the frozen compact frontend layout that was evaluated as
+the parallel `/lite` workbench. It is retained only as implementation history.
 
 Current status:
 
-- The default field frontend remains `/` until `/lite` completes field acceptance.
-- Business behavior is not duplicated here. Maps, localization, annotation editing,
-  tasks, YOLO, U360 radar and recording use the maintained shared controller.
-- The compact layout uses the current H.264/WebRTC camera pages on port 8888.
-- U360 task export, artifact registration and manual measurement are rendered
-  from the same `/api/radar/*` integration used by the default dashboard.
+- The compact frontend was retired on 2026-07-14 and is no longer served.
+- Requests to `/lite` redirect to the maintained classic `/` frontend.
+- Do not deploy or continue feature work from this directory.
+- API behavior remains maintained in the backend and classic frontend; this
+  snapshot is not an independent business implementation.
 
-Before making `/lite` the default `/`, complete one field pass covering map
-selection, relocalization, point create/edit, a short navigation task, recording,
-video, YOLO and U360 dry-run/real-device status.
+The preserved files may be consulted for layout ideas only.

@@ -88,9 +88,10 @@ def sample_robot_pose() -> dict:
     return {"x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0, "yaw_deg": 0.0}
 
 
-def sample_map(data=None) -> dict:
+def sample_map(data=None, floor="F20") -> dict:
     return {
         "available": True,
+        "floor": floor,
         "width": 4,
         "height": 3,
         "resolution": 0.5,
@@ -245,12 +246,21 @@ def test_validate_task_annotations_for_map() -> None:
             {**sample_annotation("p2"), "floor": "F21", "map_id": "builtin_F21"},
         ],
         "builtin_F20",
-        target_map_payloads={"builtin_F20": sample_map(), "builtin_F21": sample_map()},
+        target_map_payloads={"builtin_F20": sample_map(), "builtin_F21": sample_map(floor="F21")},
         allow_multi_floor=True,
         allow_multi_map=True,
         now_text=now_text,
     )
     assert_equal(cross_floor, None, "explicit cross-floor annotations pass")
+
+    floor_map_mismatch = validate_task_annotations_for_map(
+        [{**sample_annotation(), "floor": "F21"}],
+        "builtin_F20",
+        target_map_payload=sample_map(floor="F20"),
+        allow_multi_floor=True,
+        now_text=now_text,
+    )
+    assert_equal(floor_map_mismatch["code"], "waypoint_floor_map_mismatch", "floor-map mismatch fails")
 
     bad_pose = validate_task_annotations_for_map(
         [{**sample_annotation(), "pose": {"x": 1.0}}],

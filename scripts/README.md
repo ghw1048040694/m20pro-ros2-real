@@ -66,7 +66,7 @@ source install/setup.bash
 - 真机现场测试只用 `104_start_real_shadow.sh` 或 `104_start_real_move.sh` 全量启动。
 - 全量 real 会同时拉起 tcp_bridge、Nav2 和网页前端；感知唯一输入是 106 edge scan 发布的 `/scan`。
 - 任务前通过网页自检、`/api/state` 或 `104_check_edge_scan.sh` 确认 `/scan` 新鲜、frame 正确且有效距离足够。
-- 网页“自检”页是开机基础自检主入口；确认全量系统、网页、106 edge scan 和原厂状态链路。
+- 服务启动 12 秒后自动执行基础自检，之后每 300 秒刷新；结果显示在网页顶部状态栏，用于确认全量系统、网页、106 edge scan 和原厂状态链路。
 - U360 雷达巡检默认关闭；需要联动任务点扫描时，启动前设置 `M20PRO_ENABLE_RADAR_INSPECTION=true`、`M20PRO_RADAR_BACKEND=u360_http` 和 `M20PRO_RADAR_DEVICE_URL=http://192.168.107.72:8080`。结果默认写到 `M20PRO_RADAR_OUTPUT_DIR`，未设置时使用 `/home/user/m20pro_radar_results`。
 - 定位、`/scan`、代价地图和 Nav2 生命周期需要到测试场地重定位后再确认；网页自检会把未重定位前的 costmap/Nav2 延后启动显示为信息项，不再作为 WARN 阻塞重定位。
 - `104_preflight_check.sh move` 是终端备用基础自检；网页自检异常、或现场需要保存终端输出时使用。104 正式服务和诊断终端都应使用项目 UDP-only FastDDS 配置；104 不再观察或转发原始点云。
@@ -76,7 +76,8 @@ source install/setup.bash
 - 现场任务问题统一录 rosbag 复盘，不再使用前端 watcher、ready-check、失败快照或 smoke 脚本作为正式流程。录包用 `./scripts/104_record_bag.sh 180 <label>`，上位机拉回用 `./scripts/local_pull_bags.sh`。
 - 历史前端 watcher/ready-check/analyzer/smoke 脚本已删除，不再作为维护对象。
 
-- 重定位排查以网页定位页、`localization_status` 和开发手册 TCP `2101/1` 回执为准；不要再用“106 是否收到 `/initialpose`”作为成功判断。
+- 重定位排查以网页顶部“定位”浮层、`localization_status` 和开发手册 TCP `2101/1` 回执为准；不要再用“106 是否收到 `/initialpose`”作为成功判断。
+- 当前地图、重定位和录包都从网页顶部状态栏进入，不再占用独立侧栏面板。
 - `104_start_web.sh` 只用于开发预览网页界面，不会拉起 tcp_bridge/Nav2，不能作为现场任务流程。
 - `127.0.0.1:8080` 只适合在运行前端的那台机器本机自测。
 - `shadow` 不放开运动控制。

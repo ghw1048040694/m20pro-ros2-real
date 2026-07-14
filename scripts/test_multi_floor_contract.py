@@ -46,6 +46,7 @@ def floor_config() -> dict:
             "F20": {
                 "level": 20,
                 "initial_pose": pose(0),
+                "terrain_segments": {"same_floor_ramp": {"entry": pose(0), "exit": pose(1)}},
                 "stairs": {
                     "up": {
                         "target_floor": "F21",
@@ -129,6 +130,52 @@ def test_workspace_aggregation() -> None:
     assert_equal(workspace["floors"][1]["historical_annotation_count"], 1, "historical point excluded")
     assert_equal(workspace["floors"][1]["annotations"][0]["id"], "p20", "selected map points only")
     assert_equal(workspace["floors"][1]["mapping_step"]["status"], "mapping", "mapping step")
+    assert_equal(workspace["floors"][1]["terrain_segment_count"], 1, "same-floor terrain count")
+
+
+def test_workspace_excludes_unregistered_floor_data() -> None:
+    workspace = build_multi_floor_workspace(
+        floor_config=floor_config(),
+        maps=maps() + [{"id": "bad", "name": "F1", "floor": "F1"}],
+        annotations=annotations() + [{"id": "bad_point", "floor": "F1", "map_id": "bad"}],
+        sessions=[{"id": "bad_session", "floors": ["F1"], "active_floor": "F1"}],
+        current_floor="F20",
+        selected_map_id="map20",
+    )
+    assert_equal(workspace["floor_count"], 3, "only registered floors exposed")
+    assert_equal(workspace["identity_issue_count"], 3, "unregistered records reported")
+    assert_equal(workspace["latest_mapping_session"], None, "invalid session excluded")
+
+
+def test_project_single_floor_does_not_require_cross_floor_route() -> None:
+    workspace = build_multi_floor_workspace(
+        floor_config={
+            "floors": {
+                "F7": {
+                    "level": 7,
+                    "registry_source": "project",
+                    "stairs": {},
+                    "terrain_segments": {},
+                }
+            }
+        },
+        maps=[
+            {
+                "id": "map7",
+                "name": "7层现场图",
+                "floor": "F7",
+                "factory_apply_path": "/var/opt/robot/data/maps/map-7",
+            }
+        ],
+        annotations=[],
+        sessions=[],
+        current_floor="F7",
+        selected_map_id="map7",
+    )
+    floor = workspace["floors"][0]
+    assert_equal(floor["route_configured"], False, "project floor is single-floor only")
+    assert_equal(floor["warnings"], [], "single floor does not require route or switch pose")
+    assert_equal(floor["ready"], True, "single floor ready with a factory map")
 
 
 def test_cross_floor_task_order_and_route() -> None:
@@ -171,6 +218,8 @@ def main() -> int:
     for test in (
         test_routes_and_multi_hop_path,
         test_workspace_aggregation,
+        test_workspace_excludes_unregistered_floor_data,
+        test_project_single_floor_does_not_require_cross_floor_route,
         test_cross_floor_task_order_and_route,
     ):
         test()

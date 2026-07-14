@@ -4,17 +4,53 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>M20Pro 现场操作台</title>
-  <link rel="stylesheet" href="/static/dashboard.css?v=20260710-camera-h264" />
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="/static/dashboard.css?v=20260714-classic-ops" />
 
 </head>
 <body>
-  <header>
-    <div>
-      <h1>M20Pro 现场操作台</h1>
-      <div class="subhead">建图、拉图、选图、标点、任务与实时状态统一入口</div>
+  <header class="topbar">
+    <div class="top-brand"><strong>M20Pro</strong><span>现场操作台</span></div>
+    <div class="top-status">
+      <span class="status-chip"><span id="statusDot" class="dot"></span><strong id="statusText">连接中</strong></span>
+      <button id="mapStatusBtn" class="status-chip status-action" type="button" aria-expanded="false"><span>地图</span><strong id="mapTopStatus">等待</strong></button>
+      <span class="status-chip"><span>楼层</span><strong id="floor">-</strong></span>
+      <button id="localizationStatusBtn" class="status-chip status-action" type="button" aria-expanded="false"><span>定位</span><strong id="localization">-</strong></button>
+      <span class="status-chip"><span>点云</span><strong id="perceptionTopStatus">等待</strong></span>
+      <span class="status-chip"><span>自检</span><strong id="preflightTopStatus">启动中</strong></span>
+      <span class="status-chip"><span>电量</span><strong id="battery">-</strong></span>
+      <span class="status-chip"><span>任务</span><strong id="taskTopStatus">空闲</strong></span>
+      <span class="status-chip"><span>雷达</span><strong id="radarTopStatus">等待</strong></span>
+      <button id="recordingStatusBtn" class="status-chip status-action" type="button" aria-expanded="false"><span>录包</span><strong id="recordingTopStatus">未录制</strong></button>
     </div>
-    <span class="pill"><span id="statusDot" class="dot"></span><span id="statusText">连接中</span></span>
   </header>
+
+  <section id="mapStatusPopover" class="status-popover" hidden>
+    <div class="status-popover-head"><strong>当前地图</strong><button id="closeMapStatusBtn" class="icon-button" type="button" title="关闭" aria-label="关闭">×</button></div>
+    <div class="row"><label>显示地图</label><select id="mapSelect"></select></div>
+    <div id="mapStatusDetail" class="compact-status">等待地图状态</div>
+    <div class="actions"><button class="primary" id="selectMapBtn">设为当前地图</button><button id="reloadMapsBtn">刷新</button></div>
+  </section>
+
+  <section id="localizationStatusPopover" class="status-popover status-popover-wide" hidden>
+    <div class="status-popover-head"><strong>重定位</strong><button id="closeLocalizationStatusBtn" class="icon-button" type="button" title="关闭" aria-label="关闭">×</button></div>
+    <div class="row"><label>坐标 X/Y</label><input id="locXY" placeholder="在地图上拖拽取点" /></div>
+    <div class="row"><label>朝向(rad)</label><input id="locYaw" value="0.0" /></div>
+    <div class="row"><label>楼层</label><select id="locFloor" disabled></select></div>
+    <div class="actions"><button class="primary" id="sendInitialPoseBtn">执行重定位</button><button id="useRobotPoseForLocBtn">使用当前位姿</button></div>
+    <label class="checkline"><input id="scanOverlayToggle" type="checkbox" checked /><span>显示实时激光轮廓</span></label>
+    <div class="small" id="scanOverlayStatus">等待 /scan 数据</div>
+    <div id="localizationStatus" class="preflight-summary warn">等待定位状态</div>
+    <div id="localizeLog" class="compact-status">打开定位后，在地图上拖拽设置位置和朝向。</div>
+  </section>
+
+  <section id="recordingStatusPopover" class="status-popover" hidden>
+    <div class="status-popover-head"><strong>ROS 录包</strong><button id="closeRecordingStatusBtn" class="icon-button" type="button" title="关闭" aria-label="关闭">×</button></div>
+    <div class="row"><label>最长时间(s)</label><input id="recordingDuration" value="300" /></div>
+    <div class="row"><label>名称</label><input id="recordingPrefix" value="testfield" /></div>
+    <div class="actions"><button class="primary" id="startRecordingBtn">开始录包</button><button id="stopRecordingBtn">停止录包</button></div>
+    <div id="recordingStatus" class="compact-status">未开始</div>
+  </section>
   <main>
     <section class="map-wrap">
       <div class="map-toolbar">
@@ -39,119 +75,13 @@
     </section>
     <aside class="side">
       <nav class="tabs">
-        <button class="tab active" data-tab="live">看板</button>
-        <button class="tab" data-tab="localize">定位</button>
-        <button class="tab" data-tab="mapping">建图</button>
-        <button class="tab" data-tab="maps">地图</button>
+        <button class="tab active" data-tab="mapping">建图</button>
         <button class="tab" data-tab="marks">标点</button>
         <button class="tab" data-tab="tasks">任务</button>
-        <button class="tab" data-tab="preflight">自检</button>
+        <button class="tab" data-tab="detect">检测</button>
       </nav>
       <div class="content">
-        <section id="tab-live" class="panel active">
-          <div class="grid">
-            <div class="tile">
-              <div class="label">当前楼层</div>
-              <div id="floor" class="value">-</div>
-            </div>
-            <div class="tile">
-              <div class="label">楼梯状态</div>
-              <div id="stair" class="value">-</div>
-            </div>
-            <div class="tile">
-              <div class="label">模式/步态</div>
-              <div id="gait" class="value">-</div>
-            </div>
-            <div class="tile wide">
-              <div class="label">机器人位姿</div>
-              <div id="pose" class="value">-</div>
-            </div>
-            <div class="tile">
-              <div class="label">定位状态</div>
-              <div id="localization" class="value">-</div>
-            </div>
-            <div class="tile">
-              <div class="label">原厂导航</div>
-              <div id="factoryNav" class="value">-</div>
-            </div>
-            <div class="tile">
-              <div class="label">机器狗电量</div>
-              <div id="battery" class="value">-</div>
-            </div>
-          </div>
-          <div class="section">
-            <h2>导航状态</h2>
-            <div id="livePoseTracker" class="pose-tracker">等待位姿</div>
-            <div id="nav" class="mono">等待数据</div>
-          </div>
-          <div class="section">
-            <h2>视频画面</h2>
-            <div class="video-grid">
-	              <div class="video-card">
-	                <div class="video-head">
-	                  <strong>前摄像头</strong>
-	                  <button id="frontVideoBtn" class="mini-btn" type="button" data-video-camera="front">打开</button>
-	                </div>
-	                <iframe id="frontVideo" data-src="http://10.21.31.104:8888/video1/" title="前摄像头画面" allow="autoplay; fullscreen" loading="lazy"></iframe>
-	              </div>
-	              <div class="video-card">
-	                <div class="video-head">
-	                  <strong>后摄像头</strong>
-	                  <button id="rearVideoBtn" class="mini-btn" type="button" data-video-camera="rear">打开</button>
-	                </div>
-	                <iframe id="rearVideo" data-src="http://10.21.31.104:8888/video2/" title="后摄像头画面" allow="autoplay; fullscreen" loading="lazy"></iframe>
-	              </div>
-            </div>
-          </div>
-          <div class="section">
-            <h2>YOLO 检测</h2>
-            <div id="detections" class="mono">等待数据</div>
-          </div>
-          <div class="section">
-            <h2>雷达扫描</h2>
-            <div id="radarInspection" class="radar-box">等待数据</div>
-          </div>
-          <div class="section">
-            <h2>事件</h2>
-            <div id="events" class="mono">等待数据</div>
-          </div>
-          <div class="section">
-            <h2>话题状态</h2>
-            <table id="topics"></table>
-          </div>
-        </section>
-
-        <section id="tab-localize" class="panel">
-          <div class="section">
-            <h2>网页重定位</h2>
-            <div class="row">
-              <label>坐标 X/Y</label>
-              <input id="locXY" placeholder="拖拽地图自动填入" />
-            </div>
-            <div class="row">
-              <label>朝向角(rad)</label>
-              <input id="locYaw" value="0.0" />
-            </div>
-            <div class="row">
-              <label>楼层</label>
-              <input id="locFloor" value="F20" />
-            </div>
-            <div class="actions">
-              <button class="primary" id="sendInitialPoseBtn">执行重定位</button>
-              <button id="useRobotPoseForLocBtn">使用当前机器人位姿</button>
-            </div>
-            <label class="checkline">
-              <input id="scanOverlayToggle" type="checkbox" checked />
-              <span>显示实时激光轮廓</span>
-            </label>
-            <div class="small" id="scanOverlayStatus">等待 /scan 数据</div>
-            <div class="small" style="margin-top:8px;">重定位不要求导航已就绪；只要固定地图和 /scan/点云可用，就可以先在工位或测试场地执行重定位。</div>
-            <div id="localizationStatus" class="preflight-summary warn" style="margin-top:8px;">等待定位状态</div>
-            <div id="localizeLog" class="mono" style="margin-top:8px;">先在地图上拖箭头，红色激光轮廓贴合地图后再执行重定位。</div>
-          </div>
-        </section>
-
-        <section id="tab-mapping" class="panel">
+        <section id="tab-mapping" class="panel active">
           <div class="section">
             <h2>建图向导</h2>
             <div class="row">
@@ -165,17 +95,17 @@
             <div class="row">
               <label>建图模式</label>
               <select id="mappingMode">
-                <option value="multi">多楼层</option>
                 <option value="single">单楼层</option>
+                <option value="multi">多楼层</option>
               </select>
             </div>
             <div class="row">
-              <label>楼层编号</label>
-              <input id="mappingFloors" value="F19,F20,F21" />
+              <label>实际楼层</label>
+              <input id="mappingFloors" placeholder="例如 7、F7 或 B1" aria-label="实际建图楼层" autocomplete="off" />
             </div>
-            <div class="row">
-              <label>当前楼层</label>
-              <input id="mappingActiveFloor" value="F20" />
+            <div id="mappingActiveFloorRow" class="row" hidden>
+              <label>当前建图楼层</label>
+              <select id="mappingActiveFloor"></select>
             </div>
             <div class="row">
               <label>地图名称</label>
@@ -196,7 +126,7 @@
             <h2>拉取 106 建图结果</h2>
             <div class="row">
               <label>地图楼层</label>
-              <input id="importFloor" value="F20" />
+              <select id="importFloor" disabled></select>
             </div>
             <div class="row">
               <label>地图名称</label>
@@ -205,28 +135,6 @@
             <div class="actions">
               <button class="primary" id="importMapBtn">从 106 拉到 104</button>
             </div>
-            <div id="mappingLog" class="mono" style="margin-top:8px;">等待操作</div>
-          </div>
-        </section>
-
-        <section id="tab-maps" class="panel">
-          <div class="section">
-            <h2>地图选择</h2>
-            <div class="row">
-              <label>显示地图</label>
-              <select id="mapSelect"></select>
-            </div>
-            <div class="actions">
-              <button class="primary" id="selectMapBtn">设为当前地图</button>
-              <button id="reloadMapsBtn">刷新列表</button>
-            </div>
-            <div class="small" style="margin-top:8px;">
-              选择地图后点击“设为当前地图”；Nav2 确认成功后页面才会切换。查看非当前楼层时不叠加机器狗实时位置。
-            </div>
-          </div>
-          <div class="section">
-            <h2>地图列表</h2>
-            <div id="mapList" class="list"></div>
           </div>
         </section>
 
@@ -254,7 +162,7 @@
             </div>
             <div class="row">
               <label>楼层</label>
-              <input id="markFloor" value="F20" />
+              <select id="markFloor" disabled></select>
             </div>
             <div class="row">
               <label>名称</label>
@@ -291,10 +199,10 @@
             <div class="row">
               <label>雷达扫描</label>
               <select id="markRadarPlan">
+                <option value="none" selected>不触发雷达</option>
                 <option value="measuring">仅实测实量</option>
                 <option value="modeling">仅点云建模</option>
                 <option value="both">实测实量 + 点云建模</option>
-                <option value="none">不触发雷达</option>
               </select>
             </div>
             <div class="row">
@@ -351,64 +259,37 @@
           </div>
           <div class="section">
             <h2>当前地图点位</h2>
-            <div id="annotationList" class="list"></div>
-          </div>
-        </section>
-
-        <section id="tab-preflight" class="panel">
-          <div class="section">
-            <h2>作业前自检</h2>
-            <div id="preflightSummary" class="preflight-summary">尚未自检</div>
-            <div class="actions">
-              <button class="primary" id="runPreflightBtn">开机基础自检</button>
-              <button id="refreshPreflightBtn">刷新结果</button>
+            <div class="collection-toolbar">
+              <input id="annotationSearch" type="search" placeholder="搜索名称、楼层、房间或扫描点" aria-label="搜索点位" />
+              <span id="annotationCount" class="collection-count">0</span>
             </div>
-            <div class="small" style="margin-top:8px;">
-              基础自检确认全量系统、网页、106 edge scan、电量和原厂状态链路；定位和代价地图需要到测试场地重定位后再看，不会阻止手柄原厂遥控。
-            </div>
-          </div>
-          <div class="section">
-            <h2>检查项</h2>
-            <div id="preflightItems" class="list"></div>
-          </div>
-          <div class="section">
-            <h2>原始结果</h2>
-            <div id="preflightRaw" class="mono">等待自检</div>
-          </div>
-          <div class="section">
-            <h2>导航录包</h2>
-            <div class="row"><label>最长时间(s)</label><input id="recordingDuration" value="300" /></div>
-            <div class="row"><label>名称</label><input id="recordingPrefix" value="testfield" /></div>
-            <div class="actions">
-              <button class="primary" id="startRecordingBtn">开始录包</button>
-              <button id="stopRecordingBtn">停止录包</button>
-            </div>
-            <div id="recordingStatus" class="mono">未开始</div>
+            <div id="annotationList" class="list bounded-list"></div>
+            <div id="annotationPager" class="collection-pager"></div>
           </div>
         </section>
 
         <section id="tab-tasks" class="panel">
-          <div class="section">
-            <h2>作业前状态</h2>
-            <div id="taskPreflightSummary" class="preflight-summary">尚未自检</div>
-            <div id="taskNextStepSummary" class="preflight-summary warn" style="margin-top:8px;">等待下一步判断</div>
-            <div class="actions">
-              <button id="taskRunPreflightBtn">开机基础自检</button>
-            </div>
-          </div>
           <div class="section">
             <h2>任务编排</h2>
             <div class="row">
               <label>任务名称</label>
               <input id="taskName" value="日常巡检任务" />
             </div>
-            <div id="taskPointList" class="mono">请先选择地图并标点</div>
+            <div class="collection-toolbar">
+              <input id="taskPointSearch" type="search" placeholder="搜索可选点位" aria-label="搜索可选点位" />
+              <span id="taskPointCount" class="collection-count">0</span>
+            </div>
+            <div id="taskPointList" class="ordered-composer">请先选择地图并标点</div>
             <div class="actions">
               <button class="primary" id="createTaskBtn">生成任务</button>
               <button id="reloadTasksBtn">刷新任务</button>
             </div>
             <h2 style="margin-top:14px;">跨楼层编排</h2>
             <div id="multiFloorSummary" class="multi-floor-summary">正在读取楼层配置</div>
+            <div class="collection-toolbar">
+              <input id="crossFloorPointSearch" type="search" placeholder="搜索跨楼层点位" aria-label="搜索跨楼层点位" />
+              <span id="crossFloorPointCount" class="collection-count">0</span>
+            </div>
             <div id="crossFloorPointPool" class="floor-point-pool"></div>
             <div id="crossFloorDraft" class="ordered-waypoints"></div>
             <div class="actions">
@@ -418,24 +299,76 @@
           </div>
           <div class="section">
             <h2>任务列表</h2>
-            <div id="taskList" class="list"></div>
+            <div class="collection-toolbar">
+              <input id="taskSearch" type="search" placeholder="搜索任务或点位" aria-label="搜索任务" />
+              <span id="taskCount" class="collection-count">0</span>
+            </div>
+            <div id="taskList" class="list bounded-list"></div>
+            <div id="taskPager" class="collection-pager"></div>
           </div>
           <div class="section">
             <h2>当前执行</h2>
             <div id="taskPoseTracker" class="pose-tracker">等待位姿</div>
             <div id="activeTaskSummary" class="preflight-summary">无任务</div>
-            <div id="activeTask" class="mono">无任务</div>
+            <div id="taskExecutionFlow" class="task-execution-flow"><div class="small">暂无执行任务</div></div>
             <div class="actions">
               <button class="danger" id="stopTaskBtn">停止当前任务</button>
               <button id="resetTaskSessionBtn">复位导航状态</button>
             </div>
           </div>
         </section>
+
+        <section id="tab-detect" class="panel">
+          <div class="section">
+            <h2>实时视频</h2>
+            <div class="video-grid">
+              <div class="video-card"><div class="video-head"><strong>前摄像头</strong><button id="frontVideoBtn" class="mini-btn" type="button" data-video-camera="front">打开</button></div><iframe id="frontVideo" data-src="http://10.21.31.104:8888/video1/" title="前摄像头画面" allow="autoplay; fullscreen" loading="lazy"></iframe></div>
+              <div class="video-card"><div class="video-head"><strong>后摄像头</strong><button id="rearVideoBtn" class="mini-btn" type="button" data-video-camera="rear">打开</button></div><iframe id="rearVideo" data-src="http://10.21.31.104:8888/video2/" title="后摄像头画面" allow="autoplay; fullscreen" loading="lazy"></iframe></div>
+            </div>
+          </div>
+          <div class="section">
+            <h2>YOLO 检测</h2>
+            <div id="yoloStatus" class="compact-status">等待 YOLO 状态</div>
+            <div id="detections" class="detection-results"><div class="small">暂无检测结果</div></div>
+          </div>
+          <div class="section">
+            <h2>雷达状态</h2>
+            <div id="radarInspection" class="radar-box">等待雷达状态</div>
+          </div>
+          <div class="section">
+            <h2>雷达测量结果</h2>
+            <div class="collection-toolbar radar-result-toolbar">
+              <input id="radarResultSearch" type="search" placeholder="搜索任务、房间、点位或指标" aria-label="搜索雷达测量结果" />
+              <select id="radarResultMode" aria-label="筛选雷达测量模式"><option value="">全部模式</option><option value="measuring">实测实量</option><option value="modeling">点云建模</option></select>
+              <button id="refreshRadarResultsBtn" type="button">刷新</button><span id="radarResultCount" class="collection-count">0</span>
+            </div>
+            <div id="radarResultList" class="radar-result-list">等待结果</div>
+            <div id="radarResultPager" class="collection-pager"></div>
+          </div>
+        </section>
       </div>
     </aside>
   </main>
 
-  <script src="/static/dashboard.js?v=20260710-camera-h264"></script>
+  <dialog id="mappingProgressDialog" class="operation-dialog">
+    <div class="operation-dialog-head">
+      <div>
+        <div id="mappingProgressTitle" class="operation-dialog-title">建图任务</div>
+        <div id="mappingProgressContext" class="operation-dialog-context"></div>
+      </div>
+      <button id="closeMappingProgressBtn" class="icon-button" type="button" title="关闭" aria-label="关闭">×</button>
+    </div>
+    <div id="mappingProgressSteps" class="operation-steps"></div>
+    <div id="mappingProgressMessage" class="operation-message"></div>
+  </dialog>
+
+  <dialog id="operationFeedbackDialog" class="operation-dialog feedback-dialog">
+    <div class="operation-dialog-head"><div><div id="operationFeedbackTitle" class="operation-dialog-title">操作结果</div><div id="operationFeedbackContext" class="operation-dialog-context"></div></div><button id="closeOperationFeedbackBtn" class="icon-button" type="button" title="关闭" aria-label="关闭">×</button></div>
+    <div id="operationFeedbackMessage" class="operation-message"></div>
+    <div class="dialog-actions"><button id="confirmOperationFeedbackBtn" class="primary" type="button">确定</button></div>
+  </dialog>
+
+  <script src="/static/dashboard.js?v=20260714-classic-ops"></script>
 
 </body>
 </html>

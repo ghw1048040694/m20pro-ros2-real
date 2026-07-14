@@ -53,11 +53,11 @@ def test_waypoint_identity_and_scan_plan() -> None:
     assert_equal(plan["scans"][1]["manual_measure_required"], True, "modeling manual result")
 
 
-def test_disabled_and_default_scan_plan() -> None:
+def test_disabled_and_explicit_scan_plan() -> None:
     disabled = {"waypoint": {"radar": {"enabled": "false"}}}
     assert_equal(scan_plan_from_waypoint(disabled, "measuring", "low"), {"enabled": False, "scans": []}, "disabled plan")
     fallback = scan_plan_from_waypoint({"waypoint": {}}, "invalid", "normal")
-    assert_equal(fallback["scans"][0]["mode"], "measuring", "safe default mode")
+    assert_equal(fallback, {"enabled": False, "scans": []}, "missing radar is navigation only")
 
 
 def test_nested_device_state_and_timeout_detection() -> None:
@@ -89,7 +89,7 @@ def test_measurement_summary_and_task_id() -> None:
 def main() -> None:
     tests = [
         test_waypoint_identity_and_scan_plan,
-        test_disabled_and_default_scan_plan,
+        test_disabled_and_explicit_scan_plan,
         test_nested_device_state_and_timeout_detection,
         test_measurement_summary_and_task_id,
     ]

@@ -75,6 +75,7 @@ def test_prepare_mapping_session_create_reuses_project() -> None:
         default_map_name="{active_floor}_stamp",
     )
     assert_equal(prepared["created_project"], None, "no new project")
+    assert_equal(prepared["updated_project"]["floors"], ["F20"], "existing project registers floor")
     assert_equal(prepared["session"]["project_id"], "project_existing", "project id")
     assert_equal(prepared["session"]["id"], "map_session_1", "session id")
     assert_equal(prepared["session"]["map_name"], "F20_stamp", "map name")
@@ -181,6 +182,7 @@ def test_prepare_mapping_session_create_adds_project() -> None:
         default_map_name="{active_floor}_stamp",
     )
     assert_equal(prepared["created_project"]["id"], "project_1", "new project id")
+    assert_equal(prepared["created_project"]["floors"], [], "new empty project floor registry")
     assert_equal(prepared["session"]["project_id"], "project_1", "session project id")
     assert_equal(prepared["session"]["map_name"], "map_stamp", "fallback map name")
 

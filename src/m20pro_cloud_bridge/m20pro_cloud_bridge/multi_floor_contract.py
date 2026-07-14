@@ -138,13 +138,25 @@ def build_multi_floor_workspace(
     annotation_items = [dict(item) for item in annotations if isinstance(item, dict) and item.get("id")]
     session_items = [dict(item) for item in sessions if isinstance(item, dict)]
     floor_ids = set(str(item).strip() for item in configured_floors if str(item).strip())
-    floor_ids.update(item["floor"] for item in map_items if item["floor"])
-    floor_ids.update(str(item.get("floor") or "").strip() for item in annotation_items if item.get("floor"))
+    unregistered_map_ids = [item["id"] for item in map_items if item["floor"] not in floor_ids]
+    unregistered_annotation_ids = [
+        str(item.get("id"))
+        for item in annotation_items
+        if str(item.get("floor") or "").strip() not in floor_ids
+    ]
+    valid_sessions = []
+    unregistered_session_ids = []
     for session in session_items:
-        floor_ids.update(str(item).strip() for item in (session.get("floors") or []) if str(item).strip())
+        session_floors = {
+            str(item).strip() for item in (session.get("floors") or []) if str(item).strip()
+        }
+        if session_floors and session_floors.issubset(floor_ids):
+            valid_sessions.append(session)
+        elif session_floors:
+            unregistered_session_ids.append(str(session.get("id") or ""))
 
     routes = stair_routes_from_config(floor_config)
-    latest_session = session_items[-1] if session_items else None
+    latest_session = valid_sessions[-1] if valid_sessions else None
     latest_steps = mapping_floor_steps(latest_session or {})
     steps_by_floor = {str(item.get("floor") or ""): item for item in latest_steps}
     selected_map = next((item for item in map_items if item["id"] == str(selected_map_id or "")), None)
@@ -165,20 +177,31 @@ def build_multi_floor_workspace(
         outgoing = [item for item in routes if item["source_floor"] == floor_id]
         incoming = [item for item in routes if item["target_floor"] == floor_id]
         configured = configured_floors.get(floor_id) if isinstance(configured_floors, dict) else None
+        registry_source = str(configured.get("registry_source") or "route_config") if isinstance(configured, dict) else ""
+        route_configured = registry_source != "project"
         initial_pose = configured.get("initial_pose") if isinstance(configured, dict) else None
+        terrain_segments = configured.get("terrain_segments") if isinstance(configured, dict) else {}
+        if isinstance(terrain_segments, dict):
+            terrain_segment_count = len([item for item in terrain_segments.values() if isinstance(item, dict)])
+        elif isinstance(terrain_segments, list):
+            terrain_segment_count = len([item for item in terrain_segments if isinstance(item, dict)])
+        else:
+            terrain_segment_count = 0
         warnings: List[str] = []
         if not floor_maps:
             warnings.append("缺少地图")
         elif not any(item.get("factory_ready") for item in floor_maps):
             warnings.append("缺少106可切换地图包")
-        if not _pose_ready(initial_pose):
+        if route_configured and not _pose_ready(initial_pose):
             warnings.append("缺少初始定位位姿")
-        if not outgoing and len(floor_ids) > 1:
+        if route_configured and not outgoing and len(floor_ids) > 1:
             warnings.append("缺少离开本层的楼梯路线")
         floors.append(
             {
                 "id": floor_id,
                 "level": configured.get("level") if isinstance(configured, dict) else None,
+                "registry_source": registry_source,
+                "route_configured": route_configured,
                 "current": floor_id == str(current_floor or ""),
                 "maps": floor_maps,
                 "preferred_map_id": preferred.get("id") if preferred else None,
@@ -199,6 +222,7 @@ def build_multi_floor_workspace(
                 ],
                 "route_out_count": len(outgoing),
                 "route_in_count": len(incoming),
+                "terrain_segment_count": terrain_segment_count,
                 "mapping_step": dict(steps_by_floor.get(floor_id) or {}),
                 "warnings": warnings,
                 "ready": not warnings,
@@ -220,6 +244,14 @@ def build_multi_floor_workspace(
         "floor_count": len(floors),
         "configured_route_count": len(configured_routes),
         "ready_floor_count": sum(1 for item in floors if item["ready"]),
+        "identity_issues": {
+            "unregistered_map_ids": unregistered_map_ids,
+            "unregistered_annotation_ids": unregistered_annotation_ids,
+            "unregistered_session_ids": unregistered_session_ids,
+        },
+        "identity_issue_count": len(unregistered_map_ids)
+        + len(unregistered_annotation_ids)
+        + len(unregistered_session_ids),
         "ready": bool(floors) and all(item["ready"] for item in floors) and len(configured_routes) >= max(0, len(floors) - 1),
     }
 

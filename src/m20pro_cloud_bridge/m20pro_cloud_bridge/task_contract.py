@@ -355,6 +355,7 @@ def validate_task_annotations_for_map(
     expected_map_id = str(task_map_id or "").strip() or "live_map"
     bad_maps = []
     bad_floors = []
+    bad_floor_maps = []
     bad_poses = []
     out_of_map = []
     blocked_cells = []
@@ -400,6 +401,19 @@ def validate_task_annotations_for_map(
         if target_map_payloads is not None and annotation_map_id:
             point_map_payload = target_map_payloads.get(annotation_map_id)
         if point_map_payload is not None:
+            map_floor = str(point_map_payload.get("floor") or "").strip()
+            if floor and map_floor and floor != map_floor:
+                bad_floor_maps.append(
+                    {
+                        "index": index,
+                        "annotation_id": annotation_id,
+                        "label": annotation.get("label"),
+                        "annotation_floor": floor,
+                        "map_floor": map_floor,
+                        "annotation_map_id": annotation_map_id,
+                    }
+                )
+                continue
             pose_error = pose_map_bounds_error(pose, point_map_payload, "任务点位")
             if pose_error:
                 out_of_map.append(
@@ -441,6 +455,13 @@ def validate_task_annotations_for_map(
             "waypoint_floor_missing",
             "任务中存在楼层为空的点位，请重新标点后重新生成任务",
             {**base, "bad_waypoints": bad_floors[:10]},
+            now_text=now_text,
+        )
+    if bad_floor_maps:
+        return readiness_failure(
+            "waypoint_floor_map_mismatch",
+            "任务点位楼层与其绑定地图楼层不一致，请修正地图身份后重新标点",
+            {**base, "bad_waypoints": bad_floor_maps[:10]},
             now_text=now_text,
         )
     if len(floors) > 1 and not allow_multi_floor:

@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>M20Pro 现场操作台</title>
-  <link rel="stylesheet" href="/static/dashboard-lite.css?v=20260710-api-complete" />
+  <link rel="stylesheet" href="/static/dashboard-lite.css?v=20260714-actual-floors" />
 </head>
 <body>
   <header class="topbar">
@@ -101,7 +101,7 @@
             </div>
             <div class="row compact-row">
               <label>楼层</label>
-              <input id="locFloor" value="F20" />
+              <select id="locFloor" disabled></select>
             </div>
             <div class="actions">
               <button class="primary" id="sendInitialPoseBtn">执行重定位</button>
@@ -139,7 +139,7 @@
             </div>
             <div class="row compact-row">
               <label>楼层</label>
-              <input id="markFloor" value="F20" />
+              <select id="markFloor" disabled></select>
             </div>
             <div class="row">
               <label>名称</label>
@@ -172,7 +172,7 @@
             <div class="row">
               <label>雷达模式</label>
               <select id="markRadarPlan">
-                <option value="none">不触发雷达</option>
+                <option value="none" selected>不触发雷达</option>
                 <option value="measuring">仅实测实量</option>
                 <option value="modeling">仅点云建模</option>
                 <option value="both">实测实量 + 点云建模</option>
@@ -237,7 +237,12 @@
 
           <div class="section">
             <h2>当前地图点位</h2>
-            <div id="annotationList" class="list"></div>
+            <div class="collection-toolbar">
+              <input id="annotationSearch" type="search" placeholder="搜索名称、楼层、房间或扫描点" aria-label="搜索点位" />
+              <span id="annotationCount" class="collection-count">0</span>
+            </div>
+            <div id="annotationList" class="list bounded-list"></div>
+            <div id="annotationPager" class="collection-pager"></div>
           </div>
 
           <div class="section">
@@ -248,7 +253,11 @@
               <label>任务名称</label>
               <input id="taskName" value="日常巡检任务" />
             </div>
-            <div id="taskPointList" class="mono compact-log">请先选择地图并标点</div>
+            <div class="collection-toolbar">
+              <input id="taskPointSearch" type="search" placeholder="搜索可选点位" aria-label="搜索可选点位" />
+              <span id="taskPointCount" class="collection-count">0</span>
+            </div>
+            <div id="taskPointList" class="ordered-composer">请先选择地图并标点</div>
             <div class="actions">
               <button class="primary" id="createTaskBtn">生成任务</button>
               <button id="reloadTasksBtn">刷新任务</button>
@@ -256,6 +265,10 @@
             </div>
             <h2 class="inline-heading">跨楼层编排</h2>
             <div id="multiFloorSummary" class="multi-floor-summary">正在读取楼层配置</div>
+            <div class="collection-toolbar">
+              <input id="crossFloorPointSearch" type="search" placeholder="搜索跨楼层点位" aria-label="搜索跨楼层点位" />
+              <span id="crossFloorPointCount" class="collection-count">0</span>
+            </div>
             <div id="crossFloorPointPool" class="floor-point-pool"></div>
             <div id="crossFloorDraft" class="ordered-waypoints"></div>
             <div class="actions">
@@ -263,7 +276,12 @@
               <button id="clearCrossFloorDraftBtn">清空顺序</button>
             </div>
             <h2 class="inline-heading">任务列表</h2>
-            <div id="taskList" class="list"></div>
+            <div class="collection-toolbar">
+              <input id="taskSearch" type="search" placeholder="搜索任务或点位" aria-label="搜索任务" />
+              <span id="taskCount" class="collection-count">0</span>
+            </div>
+            <div id="taskList" class="list bounded-list"></div>
+            <div id="taskPager" class="collection-pager"></div>
           </div>
 
           <div class="section">
@@ -285,9 +303,24 @@
           </div>
 
           <div class="section">
-            <h2>昂锐雷达</h2>
+            <h2>昂锐雷达状态</h2>
             <div id="radarInspection" class="radar-box">等待雷达状态</div>
-            <div class="small">任务结果中可导出 JSON/CSV；建模点支持登记点云和人工回填。</div>
+          </div>
+
+          <div class="section">
+            <h2>雷达测量结果</h2>
+            <div class="collection-toolbar radar-result-toolbar">
+              <input id="radarResultSearch" type="search" placeholder="搜索任务、房间、点位或指标" aria-label="搜索雷达测量结果" />
+              <select id="radarResultMode" aria-label="筛选雷达测量模式">
+                <option value="">全部模式</option>
+                <option value="measuring">实测实量</option>
+                <option value="modeling">点云建模</option>
+              </select>
+              <button id="refreshRadarResultsBtn" type="button">刷新</button>
+              <span id="radarResultCount" class="collection-count">0</span>
+            </div>
+            <div id="radarResultList" class="radar-result-list">等待结果</div>
+            <div id="radarResultPager" class="collection-pager"></div>
           </div>
 
           <div class="section">
@@ -343,17 +376,17 @@
               <div class="row">
                 <label>建图模式</label>
                 <select id="mappingMode">
-                  <option value="multi">多楼层</option>
                   <option value="single">单楼层</option>
+                  <option value="multi">多楼层</option>
                 </select>
               </div>
               <div class="row">
-                <label>楼层编号</label>
-                <input id="mappingFloors" value="F19,F20,F21" />
+                <label>实际楼层</label>
+                <input id="mappingFloors" placeholder="例如 7、F7 或 B1" aria-label="实际建图楼层" autocomplete="off" />
               </div>
-              <div class="row">
-                <label>当前楼层</label>
-                <input id="mappingActiveFloor" value="F20" />
+              <div id="mappingActiveFloorRow" class="row" hidden>
+                <label>当前建图楼层</label>
+                <select id="mappingActiveFloor"></select>
               </div>
               <div class="row">
                 <label>地图名称</label>
@@ -369,7 +402,7 @@
               <div class="small">默认按《M20 Pro 软件使用手册》通过 106 的 drmap -b 建图；保存后不会立即用于导航，需要拉取后手动切换地图生效。</div>
               <div class="row">
                 <label>地图楼层</label>
-                <input id="importFloor" value="F20" />
+                <select id="importFloor" disabled></select>
               </div>
               <div class="row">
                 <label>地图名称</label>
@@ -378,7 +411,6 @@
               <div class="actions">
                 <button class="primary" id="importMapBtn">从 106 拉到 104</button>
               </div>
-              <div id="mappingLog" class="mono compact-log">等待操作</div>
             </div>
           </details>
 
@@ -447,6 +479,18 @@
     </aside>
   </main>
 
-  <script src="/static/dashboard.js?v=20260710-api-complete"></script>
+  <dialog id="mappingProgressDialog" class="operation-dialog">
+    <div class="operation-dialog-head">
+      <div>
+        <div id="mappingProgressTitle" class="operation-dialog-title">建图任务</div>
+        <div id="mappingProgressContext" class="operation-dialog-context"></div>
+      </div>
+      <button id="closeMappingProgressBtn" class="icon-button" type="button" title="关闭" aria-label="关闭">×</button>
+    </div>
+    <div id="mappingProgressSteps" class="operation-steps"></div>
+    <div id="mappingProgressMessage" class="operation-message"></div>
+  </dialog>
+
+  <script src="/static/dashboard.js?v=20260714-actual-floors"></script>
 </body>
 </html>

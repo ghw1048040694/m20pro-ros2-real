@@ -64,6 +64,15 @@ from .annotation_contract import (
     normalize_annotation_semantics,
     resolve_annotation_dwell_s,
 )
+from .floor_identity_contract import (
+    augment_floor_config,
+    configured_floor_ids,
+    normalize_floor_id,
+    resolve_operational_floor,
+    validate_floor_matches_map,
+    validate_mapping_session_identity,
+    validate_registered_floor,
+)
 from .localization_contract import (
     initialpose_api_response_payload,
     localization_status_payload,
@@ -158,6 +167,7 @@ from .preflight_contract import (
     preflight_perception_items,
     preflight_result_payload,
 )
+from .radar_result_contract import radar_job_matches_query
 from .ros_message_contract import (
     pose_to_dict,
     stamp_to_float,
@@ -265,21 +275,14 @@ def get_cv2() -> Any:
 DASHBOARD_STATIC_DIR = FsPath(__file__).resolve().parent / "static"
 DASHBOARD_HTML_PATH = DASHBOARD_STATIC_DIR / "dashboard.html"
 M20PRO_WS_DIR = FsPath(os.environ.get("M20PRO_WS") or FsPath.cwd())
-DASHBOARD_LITE_DIR = M20PRO_WS_DIR / "docs" / "archived_frontend_lite_workbench" / "20260702"
-DASHBOARD_LITE_HTML_PATH = DASHBOARD_LITE_DIR / "dashboard.html"
 DASHBOARD_STATIC_FILES = {
     "/static/dashboard.css": (DASHBOARD_STATIC_DIR / "dashboard.css", "text/css; charset=utf-8"),
     "/static/dashboard.js": (DASHBOARD_STATIC_DIR / "dashboard.js", "application/javascript; charset=utf-8"),
-    "/static/dashboard-lite.css": (DASHBOARD_LITE_DIR / "dashboard.css", "text/css; charset=utf-8"),
 }
 
 
 def _load_dashboard_html() -> bytes:
     return DASHBOARD_HTML_PATH.read_bytes()
-
-
-def _load_dashboard_lite_html() -> bytes:
-    return DASHBOARD_LITE_HTML_PATH.read_bytes()
 
 
 def _load_dashboard_static(path: str) -> Optional[Tuple[bytes, str]]:
@@ -698,6 +701,7 @@ class WebDashboardNode(Node):
         self.map_archive_dir.mkdir(parents=True, exist_ok=True)
 
         self._projects = self._load_json("projects.json", [])
+        self._route_config_floor_ids = self._static_route_floor_ids()
         self._maps = self._load_json("maps.json", [])
         builtin_maps = self._load_builtin_maps()
         self._default_builtin_floor: Optional[str] = builtin_maps["default_floor"]
@@ -717,6 +721,9 @@ class WebDashboardNode(Node):
         self._preflight_lock = threading.Lock()
         self._preflight_run_lock = threading.Lock()
         self._preflight_running: Optional[Dict[str, Any]] = None
+        self._auto_preflight_timer = None
+        self._auto_preflight_started_monotonic = time.monotonic()
+        self._last_auto_preflight_monotonic = 0.0
         self._recording_lock = threading.RLock()
         self._recording_process: Optional[subprocess.Popen] = None
         self._recording_state: Optional[Dict[str, Any]] = None
@@ -806,6 +813,8 @@ class WebDashboardNode(Node):
         self.create_timer(1.0, self._tick_active_task)
         self.create_timer(2.0, self._publish_selected_stair_zones)
         self._server = self._start_http_server()
+        if bool(self.get_parameter("auto_preflight_enabled").value):
+            self._auto_preflight_timer = self.create_timer(1.0, self._tick_auto_preflight)
         if bool(self.get_parameter("startup_sync_selected_map_to_nav2").value):
             delay_s = max(0.1, float(self.get_parameter("startup_sync_selected_map_delay_s").value))
             self._startup_map_sync_timer = self.create_timer(delay_s, self._sync_selected_map_to_nav2_on_startup)
@@ -948,6 +957,9 @@ class WebDashboardNode(Node):
         self.declare_parameter("api_slow_log_threshold_s", 1.0)
         self.declare_parameter("preflight_topic_timeout_s", 5.0)
         self.declare_parameter("preflight_settle_wait_s", 6.0)
+        self.declare_parameter("auto_preflight_enabled", True)
+        self.declare_parameter("auto_preflight_start_delay_s", 12.0)
+        self.declare_parameter("auto_preflight_interval_s", 300.0)
 
     def _topic(self, name: str) -> str:
         return str(self.get_parameter(name).value)
@@ -1746,6 +1758,9 @@ class WebDashboardNode(Node):
             snapshot["active_task"] = self._settings.get("active_task")
             snapshot["map_relocalization_required"] = self._settings.get("map_relocalization_required")
             snapshot["startup_map_sync"] = self._settings.get("startup_map_sync")
+        reported_floor = snapshot.get("floor")
+        snapshot["reported_floor"] = reported_floor
+        snapshot["floor"] = self._operational_floor(reported_floor, snapshot.get("selected_map_id"))
         snapshot["effective_map_id"] = self._effective_map_id(runtime_state=map_status_runtime)
         self._remember_working_map_id(snapshot["effective_map_id"], reason="state_effective_map")
         with self._data_lock:
@@ -1851,6 +1866,9 @@ class WebDashboardNode(Node):
                 ),
             }
         )
+        reported_floor = payload.get("floor")
+        payload["reported_floor"] = reported_floor
+        payload["floor"] = self._operational_floor(reported_floor)
         return payload
 
     def _map_relocalization_lock_loaded_time(self, lock_payload: Any) -> Optional[float]:
@@ -2107,10 +2125,17 @@ class WebDashboardNode(Node):
         building = str(payload.get("building") or "").strip()
         if not name:
             return self._error("项目名称不能为空")
+        raw_floors = payload.get("floors") or []
+        if isinstance(raw_floors, str):
+            raw_floors = raw_floors.split(",")
+        floors = [normalize_floor_id(item) for item in raw_floors if str(item).strip()]
+        if any(not item for item in floors):
+            return self._error("项目楼层格式无效，请填写例如 7、F7 或 B1")
         project = {
             "id": new_id("project"),
             "name": name,
             "building": building,
+            "floors": list(dict.fromkeys(floors)),
             "created_at": now_text(),
         }
         with self._data_lock:
@@ -2144,7 +2169,16 @@ class WebDashboardNode(Node):
                 config = yaml.safe_load(file) or {}
             if not isinstance(config, dict):
                 raise ValueError("配置根节点必须是对象")
-            return {"ok": True, "config": config, "path": str(path)}
+            static_floors = configured_floor_ids(config)
+            with self._data_lock:
+                projects = [dict(item) for item in self._projects]
+            config = augment_floor_config(config, projects)
+            return {
+                "ok": True,
+                "config": config,
+                "path": str(path),
+                "route_config_floors": static_floors,
+            }
         except Exception as exc:
             return {
                 "ok": False,
@@ -2154,15 +2188,34 @@ class WebDashboardNode(Node):
                 "error": str(exc),
             }
 
+    def _static_route_floor_ids(self) -> set:
+        path = self._floor_config_path()
+        if path is None or not path.is_file():
+            return set()
+        try:
+            with path.open("r", encoding="utf-8") as file:
+                config = yaml.safe_load(file) or {}
+        except Exception:
+            return set()
+        return set(configured_floor_ids(config if isinstance(config, dict) else {}))
+
+    def _operational_floor(self, reported_floor: Any, selected_map_id: Any = None) -> Any:
+        reported = str(reported_floor or "").strip() or None
+        with self._data_lock:
+            map_id = str(selected_map_id or self._settings.get("selected_map_id") or "").strip()
+            record = self._find_map_record_unlocked(map_id) if map_id else None
+        return resolve_operational_floor(reported, record or {}, self._route_config_floor_ids)
+
     def _multi_floor_payload(self) -> Dict[str, Any]:
         config_payload = self._floor_config_payload()
         with self._lock:
-            current_floor = self._state.get("floor")
+            reported_floor = self._state.get("floor")
         with self._data_lock:
             maps = [dict(item) for item in self._all_maps_unlocked()]
             annotations = [dict(item) for item in self._annotations]
             sessions = [dict(item) for item in self._sessions]
             selected_map_id = self._settings.get("selected_map_id")
+        current_floor = self._operational_floor(reported_floor, selected_map_id)
         workspace = build_multi_floor_workspace(
             floor_config=config_payload["config"],
             maps=maps,
@@ -2179,12 +2232,62 @@ class WebDashboardNode(Node):
             workspace["config_error"] = config_payload.get("error")
         return workspace
 
+    def _floor_identity_validation(self, floor: Any, *, subject: str) -> Dict[str, Any]:
+        config_payload = self._floor_config_payload()
+        if not config_payload.get("ok"):
+            return {
+                "ok": False,
+                "code": "floor_registry_unavailable",
+                "message": str(config_payload.get("message") or "楼层注册表不可用"),
+                "path": config_payload.get("path"),
+                "error": config_payload.get("error"),
+            }
+        return validate_registered_floor(floor, config_payload["config"], subject=subject)
+
+    def _floor_map_identity_validation(
+        self,
+        floor: Any,
+        map_record: Dict[str, Any],
+        *,
+        subject: str,
+    ) -> Dict[str, Any]:
+        config_payload = self._floor_config_payload()
+        if not config_payload.get("ok"):
+            return {
+                "ok": False,
+                "code": "floor_registry_unavailable",
+                "message": str(config_payload.get("message") or "楼层注册表不可用"),
+                "path": config_payload.get("path"),
+            }
+        return validate_floor_matches_map(
+            floor,
+            map_record,
+            config_payload["config"],
+            subject=subject,
+        )
+
     def _preflight_payload(self) -> Dict[str, Any]:
         with self._preflight_lock:
             running = self._preflight_running_payload_unlocked()
             if running:
                 return {"ok": True, "running": True, "preflight": running}
             return {"ok": True, "preflight": self._preflight_with_age_unlocked()}
+
+    def _tick_auto_preflight(self) -> None:
+        now_monotonic = time.monotonic()
+        start_delay_s = max(1.0, float(self.get_parameter("auto_preflight_start_delay_s").value))
+        interval_s = max(60.0, float(self.get_parameter("auto_preflight_interval_s").value))
+        if self._last_auto_preflight_monotonic <= 0.0:
+            if now_monotonic - self._auto_preflight_started_monotonic < start_delay_s:
+                return
+        elif now_monotonic - self._last_auto_preflight_monotonic < interval_s:
+            return
+        response = self._start_preflight_background(
+            {"mode": "move", "site": "auto", "wait": False, "source": "automatic"}
+        )
+        running = response.get("preflight") if isinstance(response.get("preflight"), dict) else {}
+        if running.get("request_id"):
+            self._last_auto_preflight_monotonic = now_monotonic
 
     def _preflight_with_age_unlocked(self) -> Optional[Dict[str, Any]]:
         return payload_with_age(self._last_preflight)
@@ -2368,10 +2471,15 @@ class WebDashboardNode(Node):
                     "global_costmap",
                 )
             }
+        with self._data_lock:
+            current_state["map_relocalization_required"] = self._settings.get(
+                "map_relocalization_required"
+            )
         context = preflight_context(
             payload,
             localization_ok=current_state.get("localization_ok"),
             navigation_status=current_state.get("navigation_status"),
+            map_relocalization_required=current_state.get("map_relocalization_required"),
         )
         mode = str(context["mode"])
         site = str(context["site"])
@@ -2423,7 +2531,12 @@ class WebDashboardNode(Node):
 
         loc_ok = bool(context["localized"])
         nav_status_text = str(context["navigation_status_text"])
-        items.append(preflight_localization_item(loc_ok))
+        items.append(
+            preflight_localization_item(
+                loc_ok,
+                map_relocalization_required=current_state.get("map_relocalization_required"),
+            )
+        )
         items.append(preflight_navigation_status_item(nav_status_text))
 
         map_payload = current_state.get("map")
@@ -2572,6 +2685,13 @@ class WebDashboardNode(Node):
                 record = self._find_map_record_unlocked(map_id)
                 if record is None:
                     return self._error("地图不存在")
+        if record is not None:
+            identity = self._floor_identity_validation(record.get("floor"), subject="地图楼层")
+            if not identity.get("ok"):
+                return self._error(
+                    str(identity["message"]),
+                    {key: value for key, value in identity.items() if key not in ("ok", "message")},
+                )
         if map_id:
             nav2_load = self._load_selected_map_into_nav2(record)
             if not nav2_load.get("ok"):
@@ -2760,8 +2880,32 @@ class WebDashboardNode(Node):
 
     def _create_mapping_session(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
-        prepared = prepare_mapping_session_create(
+        config_payload = self._floor_config_payload()
+        if not config_payload.get("ok"):
+            return self._error(
+                str(config_payload.get("message") or "楼层注册表不可用"),
+                {"code": "floor_registry_unavailable", "path": config_payload.get("path")},
+            )
+        identity = validate_mapping_session_identity(
             payload,
+            config_payload["config"],
+            allow_floor_registration=True,
+        )
+        if not identity.get("ok"):
+            return self._error(
+                str(identity["message"]),
+                {key: value for key, value in identity.items() if key not in ("ok", "message")},
+            )
+        normalized_payload = dict(payload)
+        normalized_payload.update(
+            {
+                "floors": identity["floors"],
+                "active_floor": identity["active_floor"],
+                "mode": identity["mode"],
+            }
+        )
+        prepared = prepare_mapping_session_create(
+            normalized_payload,
             projects=self._projects,
             id_factory=new_id,
             now_text=now_text,
@@ -2772,6 +2916,12 @@ class WebDashboardNode(Node):
         with self._data_lock:
             if prepared.get("created_project"):
                 self._projects.append(prepared["created_project"])
+            elif prepared.get("updated_project"):
+                project_id = str(prepared["updated_project"].get("id") or "")
+                self._projects = [
+                    prepared["updated_project"] if str(item.get("id") or "") == project_id else item
+                    for item in self._projects
+                ]
             self._sessions.append(session)
             self._save_json("projects.json", self._projects)
             self._save_json("mapping_sessions.json", self._sessions)
@@ -2792,6 +2942,12 @@ class WebDashboardNode(Node):
         session = self._find_session(session_id or None)
         if session is None:
             return self._error("建图任务不存在，请先建立建图任务", {"code": "mapping_session_missing"})
+        identity = self._floor_identity_validation(floor, subject="建图楼层")
+        if not identity.get("ok"):
+            return self._error(
+                str(identity["message"]),
+                {key: value for key, value in identity.items() if key not in ("ok", "message")},
+            )
         result = select_mapping_floor(session, floor, updated_at=now_text())
         if not result.get("ok"):
             return self._error(
@@ -2809,6 +2965,12 @@ class WebDashboardNode(Node):
         session = self._find_session(session_id)
         if session is None:
             return self._error("建图任务不存在，请先建立建图任务")
+        identity = self._floor_identity_validation(session.get("active_floor"), subject="当前建图楼层")
+        if not identity.get("ok"):
+            return self._error(
+                str(identity["message"]),
+                {key: value for key, value in identity.items() if key not in ("ok", "message")},
+            )
         context = self._command_context(session)
         result = self._run_configured_command(param_name, context)
         updated = apply_mapping_command_result(
@@ -3141,6 +3303,21 @@ class WebDashboardNode(Node):
         floor = str(payload.get("floor") or (session or {}).get("active_floor") or "").strip()
         if not floor:
             return self._error("请指定地图楼层")
+        identity = self._floor_identity_validation(floor, subject="拉取地图楼层")
+        if not identity.get("ok"):
+            return self._error(
+                str(identity["message"]),
+                {key: value for key, value in identity.items() if key not in ("ok", "message")},
+            )
+        if session and floor != str(session.get("active_floor") or "").strip():
+            return self._error(
+                "拉取地图楼层必须与当前建图步骤一致",
+                {
+                    "code": "mapping_import_floor_mismatch",
+                    "floor": floor,
+                    "active_floor": session.get("active_floor"),
+                },
+            )
 
         factory_host = str(payload.get("factory_host") or self.get_parameter("factory_host").value).strip()
         factory_user = str(payload.get("factory_user") or self.get_parameter("factory_user").value).strip()
@@ -3414,9 +3591,12 @@ class WebDashboardNode(Node):
         map_id = context.get("map_id")
         if not map_id or map_id == "live_map":
             map_id = self._effective_map_id(map_id, runtime_state=runtime_state) or map_id
+        map_record = None
         with self._data_lock:
-            if map_id and map_id != "live_map" and not self._find_map_record_unlocked(map_id):
-                return self._error("地图不存在")
+            if map_id and map_id != "live_map":
+                map_record = self._find_map_record_unlocked(map_id)
+                if map_record is None:
+                    return self._error("地图不存在")
             if not map_id:
                 map_id = self._effective_map_id(runtime_state=runtime_state)
             if not map_id and runtime_state.get("map"):
@@ -3424,6 +3604,19 @@ class WebDashboardNode(Node):
             if not map_id:
                 return self._error("没有可用地图，请等待实时 /map 或先选择固定地图")
             selected_map_id = self._effective_map_id(runtime_state=runtime_state)
+            if map_record is None and map_id and map_id != "live_map":
+                map_record = self._find_map_record_unlocked(map_id)
+        if map_record is not None:
+            identity = self._floor_map_identity_validation(
+                context.get("floor"),
+                map_record,
+                subject="点位楼层",
+            )
+            if not identity.get("ok"):
+                return self._error(
+                    str(identity["message"]),
+                    {key: value for key, value in identity.items() if key not in ("ok", "message")},
+                )
         annotation_source = str(payload.get("source") or "map_click").strip()
         require_live_pose = annotation_source == "robot_pose"
         annotation_readiness = self._annotation_create_readiness_payload(
@@ -3663,6 +3856,20 @@ class WebDashboardNode(Node):
         context = annotation_create_static_context(merged_payload, default_label_index=1)
         if not context.get("ok"):
             return self._error(str(context["message"]), {"code": context["code"]})
+        with self._data_lock:
+            map_record = self._find_map_record_unlocked(requested_map_id)
+        if map_record is None:
+            return self._error("点位绑定的地图不存在", {"code": "annotation_map_missing"})
+        identity = self._floor_map_identity_validation(
+            context.get("floor"),
+            map_record,
+            subject="点位楼层",
+        )
+        if not identity.get("ok"):
+            return self._error(
+                str(identity["message"]),
+                {key: value for key, value in identity.items() if key not in ("ok", "message")},
+            )
         target_map_payload = self._map_file_snapshot(requested_map_id)
         map_pose_error = annotation_map_pose_error_payload(dict(context["pose"]), target_map_payload)
         if map_pose_error:
@@ -3967,6 +4174,7 @@ class WebDashboardNode(Node):
         return item
 
     def _radar_filter_jobs(self, query: Dict[str, List[str]]) -> Tuple[List[Dict[str, Any]], Dict[str, Any], int]:
+        search_query = self._query_text(query, "q")
         task_id = self._query_text(query, "task_id")
         radar_task_id = self._query_text(query, "radar_task_id") or self._query_text(query, "taskId")
         run_id = self._query_text(query, "run_id")
@@ -3977,6 +4185,8 @@ class WebDashboardNode(Node):
         offset = self._query_int(query, "offset", 0, 0, 1000000)
         limit = self._query_int(query, "limit", 50, 1, 500)
         jobs = self._radar_all_jobs()
+        if search_query:
+            jobs = [job for job in jobs if radar_job_matches_query(job, search_query)]
         if task_id:
             jobs = [job for job in jobs if str(job.get("task_id") or "") == task_id]
         if radar_task_id:
@@ -3992,6 +4202,7 @@ class WebDashboardNode(Node):
         if mode:
             jobs = [job for job in jobs if str(job.get("scan_mode") or "") == mode]
         filters = {
+            "q": search_query or None,
             "task_id": task_id or None,
             "radar_task_id": radar_task_id or None,
             "run_id": run_id or None,
@@ -5081,6 +5292,23 @@ class WebDashboardNode(Node):
         yaw = float(pose["yaw"])
         frame_id = str(request.get("frame_id") or "map")
         floor = str(request.get("floor") or "")
+        with self._data_lock:
+            selected_map_id = self._effective_map_id()
+            selected_map = self._find_map_record_unlocked(selected_map_id)
+        if selected_map is not None:
+            floor = floor or str(selected_map.get("floor") or "").strip()
+            identity = self._floor_map_identity_validation(
+                floor,
+                selected_map,
+                subject="重定位楼层",
+            )
+        else:
+            identity = self._floor_identity_validation(floor, subject="重定位楼层")
+        if not identity.get("ok"):
+            return self._error(
+                str(identity["message"]),
+                {key: value for key, value in identity.items() if key not in ("ok", "message")},
+            )
         msg = PoseWithCovarianceStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = frame_id
@@ -5784,7 +6012,7 @@ class WebDashboardNode(Node):
     def _radar_completion_for_active(self, annotation: Dict[str, Any], active: Dict[str, Any]) -> str:
         normalized = normalize_annotation_semantics(dict(annotation))
         radar = normalized.get("radar") if isinstance(normalized.get("radar"), dict) else {}
-        if normalized.get("manual_point_type") != "task" or not radar.get("enabled", True):
+        if normalized.get("manual_point_type") != "task" or not radar.get("enabled", False):
             return "completed"
         scans = radar.get("scans") if isinstance(radar.get("scans"), list) else []
         if not scans:
@@ -6275,7 +6503,12 @@ class WebDashboardNode(Node):
                     if parsed.path == "/":
                         self._send_bytes(_load_dashboard_html(), "text/html; charset=utf-8")
                     elif parsed.path in ("/lite", "/lite/"):
-                        self._send_bytes(_load_dashboard_lite_html(), "text/html; charset=utf-8")
+                        self._send_bytes(
+                            b"",
+                            "text/plain; charset=utf-8",
+                            status=HTTPStatus.SEE_OTHER,
+                            extra_headers={"Location": "/"},
+                        )
                     elif parsed.path in DASHBOARD_STATIC_FILES:
                         static_payload = _load_dashboard_static(parsed.path)
                         if static_payload is None:

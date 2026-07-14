@@ -8,7 +8,13 @@ from typing import Any, Callable, Dict, List, Optional
 NowText = Callable[[], str]
 
 
-def preflight_context(payload: Dict[str, Any], *, localization_ok: Any, navigation_status: Any) -> Dict[str, Any]:
+def preflight_context(
+    payload: Dict[str, Any],
+    *,
+    localization_ok: Any,
+    navigation_status: Any,
+    map_relocalization_required: Any = None,
+) -> Dict[str, Any]:
     mode = str((payload or {}).get("mode") or "move").strip()
     if mode not in ("move", "shadow"):
         mode = "move"
@@ -16,7 +22,8 @@ def preflight_context(payload: Dict[str, Any], *, localization_ok: Any, navigati
     explicit_workstation = site in ("workstation", "bench", "desk", "office", "charging")
     auto_site = site in ("", "auto", "unknown")
     nav_status_text = str(navigation_status or "")
-    localized = localization_ok is True
+    relocalization_locked = bool(map_relocalization_required)
+    localized = localization_ok is True and not relocalization_locked
     unlocalized = (not localized) or ("location=1" in nav_status_text.lower())
     workstation_mode = explicit_workstation or (auto_site and unlocalized)
     return {
@@ -25,6 +32,7 @@ def preflight_context(payload: Dict[str, Any], *, localization_ok: Any, navigati
         "navigation_status_text": nav_status_text,
         "localized": localized,
         "unlocalized": unlocalized,
+        "relocalization_locked": relocalization_locked,
         "workstation_mode": workstation_mode,
         "defer_nav2_startup_checks": workstation_mode or unlocalized,
     }
@@ -277,17 +285,23 @@ def preflight_map_pose_item(
     }
 
 
-def preflight_localization_item(localization_ok: Any) -> Dict[str, Any]:
+def preflight_localization_item(
+    localization_ok: Any,
+    *,
+    map_relocalization_required: Any = None,
+) -> Dict[str, Any]:
     confirmed = localization_ok is True
+    if confirmed:
+        message = "localization_ok=true"
+    elif map_relocalization_required:
+        message = "当前地图要求重新定位；完成开发手册 2101 定位前不要开始移动任务"
+    else:
+        message = "当前未重定位；完成定位确认前不要开始移动任务"
     return {
         "key": "localization",
         "label": "定位状态",
         "status": "ok" if confirmed else "warn",
-        "message": (
-            "localization_ok=true"
-            if confirmed
-            else "当前在工位/未重定位，定位未确认是预期状态；到测试场地后先重定位"
-        ),
+        "message": message,
         "group": "navigation",
     }
 
@@ -352,7 +366,7 @@ def preflight_result_payload(
         summary = (
             "基础自检通过，导航已就绪"
             if not navigation_failures
-            else "基础自检通过，当前在工位，导航待到测试场地重定位后确认"
+            else "基础自检通过，导航待重定位后确认"
         )
     elif relocalization_ready:
         summary = (

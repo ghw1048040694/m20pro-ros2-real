@@ -76,7 +76,7 @@ def test_workstation_navigation_deferred() -> None:
     assert_equal(payload["navigation_ready"], False, "navigation deferred")
     assert_equal(payload["site"], "workstation", "site")
     assert_equal(payload["site_mode"], "workstation", "site mode")
-    assert_equal(payload["summary"], "基础自检通过，当前在工位，导航待到测试场地重定位后确认", "summary")
+    assert_equal(payload["summary"], "基础自检通过，导航待重定位后确认", "summary")
 
 
 def test_perception_chain_failure_is_added() -> None:
@@ -148,6 +148,17 @@ def test_preflight_context() -> None:
     assert_equal(explicit_workstation["mode"], "shadow", "shadow mode remains")
     assert_equal(explicit_workstation["workstation_mode"], True, "explicit desk is workstation")
     assert_equal(explicit_workstation["defer_nav2_startup_checks"], True, "explicit workstation defers Nav2 checks")
+
+    map_locked = preflight_context(
+        {"mode": "move", "site": "auto"},
+        localization_ok=True,
+        navigation_status="location=0; nav=idle",
+        map_relocalization_required={"map_id": "builtin_F20"},
+    )
+    assert_equal(map_locked["localized"], False, "map lock overrides raw factory localization")
+    assert_equal(map_locked["unlocalized"], True, "map lock requires relocalization")
+    assert_equal(map_locked["relocalization_locked"], True, "map lock is explicit")
+    assert_equal(map_locked["defer_nav2_startup_checks"], True, "map lock defers strict Nav2 checks")
 
 
 def test_node_and_topic_items() -> None:
@@ -230,6 +241,17 @@ def test_odom_navigation_status_and_lifecycle_items() -> None:
     inactive = preflight_lifecycle_item("/planner_server", {"active": False, "message": "inactive"})
     assert_equal(inactive["status"], "warn", "inactive lifecycle warns")
     assert_equal(inactive["message"], "inactive", "inactive lifecycle message")
+
+    locked_localization = preflight_localization_item(
+        False,
+        map_relocalization_required={"map_id": "builtin_F20"},
+    )
+    assert_equal(locked_localization["status"], "warn", "map lock warns")
+    assert_equal(
+        locked_localization["message"],
+        "当前地图要求重新定位；完成开发手册 2101 定位前不要开始移动任务",
+        "map lock localization message",
+    )
 
 
 def test_perception_items() -> None:
@@ -342,7 +364,7 @@ def test_localization_item() -> None:
     assert_equal(warn["status"], "warn", "localization unconfirmed warns")
     assert_equal(
         warn["message"],
-        "当前在工位/未重定位，定位未确认是预期状态；到测试场地后先重定位",
+        "当前未重定位；完成定位确认前不要开始移动任务",
         "localization warning message",
     )
 
