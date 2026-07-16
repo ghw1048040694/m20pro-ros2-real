@@ -12,7 +12,7 @@ from tf2_ros import TransformBroadcaster
 
 from .geometry import quaternion_to_yaw, yaw_to_quaternion
 from .odom_alignment_contract import odom_alignment_update
-from .pose_stability_contract import stable_jump_decision
+from .pose_stability_contract import stationary_drift_decision, stable_jump_decision
 from .tcp_protocol import M20TcpClient, patrol_items
 
 
@@ -43,9 +43,17 @@ class M20TcpBridge(Node):
         self.declare_parameter("reject_origin_placeholder_pose", True)
         self.declare_parameter("origin_placeholder_radius_m", 0.05)
         self.declare_parameter("pose_jump_reject_m", 0.6)
-        self.declare_parameter("pose_jump_accept_after_s", 8.0)
+        # Kept for launch-file compatibility. Positive values are intentionally
+        # ignored: an uncommanded localization hypothesis must never become
+        # trusted merely because it remains stable for a while.
+        self.declare_parameter("pose_jump_accept_after_s", 0.0)
         self.declare_parameter("pose_jump_candidate_radius_m", 0.30)
         self.declare_parameter("pose_jump_candidate_yaw_tolerance_rad", 0.35)
+        self.declare_parameter("pose_stationary_drift_reject_m", 0.20)
+        self.declare_parameter("pose_stationary_drift_reject_yaw_rad", 0.30)
+        self.declare_parameter("pose_motion_command_hold_s", 1.0)
+        self.declare_parameter("pose_command_linear_deadband_mps", 0.03)
+        self.declare_parameter("pose_command_angular_deadband_rad_s", 0.05)
         self.declare_parameter("pose_filter_hold_last_good_s", 1.0)
         self.declare_parameter("pose_relocalization_jump_grace_s", 3.0)
         self.declare_parameter("pose_relocalization_jump_grace_radius_m", 1.0)
@@ -103,6 +111,8 @@ class M20TcpBridge(Node):
         self.last_navigation_location_ok = None
         self.last_navigation_status_time = None
         self.official_tf_pose_unlocked = False
+        self.last_motion_command_time = None
+        self.stationary_anchor_pose = None
         self.last_published_map_pose = None
         self.last_published_odom_pose = None
         self.map_to_odom_pose = None
@@ -197,6 +207,22 @@ class M20TcpBridge(Node):
         self.latest_cmd = msg
         self.last_cmd_time = self.get_clock().now()
         self.idle_zero_sent = False
+        linear_deadband = max(
+            0.0,
+            float(self.get_parameter("pose_command_linear_deadband_mps").value),
+        )
+        angular_deadband = max(
+            0.0,
+            float(self.get_parameter("pose_command_angular_deadband_rad_s").value),
+        )
+        if (
+            math.hypot(float(msg.linear.x), float(msg.linear.y)) > linear_deadband
+            or abs(float(msg.angular.z)) > angular_deadband
+        ):
+            self.last_motion_command_time = self.get_clock().now()
+            # A new commanded motion gets a fresh stationary anchor when it
+            # stops; retaining the old anchor would reject legitimate travel.
+            self.stationary_anchor_pose = None
 
     def _on_gait_command(self, msg: String) -> None:
         gait_param = self._resolve_gait_param(msg.data)
@@ -665,7 +691,7 @@ class M20TcpBridge(Node):
             fallback["y"],
             fallback["z"],
             fallback["yaw"],
-            allow_stable_recovery=location_ok,
+            allow_stable_recovery=False,
         )
         if not valid_by_filter:
             self._warn_throttled(
@@ -811,6 +837,15 @@ class M20TcpBridge(Node):
         self.map_to_odom_pose = map_to_odom_pose
         if force_odom_rebase:
             self.pending_odom_rebase = False
+            # The accepted 2101 target becomes the new stationary reference.
+            # Without this reset, the previous map anchor would immediately
+            # classify every valid relocalization as drift.
+            self.stationary_anchor_pose = {
+                "x": float(x),
+                "y": float(y),
+                "z": float(z),
+                "yaw": float(yaw),
+            }
         if alignment.get("rebased"):
             self.get_logger().warning(
                 "rebased map->odom after %s; map_step=%.3fm yaw_step=%.3frad"
@@ -887,17 +922,17 @@ class M20TcpBridge(Node):
                 return False, "origin_placeholder_after_good_pose"
 
         jump_limit = max(0.0, float(self.get_parameter("pose_jump_reject_m").value))
-        if last is not None and jump_limit > 0.0 and not self._within_relocalization_jump_grace(now, x, y):
+        in_relocalization_grace = self._within_relocalization_jump_grace(now, x, y)
+        if last is not None and jump_limit > 0.0 and not in_relocalization_grace:
             decision = stable_jump_decision(
                 last_pose=last,
                 pending_pose=self.pending_jump_pose,
                 candidate={"x": x, "y": y, "z": z, "yaw": yaw},
                 now_s=now.nanoseconds * 1e-9,
                 jump_limit_m=jump_limit,
-                accept_after_s=max(
-                    0.0,
-                    float(self.get_parameter("pose_jump_accept_after_s").value),
-                ),
+                # Never auto-accept an uncommanded jump. The parameter is
+                # retained only so older launch files remain loadable.
+                accept_after_s=0.0,
                 candidate_radius_m=max(
                     0.01,
                     float(self.get_parameter("pose_jump_candidate_radius_m").value),
@@ -916,9 +951,34 @@ class M20TcpBridge(Node):
             if decision.get("reason"):
                 self.get_logger().warning(str(decision["reason"]))
 
+        if last is not None and not in_relocalization_grace and not self._motion_command_active(now):
+            if self.stationary_anchor_pose is None:
+                self.stationary_anchor_pose = dict(last)
+            drift = stationary_drift_decision(
+                anchor_pose=self.stationary_anchor_pose,
+                candidate={"x": x, "y": y, "yaw": yaw},
+                position_tolerance_m=max(
+                    0.0,
+                    float(self.get_parameter("pose_stationary_drift_reject_m").value),
+                ),
+                yaw_tolerance_rad=max(
+                    0.0,
+                    float(self.get_parameter("pose_stationary_drift_reject_yaw_rad").value),
+                ),
+            )
+            if not drift["accept"]:
+                return False, str(drift["reason"])
+
         self.last_good_map_pose = {"x": x, "y": y, "z": z, "yaw": yaw, "stamp": now}
         self.pending_jump_pose = None
         return True, ""
+
+    def _motion_command_active(self, now) -> bool:
+        stamp = self.last_motion_command_time
+        if stamp is None:
+            return False
+        hold_s = max(0.0, float(self.get_parameter("pose_motion_command_hold_s").value))
+        return (now - stamp).nanoseconds * 1e-9 <= hold_s
 
     def _has_recent_good_map_pose(self) -> bool:
         if self.last_good_map_pose is None:

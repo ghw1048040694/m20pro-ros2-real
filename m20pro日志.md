@@ -1,10 +1,23 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-07-14 14:15 CST
+Last updated: 2026-07-16 17:19 CST
 
 This file is maintained by Codex as the local M20 Pro project memory for future ChatGPT review. It records the current architecture, important decisions, recent changes, verification status, and next steps.
 
 Naming note: this file replaced the previous local-only `codex.md`. Going forward, maintain this file, `m20pro日志.md`, after every meaningful project change or field diagnosis.
+
+## 2026-07-16 17:05 CST - 重定位漂移根因确认与防回退修复
+
+- 开发狗 `10.21.31.104` 只读核查确认：当前正式桥接使用 `pose_source=official_tf`，直接读取 103 原厂 `/tf` 的 `map->base_link`；机器狗无运动指令时，该 TF 在数秒内仍从约 `(-11.44,-5.07)` 摇摆到约 `(-11.70,-5.25)`，`/m20pro_tcp_bridge/map_pose` 完全跟随，因此漂移源是 103 原厂定位输出，不是前端绘制或 `map->odom` 重基准。
+- 复发原因：7 月 10 日 `3157cbf` 已将未授权大跳不自动接管改为 `pose_jump_accept_after_s=0`，但后续 7 月 12 日 `82d1f56` 为现场恢复能力又把默认值和正式 YAML 改回 `8.0s`；当前开发狗运行参数仍为 `8.0`，导致旧错误定位簇重新获得接管资格。
+- 根治修改：
+  - `tcp_bridge_node.py` 将稳定接管硬编码为 `accept_after_s=0.0`，保留旧参数仅为兼容旧 launch，任何正值都不能重新打开自动接管；官方 TF 路径也不再把 `Location=0` 当作稳定恢复授权。
+  - 新增 `stationary_drift_decision` 合同和静止锚点：无有效 `/cmd_vel` 时，以最后确认位姿为锚，位置偏离超过 `0.20m` 或航向偏离超过 `0.30rad` 即拒绝该样本并发布 `localization_ok=false`，要求重新 2101 定位；不再允许每次小于 0.6m 的变化累计成米级漂移。
+  - 只有检测到超过死区的运动指令，并在停止后保留 1 秒缓冲，才允许位姿随运动更新；成功重定位触发 `map->odom` 重基准时同步更新静止锚点。
+  - `m20pro_real.yaml` 恢复 `pose_jump_accept_after_s: 0.0` 并固定新增静止漂移参数；新增合同测试防止后续提交再次把安全边界改回正数。
+- 本地验证：`test_pose_stability_contract.py`、`test_nav2_real_config_contract.py`、`py_compile`、`git diff --check` 均通过。
+- 部署验证：通过 `M20PRO_DEPLOY_SKIP_EDGE=1 scripts/local_deploy_to_test_robot.sh user@10.21.31.104 /home/user/m20pro_real_ros2_ws` 完成 104 全量构建与服务重启，`m20pro-real.service` active、`NRestarts=0`，运行参数已为 `pose_jump_accept_after_s=0.0`、`pose_stationary_drift_reject_m=0.2`、`pose_motion_command_hold_s=1.0`；网页/API 与 106 edge scan 均 ready。部署脚本留下的 root-owned 备份已用 root 清理，104 仅保留正式工作区。
+- 实时验证：104 日志连续出现 `stationary_drift_requires_relocalization`（约 `0.21-0.42m`）并拒绝漂移样本；被拒期间不再更新错误 `map_pose`，原始 TF 回到重定位锚点附近时才恢复发布和确认。这证明小步累计漂移与双候选错误簇都不会再直接穿透到导航。
 
 ## 2026-07-10 16:44 CST - 生成 7.10 项目周报
 

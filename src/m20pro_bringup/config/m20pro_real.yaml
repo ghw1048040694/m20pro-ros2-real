@@ -27,9 +27,15 @@ m20pro_tcp_bridge:
     tf_pose_fallback_base_frame: "base_link"
     tf_pose_fallback_max_age_s: 1.0
     tf_pose_fallback_require_location_ok: true
-    pose_jump_accept_after_s: 8.0
+    # Uncommanded localization jumps are never accepted after a stability delay.
+    pose_jump_accept_after_s: 0.0
     pose_jump_candidate_radius_m: 0.30
     pose_jump_candidate_yaw_tolerance_rad: 0.35
+    pose_stationary_drift_reject_m: 0.20
+    pose_stationary_drift_reject_yaw_rad: 0.30
+    pose_motion_command_hold_s: 1.0
+    pose_command_linear_deadband_mps: 0.03
+    pose_command_angular_deadband_rad_s: 0.05
     odom_rebase_jump_m: 0.6
     odom_rebase_jump_yaw_rad: 0.75
     flatten_odom_z: true

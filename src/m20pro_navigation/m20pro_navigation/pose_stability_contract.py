@@ -6,6 +6,35 @@ def _angle_error(a: float, b: float) -> float:
     return abs((float(a) - float(b) + math.pi) % (2.0 * math.pi) - math.pi)
 
 
+def stationary_drift_decision(
+    *,
+    anchor_pose: Optional[Dict[str, Any]],
+    candidate: Dict[str, float],
+    position_tolerance_m: float,
+    yaw_tolerance_rad: float,
+) -> Dict[str, Any]:
+    """Keep an idle robot anchored instead of accepting cumulative TF drift."""
+
+    if anchor_pose is None:
+        return {"accept": True, "reason": "stationary_anchor_started"}
+
+    distance = math.hypot(
+        float(candidate["x"]) - float(anchor_pose["x"]),
+        float(candidate["y"]) - float(anchor_pose["y"]),
+    )
+    yaw_error = _angle_error(float(candidate["yaw"]), float(anchor_pose["yaw"]))
+    if (
+        distance <= max(0.0, float(position_tolerance_m))
+        and yaw_error <= max(0.0, float(yaw_tolerance_rad))
+    ):
+        return {"accept": True, "reason": ""}
+    return {
+        "accept": False,
+        "reason": "stationary_drift_requires_relocalization distance=%.2f yaw=%.2f"
+        % (distance, yaw_error),
+    }
+
+
 def stable_jump_decision(
     *,
     last_pose: Optional[Dict[str, Any]],

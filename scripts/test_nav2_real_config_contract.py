@@ -11,6 +11,12 @@ ROOT = Path(__file__).resolve().parents[1]
 def main() -> None:
     config_path = ROOT / "src" / "m20pro_bringup" / "config" / "nav2_params_real.yaml"
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    real_config_path = ROOT / "src" / "m20pro_bringup" / "config" / "m20pro_real.yaml"
+    real_config = yaml.safe_load(real_config_path.read_text(encoding="utf-8"))
+    bridge_config = real_config["m20pro_tcp_bridge"]["ros__parameters"]
+    assert float(bridge_config["pose_jump_accept_after_s"]) == 0.0
+    assert float(bridge_config["pose_stationary_drift_reject_m"]) > 0.0
+    assert float(bridge_config["pose_motion_command_hold_s"]) > 0.0
     controller = config["controller_server"]["ros__parameters"]
     follow = controller["FollowPath"]
     local = config["local_costmap"]["local_costmap"]["ros__parameters"]
@@ -77,6 +83,15 @@ def main() -> None:
         / "m20pro_cloud_bridge"
         / "web_dashboard_node.py"
     ).read_text(encoding="utf-8")
+    tcp_bridge = (
+        ROOT
+        / "src"
+        / "m20pro_navigation"
+        / "m20pro_navigation"
+        / "tcp_bridge_node.py"
+    ).read_text(encoding="utf-8")
+    assert "accept_after_s=0.0" in tcp_bridge
+    assert "allow_stable_recovery=location_ok" not in tcp_bridge
     assert "OccupancyGridUpdate" in dashboard
     assert '"local_costmap_updates_topic"' in dashboard
     assert '"global_costmap_updates_topic"' in dashboard
