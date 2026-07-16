@@ -27,6 +27,12 @@ def main() -> None:
 
     assert "106_enable_edge_scan_service.sh" in edge
     assert "tools/edge_scan_feasibility" in edge
+    assert 'STAGE="${REMOTE_WS}.edge_stage.${STAMP}"' in edge
+    assert "--no-owner --no-group" in edge
+    assert '"${STAGE}/tools/edge_scan_feasibility/"' in edge
+    assert 'sudo -n rsync -a --delete' in edge
+    assert 'sudo -n chown -R' in edge
+    assert 'systemctl restart m20pro-edge-scan-106.service' in edge
     assert "systemctl is-enabled --quiet m20pro-edge-scan-106.service" in edge
     assert "systemctl is-active --quiet m20pro-edge-scan-106.service" in edge
 
@@ -44,6 +50,9 @@ def main() -> None:
     assert "edge_previous_state" in deploy
     assert "systemctl stop m20pro-edge-scan-106.service" in deploy
     assert "systemctl disable m20pro-edge-scan-106.service" in deploy
+    assert 'M20PRO_DEPLOY_KEEP_BACKUP:-0' in deploy
+    assert "${BACKUP}.systemd'" in deploy
+    assert "removed successful-deployment backup" in deploy
 
     print("test-robot deployment contract tests passed")
 

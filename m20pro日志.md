@@ -23570,3 +23570,20 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
   - 新增 Nav2 配置合同，锁定两级恢复预算、等待优先顺序和最小等待时间，防止后续退回快速失败逻辑。
   - 全部测试脚本通过，行为树 XML 解析通过，m20pro_bringup 本地构建通过，安装目录与源码行为树一致。
   - 本轮只修改上位机源码并分析离线 rosbag，没有部署或重启测试狗 104/103/106，没有下发导航、速度或清图命令，没有修改网络。完成时间已过北京时间 21:00，需要同步 GitHub 和 GitLab。
+
+## 2026-07-16 16:34 CST - 开发狗同步 Nav2 动态障碍恢复版本并清理旧目录
+
+- 目标确认：当前开发狗为 10.21.31.104，三台主机链路仍为 103/104/106；104 SSH、Web API 和 106 root 链路均可用，未修改上位机网卡、路由、DNS、Wi-Fi 或 VPN。
+- 104 同步：
+  - 将主线提交 f556231 的完整源码同步到暂存目录，在最终 /home/user/m20pro_real_ros2_ws 路径完成五包构建并原子切换；
+  - m20pro-real.service active，NRestarts=0，无活动任务；部署过程中未下发导航、速度、重定位或建图命令；
+  - 旧 workspace 备份和失败暂存均已清理，/home/user/m20pro_deploy_backups 已删除，104 不保留旧目录。
+- 106 同步：
+  - 上位机直连 106 的 user 公钥被拒绝，但 104 root 到 106 user 的既有密钥链路可用；通过 104 root 的暂存目录同步 edge_scan 最小组件；
+  - 106 edge-scan 在 ARM64 本机构建成功，m20pro-edge-scan-106.service active/enabled，正式组件目录已恢复为 user:user 所有，后续普通 rsync 不再因 root 文件权限失败；
+  - 104 API 联合验收返回 perception_ready/edge_scan，/scan 新鲜、frame_id=m20pro_base_link、finite_ranges 约 257，当前任务为空。
+- 部署根因修正：
+  - local_deploy_edge_scan_to_106.sh 改为用户暂存、root 原子覆盖正式 edge 目录并在安装后重启服务，解决旧 root-owned 文件导致 rsync --delete 权限拒绝；
+  - local_deploy_to_test_robot.sh 成功验收后默认删除旧 workspace 备份，设置 M20PRO_DEPLOY_KEEP_BACKUP=1 才保留回滚副本；失败流程仍保留自动回滚所需备份。
+- 验证与边界：
+  - deployment contract、Shell 语法和 git diff --check 通过；本轮未执行重定位或运动测试，导航恢复行为仍需现场在开发狗上按“静态障碍 + 人员短时挡路 + 离开”流程复测。

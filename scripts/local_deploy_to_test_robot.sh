@@ -117,3 +117,10 @@ fi
 
 echo "[local_deploy_to_test_robot] done revision=${REVISION}"
 echo "[local_deploy_to_test_robot] API=${WEB_URL} edge_scan=ready"
+
+if [[ "${M20PRO_DEPLOY_KEEP_BACKUP:-0}" != "1" ]]; then
+  ssh "${HOST}" "rm -rf '${BACKUP}' '${BACKUP}.systemd'"
+  echo "[local_deploy_to_test_robot] removed successful-deployment backup"
+else
+  echo "[local_deploy_to_test_robot] kept backup=${BACKUP}"
+fi
