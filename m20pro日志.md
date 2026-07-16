@@ -23676,3 +23676,9 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 验证：
   - 104 revision 文件为 `a27bda3946cf9d836b54cd4d5659e92be7cac1ea`；全量 `scripts/test_*.py`、地图/前端/部署合同测试、语法检查和 `git diff --check` 通过；
   - 直接 SSH 访问 106 未成功（公钥/密码链路拒绝），未继续尝试，也未对 106 执行任何命令。
+
+## 2026-07-16 18:59 CST - 104 对齐部署工具修复后的主线提交
+
+- 因上一轮部署已先完成功能提交、后修复“104-only 仍重启 106”的部署脚本，已再次使用修复后的脚本仅同步 104；
+- 104 当前 revision 已对齐 `2abfaf8eeed181a5771178e286f4eedce086afff`，`m20pro-real.service=active`、`NRestarts=0`、无活动任务、感知链路通过 API 验收；
+- 本次部署没有访问或操作 106；成功部署备份已按脚本清理。GitHub 和 GitLab 的 `main` 均已同步到同一提交。
