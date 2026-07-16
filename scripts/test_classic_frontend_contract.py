@@ -60,6 +60,9 @@ def main() -> None:
         "radarResultList",
         "operationFeedbackDialog",
         "markPoseSummary",
+        "mapEditorBtn",
+        "mapEditorToolbar",
+        "mapEditorSaveBtn",
     ):
         assert f'id="{element_id}"' in html
 
@@ -104,10 +107,14 @@ def main() -> None:
     assert "workspace && workspace.latest_mapping_session" not in script
     assert "(session.floor_steps || [])" in script
     assert "mapping-actions" in css
+    assert "map-editor-toolbar" in css
     assert "grid-template-columns: repeat(2, minmax(0, 1fr));" in css
     assert '<button class="danger" id="resetTaskSessionBtn"' in html
     assert "清理导航会话" in html
     assert "复位导航状态" not in html
+    assert '"/api/maps/edit"' in script
+    assert "function setMapEditorActive" in script
+    assert "function paintMapEditor" in script
 
     assert "DASHBOARD_LITE_DIR" not in backend
     assert 'parsed.path in ("/lite", "/lite/")' in backend
@@ -117,6 +124,9 @@ def main() -> None:
     assert 'self.declare_parameter("auto_preflight_interval_s", 300.0)' in backend
     assert "def _tick_auto_preflight" in backend
     assert '"source": "automatic"' in backend
+    assert "def _edit_map" in backend
+    assert 'elif parsed.path == "/api/maps/edit":' in backend
+    assert '"source": "web_map_editor"' in backend
 
     print("classic frontend contract tests passed")
 

@@ -333,6 +333,86 @@ def read_pgm(path: Path) -> Tuple[int, int, int, List[int]]:
     return width, height, max_value, pixels
 
 
+def write_pgm(path: Path, width: int, height: int, max_value: int, pixels: List[int]) -> None:
+    """Write a normalized binary PGM while preserving the map dimensions."""
+    if len(pixels) != int(width) * int(height):
+        raise ValueError("PGM pixel count does not match map dimensions")
+    if not 1 <= int(max_value) <= 65535:
+        raise ValueError("unsupported PGM max value")
+    header = (f"P5\n{int(width)} {int(height)}\n{int(max_value)}\n").encode("ascii")
+    bounded = [int(max(0, min(int(max_value), value))) for value in pixels]
+    raw = (
+        bytes(bounded)
+        if int(max_value) <= 255
+        else b"".join(value.to_bytes(2, "big") for value in bounded)
+    )
+    path.write_bytes(header + raw)
+
+
+def apply_map_cell_edits(yaml_path: Path, cells: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Apply sparse ROS occupancy edits to the PGM referenced by a map YAML.
+
+    Frontend editor coordinates are image coordinates (origin at the top-left),
+    which match PGM row order.  The loaded ROS occupancy data remains flipped
+    by ``load_map_file_payload`` and is not written directly by the browser.
+    """
+    if not yaml_path.exists():
+        raise FileNotFoundError(str(yaml_path))
+    with yaml_path.open("r", encoding="utf-8") as file:
+        info = yaml.safe_load(file) or {}
+    image_value = str(info.get("image") or "").strip()
+    image_path = resolve_map_yaml_image_path(yaml_path, image_value) if image_value else None
+    if image_path is None or not image_path.exists():
+        image_path = find_local_map_image(yaml_path, image_value)
+    if image_path is None or not image_path.exists():
+        raise FileNotFoundError("map image not found")
+    width, height, max_value, pixels = read_pgm(image_path)
+    if len(cells) > 100000:
+        raise ValueError("地图修饰单次最多保存 100000 个栅格")
+    negate = int(info.get("negate", 0) or 0)
+    occupied_thresh = float(info.get("occupied_thresh", 0.65) or 0.65)
+    free_thresh = float(info.get("free_thresh", 0.196) or 0.196)
+    unknown_ratio = max(0.0, min(1.0, (occupied_thresh + free_thresh) / 2.0))
+    changed = 0
+    seen = set()
+    for item in cells:
+        if not isinstance(item, dict):
+            raise ValueError("地图修饰栅格格式无效")
+        try:
+            x = int(item["x"])
+            y = int(item["y"])
+            occupancy = int(item["value"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("地图修饰栅格必须包含整数 x/y/value") from exc
+        if not (0 <= x < width and 0 <= y < height):
+            raise ValueError("地图修饰栅格超出地图范围")
+        if occupancy not in (-1, 0, 100):
+            raise ValueError("地图修饰值只能是 -1、0 或 100")
+        key = (x, y)
+        if key in seen:
+            continue
+        seen.add(key)
+        if occupancy == 100:
+            ratio = 1.0 if negate else 0.0
+        elif occupancy == 0:
+            ratio = 0.0 if negate else 1.0
+        else:
+            ratio = unknown_ratio
+        pixel = int(round(ratio * max_value))
+        index = y * width + x
+        if pixels[index] != pixel:
+            pixels[index] = pixel
+            changed += 1
+    write_pgm(image_path, width, height, max_value, pixels)
+    return {
+        "ok": True,
+        "width": width,
+        "height": height,
+        "changed_cells": changed,
+        "image_path": str(image_path),
+    }
+
+
 def read_pgm_header(path: Path) -> Tuple[int, int, int]:
     with path.open("rb") as file:
 

@@ -94,6 +94,7 @@ from .map_derived_contract import (
 )
 from .map_contract import (
     all_map_records,
+    apply_map_cell_edits,
     build_imported_map_record,
     default_map_id,
     ensure_map_yaml_uses_local_image,
@@ -2678,6 +2679,160 @@ class WebDashboardNode(Node):
         if launch_lines:
             return {"mode": "unknown", "message": "找到 real launch，但未确认 enable_axis_command"}
         return {"mode": "unknown", "message": "未找到全量 real 启动进程"}
+
+    def _edit_map(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        map_id = str(payload.get("map_id") or "").strip()
+        cells = payload.get("cells") if isinstance(payload.get("cells"), list) else []
+        if not map_id:
+            return self._error("请先选择需要修饰的固定地图")
+        if not cells:
+            return self._error("地图没有需要保存的修改")
+        with self._data_lock:
+            active = dict(self._settings.get("active_task") or {})
+            if active.get("status") == "running":
+                return self._error("任务执行中不能修改地图，请先停止当前任务")
+            record = self._find_map_record_unlocked(map_id)
+            if record is None:
+                return self._error("需要修饰的地图不存在")
+            selected_map_id = str(self._settings.get("selected_map_id") or "")
+        if map_id != selected_map_id:
+            return self._error("只能修饰当前已生效的固定地图，请先在顶部地图入口切换")
+
+        source_yaml = FsPath(self._resolve_path(str(record.get("yaml_path") or "")))
+        if not source_yaml.exists():
+            return self._error("地图 yaml 不存在", {"yaml_path": str(source_yaml)})
+        source_dir = source_yaml.parent
+        requested_name = str(payload.get("name") or "").strip()
+        default_name = "%s_修饰_%s" % (
+            str(record.get("name") or record.get("id") or "地图"),
+            time.strftime("%Y%m%d_%H%M%S", time.localtime()),
+        )
+        map_name = sanitize_name(requested_name, default_name)
+        dest = self.map_archive_dir / map_name
+        if dest.exists():
+            dest = self.map_archive_dir / ("%s_%s" % (map_name, random_suffix(6)))
+        staging = self.map_archive_dir / (".%s.staging.%s" % (dest.name, random_suffix(8)))
+        try:
+            shutil.copytree(source_dir, staging)
+            edited_yaml = find_map_yaml(staging)
+            if edited_yaml is None:
+                raise RuntimeError("复制后的地图包没有 occupancy yaml")
+            edit_result = apply_map_cell_edits(edited_yaml, cells)
+            os.replace(staging, dest)
+        except Exception as exc:
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
+            if dest.exists():
+                shutil.rmtree(dest, ignore_errors=True)
+            return self._error("地图修饰保存失败", {"error": str(exc)})
+
+        final_yaml = find_map_yaml(dest)
+        if final_yaml is None:
+            shutil.rmtree(dest, ignore_errors=True)
+            return self._error("地图修饰保存失败：新地图缺少 yaml")
+        created_at = now_text()
+        edited_record = dict(record)
+        edited_record.update(
+            {
+                "id": new_id("map"),
+                "name": map_name,
+                "directory": str(dest),
+                "yaml_path": str(final_yaml),
+                "source": "web_map_editor",
+                "source_path": "",
+                "factory_apply_path": "",
+                "readonly": False,
+                "parent_map_id": map_id,
+                "edited_from_source_path": record.get("factory_apply_path") or record.get("source_path"),
+                "created_at": created_at,
+                "updated_at": created_at,
+                "edit_summary": {
+                    "changed_cells": int(edit_result.get("changed_cells", 0) or 0),
+                    "requested_cells": len(cells),
+                },
+            }
+        )
+        edited_record.pop("factory_map_name", None)
+        edited_record.pop("factory_source_reason", None)
+        with self._data_lock:
+            original_maps = list(self._maps)
+            original_annotations = list(self._annotations)
+            original_tasks = list(self._tasks)
+            annotation_id_map: Dict[str, str] = {}
+            cloned_annotations: List[Dict[str, Any]] = []
+            for annotation in self._annotations:
+                if str(annotation.get("map_id") or "") != map_id:
+                    continue
+                clone = dict(annotation)
+                source_annotation_id = str(annotation.get("id") or "")
+                clone["id"] = new_id("point")
+                clone["map_id"] = edited_record["id"]
+                clone["source_annotation_id"] = source_annotation_id
+                clone["created_at"] = created_at
+                clone["updated_at"] = created_at
+                annotation_id_map[source_annotation_id] = clone["id"]
+                cloned_annotations.append(clone)
+            cloned_tasks: List[Dict[str, Any]] = []
+            for task in self._tasks:
+                if str(task.get("map_id") or "") != map_id:
+                    continue
+                source_ids = [str(item) for item in (task.get("annotation_ids") or [])]
+                if not source_ids or any(item not in annotation_id_map for item in source_ids):
+                    continue
+                cloned_tasks.append(
+                    {
+                        "id": new_id("task"),
+                        "name": str(task.get("name") or "巡检任务"),
+                        "map_id": edited_record["id"],
+                        "annotation_ids": [annotation_id_map[item] for item in source_ids],
+                        "status": "ready",
+                        "source_task_id": task.get("id"),
+                        "created_at": created_at,
+                    }
+                )
+            try:
+                self._maps.append(edited_record)
+                self._annotations.extend(cloned_annotations)
+                self._tasks.extend(cloned_tasks)
+                self._save_json("maps.json", self._maps)
+                self._save_json("annotations.json", self._annotations)
+                self._save_json("tasks.json", self._tasks)
+            except Exception as exc:
+                self._maps = original_maps
+                self._annotations = original_annotations
+                self._tasks = original_tasks
+                for name, value in (
+                    ("maps.json", original_maps),
+                    ("annotations.json", original_annotations),
+                    ("tasks.json", original_tasks),
+                ):
+                    try:
+                        self._save_json(name, value)
+                    except Exception:
+                        pass
+                shutil.rmtree(dest, ignore_errors=True)
+                return self._error("地图修饰索引保存失败，已回滚新地图文件", {"error": str(exc)})
+        self._append_event(
+            "前端修饰地图已保存",
+            {
+                "map_id": edited_record["id"],
+                "parent_map_id": map_id,
+                "changed_cells": edit_result.get("changed_cells"),
+                "cloned_annotations": len(cloned_annotations),
+                "cloned_tasks": len(cloned_tasks),
+                "directory": str(dest),
+            },
+        )
+        return {
+            "ok": True,
+            "map": edited_record,
+            "parent_map_id": map_id,
+            "changed_cells": edit_result.get("changed_cells"),
+            "cloned_annotations": len(cloned_annotations),
+            "cloned_tasks": len(cloned_tasks),
+            "message": "地图修饰已保存为新版本；原地图未覆盖，已继承 %d 个点位和 %d 个任务，请确认后切换使用"
+            % (len(cloned_annotations), len(cloned_tasks)),
+        }
 
     def _select_map(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         map_id = str(payload.get("map_id") or "").strip() or None
@@ -6012,11 +6167,13 @@ class WebDashboardNode(Node):
 
     @staticmethod
     def _active_waypoint_key(annotation: Dict[str, Any], active: Dict[str, Any]) -> str:
-        return "%s:%s:%s" % (
+        base = "%s:%s:%s" % (
             str(active.get("task_id") or "manual"),
             str(active.get("index", 0)),
             str(annotation.get("id") or annotation.get("label") or "waypoint"),
         )
+        run_id = str(active.get("run_id") or "").strip()
+        return "%s:%s" % (run_id, base) if run_id else base
 
     def _radar_completion_for_active(self, annotation: Dict[str, Any], active: Dict[str, Any]) -> str:
         normalized = normalize_annotation_semantics(dict(annotation))
@@ -6608,6 +6765,8 @@ class WebDashboardNode(Node):
                         self._send_api(node._create_project(payload))
                     elif parsed.path == "/api/maps/select":
                         self._send_api(node._select_map(payload))
+                    elif parsed.path == "/api/maps/edit":
+                        self._send_api(node._edit_map(payload))
                     elif parsed.path == "/api/mapping/session":
                         self._send_api(node._create_mapping_session(payload))
                     elif parsed.path == "/api/mapping/select_floor":

@@ -50,8 +50,9 @@
       font-weight: 500;
     }
     .top-status {
-      flex: 1;
+      flex: 0 1 auto;
       min-width: 0;
+      max-width: 100%;
       display: flex;
       justify-content: flex-end;
       gap: 0;
@@ -94,6 +95,7 @@
       font-weight: 600;
       text-overflow: ellipsis;
     }
+    #taskTopStatus { max-width: 260px; }
     button.status-chip {
       appearance: none;
       font-family: inherit;
@@ -225,6 +227,43 @@
     .map-tools button.mode {
       min-width: 58px;
     }
+    .map-editor-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      flex-wrap: wrap;
+      padding: 7px 12px;
+      border-bottom: 1px solid var(--line);
+      background: #f7f9fb;
+      font-size: 12px;
+    }
+    .map-editor-toolbar[hidden] { display: none; }
+    .map-editor-title { color: var(--text); font-weight: 700; }
+    .map-editor-modes {
+      display: inline-flex;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .map-editor-modes button {
+      border: 0;
+      border-right: 1px solid var(--line);
+      border-radius: 0;
+    }
+    .map-editor-modes button:last-child { border-right: 0; }
+    .map-editor-brush {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .map-editor-brush input { width: 92px; }
+    .map-editor-brush output { min-width: 18px; color: var(--text); text-align: center; }
+    .map-editor-name { width: min(210px, 30vw); min-height: 30px; }
+    .map-editor-count { min-width: 68px; color: var(--muted); }
+    .map-editor-toolbar button { min-height: 30px; padding: 5px 9px; font-size: 12px; }
+    .map-editor-toolbar button.primary { border-color: var(--accent); background: var(--accent); color: white; }
     .zoom-readout {
       min-width: 48px;
       text-align: center;
@@ -268,27 +307,6 @@
       color: var(--muted);
       font-size: 12px;
       pointer-events: none;
-    }
-    .floor-overlay {
-      position: absolute;
-      left: 12px;
-      top: 12px;
-      max-width: calc(100% - 24px);
-      padding: 8px 10px;
-      border-radius: 6px;
-      border: 1px solid rgba(15, 23, 42, 0.14);
-      background: rgba(255, 255, 255, 0.94);
-      color: var(--text);
-      font-size: 13px;
-      font-weight: 750;
-      line-height: 1.35;
-      pointer-events: none;
-      box-shadow: 0 6px 18px rgba(15, 23, 42, 0.10);
-    }
-    .floor-overlay.warn {
-      border-color: #fcd34d;
-      background: rgba(255, 251, 235, 0.96);
-      color: var(--warn);
     }
     .side {
       display: flex;
@@ -1031,6 +1049,8 @@
       header.topbar { align-items: center; }
       .top-brand span { display: none; }
       .top-status { justify-content: flex-start; }
+      #taskTopStatus { max-width: 170px; }
+      .map-editor-name { width: 100%; order: 5; }
       main { padding: 8px; }
       .tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .grid { grid-template-columns: 1fr; }

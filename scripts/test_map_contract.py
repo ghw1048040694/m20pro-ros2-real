@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT / "src/m20pro_cloud_bridge"))
 
 from m20pro_cloud_bridge.map_contract import (  # noqa: E402
     all_map_records,
+    apply_map_cell_edits,
     build_imported_map_record,
     default_map_id,
     ensure_map_yaml_uses_local_image,
@@ -265,6 +266,28 @@ def test_load_map_file_payload_builds_nav_occupancy_grid() -> None:
         assert_equal(payload["data"], [0, 100, 100, -1], "occupancy data flipped to ROS map order")
 
 
+def test_apply_map_cell_edits_preserves_image_coordinates() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        yaml_path = root / "map.yaml"
+        pgm_path = root / "map.pgm"
+        write_p5(pgm_path)
+        yaml_path.write_text(
+            "image: map.pgm\n"
+            "resolution: 0.1\n"
+            "occupied_thresh: 0.65\n"
+            "free_thresh: 0.196\n"
+            "negate: 0\n",
+            encoding="utf-8",
+        )
+        result = apply_map_cell_edits(
+            yaml_path,
+            [{"x": 0, "y": 0, "value": 100}, {"x": 1, "y": 0, "value": -1}],
+        )
+        assert_equal(result["changed_cells"], 1, "changed cells")
+        assert_equal(read_pgm(pgm_path), (2, 1, 255, [0, 108]), "edited PGM pixels")
+
+
 def test_build_imported_map_record() -> None:
     record = build_imported_map_record(
         map_id="map_a",
@@ -305,6 +328,7 @@ def main() -> int:
         test_map_file_metadata_payload_is_lightweight,
         test_map_file_fingerprint_tracks_yaml_and_image,
         test_load_map_file_payload_builds_nav_occupancy_grid,
+        test_apply_map_cell_edits_preserves_image_coordinates,
         test_build_imported_map_record,
     ):
         test()

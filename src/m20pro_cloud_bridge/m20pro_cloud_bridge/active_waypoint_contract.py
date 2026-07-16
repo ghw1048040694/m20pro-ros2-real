@@ -48,6 +48,7 @@ def build_active_waypoint_payload(
     return {
         "task_id": active.get("task_id"),
         "task_name": active.get("task_name"),
+        "run_id": active.get("run_id"),
         "phase": phase,
         "index": int(active.get("index", 0)),
         "remaining_dwell_s": _remaining_dwell_s(active, now_time),

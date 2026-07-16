@@ -880,8 +880,14 @@ class RadarInspectionNode(Node):
             fallback_prefix=result_prefix,
             scan_suffix=result_suffix,
         )
+        run_id = str(active.get("run_id") or "").strip()
+        if run_id:
+            # U360 task IDs are device-facing and must also be unique when a
+            # reusable web task is launched again within the same second.
+            task_id = "%s_%s" % (task_id, run_id[:12])
         request = {
             "taskId": task_id,
+            "run_id": run_id or None,
             "taskDesc": task_desc(waypoint),
             "mode": mode,
             "project": str(self.get_parameter("project").value),
@@ -925,6 +931,7 @@ class RadarInspectionNode(Node):
         result = {
             "ok": True,
             "waypoint_key": key,
+            "run_id": active_waypoint.get("run_id"),
             "backend": self.backend,
             "scan_mode": request.get("mode") or self.scan_mode,
             "scan_label": request.get("scanLabel"),
@@ -1001,6 +1008,7 @@ class RadarInspectionNode(Node):
     ) -> None:
         payload = {
             "waypoint_key": key,
+            "run_id": active_waypoint.get("run_id"),
             "status": status,
             "state": state,
             "progress": progress,
@@ -1429,11 +1437,13 @@ def normalize_scan_plan_item(item: Dict[str, Any], index: int, default_density: 
 
 def waypoint_key(active: Dict[str, Any]) -> str:
     waypoint = active.get("waypoint") or {}
-    return "%s:%s:%s" % (
+    base = "%s:%s:%s" % (
         str(active.get("task_id") or "manual"),
         str(active.get("index", 0)),
         str(waypoint.get("id") or waypoint.get("label") or "waypoint"),
     )
+    run_id = str(active.get("run_id") or "").strip()
+    return "%s:%s" % (run_id, base) if run_id else base
 
 
 def generate_u360_task_id(

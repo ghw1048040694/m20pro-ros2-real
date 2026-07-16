@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import uuid
 from typing import Any, Callable, Dict, Optional, Sequence
 
 
@@ -227,6 +228,9 @@ def create_active_task_state(
     active = {
         "task_id": task.get("id"),
         "task_name": task.get("name"),
+        # A reusable task definition gets a fresh runtime identity every time
+        # it starts, so radar/navigation state cannot leak into the next run.
+        "run_id": uuid.uuid4().hex,
         "map_id": task_map_id,
         "multi_floor": bool(task.get("multi_floor")),
         "status": "running",

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>M20Pro 现场操作台</title>
   <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="/static/dashboard.css?v=20260714-mapping-flow-5" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=20260716-map-editor-1" />
 
 </head>
 <body>
@@ -16,7 +16,6 @@
       <button id="mapStatusBtn" class="status-chip status-action" type="button" aria-expanded="false"><span>地图</span><strong id="mapTopStatus">等待</strong></button>
       <span class="status-chip"><span>楼层</span><strong id="floor">-</strong></span>
       <button id="localizationStatusBtn" class="status-chip status-action" type="button" aria-expanded="false"><span>定位</span><strong id="localization">-</strong></button>
-      <span class="status-chip"><span>点云</span><strong id="perceptionTopStatus">等待</strong></span>
       <span class="status-chip"><span>自检</span><strong id="preflightTopStatus">启动中</strong></span>
       <span class="status-chip"><span>电量</span><strong id="battery">-</strong></span>
       <span class="status-chip"><span>任务</span><strong id="taskTopStatus">空闲</strong></span>
@@ -63,11 +62,25 @@
           <button id="fitMapBtn" title="恢复整图适配">适配</button>
           <button id="centerRobotBtn" title="把机器人位置移动到视图中心">居中机器人</button>
           <button id="followRobotBtn" title="任务执行时自动跟随机器人">跟随</button>
+          <button id="mapEditorBtn" class="mode" title="修饰当前固定地图的噪点、空白和障碍边界">修饰地图</button>
         </span>
+      </div>
+      <div id="mapEditorToolbar" class="map-editor-toolbar" hidden>
+        <span class="map-editor-title">地图修饰</span>
+        <span class="map-editor-modes" role="group" aria-label="地图修饰类型">
+          <button type="button" data-map-editor-mode="free" class="active-tool" title="把噪点和错误障碍擦成可通行区域">擦除噪点</button>
+          <button type="button" data-map-editor-mode="obstacle" title="补画墙体或不可通行区域">补画障碍</button>
+          <button type="button" data-map-editor-mode="unknown" title="把区域恢复为未知栅格">设为未知</button>
+        </span>
+        <label class="map-editor-brush">笔刷 <input id="mapEditorBrush" type="range" min="1" max="20" step="1" value="3" /><output id="mapEditorBrushValue">3</output></label>
+        <input id="mapEditorName" class="map-editor-name" placeholder="新地图名称（可留空）" aria-label="修饰后新地图名称" />
+        <span id="mapEditorCount" class="map-editor-count">0 处修改</span>
+        <button id="mapEditorUndoBtn" type="button" title="撤销上一笔" disabled>撤销</button>
+        <button id="mapEditorResetBtn" type="button" title="清除本次全部修改" disabled>清除</button>
+        <button id="mapEditorSaveBtn" class="primary" type="button" disabled>保存新版本</button>
       </div>
       <div class="canvas-box">
         <canvas id="mapCanvas"></canvas>
-        <div id="floorOverlay" class="floor-overlay">-</div>
         <div id="cursor" class="crosshair">拖拽地图取点和朝向</div>
       </div>
     </section>
@@ -325,7 +338,7 @@
     <div class="dialog-actions"><button id="confirmOperationFeedbackBtn" class="primary" type="button">确定</button></div>
   </dialog>
 
-  <script src="/static/dashboard.js?v=20260716-live-scan-1"></script>
+  <script src="/static/dashboard.js?v=20260716-map-editor-1"></script>
 
 </body>
 </html>

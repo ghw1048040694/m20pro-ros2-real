@@ -20,6 +20,12 @@
       localizeDraft: null,
       markPointer: null,
       panPointer: null,
+      mapEditorActive: false,
+      mapEditorMode: "free",
+      mapEditorData: null,
+      mapEditorEdits: {},
+      mapEditorHistory: [],
+      mapEditorPointer: null,
       robotDisplayPose: null,
       view: {
         zoom: 1,
@@ -827,17 +833,6 @@
       if (shownFloor !== robotFloor) return `正在查看 ${shownFloor}，机器狗实际在 ${robotFloor}`;
       return "";
     }
-    function updateFloorDisplay(payload = state.latest) {
-      const shownFloor = displayedMapFloor() || (state.selectedMapId ? "-" : "实时");
-      const robotFloor = currentRobotFloor(payload) || "-";
-      const mismatch = selectedMapFloorMismatchText(payload);
-      const overlay = $("floorOverlay");
-      if (overlay) {
-        const relocalization = selectedMapRelocalizationText(payload);
-        overlay.textContent = relocalization || mismatch || `当前显示 ${shownFloor}`;
-        overlay.className = `floor-overlay ${(relocalization || mismatch) ? "warn" : ""}`;
-      }
-    }
     function localizationConfirmedForDisplay(payload = state.latest) {
       const status = payload && payload.localization_status ? payload.localization_status : null;
       return !!(
@@ -944,6 +939,7 @@
       recording: "recordingStatusBtn"
     };
     function setStatusPopover(name, open) {
+      if (open && name && state.mapEditorActive && !setMapEditorActive(false)) return;
       for (const [key, id] of Object.entries(statusPopoverIds)) {
         const popover = $(id);
         const button = $(statusButtonIds[key]);
@@ -1101,6 +1097,49 @@
         "确认后机器狗会立即向首点导航。"
       ].filter(Boolean).join("\n");
     }
+    function activeRadarStatus(activeTask, waypoint) {
+      const radar = state.latest && state.latest.radar_inspection && state.latest.radar_inspection.parsed;
+      if (!radar || typeof radar !== "object") return null;
+      const runId = String((activeTask && activeTask.run_id) || (waypoint && waypoint.run_id) || "").trim();
+      const radarRunId = String(radar.run_id || "").trim();
+      if (runId && radarRunId && runId !== radarRunId) return null;
+      const expectedKey = runId && waypoint && waypoint.waypoint && activeTask
+        ? `${runId}:${activeTask.task_id || "manual"}:${Number(activeTask.index) || 0}:${waypoint.waypoint.id || waypoint.waypoint.label || "waypoint"}`
+        : "";
+      if (expectedKey && radar.waypoint_key && String(radar.waypoint_key) !== expectedKey) return null;
+      return radar;
+    }
+    function taskPhaseText(activeTask, waypoint) {
+      const phase = String((waypoint && waypoint.phase) || (activeTask && activeTask.phase) || "navigating");
+      const wp = waypoint && waypoint.waypoint ? waypoint.waypoint : {};
+      const radarPlan = wp.radar && typeof wp.radar === "object" ? wp.radar : {};
+      if (phase === "dwelling" && radarPlan.enabled === true) {
+        const radar = activeRadarStatus(activeTask, waypoint);
+        const status = radar && String(radar.status || radar.state || "");
+        if (!status || ["starting", "waiting_for_device"].includes(status)) return "等待雷达开始扫描";
+        if (status === "running") {
+          const progress = Number(radar.progress);
+          return Number.isFinite(progress) ? `雷达扫描中 ${progress}%` : "雷达扫描中";
+        }
+        if (["scan_complete", "analysis_pending", "analyzing"].includes(status)) return "等待雷达返回结果";
+        if (status === "communication_retry") return "雷达通信重试中";
+        if (["completed", "finished", "complete"].includes(status)) return "雷达检测完成，准备继续";
+        if (["failed", "error"].includes(status)) return "雷达检测失败";
+        return `雷达 ${status}`;
+      }
+      if (phase === "dwelling") return "停留/检测";
+      if (phase === "cross_floor") return "跨楼层切换";
+      if (phase === "completed") return "任务完成";
+      if (activeTask && activeTask.status_message && activeTask.last_nav_goal_status === "idle") return activeTask.status_message;
+      return "导航中";
+    }
+    function taskTopStatusText(activeTask, waypoint) {
+      if (!activeTask || activeTask.status !== "running") return "空闲";
+      const total = Array.isArray(activeTask.annotation_ids) ? activeTask.annotation_ids.length : 0;
+      const index = Math.max(0, Number(activeTask.index) || 0);
+      const phase = taskPhaseText(activeTask, waypoint);
+      return total ? `第 ${Math.min(index + 1, total)} / ${total} 点 · ${phase}` : phase;
+    }
     function renderActiveTaskSummary(activeTask, waypoint) {
       const box = $("activeTaskSummary");
       if (!box) return;
@@ -1115,19 +1154,7 @@
       if (activeTask && activeTask.task_name) parts.push(activeTask.task_name);
       if (wp.label) parts.push(`点位 ${wp.label}`);
       if (Number.isFinite(Number(source.index))) parts.push(`序号 ${Number(source.index) + 1}`);
-      if (source.phase) parts.push(source.phase === "dwelling" ? "停留中" : "导航中");
-      const radarPlan = wp.radar && typeof wp.radar === "object" ? wp.radar : {};
-      if (source.phase === "dwelling" && radarPlan.enabled === true) {
-        const radar = state.latest && state.latest.radar_inspection && state.latest.radar_inspection.parsed;
-        const radarStatus = radar && String(radar.status || radar.state || "");
-        if (!radarStatus || radarStatus === "starting") parts.push("等待雷达启动");
-        else if (radarStatus === "running") {
-          const progress = Number(radar.progress);
-          parts.push(Number.isFinite(progress) ? `雷达扫描中 ${progress}%` : "雷达扫描中");
-        } else if (["scan_complete", "analysis_pending", "analyzing"].includes(radarStatus)) parts.push("雷达扫描完成，等待结果");
-        else if (radarStatus === "failed") parts.push("雷达扫描失败");
-        else parts.push(`雷达 ${radarStatus}`);
-      }
+      if (source.phase || activeTask) parts.push(taskPhaseText(activeTask, source));
       if (source.nav_goal_status) parts.push(`Nav2 ${source.nav_goal_status}`);
       if (Number.isFinite(Number(source.distance_m))) parts.push(`距离 ${fmtNumber(Number(source.distance_m), 2)}m`);
       const navFeedback = source.nav_feedback || (activeTask && activeTask.last_nav_feedback) || null;
@@ -1367,8 +1394,7 @@
           : []);
       const total = Math.max(waypoints.length, Array.isArray(activeTask.annotation_ids) ? activeTask.annotation_ids.length : 0);
       const current = Math.max(0, Math.min(Math.max(0, total - 1), Number(activeTask.index) || 0));
-      const phase = String((waypoint && waypoint.phase) || activeTask.phase || "navigating");
-      const phaseText = phase === "dwelling" ? "停留/检测" : (phase === "cross_floor" ? "跨层切换" : "导航中");
+      const phaseText = taskPhaseText(activeTask, waypoint);
       const progress = total ? Math.max(0, Math.min(100, current / total * 100)) : 0;
       const rows = waypoints.map((item, index) => {
         const label = item && (item.label || item.id) || `点位 ${index + 1}`;
@@ -1576,6 +1602,137 @@
       ictx.putImageData(imageData, 0, 0);
       return image;
     }
+    function mapEditorCellIndex(x, y) {
+      if (!state.map) return -1;
+      return (state.map.height - 1 - y) * state.map.width + x;
+    }
+    function mapEditorColor(value) {
+      if (value >= 65) return 0;
+      if (value >= 0 && value <= 25) return 255;
+      if (value >= 0) return 150;
+      return 205;
+    }
+    function updateMapEditorPixels(cells) {
+      if (!state.mapImage) return;
+      const imageCtx = state.mapImage.getContext("2d");
+      for (const cell of cells) {
+        const c = mapEditorColor(cell.value);
+        imageCtx.fillStyle = `rgb(${c},${c},${c})`;
+        imageCtx.fillRect(cell.x, cell.y, 1, 1);
+      }
+      draw();
+    }
+    function mapEditorValue() {
+      return state.mapEditorMode === "obstacle" ? 100 : (state.mapEditorMode === "unknown" ? -1 : 0);
+    }
+    function mapEditorCellKey(x, y) { return `${x}:${y}`; }
+    function mapEditorChangedCells() { return Object.values(state.mapEditorEdits); }
+    function updateMapEditorControls() {
+      const count = mapEditorChangedCells().length;
+      if ($("mapEditorCount")) $("mapEditorCount").textContent = `${count} 处修改`;
+      if ($("mapEditorUndoBtn")) $("mapEditorUndoBtn").disabled = !state.mapEditorHistory.length;
+      if ($("mapEditorResetBtn")) $("mapEditorResetBtn").disabled = !count;
+      if ($("mapEditorSaveBtn")) $("mapEditorSaveBtn").disabled = !count;
+      for (const button of document.querySelectorAll("[data-map-editor-mode]")) {
+        button.classList.toggle("active-tool", button.dataset.mapEditorMode === state.mapEditorMode);
+      }
+    }
+    function resetMapEditorDraft(redraw = true) {
+      state.mapEditorData = state.map && Array.isArray(state.map.data) ? state.map.data.slice() : null;
+      state.mapEditorEdits = {};
+      state.mapEditorHistory = [];
+      state.mapEditorPointer = null;
+      if (state.map) state.mapImage = buildMapImage(state.map);
+      updateMapEditorControls();
+      if (redraw) draw();
+    }
+    function setMapEditorActive(active, force = false) {
+      const next = Boolean(active);
+      if (!next && state.mapEditorActive && !force && mapEditorChangedCells().length) {
+        if (!window.confirm("退出地图修饰会放弃本次尚未保存的修改，确认退出？")) return false;
+      }
+      if (next) {
+        if (!state.selectedMapId || !state.map || state.map.source !== "file") {
+          showOperationFeedback("无法修饰地图", "请先在顶部地图入口选择并生效一张固定地图。", true);
+          return false;
+        }
+        const activeTask = state.latest && state.latest.active_task;
+        if (activeTask && activeTask.status === "running") {
+          showOperationFeedback("无法修饰地图", "任务执行中不能修改地图，请先停止当前任务。", true);
+          return false;
+        }
+        setStatusPopover("", false);
+        state.view.panMode = false;
+        state.followRobot = false;
+        $("panModeBtn").classList.remove("active-tool");
+        $("followRobotBtn").classList.remove("active-tool");
+        resetMapEditorDraft(false);
+      } else if (state.mapEditorActive) {
+        resetMapEditorDraft(false);
+      }
+      state.mapEditorActive = next;
+      $("mapEditorToolbar").hidden = !next;
+      $("mapEditorBtn").classList.toggle("active-tool", next);
+      $("cursor").textContent = next
+        ? "地图修饰：左键涂抹，中键/Shift+拖动平移，滚轮缩放"
+        : "拖拽地图取点和朝向";
+      updatePointerModeUi();
+      resizeCanvas();
+      return true;
+    }
+    function canvasToMapEditorCell(clientX, clientY) {
+      if (!state.map) return null;
+      const view = getView();
+      const x = Math.floor((clientX - view.rect.left - view.ox) / view.scale);
+      const y = Math.floor((clientY - view.rect.top - view.oy) / view.scale);
+      if (x < 0 || y < 0 || x >= state.map.width || y >= state.map.height) return null;
+      return {x, y};
+    }
+    function paintMapEditor(clientX, clientY) {
+      const center = canvasToMapEditorCell(clientX, clientY);
+      const pointer = state.mapEditorPointer;
+      if (!center || !pointer || !state.mapEditorData) return;
+      const radius = Math.max(1, Math.min(20, Number($("mapEditorBrush").value) || 3));
+      const value = mapEditorValue();
+      const updated = [];
+      for (let y = Math.max(0, center.y - radius); y <= Math.min(state.map.height - 1, center.y + radius); y += 1) {
+        for (let x = Math.max(0, center.x - radius); x <= Math.min(state.map.width - 1, center.x + radius); x += 1) {
+          if ((x - center.x) ** 2 + (y - center.y) ** 2 > radius ** 2) continue;
+          const index = mapEditorCellIndex(x, y);
+          if (index < 0 || state.mapEditorData[index] === value) continue;
+          const key = mapEditorCellKey(x, y);
+          if (!pointer.touched[key]) {
+            pointer.touched[key] = true;
+            pointer.changes.push({x, y, before: state.mapEditorData[index]});
+          }
+          state.mapEditorData[index] = value;
+          const original = state.map.data[index];
+          if (value === original) delete state.mapEditorEdits[key];
+          else state.mapEditorEdits[key] = {x, y, value};
+          updated.push({x, y, value});
+        }
+      }
+      if (updated.length) {
+        updateMapEditorPixels(updated);
+        updateMapEditorControls();
+        $("cursor").textContent = `地图修饰 ${center.x}, ${center.y} / ${mapEditorChangedCells().length} 处修改`;
+      }
+    }
+    function undoMapEditorStroke() {
+      const stroke = state.mapEditorHistory.pop();
+      if (!stroke || !state.mapEditorData) return;
+      const updated = [];
+      for (const change of stroke.changes.slice().reverse()) {
+        const index = mapEditorCellIndex(change.x, change.y);
+        state.mapEditorData[index] = change.before;
+        const key = mapEditorCellKey(change.x, change.y);
+        if (change.before === state.map.data[index]) delete state.mapEditorEdits[key];
+        else state.mapEditorEdits[key] = {x: change.x, y: change.y, value: change.before};
+        updated.push({x: change.x, y: change.y, value: change.before});
+      }
+      updateMapEditorPixels(updated);
+      updateMapEditorControls();
+    }
     function getBaseView(rect = canvas.getBoundingClientRect()) {
       const map = state.map;
       if (!map) return { scale: 1, ox: 0, oy: 0, rect };
@@ -1659,7 +1816,6 @@
     }
     function updateMapModeUi() {
       $("cursor").textContent = state.view.panMode ? "平移模式" : "拖拽地图取点和朝向";
-      updateFloorDisplay();
       updateZoomReadout();
     }
     function centerMapOnWorld(x, y) {
@@ -1754,6 +1910,7 @@
       return active ? active.dataset.tab : "";
     }
     function activePointerMode() {
+      if (state.mapEditorActive) return "map_edit";
       if (state.localizationPopoverOpen) return "localize";
       const tab = activeTabName();
       if (tab === "marks") return "mark";
@@ -1971,6 +2128,7 @@
       ctx.strokeStyle = "#4b5563";
       ctx.lineWidth = 1;
       ctx.strokeRect(view.ox, view.oy, state.map.width * view.scale, state.map.height * view.scale);
+      if (state.mapEditorActive) return;
       const latest = state.latest;
       const canDrawLive = canDrawLiveRobotLayer(latest);
       if (!canDrawLive || !hasFreshPose(latest)) state.robotDisplayPose = null;
@@ -2010,11 +2168,13 @@
       resizeCanvas();
     }
     async function loadFileMap(mapId) {
+      if (state.mapEditorActive) setMapEditorActive(false, true);
       if (!mapId) {
         state.selectedMapId = null;
         state.fileMapVersion = -1;
         state.map = null;
         state.mapImage = null;
+        state.mapEditorData = null;
         state.markDraft = null;
         state.markDraftSource = "map_click";
         renderMarkPoseSummary();
@@ -2036,6 +2196,7 @@
       }
       state.map = map;
       state.mapImage = buildMapImage(map);
+      resetMapEditorDraft(false);
       state.selectedMapId = mapId;
       state.fileMapVersion = map.version;
       state.markDraft = null;
@@ -2062,7 +2223,6 @@
       state.effectiveMapId = s.effective_map_id || null;
       renderLocalizationStatus(s);
       renderPreflight(s.preflight || state.preflight);
-      updateFloorDisplay(s);
       updateMarkControls(s);
       $("floor").textContent = text(s.floor);
       if ($("stair")) $("stair").textContent = text(s.stair_status);
@@ -2106,14 +2266,16 @@
       renderPoseTracker("livePoseTracker", s);
       renderPoseTracker("taskPoseTracker", s);
       renderRadarInspection(s.radar_inspection);
-      const perceptionTop = $("perceptionTopStatus");
-      if (perceptionTop) perceptionTop.textContent = s.perception_status && s.perception_status.ready === true ? "正常" : "待检查";
       const taskTop = $("taskTopStatus");
-      if (taskTop) taskTop.textContent = s.active_task && s.active_task.status === "running" ? "执行中" : "空闲";
+      const activeWaypoint = s.active_waypoint && s.active_waypoint.parsed ? s.active_waypoint.parsed : null;
+      if (taskTop) taskTop.textContent = taskTopStatusText(s.active_task || null, activeWaypoint);
       const radarTop = $("radarTopStatus");
       if (radarTop) {
-        const radarParsed = s.radar_inspection && s.radar_inspection.parsed;
-        radarTop.textContent = radarParsed ? String(radarParsed.status || radarParsed.state || "已接入") : "等待";
+        const radarParsed = s.active_task && s.active_task.status === "running"
+          ? activeRadarStatus(s.active_task, activeWaypoint)
+          : (s.radar_inspection && s.radar_inspection.parsed);
+        const radarStatus = radarParsed && String(radarParsed.status || radarParsed.state || "");
+        radarTop.textContent = radarStatus === "running" ? "扫描中" : (radarStatus === "completed" ? "已完成" : (radarStatus === "failed" ? "异常" : (radarStatus || "等待")));
       }
       if ($("scanOverlayStatus")) {
         const scan = s.scan || {};
@@ -2909,8 +3071,6 @@
             </details>
             <div class="actions">
               <button class="primary" data-start-task="${task.id}" title="${taskNote}" ${canStart ? "" : "disabled"}>${startLabel}</button>
-              <button data-export-radar-json="${task.id}">雷达JSON</button>
-              <button data-export-radar-csv="${task.id}">雷达CSV</button>
               <button data-rename-task="${task.id}">改名</button>
               <button class="danger" data-delete-task="${task.id}" ${canDelete ? "" : "disabled"}>删除</button>
             </div>
@@ -2938,16 +3098,6 @@
             } finally {
               await loadTasks();
             }
-          });
-        }
-        for (const btn of box.querySelectorAll("[data-export-radar-json]")) {
-          btn.addEventListener("click", () => {
-            window.open(`/api/radar/task_export?task_id=${encodeURIComponent(btn.dataset.exportRadarJson)}&format=json`, "_blank");
-          });
-        }
-        for (const btn of box.querySelectorAll("[data-export-radar-csv]")) {
-          btn.addEventListener("click", () => {
-            window.open(`/api/radar/task_export?task_id=${encodeURIComponent(btn.dataset.exportRadarCsv)}&format=csv`, "_blank");
           });
         }
         for (const btn of box.querySelectorAll("[data-radar-artifact]")) {
@@ -3102,6 +3252,15 @@
         canvas.setPointerCapture(evt.pointerId);
         return;
       }
+      if (state.mapEditorActive) {
+        const cell = canvasToMapEditorCell(evt.clientX, evt.clientY);
+        if (!cell) return;
+        evt.preventDefault();
+        state.mapEditorPointer = {id: evt.pointerId, changes: [], touched: {}};
+        canvas.setPointerCapture(evt.pointerId);
+        paintMapEditor(evt.clientX, evt.clientY);
+        return;
+      }
       const p = canvasToWorld(evt.clientX, evt.clientY);
       if (!p) return;
       const mode = activePointerMode();
@@ -3129,6 +3288,11 @@
         clampView();
         draw();
         $("cursor").textContent = `地图缩放 ${Math.round(state.view.zoom * 100)}%`;
+        return;
+      }
+      if (state.mapEditorPointer && state.mapEditorPointer.id === evt.pointerId) {
+        evt.preventDefault();
+        paintMapEditor(evt.clientX, evt.clientY);
         return;
       }
       const p = canvasToWorld(evt.clientX, evt.clientY);
@@ -3162,6 +3326,16 @@
         if (canvas.hasPointerCapture(evt.pointerId)) canvas.releasePointerCapture(evt.pointerId);
         state.panPointer = null;
         canvas.classList.remove("panning");
+        return;
+      }
+      if (state.mapEditorPointer && state.mapEditorPointer.id === evt.pointerId) {
+        evt.preventDefault();
+        if (canvas.hasPointerCapture(evt.pointerId)) canvas.releasePointerCapture(evt.pointerId);
+        if (state.mapEditorPointer.changes.length) {
+          state.mapEditorHistory.push({changes: state.mapEditorPointer.changes});
+        }
+        state.mapEditorPointer = null;
+        updateMapEditorControls();
         return;
       }
       if (!state.markPointer || state.markPointer.id !== evt.pointerId) return;
@@ -3226,6 +3400,66 @@
         $("panModeBtn").classList.remove("active-tool");
         const pose = freshPose();
         if (pose) centerMapOnWorld(pose.x, pose.y);
+      }
+    });
+    $("mapEditorBtn").addEventListener("click", () => {
+      setMapEditorActive(!state.mapEditorActive);
+    });
+    for (const button of document.querySelectorAll("[data-map-editor-mode]")) {
+      button.addEventListener("click", () => {
+        state.mapEditorMode = button.dataset.mapEditorMode || "free";
+        updateMapEditorControls();
+        $("cursor").textContent = {
+          free: "擦除噪点：涂抹区域将设为可通行",
+          obstacle: "补画障碍：涂抹区域将设为不可通行",
+          unknown: "设为未知：涂抹区域将恢复为未知栅格"
+        }[state.mapEditorMode];
+      });
+    }
+    $("mapEditorBrush").addEventListener("input", event => {
+      $("mapEditorBrushValue").textContent = String(event.target.value);
+    });
+    $("mapEditorUndoBtn").addEventListener("click", undoMapEditorStroke);
+    $("mapEditorResetBtn").addEventListener("click", () => {
+      if (!mapEditorChangedCells().length) return;
+      if (!window.confirm("清除本次全部地图修饰？")) return;
+      resetMapEditorDraft(true);
+      $("cursor").textContent = "已清除本次地图修饰";
+    });
+    $("mapEditorSaveBtn").addEventListener("click", async () => {
+      const button = $("mapEditorSaveBtn");
+      const cells = mapEditorChangedCells();
+      if (!cells.length) return;
+      if (!window.confirm(`将 ${cells.length} 处修改保存为新的地图版本？原地图不会被覆盖。`)) return;
+      button.disabled = true;
+      button.textContent = "保存中...";
+      let payload = null;
+      try {
+        payload = await api("POST", "/api/maps/edit", {
+          map_id: state.selectedMapId,
+          name: $("mapEditorName").value.trim(),
+          cells
+        });
+        setMapEditorActive(false, true);
+        $("mapEditorName").value = "";
+        await loadMaps();
+      } catch (err) {
+        showOperationFeedback("地图修饰保存失败", err, true);
+        return;
+      } finally {
+        button.textContent = "保存新版本";
+        updateMapEditorControls();
+      }
+      const editedMap = (payload && payload.map) || {};
+      if (editedMap.id && window.confirm(`${editedMap.name || "新地图"} 已保存。现在切换到新版本并让 Nav2 加载吗？`)) {
+        $("mapSelect").value = editedMap.id;
+        try {
+          await applySelectedMap();
+        } catch (err) {
+          showOperationFeedback("新地图已保存，但切换失败", err, true);
+        }
+      } else {
+        showOperationFeedback("地图修饰已保存", payload);
       }
     });
     $("locYaw").addEventListener("input", () => {
