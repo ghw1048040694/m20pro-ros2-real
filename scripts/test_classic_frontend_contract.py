@@ -98,6 +98,10 @@ def main() -> None:
     assert 'async function ensureMappingSession()' in script
     assert '"/api/mapping/check_environment"' in script
     assert 'await ensureMappingSession();' in script
+    assert "state.latestMappingSession = payload.latest_mapping_session || null;" in script
+    assert "const session = state.mappingSession;" in script
+    assert "workspace && workspace.latest_mapping_session" not in script
+    assert "(session.floor_steps || [])" in script
     assert "mapping-actions" in css
     assert "grid-template-columns: repeat(2, minmax(0, 1fr));" in css
     assert '<button class="danger" id="resetTaskSessionBtn"' in html

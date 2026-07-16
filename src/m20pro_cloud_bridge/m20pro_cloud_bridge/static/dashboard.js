@@ -43,6 +43,7 @@
       liveRequestInFlight: false,
       multiFloor: null,
       mappingSession: null,
+      latestMappingSession: null,
       mappingCompletedStages: [],
       taskDraftIds: [],
       crossFloorDraftIds: [],
@@ -78,6 +79,7 @@
           followRobot: state.followRobot,
           multiFloor: state.multiFloor,
           mappingSession: state.mappingSession,
+          latestMappingSession: state.latestMappingSession,
           taskDraftIds: state.taskDraftIds.slice(),
           crossFloorDraftIds: state.crossFloorDraftIds.slice(),
           radarResults: state.radarResults,
@@ -2560,6 +2562,7 @@
         $("mappingFloors").value = preferred;
       }
       syncMappingFloorOptions(floors[0]);
+      renderMappingFloorSteps();
     }
     function populateFloorControls(workspace) {
       const floorIds = (workspace && workspace.floors || []).map(item => String(item.id || "")).filter(Boolean);
@@ -2568,7 +2571,7 @@
       const currentFloor = String((workspace && workspace.current_floor) || "");
       const preferred = floorIds.includes(mapFloor) ? mapFloor : (floorIds.includes(currentFloor) ? currentFloor : floorIds[0]);
       if (!state.floorControlsInitialized) {
-        const session = state.mappingSession || (workspace && workspace.latest_mapping_session);
+        const session = state.mappingSession;
         const sessionFloors = session && Array.isArray(session.floors) ? session.floors.filter(Boolean) : [];
         if (sessionFloors.length) {
           $("mappingMode").value = session.mode === "multi" ? "multi" : "single";
@@ -2754,9 +2757,18 @@
     function renderMappingFloorSteps() {
       const box = $("mappingFloorSteps");
       if (!box) return;
-      const workspace = state.multiFloor;
-      const session = state.mappingSession || (workspace && workspace.latest_mapping_session);
-      if (!session) {
+      const session = state.mappingSession;
+      const draftFloors = selectedMappingFloors();
+      const sessionFloors = Array.isArray(session && session.floors)
+        ? session.floors.map(item => String(item || "").trim()).filter(Boolean)
+        : [];
+      const sameDraft = Boolean(
+        session
+        && String(session.mode || "single") === String($("mappingMode").value || "single")
+        && sessionFloors.length === draftFloors.length
+        && sessionFloors.every((floor, index) => floor === draftFloors[index])
+      );
+      if (!sameDraft) {
         box.hidden = true;
         box.replaceChildren();
         return;
@@ -2765,7 +2777,12 @@
       state.mappingSession = session;
       state.sessionId = session.id || state.sessionId;
       box.innerHTML = "";
-      const floorRows = (workspace && workspace.floors || []).filter(item => item.mapping_step && item.mapping_step.floor);
+      const floorRows = (session.floor_steps || [])
+        .filter(item => item && item.floor)
+        .map(step => ({
+          id: String(step.floor),
+          mapping_step: step,
+        }));
       for (const floor of floorRows) {
         const step = floor.mapping_step;
         const active = String(session.active_floor || "") === String(floor.id || "");
@@ -2800,8 +2817,7 @@
     async function loadMultiFloorWorkspace() {
       const payload = await fetchJson("/api/multi_floor");
       state.multiFloor = payload;
-      state.mappingSession = payload.latest_mapping_session || state.mappingSession;
-      rememberMappingSessionProgress(state.mappingSession);
+      state.latestMappingSession = payload.latest_mapping_session || null;
       state.lastMultiFloorRefreshAt = Date.now();
       populateFloorControls(payload);
       if (state.mappingSession && state.mappingSession.id) {
@@ -3277,7 +3293,10 @@
       draw();
     });
     $("closeMappingProgressBtn").addEventListener("click", () => $("mappingProgressDialog").close());
-    $("mappingFloors").addEventListener("input", () => syncMappingFloorOptions(selectedMappingFloors()[0]));
+    $("mappingFloors").addEventListener("input", () => {
+      syncMappingFloorOptions(selectedMappingFloors()[0]);
+      renderMappingFloorSteps();
+    });
     $("mappingMode").addEventListener("change", updateMappingModeUi);
     function mappingFlowError(err, stage) {
       const normalized = err && typeof err === "object"

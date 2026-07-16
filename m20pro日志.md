@@ -6,6 +6,14 @@ This file is maintained by Codex as the local M20 Pro project memory for future 
 
 Naming note: this file replaced the previous local-only `codex.md`. Going forward, maintain this file, `m20pro日志.md`, after every meaningful project change or field diagnosis.
 
+## 2026-07-16 17:24 CST - 建图向导移除静态 F19/F20/F21 默认楼层
+
+- 根因：`inspection_waypoints.yaml` 的 F19/F20/F21 是旧跨楼层导航路线注册表，不是建图向导的楼层输入；前端 `/api/multi_floor` 加载后又把最近一次历史建图任务自动当成当前草稿，所以单楼层模式仍渲染历史三层步骤。
+- 修复：前端分离 `mappingSession`（当前用户建图草稿）与 `latestMappingSession`（历史记录）；页面初始不再恢复历史任务，建图步骤只从当前会话的 `floor_steps` 渲染。模式和楼层输入变化后，如果与当前会话不一致，旧步骤立即隐藏。
+- 结果：单楼层只填写一个实际楼层并生成一个步骤；多楼层只按用户输入的实际楼层和顺序生成步骤；F19/F20/F21 仍仅作为现有导航路线配置，不再作为建图默认值。
+- 前端缓存版本更新为 `20260716-dynamic-mapping-floors-1`。本地 `node --check`、`test_classic_frontend_contract.py` 和 `git diff --check` 通过。
+- 远端验证：104 `m20pro_cloud_bridge` 已重建并重启，服务 `active`、`NRestarts=0`；页面返回新缓存版本。虽然 `/api/multi_floor` 仍保留导航注册表和历史会话 `F19/F20/F21`，浏览器初始 DOM 中 `mappingFloorSteps` 已为空且 `hidden=true`，不会再把历史三层显示到当前建图向导。
+
 ## 2026-07-16 17:05 CST - 重定位漂移根因确认与防回退修复
 
 - 开发狗 `10.21.31.104` 只读核查确认：当前正式桥接使用 `pose_source=official_tf`，直接读取 103 原厂 `/tf` 的 `map->base_link`；机器狗无运动指令时，该 TF 在数秒内仍从约 `(-11.44,-5.07)` 摇摆到约 `(-11.70,-5.25)`，`/m20pro_tcp_bridge/map_pose` 完全跟随，因此漂移源是 103 原厂定位输出，不是前端绘制或 `map->odom` 重基准。
