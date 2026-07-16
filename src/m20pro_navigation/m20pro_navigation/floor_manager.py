@@ -40,11 +40,7 @@ class FloorManager(Node):
         self.declare_parameter("enable_rviz_floor_goal_topics", True)
         self.declare_parameter(
             "rviz_floor_goal_topics",
-            [
-                "F19:/m20pro/rviz_goal_f19",
-                "F20:/m20pro/rviz_goal_f20",
-                "F21:/m20pro/rviz_goal_f21",
-            ],
+            [],
         )
         self.declare_parameter("current_floor_topic", "/m20pro/current_floor")
         self.declare_parameter("stair_status_topic", "/m20pro/stair_status")
@@ -81,8 +77,7 @@ class FloorManager(Node):
         self.config_file = self._resolve_path(str(self.get_parameter("config_file").value))
         self.config = self._load_config(self.config_file)
         self.floors: Dict[str, Dict[str, Any]] = dict(self.config.get("floors", {}))
-        if not self.floors:
-            raise RuntimeError("floor manager config has no floors")
+        self.route_configured = bool(self.floors)
 
         self.current_floor = ""
         self.pending_floor: Optional[str] = None
@@ -198,27 +193,31 @@ class FloorManager(Node):
 
         initial_floor = str(self.get_parameter("initial_floor").value).strip()
         if initial_floor:
-            if bool(self.get_parameter("load_initial_floor").value):
+            if bool(self.get_parameter("load_initial_floor").value) and self.route_configured:
                 self.initial_floor_timer = self.create_timer(
                     1.0,
                     lambda: self._switch_initial_floor(initial_floor),
                 )
-            elif initial_floor in self.floors:
+            elif not self.route_configured or initial_floor in self.floors:
                 self.current_floor = initial_floor
                 self.get_logger().info(
-                    "assuming initial floor %s without reloading map" % initial_floor
+                    "assuming runtime map label %s without reloading map" % initial_floor
                 )
             else:
                 self.get_logger().warning("unknown initial_floor: %s" % initial_floor)
 
         self.get_logger().info(
-            "floor manager ready; floors: %s" % ", ".join(sorted(self.floors.keys()))
+            "floor manager ready; route_configured=%s floors: %s"
+            % (self.route_configured, ", ".join(sorted(self.floors.keys())) or "(ordinary maps)")
         )
 
     def _create_rviz_floor_goal_subscriptions(self) -> None:
         routes = self._parse_floor_goal_routes(
             list(self.get_parameter("rviz_floor_goal_topics").value),
         )
+        if not routes:
+            self.get_logger().info("rviz floor goal topics disabled; ordinary map mode")
+            return
         for floor_id, topic in routes:
             self.rviz_floor_goal_subscriptions.append(
                 self.create_subscription(
@@ -244,10 +243,6 @@ class FloorManager(Node):
                 )
                 continue
             routes.append((floor_id, topic))
-        if not routes:
-            raise RuntimeError(
-                "rviz_floor_goal_topics must contain at least one FLOOR:/topic entry"
-            )
         return routes
 
     def _switch_initial_floor(self, initial_floor: str) -> None:
@@ -370,14 +365,25 @@ class FloorManager(Node):
         target_floor = self._normalize_floor_id(msg.header.frame_id)
         if not target_floor:
             target_floor = self.current_floor
-        if not target_floor:
+        if self.route_configured and not target_floor:
             self.get_logger().error("floor goal ignored; current floor is unknown")
             self._publish_stair_status("error reason=no_current_floor_for_goal")
             return
-        if target_floor not in self.floors:
+        if self.route_configured and target_floor not in self.floors:
             self.get_logger().error("floor goal has unknown target floor: %s" % target_floor)
             self._publish_stair_status("error reason=unknown_goal_floor floor=%s" % target_floor)
             return
+        if not self.route_configured and target_floor and self.current_floor and target_floor != self.current_floor:
+            self.get_logger().error(
+                "ordinary map mode cannot switch maps from a floor goal; select the target map first"
+            )
+            self._publish_stair_status(
+                "error reason=ordinary_map_floor_mismatch current=%s target=%s"
+                % (self.current_floor, target_floor)
+            )
+            return
+        if not self.route_configured and target_floor and not self.current_floor:
+            self.current_floor = target_floor
 
         goal = self._pose_in_map_frame(msg)
 
@@ -512,6 +518,12 @@ class FloorManager(Node):
             return
         if target_floor == self.current_floor:
             self.get_logger().info("already on floor %s" % target_floor)
+            return
+        if not self.route_configured:
+            self.get_logger().error(
+                "floor switch rejected: no cross-floor route profile is configured; select an ordinary map instead"
+            )
+            self._publish_stair_status("error reason=no_cross_floor_route_profile")
             return
         floor = self.floors.get(target_floor)
         if floor is None:

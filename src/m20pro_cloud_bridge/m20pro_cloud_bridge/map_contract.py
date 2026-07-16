@@ -140,17 +140,31 @@ def load_builtin_maps_from_manifest(
     if not isinstance(map_set, dict):
         map_set = {}
     source_note = str(map_set.get("source_note") or "").strip()
+    # `default_map_id` is an asset selection, not a floor-system default.
+    explicit_default_map_id = str(map_set.get("default_map_id") or "").strip() or None
     default_floor = str(map_set.get("default_floor") or "").strip() or None
     global_pcd = str(map_set.get("global_pcd") or "").strip()
-    floors = manifest.get("floors") or {}
-    if not isinstance(floors, dict):
+    raw_maps = manifest.get("maps")
+    if isinstance(raw_maps, list):
+        maps_by_id = {}
+        for entry in raw_maps:
+            if isinstance(entry, dict):
+                map_id = str(entry.get("id") or entry.get("floor") or "").strip()
+                if map_id:
+                    maps_by_id[map_id] = entry
+        map_entries = list(maps_by_id.items())
+    else:
+        floors = manifest.get("floors") or {}
+        map_entries = list(floors.items()) if isinstance(floors, dict) else []
+    if not map_entries:
         return {"maps": [], "default_floor": default_floor, "default_map_id": None, "warnings": []}
 
     maps: List[Dict[str, Any]] = []
     warnings: List[str] = []
-    for floor, info in floors.items():
+    for key, info in map_entries:
         if not isinstance(info, dict):
             continue
+        floor = str(info.get("floor") or key).strip()
         yaml_value = str(info.get("map_yaml") or "").strip()
         if not yaml_value:
             continue
@@ -168,7 +182,7 @@ def load_builtin_maps_from_manifest(
                 pcd_path = pcd_value
         maps.append(
             {
-                "id": f"builtin_{floor}",
+                "id": str(info.get("id") or f"builtin_{floor}"),
                 "name": str(info.get("label") or floor),
                 "floor": str(floor),
                 "level": info.get("level"),
@@ -186,7 +200,11 @@ def load_builtin_maps_from_manifest(
     return {
         "maps": maps,
         "default_floor": default_floor,
-        "default_map_id": default_builtin_map_id(maps, default_floor),
+        "default_map_id": (
+            explicit_default_map_id
+            if explicit_default_map_id and any(item.get("id") == explicit_default_map_id for item in maps)
+            else default_builtin_map_id(maps, default_floor)
+        ),
         "warnings": warnings,
     }
 
@@ -234,9 +252,6 @@ def default_map_id(
 ) -> Optional[str]:
     if default_builtin_id and find_map_record(builtin_maps, archived_maps, default_builtin_id):
         return str(default_builtin_id)
-    for item in builtin_maps:
-        if item.get("id") == "builtin_F20" or item.get("floor") == "F20":
-            return str(item.get("id") or "") or None
     for item in builtin_maps:
         if item.get("id"):
             return str(item.get("id"))

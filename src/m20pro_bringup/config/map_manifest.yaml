@@ -1,19 +1,21 @@
 # M20Pro map asset manifest.
 #
-# Keep map assets here so navigation, mapping, and deployment scripts
-# all refer to the same PGM/PCD products. Route and inspection semantics remain
-# in inspection_waypoints.yaml.
+# Keep map assets here so navigation, mapping, and deployment scripts all refer
+# to the same PGM/PCD products. These are ordinary selectable map assets;
+# cross-floor routes are configured separately and are never inferred from the
+# map labels below.
 
 map_set:
-  name: "F19_F20_F21_shared_stair"
-  description: "当前多楼层验证阶段使用 F19/F20/F21 三个楼层入口。"
-  default_floor: "F20"
+  name: "m20pro_map_library"
+  description: "M20Pro 可选择地图资产库。"
+  default_map_id: "builtin_F20"
   frame_id: "map"
   global_pcd: "package://m20pro_bringup/maps/Original_map/full_cloud.pcd"
-  source_note: "当前 F19 和 F21 仍复用编辑后的 F20 地图产品，正式交付前应替换为各楼层实测建图结果。"
+  source_note: "F19、F20、F21 仅作为普通地图资产；地图标签不代表已配置跨楼层路线。"
 
-floors:
-  F19:
+maps:
+  - id: "builtin_F19"
+    floor: "F19"
     level: 19
     label: "19楼"
     map_yaml: "package://m20pro_bringup/maps/F19/occ_grid.yaml"
@@ -22,7 +24,8 @@ floors:
     z_max: 1.5
     z_offset: 0.0
 
-  F20:
+  - id: "builtin_F20"
+    floor: "F20"
     level: 20
     label: "20楼"
     map_yaml: "package://m20pro_bringup/maps/F20/occ_grid.yaml"
@@ -31,7 +34,8 @@ floors:
     z_max: 1.5
     z_offset: 0.0
 
-  F21:
+  - id: "builtin_F21"
+    floor: "F21"
     level: 21
     label: "21楼"
     map_yaml: "package://m20pro_bringup/maps/F21/occ_grid.yaml"

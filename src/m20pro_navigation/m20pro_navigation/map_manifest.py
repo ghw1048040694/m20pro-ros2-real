@@ -32,15 +32,21 @@ def load_yaml(path: str) -> Dict[str, Any]:
 
 def load_manifest(path: str) -> Dict[str, Any]:
     manifest = load_yaml(path)
+    maps = manifest.get("maps")
     floors = manifest.get("floors") or {}
-    if not isinstance(floors, dict) or not floors:
-        raise RuntimeError("map manifest has no floors")
+    if not (isinstance(maps, list) and maps) and not (isinstance(floors, dict) and floors):
+        raise RuntimeError("map manifest has no maps")
     return manifest
 
 
 def floor_z_ranges(manifest: Dict[str, Any]) -> list:
     ranges = []
-    for floor_id, floor in sorted((manifest.get("floors") or {}).items()):
+    raw = manifest.get("maps")
+    if isinstance(raw, list):
+        entries = [(item.get("floor") or item.get("id"), item) for item in raw if isinstance(item, dict)]
+    else:
+        entries = list((manifest.get("floors") or {}).items())
+    for floor_id, floor in sorted(entries, key=lambda item: str(item[0])):
         if not isinstance(floor, dict):
             continue
         ranges.append(
@@ -59,5 +65,4 @@ def default_floor(manifest: Dict[str, Any], fallback: str = "") -> str:
     configured = str((manifest.get("map_set") or {}).get("default_floor") or "").strip()
     if configured:
         return configured
-    floors = sorted((manifest.get("floors") or {}).keys())
-    return fallback or (floors[0] if floors else "")
+    return fallback

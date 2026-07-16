@@ -30,7 +30,7 @@ def generate_launch_description():
     )
     default_params = os.path.join(bringup_share, "config", "m20pro_real.yaml")
     default_nav2_params = os.path.join(bringup_share, "config", "nav2_params_real.yaml")
-    default_floor_config = os.path.join(bringup_share, "config", "inspection_waypoints.yaml")
+    default_floor_config = os.path.join(bringup_share, "config", "runtime_navigation.yaml")
     default_map_manifest = os.path.join(bringup_share, "config", "map_manifest.yaml")
     default_map = os.path.join(bringup_share, "maps", "F20", "occ_grid.yaml")
     default_rviz = os.path.join(bringup_share, "rviz", "m20pro_navigation.rviz")
@@ -133,7 +133,11 @@ def generate_launch_description():
         DeclareLaunchArgument("enable_floor_goal_bridge", default_value="true"),
         DeclareLaunchArgument("enable_system_check", default_value="true"),
         DeclareLaunchArgument("enable_config_audit", default_value="true"),
-        DeclareLaunchArgument("initial_floor", default_value="F20"),
+        DeclareLaunchArgument(
+            "initial_floor",
+            default_value="",
+            description="Optional runtime map label; empty means ordinary map navigation without a floor registry.",
+        ),
         DeclareLaunchArgument("load_initial_floor", default_value="false"),
         DeclareLaunchArgument("enable_initialpose_3d_adapter", default_value="false"),
         DeclareLaunchArgument("initialpose_3d_z", default_value="0.0"),
@@ -453,6 +457,7 @@ def generate_launch_description():
                         value_type=float,
                     ),
                     "map_manifest": map_manifest,
+                    "floor_config": floor_config,
                     "initialpose_topic": initialpose_topic,
                     "relocalization_result_topic": relocalization_result_topic,
                     "factory_host": factory_host,

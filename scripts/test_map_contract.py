@@ -109,6 +109,34 @@ def test_load_builtin_maps_from_manifest() -> None:
         assert_equal(maps[1]["derived"]["pcd"], str(root / "full_cloud.pcd"), "global pcd")
 
 
+def test_map_asset_manifest_uses_explicit_map_ids() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        (root / "f19.yaml").write_text("image: f19.pgm\n", encoding="utf-8")
+        (root / "f20.yaml").write_text("image: f20.pgm\n", encoding="utf-8")
+        manifest = root / "map_manifest.yaml"
+        manifest.write_text(
+            "map_set:\n"
+            "  default_map_id: builtin_F20\n"
+            "maps:\n"
+            "  - id: builtin_F19\n"
+            "    floor: F19\n"
+            "    map_yaml: f19.yaml\n"
+            "  - id: builtin_F20\n"
+            "    floor: F20\n"
+            "    map_yaml: f20.yaml\n",
+            encoding="utf-8",
+        )
+        result = load_builtin_maps_from_manifest(
+            manifest,
+            resolve_path=lambda value: str(root / value),
+            derived_payload=lambda yaml_path, pcd_path: {},
+        )
+        assert_equal([item["id"] for item in result["maps"]], ["builtin_F19", "builtin_F20"], "explicit map ids")
+        assert_equal(result["default_floor"], None, "no default floor semantic")
+        assert_equal(result["default_map_id"], "builtin_F20", "explicit map default")
+
+
 def test_map_record_merge_find_and_default() -> None:
     builtin = [
         {"id": "builtin_F19", "floor": "F19"},
@@ -122,7 +150,7 @@ def test_map_record_merge_find_and_default() -> None:
     assert_equal([item["id"] for item in merged], ["builtin_F20", "builtin_F19", "map_custom"], "merged order")
     assert_equal(find_map_record(builtin, archived, "builtin_F19")["source"], "106_active_map", "archived wins")
     assert_equal(default_map_id(builtin, archived, "builtin_F19"), "builtin_F19", "default id if present")
-    assert_equal(default_map_id(builtin, archived, "missing"), "builtin_F20", "fallback F20")
+    assert_equal(default_map_id(builtin, archived, "missing"), "builtin_F19", "fallback first ordinary map")
     assert_equal(default_map_id([], archived, None), "builtin_F19", "fallback archived")
 
 
@@ -270,6 +298,7 @@ def main() -> int:
         test_find_map_yaml_prefers_known_names,
         test_load_builtin_maps_from_manifest,
         test_map_record_merge_find_and_default,
+        test_map_asset_manifest_uses_explicit_map_ids,
         test_ensure_map_yaml_repairs_to_local_relative_image,
         test_ensure_map_yaml_reports_missing_image,
         test_read_pgm_p2_and_p5,

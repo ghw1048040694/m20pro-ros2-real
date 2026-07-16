@@ -82,14 +82,14 @@ def generate_launch_description():
             description="Real-only workspace compatibility argument; use real.",
         ),
         DeclareLaunchArgument("rviz", default_value="true"),
-        DeclareLaunchArgument("initial_floor", default_value="F20"),
+        DeclareLaunchArgument("initial_floor", default_value=""),
         DeclareLaunchArgument(
             "map",
             default_value=os.path.join(bringup_share, "maps", "F20", "occ_grid.yaml"),
         ),
         DeclareLaunchArgument(
             "floor_config",
-            default_value=os.path.join(bringup_share, "config", "inspection_waypoints.yaml"),
+            default_value=os.path.join(bringup_share, "config", "runtime_navigation.yaml"),
         ),
         DeclareLaunchArgument(
             "map_manifest",

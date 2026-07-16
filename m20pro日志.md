@@ -1,6 +1,18 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-07-16 17:19 CST
+Last updated: 2026-07-16 17:56 CST
+
+## 2026-07-16 17:48 CST - F19/F20/F21 从默认楼层系统中彻底解耦
+
+- 根因：旧 `inspection_waypoints.yaml` 同时承担了历史 F19/F20/F21 楼梯路线、楼层身份注册和运行时默认配置，地图清单又用 `default_floor: F20` 和代码中的 `builtin_F20` 兜底，导致单层建图、地图选择和跨楼层工作区都把三张历史地图误认为固定楼层系统。
+- 运行时架构调整：新增 `config/runtime_navigation.yaml`，默认 `floors: {}`；`m20pro.launch.py`、`m20pro_real.launch.py` 和 Web Dashboard 默认改用该空路线配置，`initial_floor` 默认为空。历史路线样例重命名为 `legacy_inspection_waypoints_f19_f20_f21.yaml`，只有显式指定时才启用。
+- 地图资产调整：`map_manifest.yaml` 改为 `maps` 资产列表，每张地图使用显式 `builtin_F19`/`builtin_F20`/`builtin_F21` ID；`default_map_id` 只表示启动时选择哪张地图，不再表示默认楼层。移除 `map_contract.py` 中通过 F20 楼层的硬编码 fallback，三张地图仍可正常显示、选择和加载。
+- 导航行为调整：无路线配置时，`floor_manager` 不再创建 F19/F20/F21 专用 RViz 话题，不因配置为空启动失败；普通地图目标按当前地图直接发送 Nav2，跨地图切换会明确提示先选择地图。`floor_goal_bridge` 支持无楼层注册表的 `map` 目标和合法运行时地图标签。
+- 身份与工作区调整：无静态路线注册表时，合法的 F7、B1、F19、F20 等标签可作为普通地图/建图身份；跨楼层路线仍只能由显式配置提供。`/api/multi_floor` 在无路线时从地图资产聚合普通地图，不生成隐含楼梯路线；有路线配置时继续严格检查跨楼层完整性。
+- 配置审计与文档同步：审计器区分地图资产和路线楼层，README/API 文档说明历史路线文件仅供显式迁移使用；前端错误提示不再写死“选择 F20”。
+- 验证：楼层身份、多楼层工作区、地图清单、地图选择、建图、任务、前端、自检和导航就绪合同测试通过；全部相关 Python/launch 文件 `py_compile` 通过，`git diff --check` 通过。当前改动发生在北京时间 21:00 前，暂不执行远程推送。
+- 构建验证：`colcon build --symlink-install --packages-select m20pro_navigation m20pro_cloud_bridge m20pro_bringup` 通过；安装空间包含 `runtime_navigation.yaml`。ROS 运行时检查确认 `floor_manager` 输出 `route_configured=False`、`floors: (ordinary maps)` 且无 RViz 楼层专用话题；配置审计报告 `3 map assets, 0 warnings`。
+- 为避免历史路线配置被误加载，F19/F20/F21 旧楼梯示例已移出 ROS 包 `config/`，归档到 `docs/archived_route_profiles/`；正式安装空间只保留空的运行时路线配置。
 
 This file is maintained by Codex as the local M20 Pro project memory for future ChatGPT review. It records the current architecture, important decisions, recent changes, verification status, and next steps.
 

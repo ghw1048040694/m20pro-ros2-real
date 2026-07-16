@@ -1,3 +1,4 @@
+import re
 from typing import Any, Dict, Optional
 
 import rclpy
@@ -65,9 +66,6 @@ class FloorGoalBridge(Node):
 
     def _on_same_floor_goal(self, msg: PoseStamped) -> None:
         target_floor = self.current_floor or str(self.get_parameter("default_floor").value).strip()
-        if not target_floor:
-            self.get_logger().warning("same-floor RViz goal ignored; current floor is unknown")
-            return
         self._publish_pose(
             target_floor,
             msg.pose.position.x,
@@ -104,7 +102,7 @@ class FloorGoalBridge(Node):
     def _publish_pose(self, floor_id: str, x: float, y: float, z: float, orientation: Any) -> None:
         pose = PoseStamped()
         pose.header.stamp = self.get_clock().now().to_msg()
-        pose.header.frame_id = floor_id
+        pose.header.frame_id = floor_id or "map"
         pose.pose.position.x = float(x)
         pose.pose.position.y = float(y)
         pose.pose.position.z = float(z)
@@ -127,8 +125,8 @@ class FloorGoalBridge(Node):
             return waypoint
 
         if len(parts) in (3, 4):
-            floor_id = parts[0]
-            if floor_id not in self.floors:
+            floor_id = self._normalize_floor_id(parts[0])
+            if not floor_id or (self.floors and floor_id not in self.floors):
                 return None
             try:
                 x = float(parts[1])
@@ -138,6 +136,24 @@ class FloorGoalBridge(Node):
                 return None
             return floor_id, x, y, yaw
         return None
+
+    @staticmethod
+    def _normalize_floor_id(value: Any) -> str:
+        text = str(value or "").strip().upper().replace(" ", "")
+        if not text:
+            return ""
+        text = re.sub(r"(?:楼|层)$", "", text)
+        basement = re.fullmatch(r"(?:地下|负|B)(\d+)", text)
+        if basement:
+            return "B%d" % int(basement.group(1))
+        signed = re.fullmatch(r"([+-]?)(\d+)", text)
+        if signed:
+            level = int(signed.group(2))
+            return ("B%d" % level) if signed.group(1) == "-" else ("F%d" % level)
+        above_ground = re.fullmatch(r"F\+?(\d+)", text)
+        if above_ground:
+            return "F%d" % int(above_ground.group(1))
+        return text if re.fullmatch(r"[A-Z][A-Z0-9_-]{0,15}", text) else ""
 
     def _find_waypoint(self, waypoint_id: str) -> Optional[tuple]:
         for floor_id, floor in self.floors.items():

@@ -1,0 +1,27 @@
+# Runtime navigation identity.
+#
+# This file intentionally contains no floor registry.  A map's floor label is
+# ordinary metadata until a project supplies an explicit floor route profile
+# (including stair transitions).  This keeps the built-in F19/F20/F21 maps
+# usable as independent maps without turning them into a permanent building.
+
+mission:
+  name: "m20pro_runtime_navigation"
+  frame_id: "map"
+  default_task_dwell_s: 5.0
+  default_transition_dwell_s: 0.0
+  default_charge_dwell_s: 0.0
+  default_goal_timeout_s: 90.0
+  default_retry_count: 1
+  vendor_navigation_defaults:
+    Value: 0
+    MapID: 0
+    Gait: 12
+    Speed: 1
+    Manner: 0
+    ObsMode: 0
+    NavMode: 1
+
+# Add floors and stairs here only for a site that has measured, validated
+# cross-floor transition data.  Ordinary map labels do not belong here.
+floors: {}

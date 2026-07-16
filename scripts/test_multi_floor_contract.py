@@ -178,6 +178,25 @@ def test_project_single_floor_does_not_require_cross_floor_route() -> None:
     assert_equal(floor["ready"], True, "single floor ready with a factory map")
 
 
+def test_runtime_map_library_has_no_implicit_routes() -> None:
+    workspace = build_multi_floor_workspace(
+        floor_config={"mission": {"frame_id": "map"}, "floors": {}},
+        maps=[
+            {"id": "builtin_F19", "name": "19楼地图", "floor": "F19", "factory_apply_path": "/var/opt/robot/data/maps/f19"},
+            {"id": "builtin_F20", "name": "20楼地图", "floor": "F20", "factory_apply_path": "/var/opt/robot/data/maps/f20"},
+            {"id": "builtin_F21", "name": "21楼地图", "floor": "F21", "factory_apply_path": "/var/opt/robot/data/maps/f21"},
+        ],
+        annotations=[],
+        sessions=[],
+        current_floor="F20",
+        selected_map_id="builtin_F20",
+    )
+    assert_equal(workspace["floor_count"], 3, "ordinary maps remain visible")
+    assert_equal(workspace["configured_route_count"], 0, "no implicit stair routes")
+    assert_equal(all(not floor["route_configured"] for floor in workspace["floors"]), True, "maps are not route floors")
+    assert_equal(workspace["ready"], True, "ordinary map library is ready")
+
+
 def test_cross_floor_task_order_and_route() -> None:
     known = {item["id"]: item for item in annotations()}
     context = cross_floor_task_context(
@@ -220,6 +239,7 @@ def main() -> int:
         test_workspace_aggregation,
         test_workspace_excludes_unregistered_floor_data,
         test_project_single_floor_does_not_require_cross_floor_route,
+        test_runtime_map_library_has_no_implicit_routes,
         test_cross_floor_task_order_and_route,
     ):
         test()

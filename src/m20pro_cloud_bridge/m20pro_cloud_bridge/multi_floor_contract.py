@@ -137,12 +137,35 @@ def build_multi_floor_workspace(
     map_items = [_map_summary(item) for item in maps if isinstance(item, dict) and item.get("id")]
     annotation_items = [dict(item) for item in annotations if isinstance(item, dict) and item.get("id")]
     session_items = [dict(item) for item in sessions if isinstance(item, dict)]
-    floor_ids = set(str(item).strip() for item in configured_floors if str(item).strip())
-    unregistered_map_ids = [item["id"] for item in map_items if item["floor"] not in floor_ids]
+    route_floor_ids = set(str(item).strip() for item in configured_floors if str(item).strip())
+    map_floor_ids = {item["floor"] for item in map_items if item["floor"]}
+    annotation_floor_ids = {
+        str(item.get("floor") or "").strip()
+        for item in annotation_items
+        if str(item.get("floor") or "").strip()
+    }
+    session_floor_ids = {
+        str(floor).strip()
+        for session in session_items
+        for floor in (session.get("floors") or [])
+        if str(floor).strip()
+    }
+    # With no explicit route profile, map/point labels are ordinary runtime
+    # identities and must remain visible in the workspace. A route profile
+    # still acts as a strict registry for cross-floor data integrity.
+    floor_ids = route_floor_ids | (
+        map_floor_ids | annotation_floor_ids | session_floor_ids
+        if not route_floor_ids
+        else set()
+    )
+    unregistered_map_ids = [
+        item["id"] for item in map_items
+        if route_floor_ids and item["floor"] not in route_floor_ids
+    ]
     unregistered_annotation_ids = [
         str(item.get("id"))
         for item in annotation_items
-        if str(item.get("floor") or "").strip() not in floor_ids
+        if route_floor_ids and str(item.get("floor") or "").strip() not in route_floor_ids
     ]
     valid_sessions = []
     unregistered_session_ids = []
@@ -152,8 +175,10 @@ def build_multi_floor_workspace(
         }
         if session_floors and session_floors.issubset(floor_ids):
             valid_sessions.append(session)
-        elif session_floors:
+        elif session_floors and route_floor_ids:
             unregistered_session_ids.append(str(session.get("id") or ""))
+        elif session_floors:
+            valid_sessions.append(session)
 
     routes = stair_routes_from_config(floor_config)
     latest_session = valid_sessions[-1] if valid_sessions else None
@@ -177,8 +202,8 @@ def build_multi_floor_workspace(
         outgoing = [item for item in routes if item["source_floor"] == floor_id]
         incoming = [item for item in routes if item["target_floor"] == floor_id]
         configured = configured_floors.get(floor_id) if isinstance(configured_floors, dict) else None
-        registry_source = str(configured.get("registry_source") or "route_config") if isinstance(configured, dict) else ""
-        route_configured = registry_source != "project"
+        registry_source = str(configured.get("registry_source") or "route_config") if isinstance(configured, dict) else "map"
+        route_configured = floor_id in route_floor_ids and registry_source != "project"
         initial_pose = configured.get("initial_pose") if isinstance(configured, dict) else None
         terrain_segments = configured.get("terrain_segments") if isinstance(configured, dict) else {}
         if isinstance(terrain_segments, dict):
@@ -234,6 +259,8 @@ def build_multi_floor_workspace(
         {key: value for key, value in item.items() if key != "poses"}
         for item in routes
     ]
+    route_floor_count = sum(1 for item in floors if item["route_configured"])
+    required_route_count = max(0, route_floor_count - 1) if route_floor_count > 1 else 0
     return {
         "ok": True,
         "current_floor": str(current_floor or ""),
@@ -252,7 +279,9 @@ def build_multi_floor_workspace(
         "identity_issue_count": len(unregistered_map_ids)
         + len(unregistered_annotation_ids)
         + len(unregistered_session_ids),
-        "ready": bool(floors) and all(item["ready"] for item in floors) and len(configured_routes) >= max(0, len(floors) - 1),
+        "ready": bool(floors)
+        and all(item["ready"] for item in floors)
+        and len(configured_routes) >= required_route_count,
     }
 
 

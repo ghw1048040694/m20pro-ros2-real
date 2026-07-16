@@ -105,12 +105,16 @@ def validate_registered_floor(
     floor_id = str(floor or "").strip()
     registered = configured_floor_ids(config)
     if not registered:
-        return {
-            "ok": False,
-            "code": "floor_registry_unavailable",
-            "message": "楼层注册表不可用，不能安全创建或切换地图数据",
-            "registered_floors": [],
-        }
+        normalized = normalize_floor_id(floor_id)
+        if not normalized:
+            return {
+                "ok": False,
+                "code": "floor_identity_missing" if not floor_id else "floor_identity_invalid",
+                "message": f"{subject}不能为空" if not floor_id else f"{subject}格式无效",
+                "floor": floor_id,
+                "registered_floors": [],
+            }
+        return {"ok": True, "floor": normalized, "registered_floors": [], "registry_mode": "runtime"}
     if not floor_id:
         return {
             "ok": False,
@@ -118,15 +122,16 @@ def validate_registered_floor(
             "message": f"{subject}不能为空",
             "registered_floors": registered,
         }
-    if floor_id not in registered:
+    normalized = normalize_floor_id(floor_id)
+    if normalized not in registered:
         return {
             "ok": False,
             "code": "floor_identity_unknown",
             "message": f"{subject} {floor_id} 未在当前项目楼层注册表中配置",
-            "floor": floor_id,
+            "floor": normalized or floor_id,
             "registered_floors": registered,
         }
-    return {"ok": True, "floor": floor_id, "registered_floors": registered}
+    return {"ok": True, "floor": normalized, "registered_floors": registered}
 
 
 def validate_mapping_session_identity(
@@ -136,8 +141,6 @@ def validate_mapping_session_identity(
     allow_floor_registration: bool = False,
 ) -> Dict[str, Any]:
     registered = configured_floor_ids(config)
-    if not registered:
-        return validate_registered_floor("", config, subject="建图楼层")
     raw_floors = _floor_list(payload.get("floors"))
     floors = [normalize_floor_id(item) for item in raw_floors]
     if not floors:
@@ -163,7 +166,7 @@ def validate_mapping_session_identity(
             "floors": floors,
         }
     unknown = [floor for floor in floors if floor not in registered]
-    if unknown and not allow_floor_registration:
+    if registered and unknown and not allow_floor_registration:
         return {
             "ok": False,
             "code": "mapping_floor_unknown",
@@ -221,7 +224,14 @@ def validate_floor_matches_map(
     requested = validate_registered_floor(floor, config, subject=subject)
     if not requested.get("ok"):
         return requested
-    map_floor = str(map_record.get("floor") or "").strip()
+    map_floor = normalize_floor_id(map_record.get("floor"))
+    if not map_floor:
+        return {
+            "ok": False,
+            "code": "map_floor_identity_missing",
+            "message": "地图没有有效的楼层/地图标签",
+            "map_id": map_record.get("id"),
+        }
     registered_map = validate_registered_floor(map_floor, config, subject="地图楼层")
     if not registered_map.get("ok"):
         return registered_map

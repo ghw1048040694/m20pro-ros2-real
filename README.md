@@ -429,7 +429,8 @@ curl -X POST http://127.0.0.1:8080/api/radar/manual_measurement \
 src/m20pro_bringup/config/m20pro_real.yaml            # 104 真机基础参数
 src/m20pro_bringup/config/nav2_params_real.yaml       # 104/Foxy 真机 Nav2 参数
 src/m20pro_bringup/config/map_manifest.yaml           # 地图资产总表
-src/m20pro_bringup/config/inspection_waypoints.yaml   # 楼层、楼梯、巡检点模板
+src/m20pro_bringup/config/runtime_navigation.yaml     # 默认无路线运行时配置
+docs/archived_route_profiles/legacy_inspection_waypoints_f19_f20_f21.yaml  # 仅供显式迁移/历史路线参考
 src/m20pro_bringup/maps/                              # PGM 地图
 src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py
 src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/   # 前端 HTML/CSS/JS

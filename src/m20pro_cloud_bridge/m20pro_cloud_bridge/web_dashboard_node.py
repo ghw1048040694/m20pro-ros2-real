@@ -825,6 +825,7 @@ class WebDashboardNode(Node):
         self.declare_parameter("data_dir", "~/.m20pro_web")
         self.declare_parameter("map_archive_dir", "~/m20pro_maps")
         self.declare_parameter("map_manifest", "")
+        self.declare_parameter("floor_config", "")
         self.declare_parameter("map_server_load_map_service", "/map_server/load_map")
         self.declare_parameter("map_select_load_nav2_map", True)
         self.declare_parameter("map_select_load_timeout_s", 8.0)
@@ -2161,7 +2162,7 @@ class WebDashboardNode(Node):
             return {
                 "ok": False,
                 "config": {},
-                "message": "跨楼层配置 inspection_waypoints.yaml 不可用",
+                "message": "运行时导航配置 runtime_navigation.yaml 不可用",
                 "path": str(path or ""),
             }
         try:
@@ -3481,7 +3482,10 @@ class WebDashboardNode(Node):
 
     def _floor_config_path(self) -> Optional[FsPath]:
         try:
-            return FsPath(get_package_share_directory("m20pro_bringup")) / "config" / "inspection_waypoints.yaml"
+            configured = str(self.get_parameter("floor_config").value or "").strip()
+            if configured:
+                return FsPath(self._resolve_path(configured))
+            return FsPath(get_package_share_directory("m20pro_bringup")) / "config" / "runtime_navigation.yaml"
         except PackageNotFoundError:
             return None
 

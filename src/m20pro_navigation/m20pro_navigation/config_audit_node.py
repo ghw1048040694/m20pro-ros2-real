@@ -59,9 +59,10 @@ class ConfigAuditNode(Node):
             )
             return
 
+        manifest_maps = manifest.get("maps") if isinstance(manifest.get("maps"), list) else manifest.get("floors") or {}
         self.get_logger().info(
-            "configuration audit OK: %d floors, %d warnings"
-            % (len((manifest.get("floors") or {})), len(warnings))
+            "configuration audit OK: %d map assets, %d warnings"
+            % (len(manifest_maps), len(warnings))
         )
 
     def _check_manifest_assets(
@@ -76,19 +77,25 @@ class ConfigAuditNode(Node):
         if global_pcd and not Path(resolve_path(global_pcd, manifest_dir)).exists():
             errors.append("global_pcd does not exist: %s" % global_pcd)
 
-        for floor_id, floor in (manifest.get("floors") or {}).items():
+        raw_maps = manifest.get("maps")
+        entries = (
+            [(item.get("id") or item.get("floor"), item) for item in raw_maps if isinstance(item, dict)]
+            if isinstance(raw_maps, list)
+            else list((manifest.get("floors") or {}).items())
+        )
+        for floor_id, floor in entries:
             if not isinstance(floor, dict):
-                errors.append("manifest floor %s is not a mapping" % floor_id)
+                errors.append("manifest map %s is not a mapping" % floor_id)
                 continue
             map_yaml = str(floor.get("map_yaml") or "").strip()
             if not map_yaml:
-                errors.append("manifest floor %s has empty map_yaml" % floor_id)
+                errors.append("manifest map %s has empty map_yaml" % floor_id)
             elif not Path(resolve_path(map_yaml, manifest_dir)).exists():
-                errors.append("manifest floor %s map_yaml does not exist: %s" % (floor_id, map_yaml))
+                errors.append("manifest map %s map_yaml does not exist: %s" % (floor_id, map_yaml))
 
             pcd_map = str(floor.get("pcd_map") or global_pcd).strip()
             if pcd_map and not Path(resolve_path(pcd_map, manifest_dir)).exists():
-                warnings.append("manifest floor %s pcd_map does not exist: %s" % (floor_id, pcd_map))
+                warnings.append("manifest map %s pcd_map does not exist: %s" % (floor_id, pcd_map))
 
     def _check_floor_consistency(
         self,
@@ -97,16 +104,31 @@ class ConfigAuditNode(Node):
         errors: List[str],
         warnings: List[str],
     ) -> None:
-        manifest_floors = set((manifest.get("floors") or {}).keys())
+        raw_maps = manifest.get("maps")
+        manifest_floors = {
+            str(item.get("floor") or item.get("id") or "")
+            for item in raw_maps
+            if isinstance(item, dict) and (item.get("floor") or item.get("id"))
+        } if isinstance(raw_maps, list) else set((manifest.get("floors") or {}).keys())
         route_floors = set((floor_config.get("floors") or {}).keys())
-        for floor_id in sorted(manifest_floors - route_floors):
-            warnings.append("manifest floor %s has no route config" % floor_id)
+        # A map without a route profile is valid ordinary single-map data.
         for floor_id in sorted(route_floors - manifest_floors):
-            warnings.append("route floor %s has no map manifest entry" % floor_id)
+            warnings.append("route floor %s has no map asset entry" % floor_id)
 
         for floor_id in sorted(route_floors & manifest_floors):
             route_map = str((floor_config["floors"][floor_id] or {}).get("map_yaml") or "").strip()
-            manifest_map = str((manifest["floors"][floor_id] or {}).get("map_yaml") or "").strip()
+            if isinstance(raw_maps, list):
+                manifest_item = next(
+                    (
+                        item for item in raw_maps
+                        if isinstance(item, dict)
+                        and str(item.get("floor") or item.get("id") or "") == floor_id
+                    ),
+                    {},
+                )
+            else:
+                manifest_item = (manifest.get("floors") or {}).get(floor_id) or {}
+            manifest_map = str(manifest_item.get("map_yaml") or "").strip()
             if route_map and manifest_map and route_map != manifest_map:
                 warnings.append(
                     "floor %s map differs between manifest and route config" % floor_id

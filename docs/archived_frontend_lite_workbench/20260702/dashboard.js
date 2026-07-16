@@ -2387,7 +2387,7 @@
     });
     $("sendInitialPoseBtn").addEventListener("click", async () => {
       try {
-        if (!state.map) throw {message: "还没有固定地图，请先在地图页选择 F20 或等待默认地图加载"};
+        if (!state.map) throw {message: "还没有固定地图，请先在地图页选择地图或等待默认地图加载"};
         const [xText, yText] = $("locXY").value.split(",");
         const x = Number(xText);
         const y = Number(yText);

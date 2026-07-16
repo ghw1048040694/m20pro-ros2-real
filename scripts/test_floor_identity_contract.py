@@ -24,6 +24,7 @@ from m20pro_cloud_bridge.floor_identity_contract import (  # noqa: E402
 
 
 CONFIG = {"floors": {"F19": {}, "F20": {}, "F21": {}}}
+RUNTIME_CONFIG = {"mission": {"frame_id": "map"}, "floors": {}}
 
 
 def assert_equal(actual, expected, message: str) -> None:
@@ -106,6 +107,18 @@ def test_map_binding() -> None:
     assert_equal(mismatch["code"], "floor_map_identity_mismatch", "map mismatch")
 
 
+def test_runtime_maps_are_not_a_floor_registry() -> None:
+    assert_equal(validate_registered_floor("F19", RUNTIME_CONFIG)["ok"], True, "ordinary F19 map label")
+    assert_equal(validate_registered_floor("F20", RUNTIME_CONFIG)["ok"], True, "ordinary F20 map label")
+    assert_equal(validate_registered_floor("F21", RUNTIME_CONFIG)["ok"], True, "ordinary F21 map label")
+    assert_equal(validate_registered_floor("??", RUNTIME_CONFIG)["ok"], False, "invalid map label")
+    mapping = validate_mapping_session_identity(
+        {"mode": "single", "floors": ["7"], "active_floor": "7"},
+        RUNTIME_CONFIG,
+    )
+    assert_equal(mapping["ok"], True, "runtime map can define an actual floor label")
+
+
 def main() -> int:
     for test in (
         test_registry_and_unknown_floor,
@@ -114,6 +127,7 @@ def main() -> int:
         test_custom_single_floor_becomes_operational_floor,
         test_mapping_identity,
         test_map_binding,
+        test_runtime_maps_are_not_a_floor_registry,
     ):
         test()
         print(f"[OK] {test.__name__}")
