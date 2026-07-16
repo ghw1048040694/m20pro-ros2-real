@@ -3037,7 +3037,7 @@
     }
     function preserveNewerLiveSamples(target, current) {
       if (!target || !current) return target;
-      for (const key of ["pose", "path", "local_path", "active_waypoint"]) {
+      for (const key of ["pose", "scan", "path", "local_path", "active_waypoint"]) {
         if (sampleUpdateTime(current[key]) > sampleUpdateTime(target[key])) target[key] = current[key];
       }
       return target;
@@ -3045,7 +3045,7 @@
     function mergeLiveState(live) {
       if (!live || !state.latest) return;
       const merged = {...state.latest};
-      for (const key of ["pose", "path", "local_path", "active_waypoint"]) {
+      for (const key of ["pose", "scan", "path", "local_path", "active_waypoint"]) {
         if (live[key] && sampleUpdateTime(live[key]) >= sampleUpdateTime(merged[key])) merged[key] = live[key];
       }
       for (const key of ["floor", "localization_ok", "map_version", "node_time", "pose_age_sec", "pose_timeout_s", "pose_fresh"]) {

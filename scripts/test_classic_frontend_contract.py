@@ -72,6 +72,7 @@ def main() -> None:
     assert "task-execution-flow" in css
     assert "detection-results" in css
     assert "renderTaskExecutionFlow" in script
+    assert 'for (const key of ["pose", "scan", "path", "local_path", "active_waypoint"])' in script
     assert "renderYoloWorkspace" in script
     assert "localizationPopoverOpen" in script
     assert "mapModeLabel" not in script
@@ -112,6 +113,7 @@ def main() -> None:
     assert 'parsed.path in ("/lite", "/lite/")' in backend
     assert 'extra_headers={"Location": "/"}' in backend
     assert 'self.declare_parameter("auto_preflight_enabled", True)' in backend
+    assert '"scan": scan or None' in backend
     assert 'self.declare_parameter("auto_preflight_interval_s", 300.0)' in backend
     assert "def _tick_auto_preflight" in backend
     assert '"source": "automatic"' in backend

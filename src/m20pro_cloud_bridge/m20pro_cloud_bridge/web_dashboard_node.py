@@ -1838,6 +1838,7 @@ class WebDashboardNode(Node):
         now = time.time()
         with self._lock:
             pose = dict(self._state.get("pose") or {})
+            scan = dict(self._state.get("scan") or {})
             active_waypoint = dict(self._state.get("active_waypoint") or {})
             path = dict(self._state.get("path") or {})
             local_path = dict(self._state.get("local_path") or {})
@@ -1845,6 +1846,10 @@ class WebDashboardNode(Node):
                 "floor": self._state.get("floor"),
                 "localization_ok": self._state.get("localization_ok"),
                 "pose": pose or None,
+                # LaserScan is already reduced to the bounded overlay point
+                # set in _on_scan; carry that latest sample on the same fast
+                # endpoint as pose/path instead of waiting for /api/state.
+                "scan": scan or None,
                 "active_waypoint": active_waypoint or None,
                 "map_version": self._state.get("map_version", 0),
             }

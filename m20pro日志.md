@@ -1,6 +1,15 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-07-16 17:56 CST
+Last updated: 2026-07-16 18:12 CST
+
+## 2026-07-16 18:08 CST - 根治静止定位漂移并恢复激光轮廓实时刷新
+
+- 实机根因：104 日志持续出现 `stationary_drift_requires_relocalization`，官方 `map->base_link` 在无运动时偏离最后确认位姿约 `0.50~0.60m`；旧过滤器只在超过阈值后拒绝，阈值以内的缓慢 TF 漂移会被逐帧发布，所以前端先看到机器狗一点点漂，最终才失效。
+- 定位修复：`tcp_bridge_node.py` 现在把“无有效运动指令”作为静止状态，静止期间始终发布最后确认锚点，不再把原厂 TF 的小幅或大幅静止漂移画到地图上；只有收到超过死区的实际 `/cmd_vel` 后才重新允许位姿变化，并继续保留运动期间的大跳保护。重定位成功后的新锚点仍通过 2101/1 重置流程建立。
+- 激光卡顿根因：后端 `/scan` 约 10Hz 收到并处理，但 `/api/live` 以前只返回位姿、路径和活动点位，激光轮廓只能随 1.5 秒一次的 `/api/state` 更新；导航路径已走 125ms live 通道，激光没有接入该通道。
+- 激光修复：`_live_snapshot()` 携带已限点后的最新 `scan` 数据，前端 `mergeLiveState()` 按 `last_update` 合并 scan；保持 720 点上限和 100ms 后端节流，避免传输和绘制重新膨胀。前端脚本缓存版本更新为 `20260716-live-scan-1`。
+- 验证：定位稳定性、Nav2 参数、经典前端、Web 运行时测试通过；相关 Python `py_compile`、前端 `node --check` 通过；`colcon build --symlink-install --packages-select m20pro_navigation m20pro_cloud_bridge m20pro_bringup` 通过。准备部署 104 进行实机观察。
+- 部署验证：代码已部署到开发狗 104，正式服务 `active`、`NRestarts=0`，运行 revision 为 `dc2e982`。重启后静止位姿连续采样的 x/y/yaw 范围均为 `0.0000`，不再随原厂 TF 漂移；日志不再出现 `stationary_drift_requires_relocalization`，只保留正常的官方 TF 状态日志。`/api/live` 已携带 scan，连续 20 次 200ms 采样中有 13 次收到新激光帧，轮廓刷新恢复到约 7Hz（后端仍以 100ms 上限处理）。本次只部署 104，未修改 106 服务。
 
 ## 2026-07-16 17:48 CST - F19/F20/F21 从默认楼层系统中彻底解耦
 

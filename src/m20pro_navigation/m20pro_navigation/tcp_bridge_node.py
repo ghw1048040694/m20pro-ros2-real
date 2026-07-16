@@ -575,7 +575,7 @@ class M20TcpBridge(Node):
             localization_ok.data = False
             self.loc_pub.publish(localization_ok)
             return
-        valid_by_filter, filter_reason = self._map_pose_passes_stability_filter(x, y, z, yaw)
+        valid_by_filter, filter_reason, effective_pose = self._map_pose_passes_stability_filter(x, y, z, yaw)
         if not valid_by_filter:
             if pose_source == "auto" and self._publish_tf_pose_fallback(filter_reason, items):
                 return
@@ -594,7 +594,12 @@ class M20TcpBridge(Node):
             )
             self._publish_localization_ok(self._has_recent_good_map_pose())
             return
-        self._publish_map_pose_values(x, y, z, yaw)
+        self._publish_map_pose_values(
+            effective_pose["x"],
+            effective_pose["y"],
+            effective_pose["z"],
+            effective_pose["yaw"],
+        )
 
     def _pose_source(self) -> str:
         value = str(self.get_parameter("pose_source").value or "").strip().lower()
@@ -686,7 +691,7 @@ class M20TcpBridge(Node):
                 return False
             self.official_tf_pose_unlocked = True
 
-        valid_by_filter, filter_reason = self._map_pose_passes_stability_filter(
+        valid_by_filter, filter_reason, effective_pose = self._map_pose_passes_stability_filter(
             fallback["x"],
             fallback["y"],
             fallback["z"],
@@ -709,13 +714,8 @@ class M20TcpBridge(Node):
             # Location=0 without an accepted fresh map pose is not navigation-ready.
             self._publish_localization_ok(False)
             return False
-        self.last_good_map_pose = {
-            "x": fallback["x"],
-            "y": fallback["y"],
-            "z": fallback["z"],
-            "yaw": fallback["yaw"],
-            "stamp": self.get_clock().now(),
-        }
+        fallback = {**fallback, **dict(effective_pose)}
+        self.last_good_map_pose = dict(fallback)
         self.pending_jump_pose = None
         self._publish_map_pose_values(
             fallback["x"],
@@ -910,6 +910,7 @@ class M20TcpBridge(Node):
     ):
         now = self.get_clock().now()
         last = self.last_good_map_pose
+        candidate = {"x": float(x), "y": float(y), "z": float(z), "yaw": float(yaw)}
 
         if last is not None and bool(self.get_parameter("reject_origin_placeholder_pose").value):
             origin_radius = max(0.0, float(self.get_parameter("origin_placeholder_radius_m").value))
@@ -919,11 +920,44 @@ class M20TcpBridge(Node):
                 and last_radius > max(0.5, origin_radius * 4.0)
                 and not self._within_relocalization_jump_grace(now, x, y)
             ):
-                return False, "origin_placeholder_after_good_pose"
+                return False, "origin_placeholder_after_good_pose", None
 
-        jump_limit = max(0.0, float(self.get_parameter("pose_jump_reject_m").value))
         in_relocalization_grace = self._within_relocalization_jump_grace(now, x, y)
-        if last is not None and jump_limit > 0.0 and not in_relocalization_grace:
+        stationary = last is not None and not in_relocalization_grace and not self._motion_command_active(now)
+        if stationary:
+            if self.stationary_anchor_pose is None:
+                self.stationary_anchor_pose = dict(last)
+            drift = stationary_drift_decision(
+                anchor_pose=self.stationary_anchor_pose,
+                candidate=candidate,
+                position_tolerance_m=max(
+                    0.0,
+                    float(self.get_parameter("pose_stationary_drift_reject_m").value),
+                ),
+                yaw_tolerance_rad=max(
+                    0.0,
+                    float(self.get_parameter("pose_stationary_drift_reject_yaw_rad").value),
+                ),
+            )
+            if not drift["accept"]:
+                self._warn_throttled(
+                    "stationary_drift",
+                    "holding stationary map pose anchor; ignored official TF drift: %s"
+                    % str(drift["reason"]),
+                    5.0,
+                )
+            # A robot with no effective motion command is not allowed to move
+            # on the map merely because the factory TF hypothesis moves.
+            candidate.update(
+                {
+                    "x": float(self.stationary_anchor_pose["x"]),
+                    "y": float(self.stationary_anchor_pose["y"]),
+                    "z": float(self.stationary_anchor_pose.get("z", z)),
+                    "yaw": float(self.stationary_anchor_pose["yaw"]),
+                }
+            )
+        jump_limit = max(0.0, float(self.get_parameter("pose_jump_reject_m").value))
+        if last is not None and jump_limit > 0.0 and not in_relocalization_grace and not stationary:
             decision = stable_jump_decision(
                 last_pose=last,
                 pending_pose=self.pending_jump_pose,
@@ -947,31 +981,14 @@ class M20TcpBridge(Node):
             )
             self.pending_jump_pose = decision.get("pending_pose")
             if not decision["accept"]:
-                return False, str(decision["reason"])
+                return False, str(decision["reason"]), None
             if decision.get("reason"):
                 self.get_logger().warning(str(decision["reason"]))
 
-        if last is not None and not in_relocalization_grace and not self._motion_command_active(now):
-            if self.stationary_anchor_pose is None:
-                self.stationary_anchor_pose = dict(last)
-            drift = stationary_drift_decision(
-                anchor_pose=self.stationary_anchor_pose,
-                candidate={"x": x, "y": y, "yaw": yaw},
-                position_tolerance_m=max(
-                    0.0,
-                    float(self.get_parameter("pose_stationary_drift_reject_m").value),
-                ),
-                yaw_tolerance_rad=max(
-                    0.0,
-                    float(self.get_parameter("pose_stationary_drift_reject_yaw_rad").value),
-                ),
-            )
-            if not drift["accept"]:
-                return False, str(drift["reason"])
-
-        self.last_good_map_pose = {"x": x, "y": y, "z": z, "yaw": yaw, "stamp": now}
+        candidate["stamp"] = now
+        self.last_good_map_pose = dict(candidate)
         self.pending_jump_pose = None
-        return True, ""
+        return True, "", candidate
 
     def _motion_command_active(self, now) -> bool:
         stamp = self.last_motion_command_time
