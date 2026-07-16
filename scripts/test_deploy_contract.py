@@ -19,6 +19,7 @@ def main() -> None:
     assert "local_deploy_edge_scan_to_106.sh" in deploy
     assert deploy.index("local_deploy_edge_scan_to_106.sh") < deploy.index("rsync -az --delete")
     assert "systemctl restart m20pro-edge-scan-106.service" in deploy
+    assert 'if [[ "${M20PRO_DEPLOY_SKIP_EDGE:-0}" != "1" ]]; then' in deploy
     assert 'perception.get("mode") == "edge_scan"' in deploy
     assert 'scan.get("frame_id") == "m20pro_base_link"' in deploy
     assert 'int(scan.get("finite_ranges") or 0) >= 20' in deploy

@@ -76,13 +76,16 @@ fi
 fi
 
 # The 106 publisher is a bare DDS application. Restart it after the new 104
-# subscribers exist so discovery is deterministic for this deployment.
-ssh -tt "${EDGE_HOST}" "bash -lc '
-set -e
-sudo -v
-sudo -n systemctl restart m20pro-edge-scan-106.service
-sudo -n systemctl is-active --quiet m20pro-edge-scan-106.service
-'"
+# subscribers exist so discovery is deterministic, unless this deployment was
+# explicitly scoped to 104 only.
+if [[ "${M20PRO_DEPLOY_SKIP_EDGE:-0}" != "1" ]]; then
+  ssh -tt "${EDGE_HOST}" "bash -lc '
+  set -e
+  sudo -v
+  sudo -n systemctl restart m20pro-edge-scan-106.service
+  sudo -n systemctl is-active --quiet m20pro-edge-scan-106.service
+  '"
+fi
 
 edge_ready=0
 for _ in $(seq 1 90); do

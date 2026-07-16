@@ -23664,3 +23664,15 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
   - `docs/frontend_api_contract.md` 增加地图修饰接口合同；地图契约测试覆盖图片坐标方向和 PGM 写入，经典前端合同锁定编辑器入口和 API；
   - 全部 `scripts/test_*.py`、JavaScript/Python 语法检查和 `git diff --check` 通过；
   - 已确认 104 当前 `m20pro-real.service=active`、无活动任务、感知链路正常；部署和 Git 双远端同步将在本轮提交后完成。
+
+## 2026-07-16 18:55 CST - 地图修饰器版本部署到 104
+
+- 104 部署：
+  - 提交 `a27bda3` 已通过现有 staged installer 同步到 `/home/user/m20pro_real_ros2_ws`，五个 ROS 包构建成功并完成原子切换；
+  - `m20pro-real.service=active`、`NRestarts=0`，104 Web 已返回地图修饰器入口、`/api/state` 当前无活动任务且感知状态正常；
+  - 本次只部署 104，没有修改上位机网卡、路由、VPN、Wi-Fi 或 106 组件；部署结束后清理了本次成功部署的临时 staging/backup 目录。
+- 部署脚本根因修正：
+  - 发现旧 `local_deploy_to_test_robot.sh` 即使设置 `M20PRO_DEPLOY_SKIP_EDGE=1`，后半段仍会无条件 SSH 重启 106；已改为仅在未跳过 edge 时重启 106，并补充 deployment contract，防止“只同步 104”误触碰 106。
+- 验证：
+  - 104 revision 文件为 `a27bda3946cf9d836b54cd4d5659e92be7cac1ea`；全量 `scripts/test_*.py`、地图/前端/部署合同测试、语法检查和 `git diff --check` 通过；
+  - 直接 SSH 访问 106 未成功（公钥/密码链路拒绝），未继续尝试，也未对 106 执行任何命令。
