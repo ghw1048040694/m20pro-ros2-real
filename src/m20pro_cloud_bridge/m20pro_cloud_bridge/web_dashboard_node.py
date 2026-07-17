@@ -25,7 +25,7 @@ from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
 from map_msgs.msg import OccupancyGridUpdate
 from nav_msgs.msg import OccupancyGrid, Odometry, Path as RosPath
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from sensor_msgs.msg import Image, LaserScan
 from std_msgs.msg import Bool, String
 from std_srvs.srv import SetBool
@@ -1292,7 +1292,12 @@ class WebDashboardNode(Node):
         )
 
         if bool(self.get_parameter("subscribe_annotated_image").value):
-            self.create_subscription(Image, self._topic("annotated_image_topic"), self._on_annotated_image, 2)
+            self.create_subscription(
+                Image,
+                self._topic("annotated_image_topic"),
+                self._on_annotated_image,
+                qos_profile_sensor_data,
+            )
 
     def _mark_topic(self, topic_key: str) -> None:
         self._state["topics"][topic_key] = {

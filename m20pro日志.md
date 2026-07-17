@@ -23801,3 +23801,4 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
   - Web 订阅标注图并提供 `/camera/yolo.mjpg`、`/camera/yolo.jpg`；检测页新增启停开关、推理状态、带框实时画面和结构化检测列表。原始视频仍走 8888 H.264 网关，标注流不重复解码摄像头。
   - 104 自启动默认模型路径统一为 `best_rk3588_fp16.rknn`、后端 `rknn`，不再把 `best.pt`/Torch 配置误带到 104。
 - 验证：全量 `scripts/test_*.py` 通过；新增 YOLO 启停合同测试；3 个 ROS 包构建通过；Python/JavaScript 语法、`git diff --check` 通过；本地实际启动 `enabled=false` launch 验证节点进入休眠态且不加载模型。
+- 104 首轮真实启用发现标注图端点有发布者/订阅者但 Web 收不到样本；根因是 YOLO 图像发布端为传感器 `best_effort` QoS，Web 订阅端误用整数深度生成 `reliable` QoS。已统一为 `qos_profile_sensor_data`，避免 DDS 只发现端点却不传图。

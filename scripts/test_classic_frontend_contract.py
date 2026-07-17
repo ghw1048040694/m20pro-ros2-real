@@ -108,6 +108,8 @@ def main() -> None:
     assert '"/api/inspection/toggle"' in script
     assert '"/camera/yolo.mjpg"' in backend
     assert 'elif parsed.path == "/api/inspection/toggle":' in backend
+    assert "qos_profile_sensor_data" in backend
+    assert 'self._topic("annotated_image_topic"),\n                self._on_annotated_image,\n                qos_profile_sensor_data,' in backend
     assert "localizationPopoverOpen" in script
     assert 'task: "taskStatusPopover"' in script
     assert '$("taskStatusBtn").addEventListener' in script
