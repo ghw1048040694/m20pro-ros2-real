@@ -74,6 +74,7 @@ from .floor_identity_contract import (
     validate_registered_floor,
 )
 from .localization_contract import (
+    factory_localization_ok_from_sources,
     initialpose_api_response_payload,
     localization_status_payload,
     map_relocalization_clearance_payload,
@@ -1708,8 +1709,6 @@ class WebDashboardNode(Node):
             self._mark_topic("relocalization_result")
 
     def _raw_factory_localization_ok(self, state: Dict[str, Any]) -> bool:
-        if state.get("localization_ok") is True:
-            return True
         nav_status_parsed = (
             state.get("navigation_status_parsed")
             if isinstance(state.get("navigation_status_parsed"), dict)
@@ -1717,11 +1716,7 @@ class WebDashboardNode(Node):
         )
         if not nav_status_parsed and state.get("navigation_status") is not None:
             nav_status_parsed = parse_key_value_status(str(state.get("navigation_status") or ""))
-        location = nav_status_parsed.get("location")
-        try:
-            return float(location) == 0.0
-        except (TypeError, ValueError):
-            return False
+        return factory_localization_ok_from_sources(state.get("localization_ok"), nav_status_parsed)
 
     def _factory_localization_ok(self, state: Dict[str, Any]) -> bool:
         # A failed or in-flight manual relocation is an explicit runtime gate.

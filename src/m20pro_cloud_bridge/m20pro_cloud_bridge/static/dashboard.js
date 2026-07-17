@@ -2692,7 +2692,7 @@
         const button = document.createElement("button");
         button.type = "button";
         button.dataset.addTaskPoint = item.id;
-        button.textContent = `+ ${item.label || item.id}`;
+        button.textContent = item.label || item.id;
         button.title = `${item.floor || "-"} / ${annotationTypeLabel(item)} / ${radarPlanText(item.radar)}`;
         button.disabled = state.taskDraftIds.includes(String(item.id));
         pool.appendChild(button);
@@ -2904,7 +2904,7 @@
             const button = document.createElement("button");
             button.type = "button";
             button.dataset.addCrossFloorPoint = item.id;
-            button.textContent = `+ ${item.label || item.id}`;
+            button.textContent = item.label || item.id;
             button.title = `${floor.id} / ${item.label || item.id}`;
             button.disabled = state.crossFloorDraftIds.includes(String(item.id));
             points.appendChild(button);

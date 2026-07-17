@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src/m20pro_cloud_bridge"))
 
 from m20pro_cloud_bridge.localization_contract import (  # noqa: E402
+    factory_localization_ok_from_sources,
     initialpose_api_response_payload,
     localization_status_payload,
     map_relocalization_clearance_payload,
@@ -107,6 +108,24 @@ def test_localization_status_requires_fresh_map_pose() -> None:
     )
     assert_equal(failed_attempt["confirmed"], False, "failed attempt clears old success")
     assert_equal(failed_attempt["code"], "relocalization_attempt_failed", "failed attempt code")
+
+
+def test_factory_localization_source_precedence() -> None:
+    assert_equal(
+        factory_localization_ok_from_sources(False, {"location": 0}),
+        False,
+        "explicit bridge failure cannot be resurrected by stale factory status",
+    )
+    assert_equal(
+        factory_localization_ok_from_sources(True, {"location": 1}),
+        True,
+        "explicit bridge success remains authoritative",
+    )
+    assert_equal(
+        factory_localization_ok_from_sources(None, {"location": 0}),
+        True,
+        "navigation status is a startup fallback before the Bool topic speaks",
+    )
 
 
 def test_localization_status_reports_motion_away_from_tcp_pose_as_confirmed() -> None:
@@ -496,6 +515,8 @@ def main() -> int:
     print("[OK] test_parse_initialpose_request")
     test_localization_status_requires_fresh_map_pose()
     print("[OK] test_localization_status_requires_fresh_map_pose")
+    test_factory_localization_source_precedence()
+    print("[OK] test_factory_localization_source_precedence")
     test_localization_status_reports_motion_away_from_tcp_pose_as_confirmed()
     print("[OK] test_localization_status_reports_motion_away_from_tcp_pose_as_confirmed")
     test_localization_status_uses_factory_status_when_localization_topic_disagrees()

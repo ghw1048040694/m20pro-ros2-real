@@ -12,7 +12,7 @@ from tf2_ros import TransformBroadcaster
 
 from .geometry import quaternion_to_yaw, yaw_to_quaternion
 from .odom_alignment_contract import odom_alignment_update
-from .pose_stability_contract import stationary_drift_decision, stable_jump_decision
+from .pose_stability_contract import stationary_pose_update, stable_jump_decision
 from .tcp_protocol import M20TcpClient, patrol_items
 
 
@@ -927,7 +927,7 @@ class M20TcpBridge(Node):
         if stationary:
             if self.stationary_anchor_pose is None:
                 self.stationary_anchor_pose = dict(last)
-            drift = stationary_drift_decision(
+            stationary_update = stationary_pose_update(
                 anchor_pose=self.stationary_anchor_pose,
                 candidate=candidate,
                 position_tolerance_m=max(
@@ -939,23 +939,17 @@ class M20TcpBridge(Node):
                     float(self.get_parameter("pose_stationary_drift_reject_yaw_rad").value),
                 ),
             )
-            if not drift["accept"]:
+            if not stationary_update["accept"]:
                 self._warn_throttled(
                     "stationary_drift",
-                    "holding stationary map pose anchor; ignored official TF drift: %s"
-                    % str(drift["reason"]),
+                    "rejecting stationary map pose; localization requires relocalization: %s"
+                    % str(stationary_update["reason"]),
                     5.0,
                 )
-            # A robot with no effective motion command is not allowed to move
-            # on the map merely because the factory TF hypothesis moves.
-            candidate.update(
-                {
-                    "x": float(self.stationary_anchor_pose["x"]),
-                    "y": float(self.stationary_anchor_pose["y"]),
-                    "z": float(self.stationary_anchor_pose.get("z", z)),
-                    "yaw": float(self.stationary_anchor_pose["yaw"]),
-                }
-            )
+                # Do not republish the old anchor with a new timestamp. The
+                # bridge must make the task layer observe localization loss.
+                return False, str(stationary_update["reason"]), None
+            candidate = dict(stationary_update["pose"] or candidate)
         jump_limit = max(0.0, float(self.get_parameter("pose_jump_reject_m").value))
         if last is not None and jump_limit > 0.0 and not in_relocalization_grace and not stationary:
             decision = stable_jump_decision(

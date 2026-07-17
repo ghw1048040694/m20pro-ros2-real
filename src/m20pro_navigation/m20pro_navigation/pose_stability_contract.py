@@ -35,6 +35,41 @@ def stationary_drift_decision(
     }
 
 
+def stationary_pose_update(
+    *,
+    anchor_pose: Optional[Dict[str, Any]],
+    candidate: Dict[str, float],
+    position_tolerance_m: float,
+    yaw_tolerance_rad: float,
+) -> Dict[str, Any]:
+    """Return an anchored pose only when a stationary candidate is trustworthy.
+
+    A rejected candidate must not be republished with a fresh timestamp. Keeping
+    the last pose visible is useful, but treating it as fresh would allow the
+    navigation/task layers to continue after the localization source drifted.
+    """
+
+    decision = stationary_drift_decision(
+        anchor_pose=anchor_pose,
+        candidate=candidate,
+        position_tolerance_m=position_tolerance_m,
+        yaw_tolerance_rad=yaw_tolerance_rad,
+    )
+    if not decision["accept"]:
+        return {"accept": False, "reason": decision["reason"], "pose": None}
+    effective = dict(candidate)
+    if anchor_pose is not None:
+        effective.update(
+            {
+                "x": float(anchor_pose["x"]),
+                "y": float(anchor_pose["y"]),
+                "z": float(anchor_pose.get("z", effective.get("z", 0.0))),
+                "yaw": float(anchor_pose["yaw"]),
+            }
+        )
+    return {"accept": True, "reason": decision["reason"], "pose": effective}
+
+
 def stable_jump_decision(
     *,
     last_pose: Optional[Dict[str, Any]],

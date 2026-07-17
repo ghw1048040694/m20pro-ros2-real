@@ -35,6 +35,27 @@ def pose_is_plausible(pose: Any, max_abs_position: float = 10000.0) -> bool:
     return all(abs(float(pose.get(key, 0.0))) <= max_abs_position for key in ("x", "y", "z"))
 
 
+def factory_localization_ok_from_sources(
+    localization_ok: Any,
+    navigation_status_parsed: Any = None,
+) -> bool:
+    """Resolve factory localization without letting a stale status resurrect failure.
+
+    The bridge publishes an explicit Bool after every pose evaluation. Once that
+    source has spoken, its false value (including stationary TF drift) is a hard
+    safety result. Navigation status is only a startup fallback before the Bool
+    topic has produced its first sample.
+    """
+
+    if localization_ok is not None:
+        return localization_ok is True
+    parsed = navigation_status_parsed if isinstance(navigation_status_parsed, dict) else {}
+    try:
+        return float(parsed.get("location")) == 0.0
+    except (TypeError, ValueError):
+        return False
+
+
 def relocalization_result_evidence(
     relocalization: Any,
     *,

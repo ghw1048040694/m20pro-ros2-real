@@ -152,6 +152,9 @@ def main() -> None:
     assert '"/api/maps/edit"' in script
     assert "function setMapEditorActive" in script
     assert "function paintMapEditor" in script
+    assert "button.textContent = item.label || item.id;" in script
+    assert "button.textContent = `+ ${item.label || item.id}`" not in script
+    assert "20260717-localization-drift-points-1" in html
 
     assert "DASHBOARD_LITE_DIR" not in backend
     assert 'parsed.path in ("/lite", "/lite/")' in backend

@@ -23771,3 +23771,16 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 判定边界：Web 层 `goal_reached_tolerance_m=0.3m`、`success_slack_m=0.2m` 保持不变，Nav2 成功仍需有新鲜位姿距离证据；本次没有把 yaw 条件叠加到 Web 安全门，因此不会出现“角度稍有偏差就无法完成任务”的过严判定。
 - 验证：Nav2 配置、任务进度、导航状态合同测试，Python 语法检查和 `git diff --check` 均通过；本轮尚未执行真实运动，需现场用同一测试点复测最终朝向、到点耗时及多点任务衔接。
 - 部署：提交 `007a9cd` 已以 104-only 模式部署到测试狗；五包构建成功，`m20pro-real.service=active`、`NRestarts=0`、已启用。104 实际安装配置确认 XY `0.35m`、yaw `0.20rad`，当前无活动任务，定位与 106 edge scan API 验收正常；本次未访问或重启 106，也未下发运动/导航命令。
+
+## 2026-07-17 12:08 CST - 根治静止定位漂移并清理任务点位前导加号
+
+- 定位漂移根因闭环：
+  - 104 日志中的原厂 `map->base_link` 在机器狗无运动命令时仍发生约 1.3-1.5m 漂移，并反复触发 `stationary_drift_requires_relocalization`；这不是前端刷新慢，也没有发现项目节点内存泄漏、OOM 或文件描述符耗尽。
+  - 旧逻辑检测到漂移后仍把旧锚点以“新时间戳”继续发布，任务层会把过期位姿当成新鲜位姿；同时 Web 侧的 `navigation_status=location=0` 还能覆盖 `localization_ok=false`，因此出现定位看似正常但导航原地转圈的风险。
+  - 新逻辑对静止状态采用 fail-closed：候选位姿超过位置/角度阈值时不再发布伪造的新鲜锚点，明确发布 `localization_ok=false`，并要求重新定位；原厂导航状态只在定位 Bool 尚未首次上报时作为启动期兜底，不能复活明确失败。
+- 前端点位选择：
+  - 普通任务和跨楼层任务的点位选择按钮均移除前导 `+`，直接显示点位名称/编号，避免点位多时视觉噪声和误解；保留按钮本身的添加行为与禁用状态。
+  - 静态资源版本更新为 `20260717-localization-drift-points-1`，避免浏览器继续使用旧缓存。
+- 验证：
+  - 全量 `scripts/test_*.py` 通过；Python 编译、JavaScript 语法检查和 `git diff --check` 通过。
+  - 本轮只读检查和服务部署不执行重定位、导航、速度或地图切换命令。
