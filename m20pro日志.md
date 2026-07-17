@@ -23803,3 +23803,9 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 验证：全量 `scripts/test_*.py` 通过；新增 YOLO 启停合同测试；3 个 ROS 包构建通过；Python/JavaScript 语法、`git diff --check` 通过；本地实际启动 `enabled=false` launch 验证节点进入休眠态且不加载模型。
 - 104 首轮真实启用发现标注图端点有发布者/订阅者但 Web 收不到样本；根因是 YOLO 图像发布端为传感器 `best_effort` QoS，Web 订阅端误用整数深度生成 `reliable` QoS。已统一为 `qos_profile_sensor_data`，避免 DDS 只发现端点却不传图。
 - 104 二次验收：前端 API 启用后 `backend=rknn`、`ready=true`、推理约 100-120ms，`/camera/yolo.jpg` 返回 200 且为 960x540 JPEG；关闭后 RKNN/RTSP 资源释放。补充约束：关闭瞬间迟到的 ROS 图像帧不再让 API 报告标注流可用。
+
+## 2026-07-17 14:55 CST - YOLO 启停与标注画面修复部署到 104
+
+- 经过两次 104-only 原子部署完成最终版本 `1d8c272c4276e8d5b47d8e3e90f9e3b19c624529`；未访问、重启或修改 106，也未改变上位机网络。
+- 最终验收：`m20pro-real.service=active`、`NRestarts=0`；YOLO 控制服务可用，默认 `enabled=false/state=disabled/backend=disabled`，不占用 RKNN/RTSP；前端资源版本为 `20260717-yolo-control-overlay-1`；当前无活动任务，定位状态正常。
+- 实启验证已在上一版本完成：前端 API 启用后真实 `backend=rknn`、`ready=true`，推理约 100-120ms，`/camera/yolo.jpg` 返回 200、960x540 JPEG；关闭后状态回到 disabled。最终版仅补充关闭态迟到图像帧的状态门禁。
