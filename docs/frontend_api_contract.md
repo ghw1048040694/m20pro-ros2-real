@@ -250,7 +250,7 @@ GET /api/radar/task_export?task_id=<task_id>&format=csv
 DELETE /api/maps?id=<map_id>&cascade=true
 ```
 
-- 项目内置只读地图不能删除；
+- 项目内置地图可以从业务地图库移除，删除状态保存在 104 的 `hidden_builtin_map_ids`，后续部署不会重新显示；仓库中的只读源文件保留，不直接修改源码资产；
 - 当前生效地图、工作地图和实时 `/map` 实际匹配的地图不能删除，必须先切换到其他地图；
 - 任务执行中不能删除地图；
 - `cascade=true` 会同步删除该地图的点位和依赖任务，并清除建图会话里的导入引用；

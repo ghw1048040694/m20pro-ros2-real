@@ -186,6 +186,7 @@ def main() -> None:
     assert 'elif parsed.path == "/api/maps/edit":' in backend
     assert 'elif parsed.path == "/api/maps":' in backend
     assert "node._delete_map(map_id, cascade=cascade)" in backend
+    assert 'plan["settings"]["hidden_builtin_map_ids"]' in backend
     assert '"source": "web_map_editor"' in backend
     assert 'elif parsed.path == "/api/radar/manual_start":' in backend
     assert "def _radar_manual_start" in backend

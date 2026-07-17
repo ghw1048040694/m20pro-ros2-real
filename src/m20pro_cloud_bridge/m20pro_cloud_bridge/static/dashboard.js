@@ -2648,10 +2648,11 @@
       ].filter(Boolean));
       let reason = "";
       if (!record) reason = "实时地图不能删除";
-      else if (record.readonly) reason = "项目内置地图不能删除";
       else if (protectedIds.has(mapId)) reason = "当前生效或工作地图不能删除，请先切换地图";
       button.disabled = Boolean(reason) || state.mapSwitching;
-      button.title = reason || "永久删除该地图及其关联点位和任务";
+      button.title = reason || (record && record.readonly
+        ? "从业务地图库移除该内置地图及其关联点位和任务"
+        : "永久删除该地图及其关联点位和任务");
     }
     function renderMapList() {
       const box = $("mapList");
@@ -3975,7 +3976,8 @@
       const map = mapRecordById(mapId);
       if (!map || $("deleteMapBtn").disabled) return;
       const name = map.name || map.id;
-      if (!window.confirm(`确认永久删除地图“${name}”？该地图关联的点位和任务也会删除；雷达历史结果不会删除。`)) return;
+      const action = map.readonly ? "从业务地图库移除" : "永久删除";
+      if (!window.confirm(`确认${action}地图“${name}”？该地图关联的点位和任务也会删除；雷达历史结果不会删除。`)) return;
       $("deleteMapBtn").disabled = true;
       try {
         const result = await api("DELETE", `/api/maps?id=${encodeURIComponent(mapId)}&cascade=true`);

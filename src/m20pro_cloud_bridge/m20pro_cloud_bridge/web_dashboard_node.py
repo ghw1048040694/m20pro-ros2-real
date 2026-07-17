@@ -1029,13 +1029,34 @@ class WebDashboardNode(Node):
         return path
 
     def _all_maps_unlocked(self) -> List[Dict[str, Any]]:
-        return all_map_records(self._builtin_maps, self._maps)
+        hidden = {
+            str(item or "").strip()
+            for item in (self._settings.get("hidden_builtin_map_ids") or [])
+            if str(item or "").strip()
+        }
+        builtin_maps = [item for item in self._builtin_maps if str(item.get("id") or "") not in hidden]
+        return all_map_records(builtin_maps, self._maps)
 
     def _find_map_record_unlocked(self, map_id: Optional[str]) -> Optional[Dict[str, Any]]:
-        return find_map_record(self._builtin_maps, self._maps, map_id)
+        target = str(map_id or "").strip()
+        if any(str(item.get("id") or "") == target for item in self._maps):
+            return find_map_record([], self._maps, target)
+        hidden = {
+            str(item or "").strip()
+            for item in (self._settings.get("hidden_builtin_map_ids") or [])
+            if str(item or "").strip()
+        }
+        return None if target in hidden else find_map_record(self._builtin_maps, [], target)
 
     def _default_map_id_unlocked(self) -> Optional[str]:
-        return default_map_id(self._builtin_maps, self._maps, self._default_builtin_map_id)
+        visible_builtin_ids = {
+            str(item.get("id") or "")
+            for item in self._all_maps_unlocked()
+            if str(item.get("source") or "") == "project_builtin"
+        }
+        builtin_maps = [item for item in self._builtin_maps if str(item.get("id") or "") in visible_builtin_ids]
+        default_builtin = self._default_builtin_map_id if self._default_builtin_map_id in visible_builtin_ids else None
+        return default_map_id(builtin_maps, self._maps, default_builtin)
 
     def _normalize_runtime_state_on_startup(self) -> None:
         changed = False
@@ -2812,10 +2833,14 @@ class WebDashboardNode(Node):
             record = self._find_map_record_unlocked(map_id)
             if record is None:
                 return self._error("地图不存在")
-            if bool(record.get("readonly")) or not any(str(item.get("id") or "") == map_id for item in self._maps):
-                return self._error("项目内置地图不能从前端删除")
+            is_archived = any(str(item.get("id") or "") == map_id for item in self._maps)
+            is_builtin = not is_archived and any(
+                str(item.get("id") or "") == map_id for item in self._builtin_maps
+            )
+            if not is_archived and not is_builtin:
+                return self._error("地图不存在或不属于可管理地图")
             plan = apply_map_delete_state(
-                archived_maps=self._maps,
+                archived_maps=[*self._maps, *([record] if is_builtin else [])],
                 annotations=self._annotations,
                 tasks=self._tasks,
                 sessions=self._sessions,
@@ -2840,11 +2865,26 @@ class WebDashboardNode(Node):
                         "deleted_tasks": plan.get("deleted_tasks", 0),
                     },
                 )
-            file_plan = removable_map_archive_directory(
-                self.map_archive_dir,
-                record,
-                [*self._builtin_maps, *list(plan["maps"])],
-            )
+            if is_builtin:
+                file_plan = {
+                    "delete": False,
+                    "path": str(record.get("directory") or ""),
+                    "reason": "project_builtin_hidden",
+                }
+                plan["settings"]["hidden_builtin_map_ids"] = sorted({
+                    *[
+                        str(item or "").strip()
+                        for item in (plan["settings"].get("hidden_builtin_map_ids") or [])
+                        if str(item or "").strip()
+                    ],
+                    map_id,
+                })
+            else:
+                file_plan = removable_map_archive_directory(
+                    self.map_archive_dir,
+                    record,
+                    [*self._builtin_maps, *list(plan["maps"])],
+                )
             originals = {
                 "maps": list(self._maps),
                 "annotations": list(self._annotations),
@@ -2866,7 +2906,11 @@ class WebDashboardNode(Node):
 
         try:
             with self._data_lock:
-                self._maps = list(plan["maps"])
+                self._maps = [
+                    item
+                    for item in plan["maps"]
+                    if not (is_builtin and str(item.get("id") or "") == map_id)
+                ]
                 self._annotations = list(plan["annotations"])
                 self._tasks = list(plan["tasks"])
                 self._sessions = list(plan["sessions"])
@@ -2929,7 +2973,11 @@ class WebDashboardNode(Node):
             "updated_sessions": plan.get("updated_sessions", 0),
             "files_deleted": files_deleted,
             "file_reason": file_plan.get("reason"),
-            "message": "地图已删除，并同步清理关联点位和任务",
+            "message": (
+                "地图已从业务地图库移除，并同步清理关联点位和任务"
+                if is_builtin
+                else "地图已删除，并同步清理关联点位和任务"
+            ),
         }
 
     def _edit_map(self, payload: Dict[str, Any]) -> Dict[str, Any]:
