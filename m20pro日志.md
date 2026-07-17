@@ -1,6 +1,13 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-07-17 10:18 CST
+Last updated: 2026-07-17 10:40 CST
+
+## 2026-07-17 10:37 CST - 状态栏自检改为可点击逐项结果
+
+- 根因：旧版前端虽然已经由后端自动执行 `GET /api/preflight` 和 `POST /api/preflight/run`，状态栏却只是不可交互的“自检”文本；此前独立自检面板被移除后，操作员无法查看核心节点、基础话题、106 边缘激光、`/scan`、地图、定位、代价地图和 Nav2 生命周期等逐项结果。
+- 修复：状态栏“自检”改为可点击入口，新增基础自检弹层；弹层显示整体摘要、通过/提醒/失败数量和每一项的具体结果，并提供“重新自检”和“刷新结果”。自检失败时顶部直接显示 `失败 N项`，点击后可看到失败项目及原因；执行中显示“自检中”，尚未有结果显示“尚未自检”。
+- 设计：复用现有 preflight contract/API 和 `renderPreflight()`，没有新增第二套检查逻辑；检查项文本统一转义后再渲染，避免设备返回内容影响页面结构；读取接口失败也会明确显示为“自检结果读取”失败，而不是误报成尚未执行。
+- 验证：`node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js`、`python3 scripts/test_classic_frontend_contract.py`、`git diff --check` 通过；已部署 104，页面缓存版本为 `20260717-preflight-popover-1`，`m20pro-real.service` 为 `active` 且 `NRestarts=0`；API 返回 18 个检查项目，手动触发后台自检后结果为“基础自检通过，导航已就绪”。未修改 103/106、网络或导航运行参数。
 
 ## 2026-07-16 18:08 CST - 根治静止定位漂移并恢复激光轮廓实时刷新
 

@@ -715,6 +715,32 @@
       border-color: #fecaca;
       background: #fef2f2;
     }
+    .preflight-counts {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .preflight-count {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 0 8px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 650;
+      white-space: nowrap;
+    }
+    .preflight-count.ok { border-color: #86efac; background: #f0fdf4; color: var(--good); }
+    .preflight-count.warn { border-color: #fcd34d; background: #fffbeb; color: var(--warn); }
+    .preflight-count.fail { border-color: #fecaca; background: #fef2f2; color: var(--bad); }
+    .preflight-items {
+      max-height: min(390px, 48vh);
+      margin-top: 8px;
+      overflow: auto;
+      padding-right: 3px;
+    }
     .localization-verdict {
       font-size: 13px;
       font-weight: 700;

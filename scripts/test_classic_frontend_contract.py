@@ -52,6 +52,14 @@ def main() -> None:
         "mapStatusPopover",
         "localizationStatusBtn",
         "localizationStatusPopover",
+        "preflightStatusBtn",
+        "preflightStatusPopover",
+        "closePreflightStatusBtn",
+        "preflightSummary",
+        "preflightCounts",
+        "preflightItems",
+        "runPreflightBtn",
+        "refreshPreflightBtn",
         "recordingStatusBtn",
         "recordingStatusPopover",
         "taskStatusBtn",
@@ -85,6 +93,10 @@ def main() -> None:
     assert "localizationPopoverOpen" in script
     assert 'task: "taskStatusPopover"' in script
     assert '$("taskStatusBtn").addEventListener' in script
+    assert 'preflight: "preflightStatusPopover"' in script
+    assert '$("preflightStatusBtn").addEventListener' in script
+    assert 'function preflightTopLabel' in script
+    assert "escapeHtml(item.label || item.key)" in script
     assert "mapModeLabel" not in script
     assert "renderTaskNextStep" not in script
     assert 'setStatusPopover("", false)' in script

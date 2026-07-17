@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>M20Pro 现场操作台</title>
   <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="/static/dashboard.css?v=20260717-task-popover-1" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=20260717-preflight-popover-1" />
 
 </head>
 <body>
@@ -16,7 +16,7 @@
       <button id="mapStatusBtn" class="status-chip status-action" type="button" aria-expanded="false"><span>地图</span><strong id="mapTopStatus">等待</strong></button>
       <span class="status-chip"><span>楼层</span><strong id="floor">-</strong></span>
       <button id="localizationStatusBtn" class="status-chip status-action" type="button" aria-expanded="false"><span>定位</span><strong id="localization">-</strong></button>
-      <span class="status-chip"><span>自检</span><strong id="preflightTopStatus">启动中</strong></span>
+      <button id="preflightStatusBtn" class="status-chip status-action" type="button" aria-expanded="false" title="查看基础自检结果"><span>自检</span><strong id="preflightTopStatus">尚未自检</strong></button>
       <span class="status-chip"><span>电量</span><strong id="battery">-</strong></span>
       <button id="taskStatusBtn" class="status-chip status-action" type="button" aria-expanded="false"><span>任务</span><strong id="taskTopStatus">空闲</strong></button>
       <span class="status-chip"><span>雷达</span><strong id="radarTopStatus">等待</strong></span>
@@ -41,6 +41,14 @@
     <div class="small" id="scanOverlayStatus">等待 /scan 数据</div>
     <div id="localizationStatus" class="preflight-summary warn">等待定位状态</div>
     <div id="localizeLog" class="compact-status">打开定位后，在地图上拖拽设置位置和朝向。</div>
+  </section>
+
+  <section id="preflightStatusPopover" class="status-popover status-popover-wide" hidden>
+    <div class="status-popover-head"><strong>基础自检</strong><button id="closePreflightStatusBtn" class="icon-button" type="button" title="关闭" aria-label="关闭">×</button></div>
+    <div id="preflightSummary" class="preflight-summary warn">尚未自检</div>
+    <div id="preflightCounts" class="preflight-counts" aria-live="polite"></div>
+    <div id="preflightItems" class="preflight-items" aria-live="polite"><div class="small">尚未自检。</div></div>
+    <div class="actions"><button class="primary" id="runPreflightBtn" type="button">重新自检</button><button id="refreshPreflightBtn" type="button">刷新结果</button></div>
   </section>
 
   <section id="recordingStatusPopover" class="status-popover" hidden>
@@ -336,7 +344,7 @@
     <div class="dialog-actions"><button id="confirmOperationFeedbackBtn" class="primary" type="button">确定</button></div>
   </dialog>
 
-  <script src="/static/dashboard.js?v=20260717-task-popover-1"></script>
+  <script src="/static/dashboard.js?v=20260717-preflight-popover-1"></script>
 
 </body>
 </html>

@@ -934,12 +934,14 @@
     const statusPopoverIds = {
       map: "mapStatusPopover",
       localization: "localizationStatusPopover",
+      preflight: "preflightStatusPopover",
       recording: "recordingStatusPopover",
       task: "taskStatusPopover"
     };
     const statusButtonIds = {
       map: "mapStatusBtn",
       localization: "localizationStatusBtn",
+      preflight: "preflightStatusBtn",
       recording: "recordingStatusBtn",
       task: "taskStatusBtn"
     };
@@ -978,11 +980,19 @@
       if (result.ok) return `最近一次基础自检通过${ageText}`;
       return `最近一次基础自检未通过${ageText}`;
     }
+    function preflightTopLabel(result) {
+      if (!result) return "尚未自检";
+      if (result.running) return "自检中";
+      if (result.ok) return "通过";
+      const failures = Number(result.failures);
+      if (Number.isFinite(failures) && failures > 0) return `失败 ${failures}项`;
+      return "异常";
+    }
     function renderPreflight(result) {
       state.preflight = result || null;
       const preflightTop = $("preflightTopStatus");
       if (preflightTop) {
-        preflightTop.textContent = !result ? "尚未自检" : (result.running ? "自检中" : (result.ok ? "通过" : "异常"));
+        preflightTop.textContent = preflightTopLabel(result);
         preflightTop.title = preflightStatusText(result);
       }
       const summaries = [$("preflightSummary"), $("taskPreflightSummary")];
@@ -994,6 +1004,21 @@
           box.classList.add(cls);
         }
         box.textContent = preflightStatusText(result);
+      }
+      const countsBox = $("preflightCounts");
+      if (countsBox) {
+        if (!result) {
+          countsBox.innerHTML = "";
+        } else {
+          const failures = Number.isFinite(Number(result.failures)) ? Number(result.failures) : 0;
+          const warnings = Number.isFinite(Number(result.warnings)) ? Number(result.warnings) : 0;
+          const items = Array.isArray(result.items) ? result.items : [];
+          const passed = items.filter(item => item.status === "ok" || item.status === "info").length;
+          countsBox.innerHTML = `
+            <span class="preflight-count ok">通过 ${passed}</span>
+            <span class="preflight-count warn">提醒 ${warnings}</span>
+            <span class="preflight-count fail">失败 ${failures}</span>`;
+        }
       }
       const itemsBox = $("preflightItems");
       if (itemsBox) {
@@ -1009,7 +1034,7 @@
             const statusText = item.status === "ok" ? "通过" : (item.status === "warn" ? "提醒" : (item.status === "info" ? "信息" : "失败"));
             row.innerHTML = `
               <div class="check-status ${statusClass}">${statusText}</div>
-              <div><strong>${item.label || item.key}</strong><div class="small">${item.message || ""}</div></div>
+              <div><strong>${escapeHtml(item.label || item.key)}</strong><div class="small">${escapeHtml(item.message || "")}</div></div>
             `;
             itemsBox.appendChild(row);
           }
@@ -1420,7 +1445,15 @@
         renderPreflight(result);
         return result;
       } catch (err) {
-        renderPreflight(null);
+        renderPreflight({
+          ok: false,
+          running: false,
+          failures: 1,
+          warnings: 0,
+          summary: "无法读取自检结果，请检查前端与服务连接",
+          age_sec: 0,
+          items: [{key: "preflight_fetch", label: "自检结果读取", status: "fail", message: err.message || "请求失败"}]
+        });
         return null;
       }
     }
@@ -1437,7 +1470,13 @@
     async function runPreflight() {
       const buttons = [$("runPreflightBtn"), $("taskRunPreflightBtn")].filter(Boolean);
       for (const btn of buttons) btn.disabled = true;
-      if ($("preflightSummary")) $("preflightSummary").textContent = "基础自检中（工位/未重定位时只确认基础链路）...";
+      renderPreflight({
+        ...(state.preflight || {}),
+        ok: false,
+        running: true,
+        summary: "基础自检中（工位/未重定位时只确认基础链路），请稍候",
+        age_sec: 0
+      });
       if ($("taskPreflightSummary")) $("taskPreflightSummary").textContent = "基础自检中（工位/未重定位时只确认基础链路）...";
       try {
         const payload = await apiWithTimeout("POST", "/api/preflight/run", {mode: "move", site: "auto", wait: false}, 10000);
@@ -3895,10 +3934,12 @@
     window.addEventListener("resize", resizeCanvas);
     $("mapStatusBtn").addEventListener("click", () => toggleStatusPopover("map"));
     $("localizationStatusBtn").addEventListener("click", () => toggleStatusPopover("localization"));
+    $("preflightStatusBtn").addEventListener("click", () => toggleStatusPopover("preflight"));
     $("recordingStatusBtn").addEventListener("click", () => toggleStatusPopover("recording"));
     $("taskStatusBtn").addEventListener("click", () => toggleStatusPopover("task"));
     $("closeMapStatusBtn").addEventListener("click", () => setStatusPopover("", false));
     $("closeLocalizationStatusBtn").addEventListener("click", () => setStatusPopover("", false));
+    $("closePreflightStatusBtn").addEventListener("click", () => setStatusPopover("", false));
     $("closeRecordingStatusBtn").addEventListener("click", () => setStatusPopover("", false));
     $("closeTaskStatusBtn").addEventListener("click", () => setStatusPopover("", false));
 	    $("closeOperationFeedbackBtn").addEventListener("click", () => $("operationFeedbackDialog").close());
