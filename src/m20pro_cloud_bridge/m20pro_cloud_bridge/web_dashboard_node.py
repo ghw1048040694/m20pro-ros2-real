@@ -2217,7 +2217,12 @@ class WebDashboardNode(Node):
             "backend": status.get("backend"),
             "message": status.get("last_error"),
             "annotated_stream": {
-                "available": bool(has_frame and frame_age is not None and frame_age <= frame_timeout),
+                "available": bool(
+                    status.get("enabled") is True
+                    and has_frame
+                    and frame_age is not None
+                    and frame_age <= frame_timeout
+                ),
                 "age_sec": frame_age,
                 "error": frame_error,
                 "url": "/camera/yolo.mjpg",
