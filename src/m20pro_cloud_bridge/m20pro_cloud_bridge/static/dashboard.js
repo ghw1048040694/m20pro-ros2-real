@@ -945,6 +945,37 @@
       recording: "recordingStatusBtn",
       task: "taskStatusBtn"
     };
+    function positionStatusPopover(name) {
+      const popover = $(statusPopoverIds[name]);
+      const button = $(statusButtonIds[name]);
+      if (!popover || !button || popover.hidden) return;
+      const buttonRect = button.getBoundingClientRect();
+      const viewportPadding = 12;
+      const gap = 8;
+      const popoverWidth = popover.offsetWidth;
+      const popoverHeight = popover.offsetHeight;
+      let left = buttonRect.left;
+      let top = buttonRect.bottom + gap;
+      if (left + popoverWidth > window.innerWidth - viewportPadding) {
+        left = window.innerWidth - viewportPadding - popoverWidth;
+      }
+      left = Math.max(viewportPadding, left);
+      const bottomSpace = window.innerHeight - top - viewportPadding;
+      if (popoverHeight > bottomSpace && buttonRect.top - gap - viewportPadding >= popoverHeight) {
+        top = buttonRect.top - gap - popoverHeight;
+      }
+      top = Math.max(viewportPadding, top);
+      const availableHeight = Math.max(120, window.innerHeight - top - viewportPadding);
+      popover.style.left = `${Math.round(left)}px`;
+      popover.style.top = `${Math.round(top)}px`;
+      popover.style.maxHeight = `${Math.round(availableHeight)}px`;
+    }
+    function positionOpenStatusPopover() {
+      for (const name of Object.keys(statusPopoverIds)) {
+        const popover = $(statusPopoverIds[name]);
+        if (popover && !popover.hidden) positionStatusPopover(name);
+      }
+    }
     function setStatusPopover(name, open) {
       if (open && name && state.mapEditorActive && !setMapEditorActive(false)) return;
       for (const [key, id] of Object.entries(statusPopoverIds)) {
@@ -954,6 +985,7 @@
         const visible = key === name && open;
         popover.hidden = !visible;
         button.setAttribute("aria-expanded", visible ? "true" : "false");
+        if (visible) positionStatusPopover(key);
       }
       state.localizationPopoverOpen = name === "localization" && open;
       if (state.localizationPopoverOpen) {
@@ -2206,7 +2238,6 @@
       state.liveMapVersion = map.version;
       $("mapTitle").textContent = `实时地图版本 ${map.version}`;
       $("mapMeta").textContent = `${map.width} x ${map.height}, ${map.resolution.toFixed(3)} m/格`;
-      if ($("mapTopStatus")) $("mapTopStatus").textContent = "实时 /map";
       if ($("mapStatusDetail")) $("mapStatusDetail").textContent = `${map.width} x ${map.height} / ${map.resolution.toFixed(3)} m/格`;
       updateMapModeUi();
       updateMarkControls();
@@ -2227,7 +2258,6 @@
         renderMarkPoseSummary();
         $("mapTitle").textContent = "实时地图";
         $("mapMeta").textContent = "等待 /map 数据";
-        if ($("mapTopStatus")) $("mapTopStatus").textContent = "实时 /map";
         if ($("mapStatusDetail")) $("mapStatusDetail").textContent = "等待实时 /map 数据";
         updateMapModeUi();
         updateMarkControls();
@@ -2253,7 +2283,6 @@
       if (select && select.value !== mapId) select.value = mapId;
       $("mapTitle").textContent = map.name || `固定地图 ${mapId}`;
       $("mapMeta").textContent = `${map.floor || "-"} / ${map.width} x ${map.height}, ${map.resolution.toFixed(3)} m/格`;
-      if ($("mapTopStatus")) $("mapTopStatus").textContent = map.name || mapId;
       if ($("mapStatusDetail")) $("mapStatusDetail").textContent = `${map.name || mapId} / ${map.floor || "未标楼层"} / ${map.width} x ${map.height}`;
       if (map.floor) setFloorControlValue("markFloor", map.floor);
       updateMapModeUi();
@@ -2422,7 +2451,6 @@
       }
       updateMarkControls();
       const selectedRecord = state.maps.find(item => String(item.id || "") === String(selected || ""));
-      if ($("mapTopStatus")) $("mapTopStatus").textContent = selectedRecord ? (selectedRecord.name || selectedRecord.id) : "实时 /map";
       if ($("mapStatusDetail")) {
         $("mapStatusDetail").textContent = selectedRecord
           ? `${selectedRecord.name || selectedRecord.id} / ${selectedRecord.floor || "未标楼层"}`
@@ -3931,7 +3959,10 @@
         btn.textContent = oldText;
       }
     });
-    window.addEventListener("resize", resizeCanvas);
+    window.addEventListener("resize", () => {
+      resizeCanvas();
+      positionOpenStatusPopover();
+    });
     $("mapStatusBtn").addEventListener("click", () => toggleStatusPopover("map"));
     $("localizationStatusBtn").addEventListener("click", () => toggleStatusPopover("localization"));
     $("preflightStatusBtn").addEventListener("click", () => toggleStatusPopover("preflight"));
@@ -3942,6 +3973,11 @@
     $("closePreflightStatusBtn").addEventListener("click", () => setStatusPopover("", false));
     $("closeRecordingStatusBtn").addEventListener("click", () => setStatusPopover("", false));
     $("closeTaskStatusBtn").addEventListener("click", () => setStatusPopover("", false));
+    document.addEventListener("pointerdown", event => {
+      const target = event.target;
+      if (target && target.closest && (target.closest(".status-popover") || target.closest(".status-action"))) return;
+      setStatusPopover("", false);
+    });
 	    $("closeOperationFeedbackBtn").addEventListener("click", () => $("operationFeedbackDialog").close());
 	    $("confirmOperationFeedbackBtn").addEventListener("click", () => $("operationFeedbackDialog").close());
 	    resizeCanvas();

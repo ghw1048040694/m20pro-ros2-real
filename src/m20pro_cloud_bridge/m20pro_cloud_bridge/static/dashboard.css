@@ -116,10 +116,10 @@
     .status-popover {
       position: fixed;
       z-index: 80;
-      top: 50px;
-      right: 12px;
+      top: 0;
+      left: 0;
       width: min(370px, calc(100vw - 24px));
-      max-height: calc(100vh - 62px);
+      max-height: calc(100vh - 24px);
       overflow: auto;
       padding: 12px;
       border: 1px solid var(--line);
@@ -212,6 +212,36 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+    .map-toolbar-map-button {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 8px;
+      min-width: 0;
+      max-width: 100%;
+      padding: 4px 8px;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--muted);
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+    }
+    .map-toolbar-map-button:hover,
+    .map-toolbar-map-button[aria-expanded="true"] {
+      border-color: #b9d0ea;
+      background: #f2f7fd;
+    }
+    .map-toolbar-map-button strong,
+    .map-toolbar-map-button #mapMeta {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .map-toolbar-map-button strong { max-width: min(34vw, 300px); }
+    .map-toolbar-map-button #mapMeta { color: var(--muted); font-size: 12px; }
+    .map-toolbar-map-caret { color: var(--accent); font-size: 15px; line-height: 1; }
     .map-tools {
       display: flex;
       align-items: center;

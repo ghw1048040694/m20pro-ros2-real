@@ -80,6 +80,10 @@ def main() -> None:
         assert f'id="{element_id}"' in html
 
     assert "status-popover" in css
+    assert "position: fixed;" in css
+    assert "right: 12px;" not in css
+    assert 'id="mapStatusBtn" class="map-toolbar-map-button status-action"' in html
+    assert '<button id="mapStatusBtn" class="status-chip' not in html
     assert "floor-badge" not in css
     assert ".pill" not in css
     assert ".status-chip > span:not(.dot)" in css
@@ -95,6 +99,9 @@ def main() -> None:
     assert '$("taskStatusBtn").addEventListener' in script
     assert 'preflight: "preflightStatusPopover"' in script
     assert '$("preflightStatusBtn").addEventListener' in script
+    assert "function positionStatusPopover" in script
+    assert "positionOpenStatusPopover" in script
+    assert 'document.addEventListener("pointerdown"' in script
     assert 'function preflightTopLabel' in script
     assert "escapeHtml(item.label || item.key)" in script
     assert "mapModeLabel" not in script

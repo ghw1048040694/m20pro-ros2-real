@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>M20Pro 现场操作台</title>
   <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="/static/dashboard.css?v=20260717-preflight-popover-1" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=20260717-status-popover-anchor-1" />
 
 </head>
 <body>
@@ -13,7 +13,6 @@
     <div class="top-brand"><strong>M20Pro</strong><span>现场操作台</span></div>
     <div class="top-status">
       <span class="status-chip"><span id="statusDot" class="dot"></span><strong id="statusText">连接中</strong></span>
-      <button id="mapStatusBtn" class="status-chip status-action" type="button" aria-expanded="false"><span>地图</span><strong id="mapTopStatus">等待</strong></button>
       <span class="status-chip"><span>楼层</span><strong id="floor">-</strong></span>
       <button id="localizationStatusBtn" class="status-chip status-action" type="button" aria-expanded="false"><span>定位</span><strong id="localization">-</strong></button>
       <button id="preflightStatusBtn" class="status-chip status-action" type="button" aria-expanded="false" title="查看基础自检结果"><span>自检</span><strong id="preflightTopStatus">尚未自检</strong></button>
@@ -69,7 +68,7 @@
   <main>
     <section class="map-wrap">
       <div class="map-toolbar">
-        <span class="map-toolbar-left"><strong id="mapTitle">等待地图</strong> <span id="mapMeta">-</span></span>
+        <span class="map-toolbar-left"><button id="mapStatusBtn" class="map-toolbar-map-button status-action" type="button" aria-expanded="false" title="切换当前地图"><strong id="mapTitle">等待地图</strong><span id="mapMeta">-</span><span class="map-toolbar-map-caret" aria-hidden="true">⌄</span></button></span>
         <span class="map-tools">
           <button id="zoomOutBtn" title="缩小地图">-</button>
           <span id="zoomReadout" class="zoom-readout">100%</span>
@@ -344,7 +343,7 @@
     <div class="dialog-actions"><button id="confirmOperationFeedbackBtn" class="primary" type="button">确定</button></div>
   </dialog>
 
-  <script src="/static/dashboard.js?v=20260717-preflight-popover-1"></script>
+  <script src="/static/dashboard.js?v=20260717-status-popover-anchor-1"></script>
 
 </body>
 </html>

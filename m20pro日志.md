@@ -1,6 +1,13 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-07-17 10:40 CST
+Last updated: 2026-07-17 10:52 CST
+
+## 2026-07-17 10:47 CST - 状态栏弹层跟随控件并将当前地图移回地图工具栏
+
+- 交互修复：状态栏弹层不再固定堆在右上角，而是按被点击控件的位置计算，显示在控件正下方；靠近右侧或底部边缘时自动夹紧/避让，窗口缩放时重新定位。
+- 关闭行为：点击弹层外任意区域自动关闭，点击其他状态控件可直接切换弹层，右上角关闭按钮仍保留作为显式关闭入口。
+- 地图入口调整：顶部状态栏移除“地图”项；当前地图名称、楼层和尺寸移回地图工具栏左侧，并作为地图切换入口，原有地图选择、刷新和切换 API 不变。
+- 验证：`node --check src/m20pro_cloud_bridge/m20pro_cloud_bridge/static/dashboard.js`、`python3 scripts/test_classic_frontend_contract.py`、`git diff --check` 通过；已部署 104，页面缓存版本为 `20260717-status-popover-anchor-1`，地图入口已位于地图工具栏，`m20pro-real.service` 为 `active` 且 `NRestarts=0`。未修改 103/106、网络或导航运行参数。
 
 ## 2026-07-17 10:37 CST - 状态栏自检改为可点击逐项结果
 
