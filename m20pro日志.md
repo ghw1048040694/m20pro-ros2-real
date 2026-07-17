@@ -23851,3 +23851,9 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 页面主布局由固定 `420px` 侧栏改为 `clamp(460px, 34vw, 620px)`，地图仍保持至少 `500px`，小于 1080px 时继续使用原有上下布局。
 - 雷达落盘核查：104 当前 `/home/user/m20pro_radar_results` 约 `2.7MB`、`71` 个 job；`jobs/raw/summaries/manual` 持久保存任务、原始 JSON、平整度等摘要和人工登记，只有雷达返回下载 URL 时才保存点云/工程文件到 `downloads`，当前 `downloads=0`。现阶段没有甲方上传 ACK 和自动清理，不能因前端看过就删除；后续应在甲方持久化确认后按任务清理本地副本。
 - 已补充地图删除纯合同测试、前端合同和接口文档；Python/JavaScript 语法、地图合同、经典前端合同及 `git diff --check` 通过。本轮尚未部署 104，未执行地图删除、地图切换、导航或运动命令。
+
+## 2026-07-17 16:15 CST - 地图删除与布局版本部署验收
+
+- 提交 `1b35eb7` 已用 104-only 原子部署更新测试狗，未访问或重启 106；5 包构建成功，`m20pro-real.service=active`、`NRestarts=0`，当前无活动任务。
+- 前端已加载 `20260717-map-delete-layout-1`，地图浮层包含删除按钮，桌面布局实际为地图最小 `500px`、侧栏 `460-620px` 响应式宽度。
+- 非破坏性接口验收：尝试删除当前地图返回 `map_in_use`，尝试删除内置地图明确返回“项目内置地图不能从前端删除”；没有删除、切换或修改任何真实地图。104 雷达目录复核仍为约 `2.7MB`、`jobs=71`、`downloads=0`。
