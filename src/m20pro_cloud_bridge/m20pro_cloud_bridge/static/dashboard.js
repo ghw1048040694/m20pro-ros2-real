@@ -67,6 +67,7 @@
       lastRadarResultsRefreshAt: 0,
       loadingRadarResults: false,
       yoloControlBusy: false,
+      yoloLiveRequestInFlight: false,
       floorControlsInitialized: false,
       lastMultiFloorRefreshAt: 0,
     };
@@ -142,8 +143,8 @@
       none: "不触发"
     };
     const cameraViewers = {
-      front: { active: false },
-      rear: { active: false }
+      front: { active: false, hls: null, retryTimer: null },
+      rear: { active: false, hls: null, retryTimer: null }
     };
 
     function $(id) { return document.getElementById(id); }
@@ -576,30 +577,94 @@
       setLog("activeTask", payload);
       await loadTasks();
     }
-	    function setVideoActive(cameraName) {
-	      for (const name of ["front", "rear"]) {
-	        const frame = $(`${name}Video`);
-	        const btn = $(`${name}VideoBtn`);
-	        if (!frame || !btn) continue;
-	        const viewer = cameraViewers[name];
-	        const active = name === cameraName;
-	        viewer.active = active;
-	        if (active) {
-	          frame.src = frame.dataset.src;
-	          btn.textContent = "关闭";
-	          btn.classList.add("active");
-	        } else {
-	          frame.removeAttribute("src");
-	          btn.textContent = "打开";
-	          btn.classList.remove("active");
-	        }
-	      }
-	    }
-	    function toggleVideo(cameraName) {
-	      const viewer = cameraViewers[cameraName];
-	      const isActive = !!viewer && viewer.active;
-	      setVideoActive(isActive ? null : cameraName);
-	    }
+    function stopVideoViewer(cameraName) {
+      const viewer = cameraViewers[cameraName];
+      const video = $(`${cameraName}Video`);
+      if (!viewer || !video) return;
+      viewer.active = false;
+      if (viewer.retryTimer !== null) {
+        clearTimeout(viewer.retryTimer);
+        viewer.retryTimer = null;
+      }
+      if (viewer.hls) {
+        viewer.hls.destroy();
+        viewer.hls = null;
+      }
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+    }
+    function startVideoViewer(cameraName) {
+      const viewer = cameraViewers[cameraName];
+      const video = $(`${cameraName}Video`);
+      if (!viewer || !video || !viewer.active) return;
+      const source = video.dataset.src;
+      if (window.Hls && window.Hls.isSupported()) {
+        const hls = new window.Hls({
+          lowLatencyMode: true,
+          liveSyncDurationCount: 1,
+          liveMaxLatencyDurationCount: 3,
+          maxLiveSyncPlaybackRate: 1.5,
+          maxBufferLength: 2,
+          maxMaxBufferLength: 4,
+          backBufferLength: 0,
+          startFragPrefetch: true
+        });
+        viewer.hls = hls;
+        hls.on(window.Hls.Events.MEDIA_ATTACHED, () => hls.loadSource(source));
+        hls.on(window.Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {}));
+        hls.on(window.Hls.Events.ERROR, (_event, data) => {
+          if (!viewer.active || viewer.hls !== hls) return;
+          if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) {
+            hls.recoverMediaError();
+            return;
+          }
+          if (!data.fatal) return;
+          hls.destroy();
+          if (viewer.hls === hls) viewer.hls = null;
+          viewer.retryTimer = setTimeout(() => {
+            viewer.retryTimer = null;
+            startVideoViewer(cameraName);
+          }, 1500);
+        });
+        hls.attachMedia(video);
+        return;
+      }
+      if (video.canPlayType("application/vnd.apple.mpegurl")) {
+        video.src = source;
+        video.play().catch(() => {});
+      }
+    }
+    function setVideoActive(cameraName) {
+      const frontWasActive = cameraViewers.front.active;
+      for (const name of ["front", "rear"]) {
+        const viewer = cameraViewers[name];
+        const btn = $(`${name}VideoBtn`);
+        if (!viewer || !btn) continue;
+        stopVideoViewer(name);
+        if (name === cameraName) {
+          viewer.active = true;
+          startVideoViewer(name);
+          btn.textContent = "关闭";
+          btn.classList.add("active");
+        } else {
+          btn.textContent = "打开";
+          btn.classList.remove("active");
+        }
+      }
+      if (frontWasActive && !cameraViewers.front.active) {
+        const toggle = $("yoloEnabledToggle");
+        if (toggle && toggle.checked && !state.yoloControlBusy) {
+          toggle.checked = false;
+          setYoloEnabled(false);
+        }
+      }
+      renderYoloWorkspace(state.latest || {});
+    }
+    function toggleVideo(cameraName) {
+      const viewer = cameraViewers[cameraName];
+      setVideoActive(viewer && viewer.active ? null : cameraName);
+    }
 	    function fmtPose2d(pose, yawScale = 1.0) {
       if (!pose || !Number.isFinite(Number(pose.x)) || !Number.isFinite(Number(pose.y))) return "-";
       const yaw = Number(pose.display_yaw !== undefined ? pose.display_yaw : pose.yaw);
@@ -1434,32 +1499,69 @@
       }
       return typeof sample === "object" ? sample : null;
     }
-    function setYoloAnnotatedStream(active, message = "") {
-      const image = $("yoloAnnotatedVideo");
-      const placeholder = $("yoloPreviewPlaceholder");
-      if (!image || !placeholder) return;
-      placeholder.textContent = message || (active ? "正在连接 YOLO 标注画面" : "启用 YOLO 后显示带检测框画面");
-      if (active) {
-        if (image.dataset.active !== "true") {
-          image.dataset.active = "true";
-          image.src = `/camera/yolo.mjpg?v=20260717-yolo-control-overlay-1&t=${Date.now()}`;
-        }
-      } else {
-        image.dataset.active = "false";
-        image.removeAttribute("src");
+    function drawYoloOverlay(snapshot) {
+      const canvas = $("frontYoloOverlay");
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      const rect = canvas.getBoundingClientRect();
+      const width = Math.max(1, Math.round(rect.width));
+      const height = Math.max(1, Math.round(rect.height));
+      const dpr = Math.max(1, Number(window.devicePixelRatio) || 1);
+      if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
+        canvas.width = Math.round(width * dpr);
+        canvas.height = Math.round(height * dpr);
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, width, height);
+      if (!cameraViewers.front.active) return;
+      const status = topicPayload(snapshot && snapshot.inspection_status) || {};
+      if (status.enabled !== true || status.ready !== true) return;
+      const payload = topicPayload(snapshot && snapshot.detections) || {};
+      const rows = Array.isArray(payload.detections) ? payload.detections : [];
+      const sourceWidth = Number(payload.image_width) || 1280;
+      const sourceHeight = Number(payload.image_height) || 720;
+      const scale = Math.min(width / sourceWidth, height / sourceHeight);
+      const offsetX = (width - sourceWidth * scale) * 0.5;
+      const offsetY = (height - sourceHeight * scale) * 0.5;
+      ctx.lineWidth = 2;
+      ctx.font = "600 13px system-ui, sans-serif";
+      for (const item of rows.slice(0, 50)) {
+        const box = Array.isArray(item.bbox_xyxy) ? item.bbox_xyxy.map(Number) : [];
+        if (box.length !== 4 || box.some(value => !Number.isFinite(value))) continue;
+        const x = offsetX + box[0] * scale;
+        const y = offsetY + box[1] * scale;
+        const w = Math.max(1, (box[2] - box[0]) * scale);
+        const h = Math.max(1, (box[3] - box[1]) * scale);
+        const confidence = Number(item.confidence);
+        const label = `${item.class_name || `类别 ${item.class_id ?? "-"}`}${Number.isFinite(confidence) ? ` ${Math.round(confidence * 100)}%` : ""}`;
+        ctx.strokeStyle = "#facc15";
+        ctx.fillStyle = "rgba(15, 23, 42, 0.78)";
+        ctx.strokeRect(x, y, w, h);
+        const textWidth = ctx.measureText(label).width + 10;
+        const textY = Math.max(18, y);
+        ctx.fillRect(x, textY - 18, textWidth, 18);
+        ctx.fillStyle = "#fef08a";
+        ctx.fillText(label, x + 5, textY - 5);
       }
     }
     async function setYoloEnabled(enabled) {
       if (state.yoloControlBusy) return;
+      if (enabled && !cameraViewers.front.active) {
+        showOperationFeedback("请先打开前摄像头", "视频开始播放后才能启用 YOLO。", true);
+        renderYoloWorkspace(state.latest || {});
+        return;
+      }
       state.yoloControlBusy = true;
       renderYoloWorkspace(state.latest || {});
       try {
         const payload = await api("POST", "/api/inspection/toggle", {enabled});
         showOperationFeedback(enabled ? "YOLO 已启用" : "YOLO 已关闭", payload.message || payload);
+        mergeInspectionState(await fetchJson("/api/inspection/state"));
       } catch (err) {
         showOperationFeedback(enabled ? "YOLO 启用失败" : "YOLO 关闭失败", err, true);
       } finally {
         state.yoloControlBusy = false;
+        renderYoloWorkspace(state.latest || {});
       }
     }
     function renderYoloWorkspace(snapshot) {
@@ -1481,12 +1583,12 @@
       const toggleLabel = $("yoloToggleLabel");
       if (toggle) {
         toggle.checked = enabled;
-        toggle.disabled = state.yoloControlBusy || control.available !== true;
+        toggle.disabled = state.yoloControlBusy || control.available !== true || !cameraViewers.front.active;
       }
       if (toggleLabel) {
         toggleLabel.textContent = state.yoloControlBusy
           ? (enabled ? "关闭中" : "启动中")
-          : (control.available !== true ? "后端未接入" : (enabled ? "已启用" : "已关闭"));
+          : (!cameraViewers.front.active ? "先开视频" : (control.available !== true ? "未接入" : (enabled ? "已启用" : "已关闭")));
       }
       statusBox.textContent = [
         !enabled ? "YOLO 已关闭" : (ready ? "YOLO 已就绪" : "YOLO 启动中"),
@@ -1496,12 +1598,7 @@
         status.last_error ? `异常 ${status.last_error}` : ""
       ].filter(Boolean).join(" / ");
       statusBox.classList.toggle("fail", Boolean(status.last_error) || (enabled && status.ready === false));
-      setYoloAnnotatedStream(
-        enabled && ready,
-        status.last_error
-          ? `YOLO 异常：${status.last_error}`
-          : (enabled ? "正在等待第一帧标注画面" : "启用 YOLO 后显示带检测框画面")
-      );
+      drawYoloOverlay(snapshot);
       resultBox.innerHTML = "";
       if (!rows.length) {
         resultBox.innerHTML = `<div class="small">${!enabled ? "YOLO 已关闭" : (ready ? "当前画面没有检测目标" : "等待 YOLO 检测结果")}</div>`;
@@ -3370,6 +3467,34 @@
       }
       setTimeout(liveLoop, 125);
     }
+    function mergeInspectionState(live) {
+      if (!live) return;
+      state.latest = {
+        ...(state.latest || {}),
+        detections: live.detections ?? null,
+        inspection_status: live.inspection_status ?? null,
+        inspection_control: live.inspection_control || {}
+      };
+      renderYoloWorkspace(state.latest);
+    }
+    async function yoloLiveLoop() {
+      const enabled = Boolean(
+        state.yoloControlBusy
+        || (state.latest && state.latest.inspection_control && state.latest.inspection_control.enabled)
+        || (state.latest && topicPayload(state.latest.inspection_status)?.enabled === true)
+      );
+      if (!document.hidden && cameraViewers.front.active && enabled && !state.yoloLiveRequestInFlight) {
+        state.yoloLiveRequestInFlight = true;
+        try {
+          mergeInspectionState(await fetchJson("/api/inspection/state"));
+        } catch (err) {
+          console.warn(err);
+        } finally {
+          state.yoloLiveRequestInFlight = false;
+        }
+      }
+      setTimeout(yoloLiveLoop, enabled && cameraViewers.front.active ? 200 : 750);
+    }
     for (const btn of document.querySelectorAll("button.tab")) {
       btn.addEventListener("click", () => {
         setStatusPopover("", false);
@@ -3981,12 +4106,7 @@
     $("frontVideoBtn").addEventListener("click", () => toggleVideo("front"));
     $("rearVideoBtn").addEventListener("click", () => toggleVideo("rear"));
     $("yoloEnabledToggle").addEventListener("change", event => setYoloEnabled(event.target.checked));
-    $("yoloAnnotatedVideo").addEventListener("error", () => {
-      const image = $("yoloAnnotatedVideo");
-      image.dataset.active = "false";
-      image.removeAttribute("src");
-      $("yoloPreviewPlaceholder").textContent = "标注画面暂未就绪，正在重试";
-    });
+    window.addEventListener("resize", () => drawYoloOverlay(state.latest || {}));
     if ($("runPreflightBtn")) $("runPreflightBtn").addEventListener("click", runPreflight);
     if ($("refreshPreflightBtn")) $("refreshPreflightBtn").addEventListener("click", loadPreflight);
     $("startRecordingBtn").addEventListener("click", async () => {
@@ -4089,4 +4209,5 @@
       .then(() => Promise.all([loadRadarResults(), loadRecordingStatus()]))
       .catch(console.warn);
     mainLoop();
+    yoloLiveLoop();
     liveLoop();

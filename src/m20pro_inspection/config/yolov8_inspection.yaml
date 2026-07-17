@@ -21,10 +21,14 @@ m20pro_yolov8_inspection:
     iou_threshold: 0.45
     output_has_objectness: false
     max_detections: 100
-    publish_rate_hz: 5.0
+    # Keep the source H.264 stream at 30 fps; only NPU inference is capped at
+    # 3 Hz while YOLO is enabled so the robot and browser keep headroom.
+    publish_rate_hz: 3.0
     reconnect_interval_s: 2.0
 
-    publish_annotated_image: true
+    # The frontend overlays detection JSON on the original H.264 video. Do not
+    # serialize full ROS Image frames or start a second MJPEG video pipeline.
+    publish_annotated_image: false
     publish_empty_detections: true
     detections_topic: "~/detections"
     annotated_image_topic: "~/annotated_image"

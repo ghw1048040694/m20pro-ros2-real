@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>M20Pro 现场操作台</title>
   <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="/static/dashboard.css?v=20260717-yolo-control-overlay-1" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=20260717-yolo-video-overlay-1" />
 
 </head>
 <body>
@@ -304,24 +304,9 @@
           <div class="section">
             <h2>实时视频</h2>
             <div class="video-grid">
-              <div class="video-card"><div class="video-head"><strong>前摄像头</strong><button id="frontVideoBtn" class="mini-btn" type="button" data-video-camera="front">打开</button></div><iframe id="frontVideo" data-src="http://10.21.31.104:8888/video1/" title="前摄像头画面" allow="autoplay; fullscreen" loading="lazy"></iframe></div>
-              <div class="video-card"><div class="video-head"><strong>后摄像头</strong><button id="rearVideoBtn" class="mini-btn" type="button" data-video-camera="rear">打开</button></div><iframe id="rearVideo" data-src="http://10.21.31.104:8888/video2/" title="后摄像头画面" allow="autoplay; fullscreen" loading="lazy"></iframe></div>
+              <div class="video-card"><div class="video-head"><strong>前摄像头</strong><span class="video-actions"><label class="video-yolo-toggle" title="先打开前摄像头，再启用 YOLO"><input id="yoloEnabledToggle" type="checkbox" disabled /><span id="yoloToggleLabel">YOLO</span></label><button id="frontVideoBtn" class="mini-btn" type="button" data-video-camera="front">打开</button></span></div><div class="video-stage"><video id="frontVideo" data-src="http://10.21.31.104:8888/video1/index.m3u8" title="前摄像头画面" muted playsinline autoplay></video><canvas id="frontYoloOverlay" aria-hidden="true"></canvas></div><div id="yoloStatus" class="video-inspection-status">YOLO 已关闭 / 请先打开视频</div><div id="detections" class="detection-results"><div class="small">YOLO 已关闭</div></div></div>
+              <div class="video-card"><div class="video-head"><strong>后摄像头</strong><button id="rearVideoBtn" class="mini-btn" type="button" data-video-camera="rear">打开</button></div><div class="video-stage"><video id="rearVideo" data-src="http://10.21.31.104:8888/video2/index.m3u8" title="后摄像头画面" muted playsinline autoplay></video></div></div>
             </div>
-          </div>
-          <div class="section">
-            <div class="section-title-row">
-              <h2>YOLO 检测</h2>
-              <label class="binary-toggle" title="启用或关闭 RKNN YOLO 推理">
-                <input id="yoloEnabledToggle" type="checkbox" disabled />
-                <span id="yoloToggleLabel">未接入</span>
-              </label>
-            </div>
-            <div id="yoloStatus" class="compact-status">等待 YOLO 状态</div>
-            <div class="yolo-preview">
-              <img id="yoloAnnotatedVideo" alt="YOLO 实时标注画面" />
-              <div id="yoloPreviewPlaceholder" class="yolo-preview-placeholder">启用 YOLO 后显示带检测框画面</div>
-            </div>
-            <div id="detections" class="detection-results"><div class="small">暂无检测结果</div></div>
           </div>
           <div class="section">
             <h2>雷达测量结果</h2>
@@ -356,7 +341,8 @@
     <div class="dialog-actions"><button id="confirmOperationFeedbackBtn" class="primary" type="button">确定</button></div>
   </dialog>
 
-  <script src="/static/dashboard.js?v=20260717-yolo-control-overlay-1"></script>
+  <script src="http://10.21.31.104:8888/video1/hls.min.js"></script>
+  <script src="/static/dashboard.js?v=20260717-yolo-video-overlay-1"></script>
 
 </body>
 </html>

@@ -750,12 +750,13 @@ Content-Type: application/json
 
 Web 后端通过 `/m20pro_yolov8_inspection/set_enabled` 的 `std_srvs/SetBool` 服务控制节点。启用时才加载 RKNN/NPU 并启动 RTSP 最新帧线程；关闭时释放 RKNN、摄像头和缓存帧，不重启 `m20pro-real.service` 或 Nav2。
 
-带框画面接口：
+轻量检测刷新接口：
 
 | 接口 | 说明 |
 | --- | --- |
-| `/camera/yolo.mjpg` | 前端检测页使用的实时标注 MJPEG，仅在 YOLO 已启用且有新鲜帧时可用 |
-| `/camera/yolo.jpg` | 最新一帧标注 JPEG，供接口调试或甲方系统取图 |
+| `GET /api/inspection/state` | 只返回最近检测 JSON、YOLO 状态和启停服务状态；正式前端约每 200 ms 调用一次，仅在前摄像头和 YOLO 同时开启时调用 |
+
+前端先打开 `http://10.21.31.104:8888/video1/` 对应的 H.264 低延迟 HLS 视频，再在视频卡片内启用 YOLO。检测框由浏览器 Canvas 叠加到这条视频上。系统不再发布或提供第二路 ROS Image、JPEG 或 MJPEG 标注视频，避免重复编码和第二个播放器造成卡顿。
 
 检测节点统一发布 JSON。当前支持的推理后端：
 
@@ -853,7 +854,7 @@ M20PRO_INSPECTION_CLASS_NAMES_PATH=/home/user/m20pro_real_ros2_ws/install/m20pro
 | `http://10.21.31.104:8888/video1/` | 前相机 H.264 低延迟 HLS 播放器 |
 | `http://10.21.31.104:8888/video2/` | 后相机 H.264 低延迟 HLS 播放器 |
 
-`/camera/front.*` 与 `/camera/rear.*` 属于已停用的旧通用代理接口，正式原始视频仍走 8888 H.264 网关。`/camera/yolo.mjpg` 是唯一例外：它消费 YOLO 节点已经完成推理的 ROS 标注图，不重复解码 103 RTSP。
+`/camera/front.*` 与 `/camera/rear.*` 属于已停用的旧通用代理接口，正式原始视频仍走 8888 H.264 网关。YOLO 不再提供 `/camera/yolo.*` 标注视频接口。
 
 视频是否可用可检查：
 

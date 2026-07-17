@@ -165,7 +165,7 @@ M20PRO_INSPECTION_MODEL_PATH=/home/user/m20pro_real_ros2_ws/install/m20pro_inspe
 M20PRO_INSPECTION_CLASS_NAMES_PATH=/home/user/m20pro_real_ros2_ws/install/m20pro_inspection/share/m20pro_inspection/models/labels_zh.txt
 ```
 
-转换环境固定为 Ultralytics 8.3.40、CPU Torch 2.4.1、ONNX 1.16.1 和 RKNN Toolkit2 2.3.2，执行 `scripts/convert_yolo_to_rknn.py` 可重复生成模型。104 的 YOLO 进程默认休眠，前端启用后才启动 RTSP 最新帧线程和 NPU 推理；线程持续排空 30fps 源流且只保留最新帧，NPU 按 5Hz 消费，避免推理积压旧画面。检测页同时提供启停开关和带框 MJPEG 画面。当前类别为：未戴安全帽、未穿安全背心、跌倒、火灾、现场杂乱、配电箱打开。
+转换环境固定为 Ultralytics 8.3.40、CPU Torch 2.4.1、ONNX 1.16.1 和 RKNN Toolkit2 2.3.2，执行 `scripts/convert_yolo_to_rknn.py` 可重复生成模型。104 的 YOLO 进程默认休眠，前端先打开前摄像头，再启用 YOLO；进程启动 RTSP 最新帧线程和 NPU 推理，线程持续排空 30fps 源流且只保留最新帧，NPU 启用后按 3Hz 消费，避免推理积压旧画面。原始 H.264 视频仍保持 30fps 硬件解码，不额外转码降帧；检测页把检测框用 Canvas 叠加在同一个 H.264 视频上，并以轻量检测接口刷新 JSON，不再传输第二路 ROS Image/MJPEG。当前类别为：未戴安全帽、未穿安全背心、跌倒、火灾、现场杂乱、配电箱打开。
 
 104 重装运行时使用 `scripts/104_install_rknn_runtime.sh`。脚本默认从 `/tmp` 读取 RKNNLite 2.3.2 arm64 wheel、`librknnrt.so` 和模型，安装后会执行一次 NPU 初始化检查。
 
@@ -271,7 +271,7 @@ rtsp://10.21.31.103:8554/video2
 103 camera -> Rockchip H.264 -> RTSP -> 104 MediaMTX remux -> LL-HLS -> browser
 ```
 
-前端只在点击“打开”后加载对应播放器，关闭或切换相机时立即移除 iframe，使 104 网关停止无消费者的上游拉流。`web_dashboard` 的 `enable_camera_proxy` 必须保持为 `false`，生产进程中不应存在摄像头 FFmpeg/MJPEG 转码。
+前端只在点击“打开”后创建 Hls.js 播放器，关闭或切换相机时立即销毁播放器并移除视频源，使 104 网关停止无消费者的上游拉流。播放器启用低延迟同步、短缓冲和直播点追赶；`web_dashboard` 的 `enable_camera_proxy` 必须保持为 `false`，生产进程中不应存在摄像头 FFmpeg/MJPEG 转码。
 
 如果现场仍加载旧页面，先强制刷新网页，推荐 `Ctrl+F5`，确认浏览器加载的是当前版本脚本：
 
@@ -287,7 +287,7 @@ curl http://127.0.0.1:8888/video1/index.m3u8
 pgrep -af '[f]fmpeg .*rtsp://10.21.31.103' || true
 ```
 
-YOLO 独立消费同一条 H.264 RTSP，在推理进程内只解码一次；禁止从网页帧或 MJPEG 代理取图。当前 MediaMTX v1.4.2 的 WebRTC 与现代 Chrome 的 ICE 协商不可靠，因此生产前端使用已验证的低延迟 HLS；升级网关并通过真实浏览器 ICE 验证后才可切换 WebRTC。
+YOLO 独立消费同一条 H.264 RTSP，在推理进程内只解码一次；网页只接收检测 JSON 并在同一条原始视频上绘制边框，禁止从网页帧或 MJPEG 代理取图。当前 MediaMTX v1.4.2 的 WebRTC 与现代 Chrome 的 ICE 协商不可靠，因此生产前端使用已验证的低延迟 HLS；升级网关并通过真实浏览器 ICE 验证后才可切换 WebRTC。
 
 网页重定位以顶部“定位”浮层的最终结论为准：`/initialpose` 只是网页侧触发动作，开发手册 TCP `2101/1` 回执也只是必要证据之一，不能单独算成功。现场必须看到“重定位成功”，任务区才允许开始任务。执行任务时不能重定位；需要先停止当前任务，再打开顶部“定位”，在地图上拖箭头并点击 `执行重定位`。
 

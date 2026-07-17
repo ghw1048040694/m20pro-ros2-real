@@ -23809,3 +23809,23 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 经过两次 104-only 原子部署完成最终版本 `1d8c272c4276e8d5b47d8e3e90f9e3b19c624529`；未访问、重启或修改 106，也未改变上位机网络。
 - 最终验收：`m20pro-real.service=active`、`NRestarts=0`；YOLO 控制服务可用，默认 `enabled=false/state=disabled/backend=disabled`，不占用 RKNN/RTSP；前端资源版本为 `20260717-yolo-control-overlay-1`；当前无活动任务，定位状态正常。
 - 实启验证已在上一版本完成：前端 API 启用后真实 `backend=rknn`、`ready=true`，推理约 100-120ms，`/camera/yolo.jpg` 返回 200、960x540 JPEG；关闭后状态回到 disabled。最终版仅补充关闭态迟到图像帧的状态门禁。
+
+## 2026-07-17 15:25 CST - 合并 YOLO 到原始视频并消除第二路卡顿
+
+- 用户反馈：视频流和独立 YOLO 标注画面都卡，尤其 YOLO 画面延迟明显；要求先打开视频，再在视频中启用 YOLO。
+- 根因修正：正式前端不再创建独立 YOLO MJPEG 播放器；Web 后端删除 `annotated_image` ROS Image 订阅、JPEG 重编码、`/camera/yolo.mjpg` 和 `/camera/yolo.jpg` 服务，YOLO 节点只保留检测 JSON 输出，避免 ROS Image 传输、二次 JPEG 编码和第二播放器竞争 CPU/网络。
+- 前端视频改为同一张 `<video>` 上的 Hls.js 低延迟播放器：启用直播点同步、短缓冲（2-4 秒）、追赶直播点和销毁重建；Safari 使用原生 HLS 回退。关闭/切换摄像头时销毁 HLS 实例、清除视频源，并自动关闭 YOLO。
+- 检测框由透明 Canvas 叠加到前摄像头原始 H.264 画面；前摄像头未打开时 YOLO 开关不可用。新增 `GET /api/inspection/state` 轻量接口，仅返回最近检测 JSON、状态和控制状态，前端在视频与 YOLO 同时开启时约每 200ms 更新，不再高频拉取整份地图和任务状态。
+- 文档和合同测试同步更新，明确不再提供第二路标注视频接口；`m20pro_cloud_bridge` 移除不再使用的 numpy/ROS Image 依赖。已通过 Python/JavaScript 语法检查、经典前端合同测试、YOLO 控制合同测试和 `git diff --check`。本轮尚未部署 104，未执行运动、重定位或地图切换命令。
+
+## 2026-07-17 15:30 CST - YOLO 启用时降低推理负载
+
+- 用户希望打开 YOLO 后适当降低画面帧率，以保证视频和检测整体稳定流畅。
+- 经过链路分析，直接把原始 H.264 再转成低帧率会引入新的解码/编码进程和额外延迟；因此保持浏览器原始视频 30fps 硬件解码，只把 YOLO 启用后的 NPU 检测频率从 5Hz 调整为 3Hz。RTSP 捕获线程仍只保留最新帧，不积压历史画面，检测框继续通过轻量 JSON 叠加。
+- 配置、README、合同测试和本日志已同步更新；本次只调整检测负载，不修改 103 摄像头、104 网络或 106，尚未部署真机。
+
+## 2026-07-17 15:33 CST - 104 验收 YOLO 低负载配置
+
+- 通过 104-only 原子部署更新测试狗，跳过 106，不改变上位机网络；5 个 ROS 包构建成功，`m20pro-real.service=active`、`NRestarts=0`，当前无活动任务，定位状态正常。
+- 只读 API 验收：`GET /api/inspection/state` 返回轻量检测状态，默认 `enabled=false/backend=disabled`，配置实际为 `publish_rate_hz=3.0`。
+- 无运动启停烟测：启用后真实 `backend=rknn`、`ready=true`，推理约 93ms、计数正常且无错误；随后立即关闭，确认模型和 RTSP 资源释放。原始视频仍保持 H.264 30fps，不引入转码降帧链路。

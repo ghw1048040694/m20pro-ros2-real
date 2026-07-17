@@ -37,7 +37,8 @@ def main() -> None:
     radar_include = real_launch.index("PythonLaunchDescriptionSource(radar_launch)")
     assert "condition=IfCondition(enable_inspection)" not in real_launch[inspection_include:radar_include]
     assert "enabled: false" in config
-    assert "publish_annotated_image: true" in config
+    assert "publish_rate_hz: 3.0" in config
+    assert "publish_annotated_image: false" in config
 
     print("inspection control contract tests passed")
 
