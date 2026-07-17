@@ -94,6 +94,20 @@ def test_localization_status_requires_fresh_map_pose() -> None:
     assert_equal(missing_pose["confirmed"], False, "missing pose is not confirmed")
     assert_equal(missing_pose["code"], "pose_missing_or_invalid", "missing pose code")
 
+    failed_attempt = localization_status_payload(
+        localization_ok=True,
+        factory_localization_ok=True,
+        pose=sample_pose(),
+        pose_age_sec=0.1,
+        pose_timeout_s=3.0,
+        relocalization_attempt={
+            "status": "failed",
+            "message": "本次重定位失败，旧位姿不会作为本次成功结果",
+        },
+    )
+    assert_equal(failed_attempt["confirmed"], False, "failed attempt clears old success")
+    assert_equal(failed_attempt["code"], "relocalization_attempt_failed", "failed attempt code")
+
 
 def test_localization_status_reports_motion_away_from_tcp_pose_as_confirmed() -> None:
     status = localization_status_payload(
@@ -158,6 +172,24 @@ def test_relocalization_sample_evidence() -> None:
     assert_equal(evidence["global_costmap_ok"], True, "fresh global costmap accepted")
     assert_equal(evidence["ready_to_finish_wait"], True, "ready to finish wait")
     assert_true(evidence["yaw_error_rad"] < 0.04, "yaw wraps across pi boundary")
+    assert_equal(evidence["tcp_pose_near_request"], None, "coordinate-free 2101 reply remains compatible")
+
+    contradictory_reply = relocalization_sample_evidence(
+        request_started_at=10.0,
+        requested_pose={"x": 1.0, "y": 2.0, "z": 0.0, "yaw": 0.0},
+        relocalization={
+            "last_update": 10.2,
+            "raw": "success: x=8.000 y=2.000 z=0.000 yaw=0.000",
+        },
+        pose={"last_update": 10.3, "x": 1.0, "y": 2.0, "z": 0.0, "yaw": 0.0},
+        localization_ok=True,
+        scan={"last_update": 10.1, "finite_ranges": 25},
+        local_costmap={"last_update": 10.1, "width": 10, "height": 10},
+        global_costmap={"last_update": 10.1, "width": 20, "height": 20},
+        pose_tolerance_m=0.5,
+    )
+    assert_equal(contradictory_reply["tcp_pose_near_request"], False, "contradictory 2101 pose rejected")
+    assert_equal(contradictory_reply["ready_to_finish_wait"], False, "contradictory 2101 reply cannot confirm")
 
     stale = relocalization_sample_evidence(
         request_started_at=10.0,

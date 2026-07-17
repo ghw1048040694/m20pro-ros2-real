@@ -18,6 +18,7 @@ FRAME_ID="${FRAME_ID:-m20pro_base_link}"
 ANGLE_INCREMENT="${ANGLE_INCREMENT:-0.0174533}"
 RANGE_MAX="${RANGE_MAX:-10.0}"
 RANGE_MIN="${RANGE_MIN:-0.2}"
+BIN_HOLD_S="${BIN_HOLD_S:-0.75}"
 
 if [[ ! -x "${OUT_DIR}/m20pro_edge_scan" ]]; then
   "${SCRIPT_DIR}/build_on_106.sh" "${OUT_DIR}"
@@ -37,4 +38,5 @@ exec "${OUT_DIR}/m20pro_edge_scan" \
   "${FRAME_ID}" \
   "${ANGLE_INCREMENT}" \
   "${RANGE_MAX}" \
-  "${RANGE_MIN}"
+  "${RANGE_MIN}" \
+  "${BIN_HOLD_S}"

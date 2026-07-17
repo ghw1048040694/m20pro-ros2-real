@@ -181,6 +181,7 @@ def main() -> None:
     assert float(edge_env["HEIGHT_MIN"]) <= -0.25
     assert float(edge_env["HEIGHT_MAX"]) >= 0.60
     assert int(edge_env["MAX_POINTS"]) == 0
+    assert 0.5 <= float(edge_env["BIN_HOLD_S"]) <= 1.0
 
     print("real Nav2 configuration contract tests passed")
 

@@ -31,6 +31,10 @@ interpretation. It matches the previously field-tested real pointcloud
 converter and includes obstacles below the body center while rejecting the
 floor. Production uses the full cloud (`MAX_POINTS=0`); stride sampling is not
 allowed because it can discard the few returns from a small, low obstacle.
+The converter ingests every vendor cloud and publishes a 0.75-second rolling
+angular aggregate. This is required because individual `/LIDAR/POINTS` messages
+periodically omit the rear hemisphere; publish-rate throttling must happen only
+after those fragments have updated the aggregate.
 After a lidar mounting or posture change, verify both a low obstacle and a tall
 obstacle before navigation. Do not lower the minimum height further without a
 ground-return test, since floor points can otherwise make free space occupied.

@@ -733,6 +733,7 @@ class WebDashboardNode(Node):
         self._map_file_cache: Dict[str, Dict[str, Any]] = {}
         self._map_file_summary_cache: Dict[str, Dict[str, Any]] = {}
         self._last_scan_overlay_update = 0.0
+        self._last_scan_overlay_valid_update = 0.0
         self._last_scan_overlay_points: List[Dict[str, float]] = []
         self._startup_map_sync_timer = None
         self._startup_map_sync_attempts = 0
@@ -805,6 +806,7 @@ class WebDashboardNode(Node):
             "radar_inspection_results": {},
             "active_waypoint": None,
             "relocalization_result": None,
+            "relocalization_attempt": None,
             "map_relocalization_required": None,
             "events": [],
             "topics": {},
@@ -906,6 +908,7 @@ class WebDashboardNode(Node):
         self.declare_parameter("scan_topic", "/scan")
         self.declare_parameter("scan_overlay_max_points", 720)
         self.declare_parameter("scan_overlay_update_min_interval_s", 0.1)
+        self.declare_parameter("scan_overlay_hold_s", 0.5)
         self.declare_parameter("scan_overlay_min_range_m", 0.05)
         self.declare_parameter("scan_overlay_max_range_m", 30.0)
         self.declare_parameter("scan_overlay_offset_x_m", 0.0)
@@ -1156,6 +1159,7 @@ class WebDashboardNode(Node):
             with self._lock:
                 self._state["localization_ok"] = False
                 self._state["pose"] = None
+                self._state["relocalization_attempt"] = None
                 self._state["pose_history"] = []
                 self._state["path"] = {"version": int(self._state.get("path", {}).get("version", 0) or 0) + 1, "points": []}
                 self._state["local_path"] = {"version": int(self._state.get("local_path", {}).get("version", 0) or 0) + 1, "points": []}
@@ -1407,8 +1411,20 @@ class WebDashboardNode(Node):
                         "y": distance * math.sin(angle),
                     }
                 )
-            points = rebuilt_points
-            self._last_scan_overlay_points = points
+            if rebuilt_points:
+                points = rebuilt_points
+                self._last_scan_overlay_points = points
+                self._last_scan_overlay_valid_update = now
+            else:
+                # A single LaserScan can legitimately contain no drawable
+                # returns (packet loss, invalid ranges, or a reflective rear
+                # sector). Keep the last valid contour briefly so the rear
+                # outline does not blink out on every bad frame. The scan
+                # health counters below still expose the current bad sample.
+                hold_s = max(0.0, float(self.get_parameter("scan_overlay_hold_s").value))
+                if now - self._last_scan_overlay_valid_update > hold_s:
+                    points = []
+                    self._last_scan_overlay_points = []
             self._last_scan_overlay_update = now
         with self._lock:
             self._state["scan"] = {
@@ -1676,15 +1692,22 @@ class WebDashboardNode(Node):
             self._mark_topic("radar_inspection_result")
 
     def _on_relocalization_result(self, msg: String) -> None:
+        now = time.time()
         with self._lock:
             self._state["relocalization_result"] = {
-                "last_update": time.time(),
+                "last_update": now,
                 "raw": msg.data,
                 "parsed": parse_json_text(msg.data),
             }
+            attempt = self._state.get("relocalization_attempt")
+            if isinstance(attempt, dict) and float(attempt.get("started_at", 0.0) or 0.0) <= now:
+                attempt = dict(attempt)
+                attempt["result"] = msg.data
+                attempt["result_at"] = now
+                self._state["relocalization_attempt"] = attempt
             self._mark_topic("relocalization_result")
 
-    def _factory_localization_ok(self, state: Dict[str, Any]) -> bool:
+    def _raw_factory_localization_ok(self, state: Dict[str, Any]) -> bool:
         if state.get("localization_ok") is True:
             return True
         nav_status_parsed = (
@@ -1699,6 +1722,18 @@ class WebDashboardNode(Node):
             return float(location) == 0.0
         except (TypeError, ValueError):
             return False
+
+    def _factory_localization_ok(self, state: Dict[str, Any]) -> bool:
+        # A failed or in-flight manual relocation is an explicit runtime gate.
+        # Do not let the bridge's next healthy poll resurrect the old pose as
+        # task-ready before a new relocation succeeds.
+        attempt = state.get("relocalization_attempt")
+        if isinstance(attempt, dict) and str(attempt.get("status") or "").strip().lower() in {
+            "pending",
+            "failed",
+        }:
+            return False
+        return self._raw_factory_localization_ok(state)
 
     def _on_event(self, msg: String) -> None:
         max_events = int(self.get_parameter("max_events").value)
@@ -1743,6 +1778,8 @@ class WebDashboardNode(Node):
             ):
                 if isinstance(self._state.get(key), dict):
                     snapshot[key] = dict(self._state[key])
+            if isinstance(self._state.get("relocalization_attempt"), dict):
+                snapshot["relocalization_attempt"] = dict(self._state["relocalization_attempt"])
             snapshot["topics"] = {
                 key: dict(value)
                 for key, value in self._state["topics"].items()
@@ -1807,6 +1844,7 @@ class WebDashboardNode(Node):
             navigation_status=snapshot.get("navigation_status"),
             factory_localization_ok=snapshot.get("factory_localization_ok"),
             relocalization_result=snapshot.get("relocalization_result"),
+            relocalization_attempt=snapshot.get("relocalization_attempt"),
             map_relocalization_required=snapshot.get("map_relocalization_required"),
             now_time=now,
             now_text=now_text,
@@ -2897,6 +2935,7 @@ class WebDashboardNode(Node):
             with self._lock:
                 self._state["localization_ok"] = False
                 self._state["pose"] = None
+                self._state["relocalization_attempt"] = None
                 self._state["pose_history"] = []
                 self._state["path"] = {"version": int(self._state.get("path", {}).get("version", 0) or 0) + 1, "points": []}
                 self._state["local_path"] = {"version": int(self._state.get("local_path", {}).get("version", 0) or 0) + 1, "points": []}
@@ -3836,7 +3875,7 @@ class WebDashboardNode(Node):
             map_relocalization_required = self._settings.get("map_relocalization_required")
         with self._lock:
             pose = dict(self._state.get("pose") or {})
-            localization_ok = self._state.get("localization_ok")
+            localization_ok = self._factory_localization_ok(self._state)
         pose_age = pose_age_sec(pose, time.time())
         pose_timeout_s = max(0.5, float(self.get_parameter("task_start_pose_timeout_s").value))
         return annotation_create_readiness_payload(
@@ -5473,6 +5512,15 @@ class WebDashboardNode(Node):
                 str(identity["message"]),
                 {key: value for key, value in identity.items() if key not in ("ok", "message")},
             )
+        attempt_id = "reloc-%d" % int(request_started_at * 1000.0)
+        with self._lock:
+            self._state["relocalization_attempt"] = {
+                "id": attempt_id,
+                "status": "pending",
+                "started_at": request_started_at,
+                "requested_pose": dict(pose),
+                "message": "正在等待本次重定位的原厂确认",
+            }
         msg = PoseWithCovarianceStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = frame_id
@@ -5507,6 +5555,22 @@ class WebDashboardNode(Node):
             verification,
             now_text=now_text,
         )
+        attempt_status = "confirmed" if bool(status.get("confirmed")) else "failed"
+        with self._lock:
+            attempt = dict(self._state.get("relocalization_attempt") or {})
+            attempt.update(
+                {
+                    "id": attempt.get("id") or attempt_id,
+                    "status": attempt_status,
+                    "started_at": request_started_at,
+                    "completed_at": time.time(),
+                    "requested_pose": dict(pose),
+                    "code": status.get("code"),
+                    "message": status.get("message"),
+                    "verification": verification,
+                }
+            )
+            self._state["relocalization_attempt"] = attempt
         result = initialpose_api_response_payload(
             localization_status=status,
             verification=verification,
@@ -5549,7 +5613,7 @@ class WebDashboardNode(Node):
             with self._lock:
                 relocalization = dict(self._state.get("relocalization_result") or {})
                 pose = dict(self._state.get("pose") or {})
-                localization = self._factory_localization_ok(self._state)
+                localization = self._raw_factory_localization_ok(self._state)
                 scan = dict(self._state.get("scan") or {})
                 local_costmap = dict(self._state.get("local_costmap") or {})
                 global_costmap = dict(self._state.get("global_costmap") or {})
@@ -5587,6 +5651,9 @@ class WebDashboardNode(Node):
             global_costmap_ok=bool(evidence.get("global_costmap_ok")),
             pose_error_m=evidence.get("pose_error_m"),
             yaw_error_rad=evidence.get("yaw_error_rad"),
+            tcp_pose_near_request=evidence.get("tcp_pose_near_request"),
+            tcp_pose_error_m=evidence.get("tcp_pose_error_m"),
+            tcp_yaw_error_rad=evidence.get("tcp_yaw_error_rad"),
             pose_tolerance_m=pose_tolerance_m,
             navigation_readiness=navigation_readiness,
             timeout_s=timeout_s,

@@ -30,6 +30,7 @@ struct Config {
   float height_max{1.0f};
   float robot_radius{0.25f};
   float max_publish_hz{10.0f};
+  float bin_hold_s{0.75f};
   int max_points{20000};
   std::string frame_id{};
 };
@@ -38,11 +39,25 @@ struct Stats {
   std::atomic<int> clouds{0};
   std::atomic<int> scans{0};
   std::atomic<int> finite_bins{0};
+  std::atomic<int> current_finite_bins{0};
   std::atomic<int> sampled_points{0};
   std::atomic<int> kept_points{0};
   std::atomic<int> matched{0};
   Clock::time_point first_scan{};
   Clock::time_point last_scan{};
+};
+
+struct ScanAccumulator {
+  std::vector<float> ranges;
+  std::vector<Clock::time_point> updated_at;
+
+  void ensure_size(size_t bins) {
+    if (ranges.size() == bins && updated_at.size() == bins) {
+      return;
+    }
+    ranges.assign(bins, std::numeric_limits<float>::infinity());
+    updated_at.assign(bins, Clock::time_point{});
+  }
 };
 
 static float read_float32(const std::vector<uint8_t> &data, size_t offset, bool bigendian) {
@@ -98,17 +113,11 @@ static void convert_and_publish(
     ChannelLaserScan &scan_pub,
     const Config &cfg,
     Stats &stats,
+    ScanAccumulator &accumulator,
     Clock::time_point &last_publish) {
   stats.clouds.fetch_add(1);
 
   auto now = Clock::now();
-  if (cfg.max_publish_hz > 0.0f && stats.scans.load() > 0) {
-    double min_period = 1.0 / static_cast<double>(cfg.max_publish_hz);
-    double elapsed = std::chrono::duration<double>(now - last_publish).count();
-    if (elapsed < min_period) {
-      return;
-    }
-  }
 
   uint32_t x_offset = 0;
   uint32_t y_offset = 0;
@@ -122,7 +131,8 @@ static void convert_and_publish(
     return;
   }
 
-  std::vector<float> ranges(static_cast<size_t>(bins), std::numeric_limits<float>::infinity());
+  std::vector<float> cloud_ranges(
+      static_cast<size_t>(bins), std::numeric_limits<float>::infinity());
   const auto &data = cloud->data();
   const uint32_t point_step = cloud->point_step();
   if (point_step == 0) {
@@ -167,15 +177,50 @@ static void convert_and_publish(
     if (idx == bins && angle <= cfg.angle_max + 1e-6f) {
       idx = bins - 1;
     }
-    if (idx >= 0 && idx < bins && distance < ranges[static_cast<size_t>(idx)]) {
-      ranges[static_cast<size_t>(idx)] = distance;
+    if (idx >= 0 && idx < bins && distance < cloud_ranges[static_cast<size_t>(idx)]) {
+      cloud_ranges[static_cast<size_t>(idx)] = distance;
       kept += 1;
     }
   }
 
-  int finite = 0;
-  for (float value : ranges) {
+  accumulator.ensure_size(static_cast<size_t>(bins));
+  int current_finite = 0;
+  for (size_t idx = 0; idx < cloud_ranges.size(); ++idx) {
+    const float value = cloud_ranges[idx];
     if (std::isfinite(value)) {
+      accumulator.ranges[idx] = value;
+      accumulator.updated_at[idx] = now;
+      current_finite += 1;
+    }
+  }
+  stats.current_finite_bins.store(current_finite);
+  stats.sampled_points.store(sampled);
+  stats.kept_points.store(kept);
+
+  // The vendor pointcloud occasionally arrives without the rear hemisphere.
+  // Always ingest every cloud, then publish a bounded-age angular aggregate.
+  // Throttling before ingestion discards the complementary fragment and makes
+  // both the dashboard and Nav2 periodically blind behind the robot.
+  if (cfg.max_publish_hz > 0.0f && stats.scans.load() > 0) {
+    double min_period = 1.0 / static_cast<double>(cfg.max_publish_hz);
+    double elapsed = std::chrono::duration<double>(now - last_publish).count();
+    if (elapsed < min_period) {
+      return;
+    }
+  }
+
+  std::vector<float> ranges(
+      static_cast<size_t>(bins), std::numeric_limits<float>::infinity());
+  int finite = 0;
+  const double hold_s = std::max(0.0, static_cast<double>(cfg.bin_hold_s));
+  for (size_t idx = 0; idx < ranges.size(); ++idx) {
+    const auto updated_at = accumulator.updated_at[idx];
+    if (updated_at == Clock::time_point{}) {
+      continue;
+    }
+    const double age_s = std::chrono::duration<double>(now - updated_at).count();
+    if (age_s <= hold_s && std::isfinite(accumulator.ranges[idx])) {
+      ranges[idx] = accumulator.ranges[idx];
       finite += 1;
     }
   }
@@ -206,12 +251,11 @@ static void convert_and_publish(
   stats.last_scan = now;
   last_publish = now;
   stats.finite_bins.store(finite);
-  stats.sampled_points.store(sampled);
-  stats.kept_points.store(kept);
 
   if (previous_scans < 3 || (previous_scans + 1) % 20 == 0) {
     std::cout << "scan " << (previous_scans + 1)
               << " finite_bins=" << finite
+              << " current_finite_bins=" << current_finite
               << " sampled=" << sampled
               << " kept=" << kept
               << " frame=" << scan.header().frame_id()
@@ -235,18 +279,21 @@ static Config parse_args(int argc, char **argv) {
   if (argc > 12) cfg.angle_increment = std::stof(argv[12]);
   if (argc > 13) cfg.range_max = std::stof(argv[13]);
   if (argc > 14) cfg.range_min = std::stof(argv[14]);
+  if (argc > 15) cfg.bin_hold_s = std::stof(argv[15]);
   return cfg;
 }
 
 int main(int argc, char **argv) {
   Config cfg = parse_args(argc, argv);
   Stats stats;
+  ScanAccumulator accumulator;
   Clock::time_point last_publish{};
 
   DrDDSManager::Init(cfg.domain, "");
   ChannelLaserScan scan_pub(cfg.output_topic, cfg.domain, cfg.use_shm, cfg.prefix);
-  auto cb = [&scan_pub, &cfg, &stats, &last_publish](const sensor_msgs::msg::PointCloud2 *msg) {
-    convert_and_publish(msg, scan_pub, cfg, stats, last_publish);
+  auto cb = [&scan_pub, &cfg, &stats, &accumulator, &last_publish](
+                const sensor_msgs::msg::PointCloud2 *msg) {
+    convert_and_publish(msg, scan_pub, cfg, stats, accumulator, last_publish);
   };
   ChannelLidarPointCloud lidar_sub(cb, cfg.input_topic, cfg.domain, cfg.use_shm, cfg.prefix);
 
@@ -259,6 +306,7 @@ int main(int argc, char **argv) {
             << " angle_increment=" << cfg.angle_increment
             << " range=[" << cfg.range_min << "," << cfg.range_max << "]"
             << " max_publish_hz=" << cfg.max_publish_hz
+            << " bin_hold_s=" << cfg.bin_hold_s
             << " max_points=" << cfg.max_points
             << std::endl;
 
@@ -279,6 +327,7 @@ int main(int argc, char **argv) {
             << " scans=" << scan_count
             << " rate_hz=" << rate_hz
             << " finite_bins=" << stats.finite_bins.load()
+            << " current_finite_bins=" << stats.current_finite_bins.load()
             << " sampled=" << stats.sampled_points.load()
             << " kept=" << stats.kept_points.load()
             << " matched=" << stats.matched.load()

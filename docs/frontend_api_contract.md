@@ -86,6 +86,7 @@
 | `selected_map_status` | 当前有效地图与 Nav2 `/map` 是否一致 |
 | `map_relocalization_required` | 切图后是否必须重新 2101 重定位 |
 | `localization_status` | 重定位是否真正确认 |
+| `relocalization_attempt` | 最近一次网页重定位事务（`pending`/`confirmed`/`failed`）；失败事务会覆盖旧的成功状态 |
 | `pose` | 当前地图坐标系下机器人位姿 |
 | `pose_fresh` / `pose_age_sec` | 位姿是否新鲜 |
 | `floor` | 当前楼层 |
@@ -107,7 +108,7 @@ map_relocalization_required == null
 selected_map_status.ready == true
 ```
 
-不要把“调用过 `/api/localization/initialpose`”当成成功。只有后端返回确认成功，且状态接口也确认成功，才算真正重定位成功。
+不要把“调用过 `/api/localization/initialpose`”当成成功。只有后端返回确认成功，且状态接口也确认成功，才算真正重定位成功。若 `relocalization_attempt.status=failed`，旧的地图位姿不能继续作为本次重定位成功依据。
 
 ## 雷达接口
 

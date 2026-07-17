@@ -297,6 +297,9 @@ def relocalization_sample_evidence(
     pose_error_m = None
     yaw_error_rad = None
     pose_near_request = False
+    tcp_pose_near_request = None
+    tcp_pose_error_m = None
+    tcp_yaw_error_rad = None
     if pose_ok:
         try:
             pose_error_m = math.hypot(
@@ -309,6 +312,25 @@ def relocalization_sample_evidence(
             pose_near_request = pose_error_m <= max(0.1, float(pose_tolerance_m))
         except (TypeError, ValueError):
             pose_near_request = False
+
+    # A successful 2101 reply may include the pose that the firmware actually
+    # accepted.  When it does, verify that reply against the requested arrow as
+    # well as the fresh map pose.  Older firmware replies without coordinates
+    # remain supported, but a contradictory coordinate reply can never confirm
+    # the request.
+    tcp_pose = parse_tcp_2101_success_pose(result_text) if reply_accepted else None
+    if tcp_pose is not None:
+        try:
+            tcp_pose_error_m = math.hypot(
+                float(tcp_pose.get("x", 0.0)) - float(requested_pose.get("x", 0.0)),
+                float(tcp_pose.get("y", 0.0)) - float(requested_pose.get("y", 0.0)),
+            )
+            tcp_yaw_error_rad = abs(
+                wrap_angle(float(tcp_pose.get("yaw", 0.0)) - float(requested_pose.get("yaw", 0.0)))
+            )
+            tcp_pose_near_request = tcp_pose_error_m <= max(0.1, float(pose_tolerance_m))
+        except (TypeError, ValueError):
+            tcp_pose_near_request = False
 
     scan_ok = (
         float(scan.get("last_update", 0.0) or 0.0) >= request_started_at
@@ -337,12 +359,16 @@ def relocalization_sample_evidence(
         "global_costmap_ok": global_costmap_ok,
         "pose_error_m": pose_error_m,
         "yaw_error_rad": yaw_error_rad,
+        "tcp_pose_near_request": tcp_pose_near_request,
+        "tcp_pose_error_m": tcp_pose_error_m,
+        "tcp_yaw_error_rad": tcp_yaw_error_rad,
         "ready_to_finish_wait": bool(
             result_age_ok
             and (reply_accepted or reply_ambiguous)
             and localization_ok is True
             and pose_ok
             and pose_near_request
+            and tcp_pose_near_request is not False
         ),
     }
 
@@ -360,6 +386,9 @@ def manual_relocalization_verification_payload(
     global_costmap_ok: bool,
     pose_error_m: Optional[float] = None,
     yaw_error_rad: Optional[float] = None,
+    tcp_pose_near_request: Optional[bool] = None,
+    tcp_pose_error_m: Optional[float] = None,
+    tcp_yaw_error_rad: Optional[float] = None,
     pose_tolerance_m: Optional[float] = None,
     navigation_readiness: Optional[Dict[str, Any]] = None,
     timeout_s: Optional[float] = None,
@@ -378,7 +407,11 @@ def manual_relocalization_verification_payload(
         tcp_2101_ambiguous and localization_ok and pose_ok and pose_near_request
     )
     factory_pose_accepted = bool(
-        (manual_ok or ambiguous_verified) and localization_ok and pose_ok and pose_near_request
+        (manual_ok or ambiguous_verified)
+        and localization_ok
+        and pose_ok
+        and pose_near_request
+        and tcp_pose_near_request is not False
     )
     navigation_ready = bool(
         factory_pose_accepted and scan_ok and local_costmap_ok and global_costmap_ok
@@ -389,6 +422,7 @@ def manual_relocalization_verification_payload(
         "localization": "ok" if localization_ok else "warn",
         "map_pose": "ok" if pose_ok else "warn",
         "pose_near_request": "ok" if pose_near_request else "warn",
+        "tcp_pose_near_request": "ok" if tcp_pose_near_request is not False else "fail",
         "scan": "ok" if scan_ok else "warn",
         "local_costmap": "ok" if local_costmap_ok else "warn",
         "global_costmap": "ok" if global_costmap_ok else "warn",
@@ -423,6 +457,9 @@ def manual_relocalization_verification_payload(
         "result": result_text or "未收到 /m20pro_tcp_bridge/relocalization_result；按开发手册 2101/1 视为未确认",
         "pose_error_m": pose_error_m,
         "yaw_error_rad": yaw_error_rad,
+        "tcp_pose_near_request": tcp_pose_near_request,
+        "tcp_pose_error_m": tcp_pose_error_m,
+        "tcp_yaw_error_rad": tcp_yaw_error_rad,
         "pose_tolerance_m": pose_tolerance_m,
         "checks": checks,
         "navigation_readiness": navigation_readiness,
@@ -440,6 +477,7 @@ def localization_status_payload(
     navigation_readiness: Optional[Dict[str, Any]] = None,
     factory_localization_ok: Any = None,
     relocalization_result: Any = None,
+    relocalization_attempt: Optional[Dict[str, Any]] = None,
     map_relocalization_required: Optional[Dict[str, Any]] = None,
     now_time: Optional[float] = None,
     tcp_2101_recent_timeout_s: float = 300.0,
@@ -450,6 +488,8 @@ def localization_status_payload(
     pose_ok = pose_is_plausible(pose)
     age_ok = pose_age_sec is not None and float(pose_age_sec) <= timeout_s
     factory_ok = localization_ok if factory_localization_ok is None else factory_localization_ok
+    attempt = dict(relocalization_attempt or {}) if isinstance(relocalization_attempt, dict) else {}
+    attempt_status = str(attempt.get("status") or "").strip().lower()
     tcp = relocalization_result_evidence(
         relocalization_result,
         now_time=now_time,
@@ -469,6 +509,7 @@ def localization_status_payload(
         "pose_timeout_s": timeout_s,
         "navigation_status": navigation_status,
         "map_relocalization_required": map_relocalization_required,
+        "relocalization_attempt": attempt or None,
         "navigation_ready": None,
         "updated_at": (now_text or default_now_text)(),
         **pose_tcp,
@@ -504,6 +545,20 @@ def localization_status_payload(
             "confirmed": False,
             "code": "map_relocalization_required",
             "message": message,
+        }
+    if attempt_status == "pending":
+        return {
+            **base,
+            "confirmed": False,
+            "code": "relocalization_pending",
+            "message": str(attempt.get("message") or "正在等待本次重定位的原厂确认"),
+        }
+    if attempt_status == "failed":
+        return {
+            **base,
+            "confirmed": False,
+            "code": "relocalization_attempt_failed",
+            "message": str(attempt.get("message") or "本次重定位失败，旧位姿不会作为本次成功结果"),
         }
     if factory_ok is not True:
         return {

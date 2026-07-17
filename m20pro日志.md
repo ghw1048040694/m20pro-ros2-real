@@ -1,6 +1,6 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-07-16 18:12 CST
+Last updated: 2026-07-17 10:18 CST
 
 ## 2026-07-16 18:08 CST - 根治静止定位漂移并恢复激光轮廓实时刷新
 
@@ -23682,3 +23682,40 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 因上一轮部署已先完成功能提交、后修复“104-only 仍重启 106”的部署脚本，已再次使用修复后的脚本仅同步 104；
 - 104 当前 revision 已对齐 `2abfaf8eeed181a5771178e286f4eedce086afff`，`m20pro-real.service=active`、`NRestarts=0`、无活动任务、感知链路通过 API 验收；
 - 本次部署没有访问或操作 106；成功部署备份已按脚本清理。GitHub 和 GitLab 的 `main` 均已同步到同一提交。
+## 2026-07-17 10:12 CST - 根治重定位旧状态误报与尾部激光轮廓周期性消失
+
+- 用户现场现象：
+  - 在地图红色箭头处拖动重定位后，机器狗实际位姿没有到请求位置，但前端仍显示“定位成功”；
+  - 机器狗尾部的蓝色激光轮廓周期性消失后又恢复。
+- 重定位根因：
+  - 2101/1 本次失败回执到达后，Web 状态仍沿用旧的 `localization_ok=true` 和旧地图位姿；
+  - `localization_status_payload` 没有区分“本次网页重定位事务”和“历史定位状态”，因此旧成功状态覆盖了本次失败；
+  - 修复为每次请求建立独立 `relocalization_attempt`，状态严格经过 `pending -> confirmed/failed`；本次失败会立即覆盖旧成功，红色候选箭头保留，蓝色实时位姿/激光层不会伪装成已确认；
+  - 2101 成功回执带坐标时，新增回执坐标与红色箭头请求坐标的一致性检查；矛盾回执不能确认重定位。
+- 激光根因：
+  - 连续读取 104 `/api/live` 30 帧时，`/scan` 前向有效点约 117-126，但尾部有效点会周期性从约 141 变成 0；
+  - 现场日志和源码确认 106 `/LIDAR/POINTS` 存在周期性缺后半圈的点云片段，原转换器在发布限频前直接丢弃未发布片段，造成 Nav2 和前端共同收到后向盲帧；
+  - 这不是浏览器刷新或地图坐标转换问题，必须在 106 点云转激光源头处理。
+- 源头修复：
+  - 106 `m20pro_edge_scan` 现在消费每个点云片段，再按角度栅格合并最近数据，以 `BIN_HOLD_S=0.75` 的有限年龄窗口发布 4Hz `/scan`；
+  - 旧回波最多保留 0.75 秒，随后自动过期，不会把障碍物永久留在地图中；
+  - 104 Web 侧增加 0.5 秒有效轮廓保持，仅用于单帧无有效回波时的显示连续性，Nav2 仍使用 106 源头 `/scan`。
+- 部署与验收：
+  - 106 服务已更新并重启：`active`、`NRestarts=0`，启动日志明确显示 `bin_hold_s=0.75`；
+  - 106 连续 28 帧 `/scan`：有效点 275-281，尾部点 137-143，`rear_zero=0`；
+  - 104 已完成 5 包构建和原子切换，`m20pro-real.service=active`、`NRestarts=0`；
+  - 104 连续 24 帧 Web `/api/live`：有效点 275-285，尾部点 137-141，`rear_zero=0`；
+  - 本轮未执行重定位、导航、速度或地图切换命令；只做了服务部署、状态读取和激光数据采样。
+- 本地验证：
+  - `scripts/test_localization_contract.py`、`test_classic_frontend_contract.py`、`test_pose_stability_contract.py`、`test_odom_alignment_contract.py` 通过；
+  - Python 编译、JavaScript 语法检查、`git diff --check` 通过；
+  - 由于当前北京时间 21:00 前，本轮不触发强制 GitHub/GitLab 推送；提交会保留在本地，晚于 21:00 的后续修改按既定规则同步双远端。
+
+## 2026-07-17 10:18 CST - 将失败重定位事务纳入任务安全门禁
+
+- 补充根因闭环：仅把前端状态改成“重定位失败”仍不够；如果 103 随后再次上报 `Location=0`，任务层可能把旧地图位姿误认为可用。
+- `web_dashboard_node.py` 新增原始原厂定位判断与事务门禁分离：
+  - 重定位验证等待阶段读取原厂原始状态，避免成功请求被自己的 `pending` 门禁阻塞；
+  - 普通状态、点位保存和任务执行读取带事务门禁的定位状态；`pending/failed` 时统一不可标点/不可执行任务；
+  - 只有新的重定位事务进入 `confirmed` 后，旧位姿才重新具备任务资格。
+- 已通过 Python 编译、定位合同和 Web 运行时合同测试；本补充已同步到 104 并重启 `m20pro-real.service`，服务 `active`、`NRestarts=0`。
