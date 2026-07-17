@@ -23770,3 +23770,4 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
   - 新增导航配置契约断言，锁定 XY 不收紧、yaw 处于明确的现场精度范围内。
 - 判定边界：Web 层 `goal_reached_tolerance_m=0.3m`、`success_slack_m=0.2m` 保持不变，Nav2 成功仍需有新鲜位姿距离证据；本次没有把 yaw 条件叠加到 Web 安全门，因此不会出现“角度稍有偏差就无法完成任务”的过严判定。
 - 验证：Nav2 配置、任务进度、导航状态合同测试，Python 语法检查和 `git diff --check` 均通过；本轮尚未执行真实运动，需现场用同一测试点复测最终朝向、到点耗时及多点任务衔接。
+- 部署：提交 `007a9cd` 已以 104-only 模式部署到测试狗；五包构建成功，`m20pro-real.service=active`、`NRestarts=0`、已启用。104 实际安装配置确认 XY `0.35m`、yaw `0.20rad`，当前无活动任务，定位与 106 edge scan API 验收正常；本次未访问或重启 106，也未下发运动/导航命令。
