@@ -23,7 +23,7 @@ class PathFollower(Node):
         self.declare_parameter("scan_topic", "/scan")
         self.declare_parameter("lookahead_m", 0.8)
         self.declare_parameter("goal_tolerance_m", 0.25)
-        self.declare_parameter("yaw_tolerance_rad", 0.25)
+        self.declare_parameter("yaw_tolerance_rad", 0.20)
         self.declare_parameter("linear_speed", 0.25)
         self.declare_parameter("angular_gain", 0.9)
         self.declare_parameter("max_angular_z", 0.7)

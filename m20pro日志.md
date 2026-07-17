@@ -23759,3 +23759,14 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
   - 任务页保留任务编排、任务列表和点位顺序，不影响任务创建、执行或停止接口。
 - 静态资源版本更新为 `20260717-task-popover-1`，避免旧布局缓存；`node --check`、经典前端合同测试和 `git diff --check` 通过。
 - 本轮代码尚未部署 104；当前北京时间 21:00 前，不触发 GitHub/GitLab 推送。
+
+## 2026-07-17 11:29 CST - 收紧现场导航最终朝向而不改变位置到点门槛
+
+- 现场现象：机器狗到达目标点的位置误差很小，但最终朝向偏差较明显；需要提高朝向精度，同时不能因为收紧朝向而把位置到点判定变得过于严格。
+- 根因定位：正式 real 链路由 Nav2 `SimpleGoalChecker` 和 DWB `RotateToGoal` 共同完成最终到点；此前 `xy_goal_tolerance=0.35m`、`yaw_goal_tolerance=0.35rad`（约 20°）。Web 任务层只用位置距离证据做安全门，不要求额外 yaw 条件。
+- 根治修改：
+  - Nav2 最终 `yaw_goal_tolerance` 调整为 `0.20rad`（约 11.5°），让机器狗在进入原有位置范围后继续原地修正朝向；`xy_goal_tolerance` 保持 `0.35m`，不改变位置到点范围。
+  - 可选旧 `m20pro_path_follower` 的 yaw 默认值同步为 `0.20rad`，避免配置口径分裂；正式 real launch 不依赖该旧节点。
+  - 新增导航配置契约断言，锁定 XY 不收紧、yaw 处于明确的现场精度范围内。
+- 判定边界：Web 层 `goal_reached_tolerance_m=0.3m`、`success_slack_m=0.2m` 保持不变，Nav2 成功仍需有新鲜位姿距离证据；本次没有把 yaw 条件叠加到 Web 安全门，因此不会出现“角度稍有偏差就无法完成任务”的过严判定。
+- 验证：Nav2 配置、任务进度、导航状态合同测试，Python 语法检查和 `git diff --check` 均通过；本轮尚未执行真实运动，需现场用同一测试点复测最终朝向、到点耗时及多点任务衔接。

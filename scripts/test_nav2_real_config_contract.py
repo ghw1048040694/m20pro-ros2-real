@@ -25,6 +25,9 @@ def main() -> None:
     assert controller["controller_frequency"] <= 10.0
     assert controller["progress_checker"]["movement_time_allowance"] >= 12.0
     assert controller["goal_checker"]["stateful"] is False
+    assert abs(float(controller["goal_checker"]["xy_goal_tolerance"]) - 0.35) < 1e-6
+    assert 0.15 <= float(controller["goal_checker"]["yaw_goal_tolerance"]) <= 0.25
+    assert abs(float(follow["xy_goal_tolerance"]) - 0.35) < 1e-6
     assert "ObstacleFootprint" in follow["critics"]
     assert "BaseObstacle" not in follow["critics"]
     assert follow["sim_time"] >= 1.5

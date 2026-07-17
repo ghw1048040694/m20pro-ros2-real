@@ -79,7 +79,7 @@ m20pro_path_follower:
     scan_topic: "/scan"
     lookahead_m: 0.75 #原0.8
     goal_tolerance_m: 0.35 #原0.25
-    yaw_tolerance_rad: 0.35 #原0.25
+    yaw_tolerance_rad: 0.20 # final heading; XY tolerance remains 0.35 m
     linear_speed: 1.00 #原0.25
     angular_gain: 1.1
     max_angular_z: 0.9

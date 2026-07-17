@@ -95,7 +95,9 @@ controller_server:
     goal_checker:
       plugin: "nav2_controller::SimpleGoalChecker"
       xy_goal_tolerance: 0.35
-      yaw_goal_tolerance: 0.35
+      # Keep position arrival at 0.35 m, but require a closer final heading.
+      # This only adds a short in-place rotation after XY is reached.
+      yaw_goal_tolerance: 0.20
       # Foxy can retain the XY-reached latch across back-to-back goals. Recheck
       # position for every control cycle so a matching yaw cannot finish a far goal.
       stateful: false
