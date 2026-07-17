@@ -23784,3 +23784,9 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 验证：
   - 全量 `scripts/test_*.py` 通过；Python 编译、JavaScript 语法检查和 `git diff --check` 通过。
   - 本轮只读检查和服务部署不执行重定位、导航、速度或地图切换命令。
+
+## 2026-07-17 12:17 CST - 漂移与点位显示修复部署到 104
+
+- 使用 `M20PRO_DEPLOY_SKIP_EDGE=1` 完成 104-only 原子部署，版本 `f75829d2d04935ccded1962335d28a3902aec6f8`；未访问、重启或修改 106，也未改变上位机网络。
+- 104 验收：`m20pro-real.service=active`、`NRestarts=0`；选中地图与 Nav2 `/map` 一致，任务为空，基础自检通过，`/scan` 和地图位姿数据新鲜。
+- Web 验收：页面资源版本为 `20260717-localization-drift-points-1`，普通任务与跨楼层任务选择器均已直接显示点位名称；当前 `factory_localization_ok=true`，没有下发任何重定位、导航或速度命令。
