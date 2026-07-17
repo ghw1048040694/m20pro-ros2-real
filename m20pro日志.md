@@ -23725,4 +23725,4 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 根因：前端 `drawScanOverlay()` 使用“当前定位是否已确认”判断是否绘制红色预览；机器狗已有历史成功定位时，拖出新的 `localizeDraft` 后仍被当成蓝色实时层处理，因此红色激光轮廓不显示。
 - 修复：只要存在待提交的重定位箭头，就强制使用箭头位姿绘制红色激光轮廓，并暂时隐藏旧的蓝色实时位姿/路径层；成功提交后草稿清除，恢复蓝色实时层；失败时草稿保留，便于继续调整。
 - 状态栏同步显示“红色=待重定位预览”，不再被旧的 `confirmed` 状态覆盖。
-- 已通过 `node --check`、经典前端合同测试和 `git diff --check`；已完成 104 五包构建、原子切换和 `m20pro-real.service` 重启，未触碰 106、103、网络或运动控制。当前北京时间 21:00 前，不触发 GitHub/GitLab 推送。
+- 静态脚本版本更新为 `20260717-localize-preview-1`，避免浏览器继续使用旧缓存；已通过 `node --check`、经典前端合同测试和 `git diff --check`。当前北京时间 21:00 前，不触发 GitHub/GitLab 推送。
