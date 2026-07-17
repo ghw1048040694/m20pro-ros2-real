@@ -842,6 +842,9 @@
         && !status.map_relocalization_required
       );
     }
+    function localizationDraftActive() {
+      return activePointerMode() === "localize" && !!state.localizeDraft;
+    }
     function markBlockedReason(payload = state.latest) {
       if (!state.map) return "还没有地图，等地图加载后再标点";
       if (!effectiveCurrentMapId()) return "当前实时 /map 还没有匹配到固定地图，不能保存任务点";
@@ -2079,7 +2082,9 @@
       if (!state.scanOverlay || !state.map || !state.latest || !state.latest.scan) return;
       const points = state.latest.scan.points || [];
       if (!points.length) return;
-      const usingDraft = activePointerMode() === "localize" && state.localizeDraft && !localizationConfirmedForDisplay();
+      // A new red draft is a separate operator transaction. Do not let an old
+      // confirmed localization hide its preview or draw the stale blue scan.
+      const usingDraft = localizationDraftActive();
       if (!usingDraft && !canDrawLiveRobotLayer()) return;
       if (usingDraft && !isViewingRobotFloor()) return;
       const pose = usingDraft ? state.localizeDraft : freshPose();
@@ -2130,7 +2135,8 @@
       ctx.strokeRect(view.ox, view.oy, state.map.width * view.scale, state.map.height * view.scale);
       if (state.mapEditorActive) return;
       const latest = state.latest;
-      const canDrawLive = canDrawLiveRobotLayer(latest);
+      const draftActive = localizationDraftActive();
+      const canDrawLive = !draftActive && canDrawLiveRobotLayer(latest);
       if (!canDrawLive || !hasFreshPose(latest)) state.robotDisplayPose = null;
       if (canDrawLive) {
         drawPath(latest.path, {color: "rgba(249, 115, 22, 0.58)", lineWidth: 2.5, dash: [8, 6]});
@@ -2283,10 +2289,10 @@
         if (points.length) {
           const age = scan.last_update ? Math.max(0, s.node_time - scan.last_update) : null;
           const liveBlock = liveRobotLayerBlockedText(s);
-          const mode = liveBlock
-            ? `${liveBlock}，暂停叠加`
-            : activePointerMode() === "localize" && state.localizeDraft && !localizationConfirmedForDisplay(s)
+          const mode = localizationDraftActive()
             ? "红色=待重定位预览"
+            : liveBlock
+            ? `${liveBlock}，暂停叠加`
             : (currentPoseFresh ? "蓝色=当前位姿" : "当前位姿未确认，暂停叠加");
           $("scanOverlayStatus").textContent = `激光轮廓 ${points.length} 点 / ${mode} / ${fmtAge(age)}前`;
         } else if (scan.finite_ranges) {
