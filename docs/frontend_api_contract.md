@@ -169,6 +169,16 @@ selected_map_status.ready == true
 }
 ```
 
+雷达结果不是仅供前端临时显示的内存数据。104 会把以下内容持久化到 `radar_results_dir`（正式环境默认为 `/home/user/m20pro_radar_results`）：
+
+- `jobs/`：每次任务/点位的完整执行记录，前端结果列表从这里分页读取；
+- `raw/`：雷达设备返回的原始 JSON 和任务信息；
+- `summaries/`：平整度、极差等结构化指标摘要；
+- `downloads/`：仅当雷达 HTTP 接口返回可下载文件 URL 时保存点云工程或压缩包；
+- `manual/`：人工登记的点云路径和人工测量回填。
+
+当前系统没有甲方服务器“上传成功确认”接口，也没有自动清理策略，因此这些文件会持续积累。正式对接时应由上传组件读取任务结果，收到甲方服务器持久化 ACK 后再按任务清理本地副本；没有 ACK 时不得自动删除。前端使用分页接口，不会把全部历史结果一次渲染到页面。
+
 ### GET `/api/radar/result`
 
 读取单条雷达结果。支持 `run_id`、`radar_task_id`、`taskId`、`waypoint_key` 等参数；没有匹配结果时返回 HTTP 400。
@@ -231,6 +241,21 @@ GET /api/radar/task_export?task_id=<task_id>&format=csv
 ### POST `/api/maps/select`
 
 切换固定地图，或切换到实时 `/map` 显示。
+
+### DELETE `/api/maps`
+
+删除 104 上的普通归档地图：
+
+```text
+DELETE /api/maps?id=<map_id>&cascade=true
+```
+
+- 项目内置只读地图不能删除；
+- 当前生效地图、工作地图和实时 `/map` 实际匹配的地图不能删除，必须先切换到其他地图；
+- 任务执行中不能删除地图；
+- `cascade=true` 会同步删除该地图的点位和依赖任务，并清除建图会话里的导入引用；
+- 只会物理删除 `map_archive_dir` 内由 104 管理且未被其他地图共用的目录，不会删除 106 原厂地图或工程目录外文件；
+- 雷达历史结果是独立的交付证据，不随地图删除。
 
 选择固定地图：
 

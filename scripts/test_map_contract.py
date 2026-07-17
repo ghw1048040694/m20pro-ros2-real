@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT / "src/m20pro_cloud_bridge"))
 
 from m20pro_cloud_bridge.map_contract import (  # noqa: E402
     all_map_records,
+    apply_map_delete_state,
     apply_map_cell_edits,
     build_imported_map_record,
     default_map_id,
@@ -25,6 +26,7 @@ from m20pro_cloud_bridge.map_contract import (  # noqa: E402
     map_file_metadata_payload,
     read_pgm,
     read_pgm_header,
+    removable_map_archive_directory,
 )
 
 
@@ -316,6 +318,71 @@ def test_build_imported_map_record() -> None:
     assert_equal(record["created_at"], "2026-06-29 10:10:00", "created at")
 
 
+def test_apply_map_delete_state_cascades_references() -> None:
+    result = apply_map_delete_state(
+        archived_maps=[
+            {"id": "map_old", "name": "Old"},
+            {"id": "map_child", "parent_map_id": "map_old"},
+            {"id": "map_keep"},
+        ],
+        annotations=[
+            {"id": "point_old", "map_id": "map_old"},
+            {"id": "point_keep", "map_id": "map_keep"},
+        ],
+        tasks=[
+            {"id": "task_old", "map_id": "map_old", "annotation_ids": ["point_old"]},
+            {"id": "task_cross", "annotation_ids": ["point_keep", "point_old"]},
+            {"id": "task_keep", "map_id": "map_keep", "annotation_ids": ["point_keep"]},
+        ],
+        sessions=[{
+            "id": "session_a",
+            "active_floor": "F20",
+            "status": "imported",
+            "floor_steps": [{"floor": "F20", "status": "imported", "map_id": "map_old"}],
+        }],
+        settings={"active_task": {"task_id": "task_old", "status": "completed"}},
+        map_id="map_old",
+        protected_map_ids=["map_keep"],
+        updated_at="now",
+    )
+    assert_true(result["ok"], "delete state ok")
+    assert_equal([item["id"] for item in result["maps"]], ["map_child", "map_keep"], "map removed")
+    assert_equal(result["maps"][0].get("deleted_parent_map_id"), "map_old", "child history kept")
+    assert_equal([item["id"] for item in result["annotations"]], ["point_keep"], "point cascaded")
+    assert_equal([item["id"] for item in result["tasks"]], ["task_keep"], "tasks cascaded")
+    assert_equal(result["sessions"][0]["floor_steps"][0].get("map_id"), None, "session map cleared")
+    assert_equal(result["sessions"][0]["floor_steps"][0]["status"], "saved", "session restored")
+    assert_equal(result["settings"]["active_task"], None, "terminal task cleared")
+    assert_equal(result["deleted_annotations"], 1, "deleted point count")
+    assert_equal(result["deleted_tasks"], 2, "deleted task count")
+
+
+def test_map_delete_protection_and_archive_ownership() -> None:
+    blocked = apply_map_delete_state(
+        archived_maps=[{"id": "map_current"}],
+        annotations=[],
+        tasks=[],
+        sessions=[],
+        settings={},
+        map_id="map_current",
+        protected_map_ids=["map_current"],
+        updated_at="now",
+    )
+    assert_equal(blocked["code"], "map_in_use", "current map protected")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir) / "maps"
+        owned = root / "owned"
+        outside = Path(tmpdir) / "outside"
+        owned.mkdir(parents=True)
+        outside.mkdir()
+        deletable = removable_map_archive_directory(root, {"directory": str(owned)}, [])
+        protected = removable_map_archive_directory(root, {"directory": str(outside)}, [])
+        shared = removable_map_archive_directory(root, {"directory": str(owned)}, [{"directory": str(owned)}])
+        assert_true(deletable["delete"], "owned archive deletable")
+        assert_equal(protected["reason"], "outside_map_archive", "outside archive preserved")
+        assert_equal(shared["reason"], "shared_map_directory", "shared archive preserved")
+
+
 def main() -> int:
     for test in (
         test_find_map_yaml_prefers_known_names,
@@ -330,6 +397,8 @@ def main() -> int:
         test_load_map_file_payload_builds_nav_occupancy_grid,
         test_apply_map_cell_edits_preserves_image_coordinates,
         test_build_imported_map_record,
+        test_apply_map_delete_state_cascades_references,
+        test_map_delete_protection_and_archive_ownership,
     ):
         test()
         print(f"[OK] {test.__name__}")

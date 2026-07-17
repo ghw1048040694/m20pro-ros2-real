@@ -85,6 +85,7 @@ def main() -> None:
         "mapEditorBtn",
         "mapEditorToolbar",
         "mapEditorSaveBtn",
+        "deleteMapBtn",
     ):
         assert f'id="{element_id}"' in html
 
@@ -165,11 +166,13 @@ def main() -> None:
     assert "清理导航会话" in html
     assert "复位导航状态" not in html
     assert '"/api/maps/edit"' in script
+    assert '`/api/maps?id=${encodeURIComponent(mapId)}&cascade=true`' in script
     assert "function setMapEditorActive" in script
     assert "function paintMapEditor" in script
     assert "button.textContent = item.label || item.id;" in script
     assert "button.textContent = `+ ${item.label || item.id}`" not in script
-    assert "20260717-yolo-video-overlay-2" in html
+    assert "20260717-map-delete-layout-1" in html
+    assert "clamp(460px, 34vw, 620px)" in css
 
     assert "DASHBOARD_LITE_DIR" not in backend
     assert 'parsed.path in ("/lite", "/lite/")' in backend
@@ -181,6 +184,8 @@ def main() -> None:
     assert '"source": "automatic"' in backend
     assert "def _edit_map" in backend
     assert 'elif parsed.path == "/api/maps/edit":' in backend
+    assert 'elif parsed.path == "/api/maps":' in backend
+    assert "node._delete_map(map_id, cascade=cascade)" in backend
     assert '"source": "web_map_editor"' in backend
     assert 'elif parsed.path == "/api/radar/manual_start":' in backend
     assert "def _radar_manual_start" in backend

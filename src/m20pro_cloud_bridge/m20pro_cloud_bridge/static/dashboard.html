@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>M20Pro 现场操作台</title>
   <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="/static/dashboard.css?v=20260717-yolo-video-overlay-2" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=20260717-map-delete-layout-1" />
 
 </head>
 <body>
@@ -27,7 +27,7 @@
     <div class="status-popover-head"><strong>当前地图</strong><button id="closeMapStatusBtn" class="icon-button" type="button" title="关闭" aria-label="关闭">×</button></div>
     <div class="row"><label>显示地图</label><select id="mapSelect"></select></div>
     <div id="mapStatusDetail" class="compact-status">等待地图状态</div>
-    <div class="actions"><button class="primary" id="selectMapBtn">设为当前地图</button><button id="reloadMapsBtn">刷新</button></div>
+    <div class="actions"><button class="primary" id="selectMapBtn">设为当前地图</button><button id="reloadMapsBtn">刷新</button><button class="danger" id="deleteMapBtn" disabled>删除地图</button></div>
   </section>
 
   <section id="localizationStatusPopover" class="status-popover status-popover-wide" hidden>
@@ -342,7 +342,7 @@
   </dialog>
 
   <script src="http://10.21.31.104:8888/video1/hls.min.js"></script>
-  <script src="/static/dashboard.js?v=20260717-yolo-video-overlay-2"></script>
+  <script src="/static/dashboard.js?v=20260717-map-delete-layout-1"></script>
 
 </body>
 </html>

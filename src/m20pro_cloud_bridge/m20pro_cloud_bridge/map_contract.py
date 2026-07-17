@@ -235,6 +235,137 @@ def find_map_record(
     return None
 
 
+def apply_map_delete_state(
+    *,
+    archived_maps: List[Dict[str, Any]],
+    annotations: List[Dict[str, Any]],
+    tasks: List[Dict[str, Any]],
+    sessions: List[Dict[str, Any]],
+    settings: Dict[str, Any],
+    map_id: str,
+    protected_map_ids: List[str],
+    updated_at: str,
+) -> Dict[str, Any]:
+    target_id = str(map_id or "").strip()
+    target = next((dict(item) for item in archived_maps if str(item.get("id") or "") == target_id), None)
+    if target is None:
+        return {"ok": False, "code": "map_not_deletable", "message": "地图不存在或属于项目内置地图"}
+    protected = {str(item or "").strip() for item in protected_map_ids if str(item or "").strip()}
+    if target_id in protected:
+        return {"ok": False, "code": "map_in_use", "message": "当前生效或工作地图不能删除，请先切换到其他地图"}
+
+    deleted_annotation_ids = {
+        str(item.get("id") or "")
+        for item in annotations
+        if str(item.get("map_id") or "") == target_id
+    }
+    deleted_task_ids = {
+        str(item.get("id") or "")
+        for item in tasks
+        if str(item.get("map_id") or "") == target_id
+        or any(str(annotation_id) in deleted_annotation_ids for annotation_id in (item.get("annotation_ids") or []))
+    }
+
+    remaining_maps: List[Dict[str, Any]] = []
+    for item in archived_maps:
+        item_id = str(item.get("id") or "")
+        if item_id == target_id:
+            continue
+        updated = dict(item)
+        if str(updated.get("parent_map_id") or "") == target_id:
+            updated.pop("parent_map_id", None)
+            updated["deleted_parent_map_id"] = target_id
+        remaining_maps.append(updated)
+
+    remaining_annotations = [
+        dict(item)
+        for item in annotations
+        if str(item.get("id") or "") not in deleted_annotation_ids
+    ]
+    remaining_tasks = [
+        dict(item)
+        for item in tasks
+        if str(item.get("id") or "") not in deleted_task_ids
+    ]
+
+    updated_sessions: List[Dict[str, Any]] = []
+    session_references = 0
+    for session in sessions:
+        updated_session = dict(session)
+        steps = []
+        active_floor_changed = False
+        for raw_step in session.get("floor_steps") or []:
+            if not isinstance(raw_step, dict):
+                continue
+            step = dict(raw_step)
+            if str(step.get("map_id") or "") == target_id:
+                step.pop("map_id", None)
+                if str(step.get("status") or "") == "imported":
+                    step["status"] = "saved"
+                step["updated_at"] = str(updated_at or "")
+                session_references += 1
+                if str(step.get("floor") or "") == str(session.get("active_floor") or ""):
+                    active_floor_changed = True
+            steps.append(step)
+        if isinstance(session.get("floor_steps"), list):
+            updated_session["floor_steps"] = steps
+        if active_floor_changed and str(updated_session.get("status") or "") == "imported":
+            updated_session["status"] = "saved"
+            updated_session["updated_at"] = str(updated_at or "")
+        updated_sessions.append(updated_session)
+
+    updated_settings = dict(settings)
+    active_task = updated_settings.get("active_task")
+    if isinstance(active_task, dict) and str(active_task.get("task_id") or "") in deleted_task_ids:
+        updated_settings["active_task"] = None
+    relocalization = updated_settings.get("map_relocalization_required")
+    if isinstance(relocalization, dict) and target_id in {
+        str(relocalization.get("map_id") or ""),
+        str(relocalization.get("selected_map_id") or ""),
+    }:
+        updated_settings.pop("map_relocalization_required", None)
+
+    return {
+        "ok": True,
+        "deleted_record": target,
+        "maps": remaining_maps,
+        "annotations": remaining_annotations,
+        "tasks": remaining_tasks,
+        "sessions": updated_sessions,
+        "settings": updated_settings,
+        "deleted_annotations": len(deleted_annotation_ids),
+        "deleted_tasks": len(deleted_task_ids),
+        "updated_sessions": session_references,
+    }
+
+
+def removable_map_archive_directory(
+    archive_root: Path,
+    record: Dict[str, Any],
+    remaining_records: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    root = archive_root.expanduser().resolve()
+    directory_value = str(record.get("directory") or "").strip()
+    if directory_value:
+        candidate = Path(os.path.expandvars(os.path.expanduser(directory_value))).resolve()
+    else:
+        yaml_value = str(record.get("yaml_path") or "").strip()
+        candidate = Path(os.path.expandvars(os.path.expanduser(yaml_value))).resolve().parent if yaml_value else root
+    if candidate == root or root not in candidate.parents:
+        return {"delete": False, "path": str(candidate), "reason": "outside_map_archive"}
+    for item in remaining_records:
+        other_value = str(item.get("directory") or "").strip()
+        if not other_value:
+            yaml_value = str(item.get("yaml_path") or "").strip()
+            other_value = str(Path(yaml_value).parent) if yaml_value else ""
+        if not other_value:
+            continue
+        other = Path(os.path.expandvars(os.path.expanduser(other_value))).resolve()
+        if other == candidate:
+            return {"delete": False, "path": str(candidate), "reason": "shared_map_directory"}
+    return {"delete": True, "path": str(candidate), "reason": "owned_map_archive"}
+
+
 def default_builtin_map_id(builtin_maps: List[Dict[str, Any]], default_floor: Optional[str]) -> Optional[str]:
     floor = str(default_floor or "").strip()
     if not floor:

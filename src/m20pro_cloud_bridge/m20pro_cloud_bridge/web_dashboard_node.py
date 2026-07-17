@@ -96,6 +96,7 @@ from .map_derived_contract import (
 )
 from .map_contract import (
     all_map_records,
+    apply_map_delete_state,
     apply_map_cell_edits,
     build_imported_map_record,
     default_map_id,
@@ -106,6 +107,7 @@ from .map_contract import (
     load_map_file_payload,
     map_file_fingerprint,
     map_file_metadata_payload,
+    removable_map_archive_directory,
 )
 from .map_selection_contract import (
     apply_selected_map_choice_state,
@@ -2797,6 +2799,138 @@ class WebDashboardNode(Node):
         if launch_lines:
             return {"mode": "unknown", "message": "找到 real launch，但未确认 enable_axis_command"}
         return {"mode": "unknown", "message": "未找到全量 real 启动进程"}
+
+    def _delete_map(self, map_id: str, *, cascade: bool = False) -> Dict[str, Any]:
+        map_id = str(map_id or "").strip()
+        if not map_id:
+            return self._error("缺少地图 id")
+        effective_map_id = str(self._effective_map_id() or "").strip()
+        with self._data_lock:
+            active = dict(self._settings.get("active_task") or {})
+            if active.get("status") == "running":
+                return self._error("任务执行中不能删除地图，请先停止当前任务")
+            record = self._find_map_record_unlocked(map_id)
+            if record is None:
+                return self._error("地图不存在")
+            if bool(record.get("readonly")) or not any(str(item.get("id") or "") == map_id for item in self._maps):
+                return self._error("项目内置地图不能从前端删除")
+            plan = apply_map_delete_state(
+                archived_maps=self._maps,
+                annotations=self._annotations,
+                tasks=self._tasks,
+                sessions=self._sessions,
+                settings=self._settings,
+                map_id=map_id,
+                protected_map_ids=[
+                    str(self._settings.get("selected_map_id") or ""),
+                    str(self._settings.get("working_map_id") or ""),
+                    effective_map_id,
+                ],
+                updated_at=now_text(),
+            )
+            if not plan.get("ok"):
+                return self._error(str(plan.get("message") or "地图不能删除"), {"code": plan.get("code")})
+            dependent_count = int(plan.get("deleted_annotations", 0)) + int(plan.get("deleted_tasks", 0))
+            if dependent_count and not cascade:
+                return self._error(
+                    "地图仍有关联点位或任务，需要确认级联删除",
+                    {
+                        "code": "map_has_dependents",
+                        "deleted_annotations": plan.get("deleted_annotations", 0),
+                        "deleted_tasks": plan.get("deleted_tasks", 0),
+                    },
+                )
+            file_plan = removable_map_archive_directory(
+                self.map_archive_dir,
+                record,
+                [*self._builtin_maps, *list(plan["maps"])],
+            )
+            originals = {
+                "maps": list(self._maps),
+                "annotations": list(self._annotations),
+                "tasks": list(self._tasks),
+                "sessions": list(self._sessions),
+                "settings": dict(self._settings),
+            }
+
+        trash_path: Optional[FsPath] = None
+        candidate = FsPath(str(file_plan.get("path") or ""))
+        if file_plan.get("delete") and candidate.exists():
+            trash_root = self.map_archive_dir / ".trash"
+            trash_root.mkdir(parents=True, exist_ok=True)
+            trash_path = trash_root / ("%s_%s" % (candidate.name, random_suffix(8)))
+            try:
+                os.replace(candidate, trash_path)
+            except Exception as exc:
+                return self._error("地图文件无法安全移入回收区，未删除任何索引", {"error": str(exc)})
+
+        try:
+            with self._data_lock:
+                self._maps = list(plan["maps"])
+                self._annotations = list(plan["annotations"])
+                self._tasks = list(plan["tasks"])
+                self._sessions = list(plan["sessions"])
+                self._settings = dict(plan["settings"])
+                self._save_json("maps.json", self._maps)
+                self._save_json("annotations.json", self._annotations)
+                self._save_json("tasks.json", self._tasks)
+                self._save_json("mapping_sessions.json", self._sessions)
+                self._save_json("settings.json", self._settings)
+        except Exception as exc:
+            with self._data_lock:
+                self._maps = originals["maps"]
+                self._annotations = originals["annotations"]
+                self._tasks = originals["tasks"]
+                self._sessions = originals["sessions"]
+                self._settings = originals["settings"]
+                for name, value in (
+                    ("maps.json", self._maps),
+                    ("annotations.json", self._annotations),
+                    ("tasks.json", self._tasks),
+                    ("mapping_sessions.json", self._sessions),
+                    ("settings.json", self._settings),
+                ):
+                    try:
+                        self._save_json(name, value)
+                    except Exception:
+                        pass
+            if trash_path is not None and trash_path.exists() and not candidate.exists():
+                try:
+                    os.replace(trash_path, candidate)
+                except Exception:
+                    pass
+            return self._error("地图删除索引保存失败，已回滚", {"error": str(exc)})
+
+        files_deleted = False
+        if trash_path is not None and trash_path.exists():
+            shutil.rmtree(trash_path, ignore_errors=True)
+            files_deleted = not trash_path.exists()
+        with self._map_file_cache_lock:
+            self._map_file_cache.clear()
+            self._map_file_summary_cache.clear()
+        self._append_event(
+            "删除地图",
+            {
+                "map_id": map_id,
+                "name": record.get("name"),
+                "deleted_annotations": plan.get("deleted_annotations", 0),
+                "deleted_tasks": plan.get("deleted_tasks", 0),
+                "updated_sessions": plan.get("updated_sessions", 0),
+                "files_deleted": files_deleted,
+                "file_reason": file_plan.get("reason"),
+            },
+        )
+        return {
+            "ok": True,
+            "deleted": map_id,
+            "name": record.get("name"),
+            "deleted_annotations": plan.get("deleted_annotations", 0),
+            "deleted_tasks": plan.get("deleted_tasks", 0),
+            "updated_sessions": plan.get("updated_sessions", 0),
+            "files_deleted": files_deleted,
+            "file_reason": file_plan.get("reason"),
+            "message": "地图已删除，并同步清理关联点位和任务",
+        }
 
     def _edit_map(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         map_id = str(payload.get("map_id") or "").strip()
@@ -7050,6 +7184,10 @@ class WebDashboardNode(Node):
                     elif parsed.path == "/api/tasks":
                         task_id = (query.get("id") or [""])[0]
                         self._send_api(node._delete_task(task_id))
+                    elif parsed.path == "/api/maps":
+                        map_id = (query.get("id") or query.get("map_id") or [""])[0]
+                        cascade = node._as_bool((query.get("cascade") or ["false"])[0])
+                        self._send_api(node._delete_map(map_id, cascade=cascade))
                     else:
                         self.send_error(HTTPStatus.NOT_FOUND)
                 finally:

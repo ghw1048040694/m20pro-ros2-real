@@ -2634,6 +2634,24 @@
           : "当前显示实时 /map";
       }
       renderMapList();
+      updateDeleteMapButton();
+    }
+    function updateDeleteMapButton() {
+      const button = $("deleteMapBtn");
+      if (!button) return;
+      const mapId = String($("mapSelect").value || "");
+      const record = mapRecordById(mapId);
+      const protectedIds = new Set([
+        String(state.selectedMapId || ""),
+        String(state.workingMapId || ""),
+        String(state.effectiveMapId || "")
+      ].filter(Boolean));
+      let reason = "";
+      if (!record) reason = "实时地图不能删除";
+      else if (record.readonly) reason = "项目内置地图不能删除";
+      else if (protectedIds.has(mapId)) reason = "当前生效或工作地图不能删除，请先切换地图";
+      button.disabled = Boolean(reason) || state.mapSwitching;
+      button.title = reason || "永久删除该地图及其关联点位和任务";
     }
     function renderMapList() {
       const box = $("mapList");
@@ -3949,8 +3967,31 @@
       $("cursor").textContent = map
         ? `已选择 ${map.name || map.id}，点击“设为当前地图”后生效`
         : "已选择实时 /map，点击“设为当前地图”后生效";
+      updateDeleteMapButton();
     });
     $("reloadMapsBtn").addEventListener("click", loadMaps);
+    $("deleteMapBtn").addEventListener("click", async () => {
+      const mapId = String($("mapSelect").value || "");
+      const map = mapRecordById(mapId);
+      if (!map || $("deleteMapBtn").disabled) return;
+      const name = map.name || map.id;
+      if (!window.confirm(`确认永久删除地图“${name}”？该地图关联的点位和任务也会删除；雷达历史结果不会删除。`)) return;
+      $("deleteMapBtn").disabled = true;
+      try {
+        const result = await api("DELETE", `/api/maps?id=${encodeURIComponent(mapId)}&cascade=true`);
+        await loadMaps();
+        await Promise.all([loadAnnotations(), loadTasks(), loadMultiFloorWorkspace()]);
+        draw();
+        setStatusPopover("", false);
+        showOperationFeedback(
+          "地图已删除",
+          `${name} / 清理 ${Number(result.deleted_annotations || 0)} 个点位、${Number(result.deleted_tasks || 0)} 个任务`
+        );
+      } catch (err) {
+        showOperationFeedback("地图删除失败", err, true);
+        updateDeleteMapButton();
+      }
+    });
     $("markType").addEventListener("change", () => {
       syncPointDefaults(true);
     });
