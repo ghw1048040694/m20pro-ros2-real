@@ -2104,8 +2104,20 @@ class WebDashboardNode(Node):
             if isinstance(status_record, dict) and isinstance(status_record.get("parsed"), dict)
             else {}
         )
+        status_age = None
+        if isinstance(status_record, dict):
+            try:
+                status_age = max(0.0, time.time() - float(status_record.get("last_update") or 0.0))
+            except (TypeError, ValueError):
+                status_age = None
+        service_ready = bool(self.inspection_control_client.service_is_ready())
+        # DDS service discovery can briefly lag behind the status topic after
+        # the inspection node starts or releases RKNN. A fresh status proves
+        # that the control node is present; POST still performs a bounded
+        # wait_for_service before sending the actual command.
+        available = service_ready or (status_age is not None and status_age <= 3.0)
         return {
-            "available": bool(self.inspection_control_client.service_is_ready()),
+            "available": available,
             "enabled": status.get("enabled") is True,
             "ready": status.get("ready") is True,
             "state": status.get("state") or ("unavailable" if not status else "unknown"),

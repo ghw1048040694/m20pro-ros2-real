@@ -27,10 +27,14 @@ def main() -> None:
     assert "def _activate_inspection" in node
     assert "def _deactivate_inspection" in node
     assert "self._release_backend()" in node
+    assert "if not self.runtime_lock.acquire(blocking=False):" in node
+    assert "def _tick_locked" in node
+    assert "thread.join(timeout=2.0)" in node
     assert 'self.active_backend = "disabled"' in node
     assert '"enabled": self.enabled' in node
     assert '"ready": ready' in node
     assert 'DeclareLaunchArgument("enabled", default_value="false")' in inspection_launch
+    assert "respawn=True" in inspection_launch
     assert '"enabled": enabled' in inspection_launch
     assert '"enabled": enable_inspection' in real_launch
     inspection_include = real_launch.index("PythonLaunchDescriptionSource(inspection_launch)")

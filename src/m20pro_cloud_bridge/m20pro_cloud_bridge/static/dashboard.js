@@ -1579,6 +1579,7 @@
       const backend = status.backend || detectionPayload.backend || "未接入";
       const inferenceMs = Number(status.last_inference_ms);
       const frameAge = Number(status.last_frame_age_s);
+      resultBox.hidden = !enabled;
       const toggle = $("yoloEnabledToggle");
       const toggleLabel = $("yoloToggleLabel");
       if (toggle) {
@@ -1593,15 +1594,17 @@
       statusBox.textContent = [
         !enabled ? "YOLO 已关闭" : (ready ? "YOLO 已就绪" : "YOLO 启动中"),
         `后端 ${backend}`,
-        Number.isFinite(inferenceMs) ? `推理 ${fmtNumber(inferenceMs, 1)}ms` : "",
-        Number.isFinite(frameAge) ? `画面 ${fmtAge(frameAge)}前` : "",
+        enabled && Number.isFinite(inferenceMs) ? `推理 ${fmtNumber(inferenceMs, 1)}ms` : "",
+        enabled && Number.isFinite(frameAge) ? `画面 ${fmtAge(frameAge)}前` : "",
         status.last_error ? `异常 ${status.last_error}` : ""
       ].filter(Boolean).join(" / ");
       statusBox.classList.toggle("fail", Boolean(status.last_error) || (enabled && status.ready === false));
       drawYoloOverlay(snapshot);
       resultBox.innerHTML = "";
       if (!rows.length) {
-        resultBox.innerHTML = `<div class="small">${!enabled ? "YOLO 已关闭" : (ready ? "当前画面没有检测目标" : "等待 YOLO 检测结果")}</div>`;
+        if (enabled) {
+          resultBox.innerHTML = `<div class="small">${ready ? "当前画面没有检测目标" : "等待 YOLO 检测结果"}</div>`;
+        }
         return;
       }
       for (const item of rows.slice(0, 50)) {
@@ -3478,12 +3481,13 @@
       renderYoloWorkspace(state.latest);
     }
     async function yoloLiveLoop() {
-      const enabled = Boolean(
+      const yoloEnabled = Boolean(
         state.yoloControlBusy
         || (state.latest && state.latest.inspection_control && state.latest.inspection_control.enabled)
         || (state.latest && topicPayload(state.latest.inspection_status)?.enabled === true)
       );
-      if (!document.hidden && cameraViewers.front.active && enabled && !state.yoloLiveRequestInFlight) {
+      const shouldPoll = !document.hidden && cameraViewers.front.active;
+      if (shouldPoll && !state.yoloLiveRequestInFlight) {
         state.yoloLiveRequestInFlight = true;
         try {
           mergeInspectionState(await fetchJson("/api/inspection/state"));
@@ -3493,7 +3497,7 @@
           state.yoloLiveRequestInFlight = false;
         }
       }
-      setTimeout(yoloLiveLoop, enabled && cameraViewers.front.active ? 200 : 750);
+      setTimeout(yoloLiveLoop, yoloEnabled ? 200 : 750);
     }
     for (const btn of document.querySelectorAll("button.tab")) {
       btn.addEventListener("click", () => {

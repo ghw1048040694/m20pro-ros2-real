@@ -234,6 +234,10 @@ class M20ProYolov8Inspection(Node):
             self._stop_capture()
             self._release_backend()
             self.latest_image = None
+            self.last_frame_time = None
+            self.last_detection_time = None
+            self.last_inference_ms = None
+            self.last_detection_count = 0
             self.last_error = ""
             self.get_logger().info("YOLO inspection disabled; runtime resources released")
 
@@ -250,16 +254,22 @@ class M20ProYolov8Inspection(Node):
 
     def _stop_capture(self) -> None:
         self.capture_stop.set()
-        cap = self.cap
-        self.cap = None
-        if cap is not None:
-            try:
-                cap.release()
-            except Exception:
-                pass
         thread = self.capture_thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=2.0)
+        # Normal shutdown lets the capture thread release its own VideoCapture,
+        # avoiding a concurrent release while OpenCV is inside read(). Only use
+        # the fallback release after the bounded join if a backend is stuck.
+        if thread is not None and thread.is_alive():
+            with self.capture_lock:
+                cap = self.cap
+                self.cap = None
+                if cap is not None:
+                    try:
+                        cap.release()
+                    except Exception:
+                        pass
+            thread.join(timeout=1.0)
         self.capture_thread = None
         with self.capture_lock:
             self.latest_capture_frame = None
@@ -440,6 +450,17 @@ class M20ProYolov8Inspection(Node):
             self.latest_image = msg
 
     def _tick(self) -> None:
+        # RKNNLite and OpenCV resources must never be released while inference
+        # or a capture transition is using them. The service callback and timer
+        # may run on different executor threads on the real robot.
+        if not self.runtime_lock.acquire(blocking=False):
+            return
+        try:
+            self._tick_locked()
+        finally:
+            self.runtime_lock.release()
+
+    def _tick_locked(self) -> None:
         if not self.enabled:
             return
         frame, stamp = self._read_frame()
@@ -509,8 +530,12 @@ class M20ProYolov8Inspection(Node):
         )
         current_cap = None
         while not self.capture_stop.is_set():
-            current_cap = self.cap
-            if current_cap is None or not current_cap.isOpened():
+            with self.capture_lock:
+                if self.capture_stop.is_set():
+                    break
+                current_cap = self.cap
+                needs_open = current_cap is None or not current_cap.isOpened()
+            if needs_open:
                 self.last_reconnect_time = time.monotonic()
                 current_cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
                 current_cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
@@ -519,26 +544,36 @@ class M20ProYolov8Inspection(Node):
                     self.last_error = "failed to open RTSP stream: %s" % self.rtsp_url
                     self.capture_stop.wait(max(0.2, self.reconnect_interval_s))
                     continue
-                self.cap = current_cap
+                with self.capture_lock:
+                    self.cap = current_cap
 
-            ok, frame = current_cap.read()
+            # Keep release and read mutually exclusive. OpenCV backends are
+            # not safe when VideoCapture.release() races VideoCapture.read().
+            with self.capture_lock:
+                if self.capture_stop.is_set():
+                    break
+                ok, frame = current_cap.read()
             if not ok or frame is None:
                 if self.capture_stop.is_set():
                     break
                 self.last_error = "RTSP frame read failed; reconnecting"
-                current_cap.release()
-                if self.cap is current_cap:
-                    self.cap = None
+                with self.capture_lock:
+                    current_cap.release()
+                    if self.cap is current_cap:
+                        self.cap = None
                 self.capture_stop.wait(max(0.2, self.reconnect_interval_s))
                 continue
             with self.capture_lock:
                 self.latest_capture_frame = frame
             self.last_error = ""
         if current_cap is not None:
-            try:
-                current_cap.release()
-            except Exception:
-                pass
+            with self.capture_lock:
+                if self.cap is current_cap:
+                    self.cap = None
+                try:
+                    current_cap.release()
+                except Exception:
+                    pass
 
     def _image_msg_to_bgr(self, msg: Image) -> np.ndarray:
         encoding = msg.encoding.lower()

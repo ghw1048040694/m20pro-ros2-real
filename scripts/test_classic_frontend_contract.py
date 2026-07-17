@@ -108,6 +108,8 @@ def main() -> None:
     assert '"/api/inspection/toggle"' in script
     assert '"/api/inspection/state"' in script
     assert '"/api/inspection/state"' in backend
+    assert "const shouldPoll = !document.hidden && cameraViewers.front.active;" in script
+    assert "resultBox.hidden = !enabled;" in script
     assert '"/camera/yolo.mjpg"' not in backend
     assert '"/camera/yolo.jpg"' not in backend
     assert 'elif parsed.path == "/api/inspection/toggle":' in backend
@@ -167,7 +169,7 @@ def main() -> None:
     assert "function paintMapEditor" in script
     assert "button.textContent = item.label || item.id;" in script
     assert "button.textContent = `+ ${item.label || item.id}`" not in script
-    assert "20260717-yolo-video-overlay-1" in html
+    assert "20260717-yolo-video-overlay-2" in html
 
     assert "DASHBOARD_LITE_DIR" not in backend
     assert 'parsed.path in ("/lite", "/lite/")' in backend

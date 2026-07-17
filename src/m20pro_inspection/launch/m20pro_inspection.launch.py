@@ -62,6 +62,8 @@ def _launch_setup(context, *args, **kwargs):
             parameters=[config_file, override_file.name],
             additional_env=node_env,
             prefix="nice -n 10",
+            respawn=True,
+            respawn_delay=2.0,
         )
     ]
 

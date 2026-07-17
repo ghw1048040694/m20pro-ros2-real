@@ -23829,3 +23829,16 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 通过 104-only 原子部署更新测试狗，跳过 106，不改变上位机网络；5 个 ROS 包构建成功，`m20pro-real.service=active`、`NRestarts=0`，当前无活动任务，定位状态正常。
 - 只读 API 验收：`GET /api/inspection/state` 返回轻量检测状态，默认 `enabled=false/backend=disabled`，配置实际为 `publish_rate_hz=3.0`。
 - 无运动启停烟测：启用后真实 `backend=rknn`、`ready=true`，推理约 93ms、计数正常且无错误；随后立即关闭，确认模型和 RTSP 资源释放。原始视频仍保持 H.264 30fps，不引入转码降帧链路。
+
+## 2026-07-17 15:44 CST - 修复 YOLO 开关灰色与关闭竞态
+
+- 现场截图显示：前视频已经播放，但 YOLO 开关仍显示“未接入”且不可点击；检测列表底部还重复显示“YOLO 已关闭”。只读排查同时发现，上一轮启停烟测后 YOLO 进程出现 `exit code -11`。
+- 根因：前端只在 YOLO 已启用时轮询轻量控制接口，服务发现短暂未就绪会把开关锁死；后端直接读取 DDS `service_is_ready()` 也会受发现时序影响。更严重的是 YOLO 节点在停用时可能与 NPU 推理定时器、OpenCV `VideoCapture.read()` 并发释放资源。
+- 修复：前端只要前视频打开就持续刷新 `/api/inspection/state`，以新鲜状态判断控制节点是否接入；关闭态隐藏检测结果列表并清空旧推理耗时/画面年龄。YOLO 节点给推理和启停共用生命周期锁，采集线程与 `VideoCapture.release()` 串行化，停用时清理旧检测状态；检测节点异常退出时 launch 自动 respawn，避免服务永久失联。
+- 已通过语法和合同测试；本轮修改尚未部署 104，未执行运动、重定位或地图切换命令。上一版 104 上的 YOLO 进程异常已确认，下一步部署后重新做启停烟测。
+
+## 2026-07-17 15:50 CST - YOLO 开关与生命周期修复真机验收
+
+- 修复版已用 104-only 模式部署，未访问或重启 106；服务重新启动后 YOLO 控制状态为 `available=true`，关闭态不再携带旧推理耗时和旧画面年龄。
+- 连续完成两轮真实 RKNN 启用、就绪、关闭：每轮均正常进入 `backend=rknn/ready=true` 后释放资源；第二轮关闭约 25 秒后 YOLO 进程仍存活，日志无 `exit code -11`，`m20pro-real.service NRestarts=0`。
+- 前端关闭态检测结果区域已隐藏，去掉底部重复“YOLO 已关闭”；前视频打开时即使 YOLO 尚未启用也持续刷新轻量控制接口。静态资源版本提升为 `20260717-yolo-video-overlay-2`，避免浏览器继续使用开关灰色的旧脚本。
