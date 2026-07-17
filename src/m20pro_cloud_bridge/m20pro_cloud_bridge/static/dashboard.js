@@ -66,6 +66,7 @@
       radarResultTotal: 0,
       lastRadarResultsRefreshAt: 0,
       loadingRadarResults: false,
+      yoloControlBusy: false,
       floorControlsInitialized: false,
       lastMultiFloorRefreshAt: 0,
     };
@@ -1433,30 +1434,77 @@
       }
       return typeof sample === "object" ? sample : null;
     }
+    function setYoloAnnotatedStream(active, message = "") {
+      const image = $("yoloAnnotatedVideo");
+      const placeholder = $("yoloPreviewPlaceholder");
+      if (!image || !placeholder) return;
+      placeholder.textContent = message || (active ? "正在连接 YOLO 标注画面" : "启用 YOLO 后显示带检测框画面");
+      if (active) {
+        if (image.dataset.active !== "true") {
+          image.dataset.active = "true";
+          image.src = `/camera/yolo.mjpg?v=20260717-yolo-control-overlay-1&t=${Date.now()}`;
+        }
+      } else {
+        image.dataset.active = "false";
+        image.removeAttribute("src");
+      }
+    }
+    async function setYoloEnabled(enabled) {
+      if (state.yoloControlBusy) return;
+      state.yoloControlBusy = true;
+      renderYoloWorkspace(state.latest || {});
+      try {
+        const payload = await api("POST", "/api/inspection/toggle", {enabled});
+        showOperationFeedback(enabled ? "YOLO 已启用" : "YOLO 已关闭", payload.message || payload);
+      } catch (err) {
+        showOperationFeedback(enabled ? "YOLO 启用失败" : "YOLO 关闭失败", err, true);
+      } finally {
+        state.yoloControlBusy = false;
+      }
+    }
     function renderYoloWorkspace(snapshot) {
       const statusBox = $("yoloStatus");
       const resultBox = $("detections");
       if (!statusBox || !resultBox) return;
       const status = topicPayload(snapshot && snapshot.inspection_status) || {};
+      const control = snapshot && snapshot.inspection_control || {};
       const detectionPayload = topicPayload(snapshot && snapshot.detections) || {};
-      const rows = Array.isArray(detectionPayload.detections)
+      const enabled = status.enabled === true || control.enabled === true;
+      const rows = enabled && Array.isArray(detectionPayload.detections)
         ? detectionPayload.detections
-        : (Array.isArray(detectionPayload) ? detectionPayload : []);
+        : (enabled && Array.isArray(detectionPayload) ? detectionPayload : []);
       const ready = status.ready === true;
       const backend = status.backend || detectionPayload.backend || "未接入";
       const inferenceMs = Number(status.last_inference_ms);
       const frameAge = Number(status.last_frame_age_s);
+      const toggle = $("yoloEnabledToggle");
+      const toggleLabel = $("yoloToggleLabel");
+      if (toggle) {
+        toggle.checked = enabled;
+        toggle.disabled = state.yoloControlBusy || control.available !== true;
+      }
+      if (toggleLabel) {
+        toggleLabel.textContent = state.yoloControlBusy
+          ? (enabled ? "关闭中" : "启动中")
+          : (control.available !== true ? "后端未接入" : (enabled ? "已启用" : "已关闭"));
+      }
       statusBox.textContent = [
-        ready ? "YOLO 已就绪" : "YOLO 未就绪",
+        !enabled ? "YOLO 已关闭" : (ready ? "YOLO 已就绪" : "YOLO 启动中"),
         `后端 ${backend}`,
         Number.isFinite(inferenceMs) ? `推理 ${fmtNumber(inferenceMs, 1)}ms` : "",
         Number.isFinite(frameAge) ? `画面 ${fmtAge(frameAge)}前` : "",
         status.last_error ? `异常 ${status.last_error}` : ""
       ].filter(Boolean).join(" / ");
-      statusBox.classList.toggle("fail", Boolean(status.last_error) || status.ready === false);
+      statusBox.classList.toggle("fail", Boolean(status.last_error) || (enabled && status.ready === false));
+      setYoloAnnotatedStream(
+        enabled && ready,
+        status.last_error
+          ? `YOLO 异常：${status.last_error}`
+          : (enabled ? "正在等待第一帧标注画面" : "启用 YOLO 后显示带检测框画面")
+      );
       resultBox.innerHTML = "";
       if (!rows.length) {
-        resultBox.innerHTML = `<div class="small">${ready ? "当前画面没有检测目标" : "等待 YOLO 检测结果"}</div>`;
+        resultBox.innerHTML = `<div class="small">${!enabled ? "YOLO 已关闭" : (ready ? "当前画面没有检测目标" : "等待 YOLO 检测结果")}</div>`;
         return;
       }
       for (const item of rows.slice(0, 50)) {
@@ -3932,6 +3980,13 @@
     $("reloadTasksBtn").addEventListener("click", () => Promise.all([loadTasks(), loadMultiFloorWorkspace()]));
     $("frontVideoBtn").addEventListener("click", () => toggleVideo("front"));
     $("rearVideoBtn").addEventListener("click", () => toggleVideo("rear"));
+    $("yoloEnabledToggle").addEventListener("change", event => setYoloEnabled(event.target.checked));
+    $("yoloAnnotatedVideo").addEventListener("error", () => {
+      const image = $("yoloAnnotatedVideo");
+      image.dataset.active = "false";
+      image.removeAttribute("src");
+      $("yoloPreviewPlaceholder").textContent = "标注画面暂未就绪，正在重试";
+    });
     if ($("runPreflightBtn")) $("runPreflightBtn").addEventListener("click", runPreflight);
     if ($("refreshPreflightBtn")) $("refreshPreflightBtn").addEventListener("click", loadPreflight);
     $("startRecordingBtn").addEventListener("click", async () => {

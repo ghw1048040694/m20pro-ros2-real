@@ -410,6 +410,7 @@ def generate_launch_description():
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(inspection_launch),
             launch_arguments={
+                "enabled": enable_inspection,
                 "backend": inspection_backend,
                 "source_type": inspection_source_type,
                 "rtsp_url": inspection_rtsp_url,
@@ -417,7 +418,6 @@ def generate_launch_description():
                 "model_path": inspection_model_path,
                 "class_names_path": inspection_class_names_path,
             }.items(),
-            condition=IfCondition(enable_inspection),
         ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(radar_launch),

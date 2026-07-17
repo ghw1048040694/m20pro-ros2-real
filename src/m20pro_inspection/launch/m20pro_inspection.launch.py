@@ -15,6 +15,12 @@ def _launch_setup(context, *args, **kwargs):
     ld_preload = LaunchConfiguration("ld_preload").perform(context).strip()
     existing_pythonpath = os.environ.get("PYTHONPATH", "")
     existing_ld_preload = os.environ.get("LD_PRELOAD", "")
+    enabled = LaunchConfiguration("enabled").perform(context).strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
     node_env = {}
     if pythonpath:
         node_env["PYTHONPATH"] = (
@@ -27,6 +33,7 @@ def _launch_setup(context, *args, **kwargs):
     overrides = {
         "m20pro_yolov8_inspection": {
             "ros__parameters": {
+                "enabled": enabled,
                 "model_path": LaunchConfiguration("model_path").perform(context),
                 "class_names_path": LaunchConfiguration("class_names_path").perform(context),
                 "backend": LaunchConfiguration("backend").perform(context),
@@ -74,6 +81,7 @@ def generate_launch_description():
         DeclareLaunchArgument("rtsp_url", default_value="rtsp://10.21.31.103:8554/video1"),
         DeclareLaunchArgument("image_topic", default_value="/camera/image_raw"),
         DeclareLaunchArgument("camera_name", default_value="front_wide"),
+        DeclareLaunchArgument("enabled", default_value="false"),
         DeclareLaunchArgument("pythonpath", default_value="/home/user/m20pro_rknn_pydeps"),
         DeclareLaunchArgument("ld_preload", default_value=""),
         OpaqueFunction(function=_launch_setup),

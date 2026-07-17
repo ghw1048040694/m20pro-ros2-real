@@ -23790,3 +23790,14 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 使用 `M20PRO_DEPLOY_SKIP_EDGE=1` 完成 104-only 原子部署，版本 `f75829d2d04935ccded1962335d28a3902aec6f8`；未访问、重启或修改 106，也未改变上位机网络。
 - 104 验收：`m20pro-real.service=active`、`NRestarts=0`；选中地图与 Nav2 `/map` 一致，任务为空，基础自检通过，`/scan` 和地图位姿数据新鲜。
 - Web 验收：页面资源版本为 `20260717-localization-drift-points-1`，普通任务与跨楼层任务选择器均已直接显示点位名称；当前 `factory_localization_ok=true`，没有下发任何重定位、导航或速度命令。
+
+## 2026-07-17 14:36 CST - YOLO 前端启停与标注画面闭环
+
+- 用户反馈：检测页只有一块很小的“YOLO 未就绪/后端未接入”状态，没有启停入口，也没有把识别框显示在视频画面中。
+- 根因：旧链路把 YOLO 是否存在绑定在 real launch 的 `IfCondition(enable_inspection)` 上，Web 没有控制服务；虽然节点已有 `annotated_image` ROS 话题，但 Web 只保存图像宽高，不保存或输出图像内容，因此前端只能显示文字 JSON。
+- 架构修正：
+  - `m20pro_yolov8_inspection` 改为轻量常驻控制节点，默认 `enabled=false`；休眠时不加载 RKNN、不连接 RTSP、不占用 NPU。新增 `/m20pro_yolov8_inspection/set_enabled` (`std_srvs/SetBool`)；启用时按需加载 RKNN、连接 RTSP，关闭时释放推理、摄像头和缓存资源。
+  - Web 新增 `POST /api/inspection/toggle`，通过 ROS 服务启停，不重启 `m20pro-real.service`、Nav2 或运动控制；状态增加 `enabled/state/ready`，关闭时清空旧检测结果。
+  - Web 订阅标注图并提供 `/camera/yolo.mjpg`、`/camera/yolo.jpg`；检测页新增启停开关、推理状态、带框实时画面和结构化检测列表。原始视频仍走 8888 H.264 网关，标注流不重复解码摄像头。
+  - 104 自启动默认模型路径统一为 `best_rk3588_fp16.rknn`、后端 `rknn`，不再把 `best.pt`/Torch 配置误带到 104。
+- 验证：全量 `scripts/test_*.py` 通过；新增 YOLO 启停合同测试；3 个 ROS 包构建通过；Python/JavaScript 语法、`git diff --check` 通过；本地实际启动 `enabled=false` launch 验证节点进入休眠态且不加载模型。

@@ -15,6 +15,9 @@ def main() -> None:
     install = (ROOT / "scripts" / "104_install_staged_workspace.sh").read_text(
         encoding="utf-8"
     )
+    autostart = (ROOT / "scripts" / "104_enable_autostart.sh").read_text(
+        encoding="utf-8"
+    )
 
     assert "local_deploy_edge_scan_to_106.sh" in deploy
     assert deploy.index("local_deploy_edge_scan_to_106.sh") < deploy.index("rsync -az --delete")
@@ -47,6 +50,10 @@ def main() -> None:
     assert '104_enable_autostart.sh" move' in install
     assert "rollback" in install
     assert "systemctl reset-failed m20pro-real.service" in install
+    assert "M20PRO_ENABLE_INSPECTION=${M20PRO_ENABLE_INSPECTION:-false}" in autostart
+    assert "M20PRO_INSPECTION_BACKEND=${M20PRO_INSPECTION_BACKEND:-rknn}" in autostart
+    assert "best_rk3588_fp16.rknn" in autostart
+    assert "models/best.pt" not in autostart
 
     assert "edge_previous_state" in deploy
     assert "systemctl stop m20pro-edge-scan-106.service" in deploy

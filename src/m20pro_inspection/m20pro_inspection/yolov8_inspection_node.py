@@ -12,6 +12,7 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
+from std_srvs.srv import SetBool
 
 try:
     import cv2
@@ -77,16 +78,16 @@ class M20ProYolov8Inspection(Node):
         self.event_conf_threshold = float(self.get_parameter("event_conf_threshold").value)
         self.event_min_interval_s = float(self.get_parameter("event_min_interval_s").value)
         self.event_classes = self._string_set(self.get_parameter("event_classes").value)
+        self.enabled = bool(self.get_parameter("enabled").value)
 
         self.class_names = self._load_class_names()
-        self.active_backend = "dry_run"
+        self.active_backend = "disabled"
         self.rknn = None
         self.onnx_session = None
         self.onnx_input_name = ""
         self.ultralytics_model = None
         self.ultralytics_device = str(self.get_parameter("ultralytics_device").value).strip()
-        self._load_backend()
-        self._apply_process_nice_level()
+        self.runtime_lock = threading.RLock()
 
         self.cap = None
         self.capture_lock = threading.Lock()
@@ -126,37 +127,35 @@ class M20ProYolov8Inspection(Node):
             str(self.get_parameter("annotated_image_topic").value),
             qos_profile_sensor_data,
         )
+        self.control_service = self.create_service(
+            SetBool,
+            "~/set_enabled",
+            self._on_set_enabled,
+        )
 
         if self.source_type == "image_topic":
             self.create_subscription(Image, self.image_topic, self._on_image, qos_profile_sensor_data)
             self.get_logger().info("inspection input: image topic %s" % self.image_topic)
         else:
             self.get_logger().info("inspection input: RTSP %s" % self.rtsp_url)
-            self.capture_thread = threading.Thread(
-                target=self._capture_loop,
-                name="m20pro_inspection_capture",
-                daemon=True,
-            )
-            self.capture_thread.start()
+
+        if self.enabled:
+            ok, message = self._activate_inspection()
+            if not ok:
+                self.enabled = False
+                self.last_error = message
+        else:
+            self.get_logger().info("YOLO inspection is dormant; waiting for set_enabled")
 
         self.create_timer(1.0 / self.publish_rate_hz, self._tick)
         self.create_timer(1.0, self._publish_status)
         self.get_logger().info(
-            "YOLOv8 inspection ready: backend=%s model=%s camera=%s"
-            % (self.active_backend, self.model_path or "<none>", self.camera_name)
+            "YOLOv8 inspection process ready: enabled=%s backend=%s model=%s camera=%s"
+            % (self.enabled, self.active_backend, self.model_path or "<none>", self.camera_name)
         )
 
     def destroy_node(self) -> bool:
-        self.capture_stop.set()
-        if self.cap is not None:
-            self.cap.release()
-        if self.capture_thread is not None:
-            self.capture_thread.join(timeout=2.0)
-        if self.rknn is not None:
-            try:
-                self.rknn.release()
-            except Exception:
-                pass
+        self._deactivate_inspection()
         return super().destroy_node()
 
     def _declare_parameters(self) -> None:
@@ -164,6 +163,7 @@ class M20ProYolov8Inspection(Node):
         self.declare_parameter("rtsp_url", "rtsp://10.21.31.103:8554/video1")
         self.declare_parameter("image_topic", "/camera/image_raw")
         self.declare_parameter("camera_name", "front_wide")
+        self.declare_parameter("enabled", False)
         self.declare_parameter("backend", "auto")
         self.declare_parameter("model_path", "")
         self.declare_parameter("class_names_path", "")
@@ -186,6 +186,95 @@ class M20ProYolov8Inspection(Node):
         self.declare_parameter("output_has_objectness", False)
         self.declare_parameter("ultralytics_device", "cpu")
         self.declare_parameter("process_nice_level", 10)
+
+    def _on_set_enabled(self, request: SetBool.Request, response: SetBool.Response) -> SetBool.Response:
+        requested = bool(request.data)
+        with self.runtime_lock:
+            if requested == self.enabled:
+                response.success = True
+                response.message = "YOLO already %s" % ("enabled" if requested else "disabled")
+                self._publish_status()
+                return response
+            if requested:
+                ok, message = self._activate_inspection()
+                response.success = bool(ok)
+                response.message = message
+            else:
+                self._deactivate_inspection()
+                response.success = True
+                response.message = "YOLO disabled and runtime resources released"
+            self._publish_status()
+            return response
+
+    def _activate_inspection(self) -> Tuple[bool, str]:
+        with self.runtime_lock:
+            if self.enabled and self.active_backend not in ("disabled", ""):
+                return True, "YOLO already enabled"
+            self.last_error = ""
+            self.active_backend = "disabled"
+            try:
+                self._load_backend()
+                if self.active_backend == "dry_run":
+                    raise RuntimeError("YOLO model backend is unavailable; refusing dry-run activation")
+                self._apply_process_nice_level()
+                self.enabled = True
+                self._start_capture()
+            except Exception as exc:
+                self.enabled = False
+                self.last_error = str(exc) or exc.__class__.__name__
+                self._release_backend()
+                self.get_logger().error("failed to enable YOLO inspection: %s" % self.last_error)
+                return False, self.last_error
+            self.get_logger().info("YOLO inspection enabled: backend=%s" % self.active_backend)
+            return True, "YOLO enabled with %s backend" % self.active_backend
+
+    def _deactivate_inspection(self) -> None:
+        with self.runtime_lock:
+            self.enabled = False
+            self._stop_capture()
+            self._release_backend()
+            self.latest_image = None
+            self.last_error = ""
+            self.get_logger().info("YOLO inspection disabled; runtime resources released")
+
+    def _start_capture(self) -> None:
+        if self.source_type == "image_topic" or self.capture_thread is not None:
+            return
+        self.capture_stop = threading.Event()
+        self.capture_thread = threading.Thread(
+            target=self._capture_loop,
+            name="m20pro_inspection_capture",
+            daemon=True,
+        )
+        self.capture_thread.start()
+
+    def _stop_capture(self) -> None:
+        self.capture_stop.set()
+        cap = self.cap
+        self.cap = None
+        if cap is not None:
+            try:
+                cap.release()
+            except Exception:
+                pass
+        thread = self.capture_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+        self.capture_thread = None
+        with self.capture_lock:
+            self.latest_capture_frame = None
+
+    def _release_backend(self) -> None:
+        if self.rknn is not None:
+            try:
+                self.rknn.release()
+            except Exception:
+                pass
+        self.rknn = None
+        self.onnx_session = None
+        self.onnx_input_name = ""
+        self.ultralytics_model = None
+        self.active_backend = "disabled"
 
     def _apply_process_nice_level(self) -> None:
         nice_level = max(0, min(19, int(self.get_parameter("process_nice_level").value)))
@@ -347,9 +436,12 @@ class M20ProYolov8Inspection(Node):
                 pass
 
     def _on_image(self, msg: Image) -> None:
-        self.latest_image = msg
+        if self.enabled:
+            self.latest_image = msg
 
     def _tick(self) -> None:
+        if not self.enabled:
+            return
         frame, stamp = self._read_frame()
         if frame is None:
             self._publish_status()
@@ -415,28 +507,38 @@ class M20ProYolov8Inspection(Node):
             "OPENCV_FFMPEG_CAPTURE_OPTIONS",
             "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay",
         )
+        current_cap = None
         while not self.capture_stop.is_set():
-            if self.cap is None or not self.cap.isOpened():
+            current_cap = self.cap
+            if current_cap is None or not current_cap.isOpened():
                 self.last_reconnect_time = time.monotonic()
-                cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                if not cap.isOpened():
-                    cap.release()
+                current_cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
+                current_cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                if not current_cap.isOpened():
+                    current_cap.release()
                     self.last_error = "failed to open RTSP stream: %s" % self.rtsp_url
                     self.capture_stop.wait(max(0.2, self.reconnect_interval_s))
                     continue
-                self.cap = cap
+                self.cap = current_cap
 
-            ok, frame = self.cap.read()
+            ok, frame = current_cap.read()
             if not ok or frame is None:
+                if self.capture_stop.is_set():
+                    break
                 self.last_error = "RTSP frame read failed; reconnecting"
-                self.cap.release()
-                self.cap = None
+                current_cap.release()
+                if self.cap is current_cap:
+                    self.cap = None
                 self.capture_stop.wait(max(0.2, self.reconnect_interval_s))
                 continue
             with self.capture_lock:
                 self.latest_capture_frame = frame
             self.last_error = ""
+        if current_cap is not None:
+            try:
+                current_cap.release()
+            except Exception:
+                pass
 
     def _image_msg_to_bgr(self, msg: Image) -> np.ndarray:
         encoding = msg.encoding.lower()
@@ -776,22 +878,30 @@ class M20ProYolov8Inspection(Node):
 
     def _publish_status(self) -> None:
         now = time.time()
+        frame_age = round(now - self.last_frame_time, 3) if self.last_frame_time is not None else None
+        backend_ready = self.enabled and self.active_backend not in ("disabled", "dry_run", "")
+        ready = (
+            backend_ready
+            and frame_age is not None
+            and frame_age <= max(2.0, self.reconnect_interval_s * 2.0)
+            and not self.last_error
+        )
         payload = {
             "stamp": now,
             "uptime_s": round(now - self.started_at, 3),
+            "enabled": self.enabled,
+            "state": "ready" if ready else ("error" if self.last_error else ("starting" if self.enabled else "disabled")),
             "camera": self.camera_name,
             "source_type": self.source_type,
             "requested_backend": self.backend_name,
             "backend": self.active_backend,
-            "model_path": self.model_path,
-            "model_loaded": self.active_backend not in ("dry_run", ""),
-            "ready": True,
+            "model_path": self.model_path if self.enabled else None,
+            "model_loaded": self.enabled and self.active_backend not in ("disabled", "dry_run", ""),
+            "ready": ready,
             "publish_rate_hz": self.publish_rate_hz,
             "frame_count": self.frame_count,
             "inference_count": self.inference_count,
-            "last_frame_age_s": (
-                round(now - self.last_frame_time, 3) if self.last_frame_time is not None else None
-            ),
+            "last_frame_age_s": frame_age,
             "last_detection_age_s": (
                 round(now - self.last_detection_time, 3) if self.last_detection_time is not None else None
             ),

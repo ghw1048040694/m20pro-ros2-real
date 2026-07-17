@@ -75,6 +75,10 @@ def main() -> None:
         "preflightTopStatus",
         "taskExecutionFlow",
         "yoloStatus",
+        "yoloEnabledToggle",
+        "yoloToggleLabel",
+        "yoloAnnotatedVideo",
+        "yoloPreviewPlaceholder",
         "detections",
         "radarResultList",
         "operationFeedbackDialog",
@@ -100,6 +104,10 @@ def main() -> None:
     assert "renderTaskExecutionFlow" in script
     assert 'for (const key of ["pose", "scan", "path", "local_path", "active_waypoint"])' in script
     assert "renderYoloWorkspace" in script
+    assert "function setYoloAnnotatedStream" in script
+    assert '"/api/inspection/toggle"' in script
+    assert '"/camera/yolo.mjpg"' in backend
+    assert 'elif parsed.path == "/api/inspection/toggle":' in backend
     assert "localizationPopoverOpen" in script
     assert 'task: "taskStatusPopover"' in script
     assert '$("taskStatusBtn").addEventListener' in script
@@ -154,7 +162,7 @@ def main() -> None:
     assert "function paintMapEditor" in script
     assert "button.textContent = item.label || item.id;" in script
     assert "button.textContent = `+ ${item.label || item.id}`" not in script
-    assert "20260717-localization-drift-points-1" in html
+    assert "20260717-yolo-control-overlay-1" in html
 
     assert "DASHBOARD_LITE_DIR" not in backend
     assert 'parsed.path in ("/lite", "/lite/")' in backend

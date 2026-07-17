@@ -12,6 +12,7 @@ import subprocess
 import threading
 import time
 import yaml
+import numpy as np
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path as FsPath
@@ -27,6 +28,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image, LaserScan
 from std_msgs.msg import Bool, String
+from std_srvs.srv import SetBool
 from visualization_msgs.msg import Marker, MarkerArray
 
 from .active_task_contract import (
@@ -719,6 +721,11 @@ class WebDashboardNode(Node):
         self._normalize_runtime_state_on_startup()
         self._mapping_processes: Dict[str, Dict[str, Any]] = {}
         self._camera_workers: Dict[str, _CameraProxyWorker] = {}
+        self._annotated_condition = threading.Condition()
+        self._annotated_jpeg: Optional[bytes] = None
+        self._annotated_stamp = 0.0
+        self._annotated_sequence = 0
+        self._annotated_error: Optional[str] = None
         self._last_preflight: Optional[Dict[str, Any]] = None
         self._preflight_lock = threading.Lock()
         self._preflight_run_lock = threading.Lock()
@@ -783,6 +790,10 @@ class WebDashboardNode(Node):
                 LoadMap,
                 str(self.get_parameter("map_server_load_map_service").value),
             )
+        self.inspection_control_client = self.create_client(
+            SetBool,
+            str(self.get_parameter("inspection_control_service").value),
+        )
 
         self._state: Dict[str, Any] = {
             "floor": None,
@@ -803,6 +814,7 @@ class WebDashboardNode(Node):
             "dynamic_obstacles": [],
             "detections": None,
             "inspection_status": None,
+            "annotated_image": None,
             "radar_inspection": None,
             "radar_inspection_results": {},
             "active_waypoint": None,
@@ -930,7 +942,12 @@ class WebDashboardNode(Node):
         self.declare_parameter("events_topic", "/m20pro_yolov8_inspection/events")
         self.declare_parameter("inspection_status_topic", "/m20pro_yolov8_inspection/status")
         self.declare_parameter("annotated_image_topic", "/m20pro_yolov8_inspection/annotated_image")
-        self.declare_parameter("subscribe_annotated_image", False)
+        self.declare_parameter("subscribe_annotated_image", True)
+        self.declare_parameter("inspection_control_service", "/m20pro_yolov8_inspection/set_enabled")
+        self.declare_parameter("inspection_control_timeout_s", 20.0)
+        self.declare_parameter("inspection_annotated_max_width", 960)
+        self.declare_parameter("inspection_annotated_jpeg_quality", 72)
+        self.declare_parameter("inspection_annotated_frame_timeout_s", 3.0)
         self.declare_parameter("radar_inspection_status_topic", "/m20pro/radar_inspection/status")
         self.declare_parameter("radar_inspection_result_topic", "/m20pro/radar_inspection/result")
         self.declare_parameter("radar_inspection_events_topic", "/m20pro/radar_inspection/events")
@@ -1744,14 +1761,79 @@ class WebDashboardNode(Node):
             self._mark_topic("events")
 
     def _on_annotated_image(self, msg: Image) -> None:
+        now = time.time()
+        try:
+            payload = self._annotated_image_jpeg(msg)
+            error = None
+        except Exception as exc:
+            payload = None
+            error = str(exc) or exc.__class__.__name__
+        with self._annotated_condition:
+            if payload is not None:
+                self._annotated_jpeg = payload
+                self._annotated_stamp = now
+                self._annotated_sequence += 1
+                self._annotated_error = None
+            else:
+                self._annotated_error = error
+            self._annotated_condition.notify_all()
         with self._lock:
             self._state["annotated_image"] = {
-                "last_update": time.time(),
+                "last_update": now,
                 "width": int(msg.width),
                 "height": int(msg.height),
                 "encoding": msg.encoding,
+                "jpeg_ready": payload is not None,
+                "error": error,
             }
             self._mark_topic("annotated_image")
+
+    def _annotated_image_jpeg(self, msg: Image) -> bytes:
+        cv2_module = get_cv2()
+        if cv2_module is None:
+            raise RuntimeError(_CV2_IMPORT_ERROR or "OpenCV unavailable")
+        height = int(msg.height)
+        width = int(msg.width)
+        step = int(msg.step)
+        if height <= 0 or width <= 0 or step <= 0:
+            raise ValueError("invalid annotated image dimensions")
+        expected = height * step
+        data = np.frombuffer(msg.data, dtype=np.uint8)
+        if data.size < expected:
+            raise ValueError("annotated image payload is shorter than height * step")
+        rows = data[:expected].reshape((height, step))
+        encoding = str(msg.encoding or "").strip().lower()
+        if encoding in ("bgr8", "rgb8"):
+            frame = rows[:, : width * 3].reshape((height, width, 3))
+            if encoding == "rgb8":
+                frame = cv2_module.cvtColor(frame, cv2_module.COLOR_RGB2BGR)
+        elif encoding in ("bgra8", "rgba8"):
+            frame = rows[:, : width * 4].reshape((height, width, 4))
+            code = cv2_module.COLOR_BGRA2BGR if encoding == "bgra8" else cv2_module.COLOR_RGBA2BGR
+            frame = cv2_module.cvtColor(frame, code)
+        elif encoding in ("mono8", "8uc1"):
+            frame = rows[:, :width].reshape((height, width))
+            frame = cv2_module.cvtColor(frame, cv2_module.COLOR_GRAY2BGR)
+        else:
+            raise ValueError("unsupported annotated image encoding: %s" % msg.encoding)
+
+        max_width = max(0, int(self.get_parameter("inspection_annotated_max_width").value))
+        if max_width > 0 and width > max_width:
+            scale = max_width / float(width)
+            frame = cv2_module.resize(
+                frame,
+                (max_width, max(1, int(height * scale))),
+                interpolation=cv2_module.INTER_AREA,
+            )
+        quality = max(35, min(95, int(self.get_parameter("inspection_annotated_jpeg_quality").value)))
+        ok, encoded = cv2_module.imencode(
+            ".jpg",
+            frame,
+            [int(cv2_module.IMWRITE_JPEG_QUALITY), quality],
+        )
+        if not ok:
+            raise RuntimeError("failed to encode annotated image")
+        return encoded.tobytes()
 
     def _snapshot(self, include_debug: bool = True) -> Dict[str, Any]:
         now = time.time()
@@ -1769,6 +1851,7 @@ class WebDashboardNode(Node):
                 "global_costmap",
                 "active_waypoint",
                 "inspection_status",
+                "annotated_image",
                 "radar_inspection",
             ):
                 if isinstance(self._state.get(key), dict):
@@ -1854,6 +1937,7 @@ class WebDashboardNode(Node):
             "yaw": float(self.get_parameter("scan_overlay_offset_yaw_rad").value),
         }
         snapshot["camera_proxy"] = self._camera_proxy_status_payload()
+        snapshot["inspection_control"] = self._inspection_control_status_payload(snapshot)
         for value in snapshot["topics"].values():
             last_update = value.get("last_update")
             value["age_sec"] = None if last_update is None else max(0.0, now - float(last_update))
@@ -2101,6 +2185,88 @@ class WebDashboardNode(Node):
             "low_latency": self._as_bool(self.get_parameter("camera_proxy_low_latency").value),
             "snapshot_keepalive_s": float(self.get_parameter("camera_proxy_snapshot_keepalive_s").value),
             "cameras": cameras,
+        }
+
+    def _inspection_control_status_payload(self, snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        source = snapshot if isinstance(snapshot, dict) else self._snapshot(include_debug=False)
+        status_record = source.get("inspection_status")
+        status = (
+            status_record.get("parsed")
+            if isinstance(status_record, dict) and isinstance(status_record.get("parsed"), dict)
+            else {}
+        )
+        with self._annotated_condition:
+            frame_stamp = self._annotated_stamp
+            frame_error = self._annotated_error
+            has_frame = self._annotated_jpeg is not None
+        frame_age = None if frame_stamp <= 0.0 else max(0.0, time.time() - frame_stamp)
+        frame_timeout = max(
+            0.5,
+            float(self.get_parameter("inspection_annotated_frame_timeout_s").value),
+        )
+        return {
+            "available": bool(self.inspection_control_client.service_is_ready()),
+            "enabled": status.get("enabled") is True,
+            "ready": status.get("ready") is True,
+            "state": status.get("state") or ("unavailable" if not status else "unknown"),
+            "backend": status.get("backend"),
+            "message": status.get("last_error"),
+            "annotated_stream": {
+                "available": bool(has_frame and frame_age is not None and frame_age <= frame_timeout),
+                "age_sec": frame_age,
+                "error": frame_error,
+                "url": "/camera/yolo.mjpg",
+            },
+        }
+
+    def _set_inspection_enabled(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if "enabled" not in payload:
+            return self._error("缺少 enabled")
+        enabled = self._as_bool(payload.get("enabled"))
+        with self._lock:
+            self._state["detections"] = None
+        with self._annotated_condition:
+            self._annotated_jpeg = None
+            self._annotated_stamp = 0.0
+            self._annotated_error = None
+            self._annotated_condition.notify_all()
+        timeout_s = max(1.0, float(self.get_parameter("inspection_control_timeout_s").value))
+        if not self.inspection_control_client.wait_for_service(timeout_sec=min(2.0, timeout_s)):
+            return self._error(
+                "YOLO 控制服务不可用",
+                {"code": "inspection_control_unavailable", "enabled": enabled},
+            )
+        request = SetBool.Request()
+        request.data = enabled
+        future = self.inspection_control_client.call_async(request)
+        deadline = time.monotonic() + timeout_s
+        while rclpy.ok() and not future.done() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        if not future.done():
+            return self._error(
+                "YOLO 启停超时",
+                {"code": "inspection_control_timeout", "enabled": enabled},
+            )
+        try:
+            response = future.result()
+        except Exception as exc:
+            return self._error(
+                "YOLO 启停失败",
+                {"code": "inspection_control_failed", "enabled": enabled, "error": str(exc)},
+            )
+        if response is None or not bool(response.success):
+            return self._error(
+                "YOLO 启停失败",
+                {
+                    "code": "inspection_control_rejected",
+                    "enabled": enabled,
+                    "message": str(getattr(response, "message", "") or "节点拒绝请求"),
+                },
+            )
+        return {
+            "ok": True,
+            "enabled": enabled,
+            "message": str(response.message or ("YOLO 已启用" if enabled else "YOLO 已关闭")),
         }
 
     def _camera_proxy_backend(self) -> str:
@@ -6741,6 +6907,94 @@ class WebDashboardNode(Node):
         except Exception as exc:
             self.get_logger().warning(f"{camera_name} camera JPEG snapshot stopped: {exc}")
 
+    def _wait_for_annotated_frame(
+        self,
+        last_sequence: int,
+        timeout_s: float,
+    ) -> Tuple[int, Optional[bytes], float, Optional[str]]:
+        deadline = time.monotonic() + max(0.1, timeout_s)
+        with self._annotated_condition:
+            while (
+                (self._annotated_jpeg is None or self._annotated_sequence <= last_sequence)
+                and time.monotonic() < deadline
+            ):
+                self._annotated_condition.wait(timeout=min(0.25, max(0.0, deadline - time.monotonic())))
+            return (
+                self._annotated_sequence,
+                self._annotated_jpeg,
+                self._annotated_stamp,
+                self._annotated_error,
+            )
+
+    def _serve_annotated_mjpeg(self, handler: BaseHTTPRequestHandler) -> None:
+        frame_timeout = max(
+            0.5,
+            float(self.get_parameter("inspection_annotated_frame_timeout_s").value),
+        )
+        sequence, payload, stamp, error = self._wait_for_annotated_frame(-1, frame_timeout)
+        if payload is None or stamp <= 0.0 or time.time() - stamp > frame_timeout:
+            handler.send_error(HTTPStatus.SERVICE_UNAVAILABLE, error or "YOLO annotated frame unavailable")
+            return
+        try:
+            self._configure_mjpeg_socket(handler)
+            handler.send_response(HTTPStatus.OK)
+            handler.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+            handler.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+            handler.send_header("Pragma", "no-cache")
+            handler.send_header("Expires", "0")
+            handler.send_header("X-Accel-Buffering", "no")
+            handler.send_header("Connection", "close")
+            handler.send_header("Access-Control-Allow-Origin", "*")
+            handler.end_headers()
+            last_sequence = -1
+            while True:
+                sequence, payload, stamp, error = self._wait_for_annotated_frame(
+                    last_sequence,
+                    frame_timeout,
+                )
+                if payload is None or sequence == last_sequence:
+                    continue
+                last_sequence = sequence
+                handler.wfile.write(b"--frame\r\n")
+                handler.wfile.write(b"Content-Type: image/jpeg\r\n")
+                handler.wfile.write(b"Cache-Control: no-store\r\n")
+                handler.wfile.write(f"X-M20Pro-Frame-Seq: {sequence}\r\n".encode("ascii"))
+                handler.wfile.write(
+                    f"X-M20Pro-Frame-Age-Ms: {max(0.0, (time.time() - stamp) * 1000.0):.1f}\r\n".encode(
+                        "ascii"
+                    )
+                )
+                handler.wfile.write(f"Content-Length: {len(payload)}\r\n\r\n".encode("ascii"))
+                handler.wfile.write(payload)
+                handler.wfile.write(b"\r\n")
+                handler.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as exc:
+            self.get_logger().warning(f"YOLO annotated MJPEG stopped: {exc}")
+
+    def _serve_annotated_jpeg(self, handler: BaseHTTPRequestHandler) -> None:
+        frame_timeout = max(
+            0.5,
+            float(self.get_parameter("inspection_annotated_frame_timeout_s").value),
+        )
+        sequence, payload, stamp, error = self._wait_for_annotated_frame(-1, frame_timeout)
+        if payload is None or stamp <= 0.0 or time.time() - stamp > frame_timeout:
+            handler.send_error(HTTPStatus.SERVICE_UNAVAILABLE, error or "YOLO annotated frame unavailable")
+            return
+        handler.send_response(HTTPStatus.OK)
+        handler.send_header("Content-Type", "image/jpeg")
+        handler.send_header("Content-Length", str(len(payload)))
+        handler.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        handler.send_header("Pragma", "no-cache")
+        handler.send_header("Expires", "0")
+        handler.send_header("X-M20Pro-Frame-Seq", str(sequence))
+        handler.send_header("X-M20Pro-Frame-Age-Ms", f"{max(0.0, (time.time() - stamp) * 1000.0):.1f}")
+        handler.send_header("Access-Control-Allow-Origin", "*")
+        handler.end_headers()
+        handler.wfile.write(payload)
+        handler.wfile.flush()
+
     def _configure_mjpeg_socket(self, handler: BaseHTTPRequestHandler) -> None:
         if not self._as_bool(self.get_parameter("camera_proxy_low_latency").value):
             return
@@ -6885,6 +7139,10 @@ class WebDashboardNode(Node):
                     elif parsed.path in ("/camera/front.jpg", "/camera/rear.jpg"):
                         camera_name = "front" if parsed.path == "/camera/front.jpg" else "rear"
                         node._serve_jpeg_snapshot(camera_name, self)
+                    elif parsed.path == "/camera/yolo.mjpg":
+                        node._serve_annotated_mjpeg(self)
+                    elif parsed.path == "/camera/yolo.jpg":
+                        node._serve_annotated_jpeg(self)
                     elif parsed.path == "/healthz":
                         self._send_json({"ok": True})
                     else:
@@ -6933,6 +7191,8 @@ class WebDashboardNode(Node):
                         self._send_api(node._stop_task(payload))
                     elif parsed.path == "/api/preflight/run":
                         self._send_api(node._run_preflight(payload))
+                    elif parsed.path == "/api/inspection/toggle":
+                        self._send_api(node._set_inspection_enabled(payload))
                     elif parsed.path == "/api/recording/start":
                         self._send_api(node._start_recording(payload))
                     elif parsed.path == "/api/recording/stop":
