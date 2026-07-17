@@ -60,6 +60,13 @@ def main() -> None:
         "preflightItems",
         "runPreflightBtn",
         "refreshPreflightBtn",
+        "radarStatusBtn",
+        "radarStatusPopover",
+        "closeRadarStatusBtn",
+        "radarStatusSummary",
+        "radarManualMode",
+        "radarManualScanBtn",
+        "refreshRadarStatusBtn",
         "recordingStatusBtn",
         "recordingStatusPopover",
         "taskStatusBtn",
@@ -69,7 +76,6 @@ def main() -> None:
         "taskExecutionFlow",
         "yoloStatus",
         "detections",
-        "radarInspection",
         "radarResultList",
         "operationFeedbackDialog",
         "markPoseSummary",
@@ -99,6 +105,11 @@ def main() -> None:
     assert '$("taskStatusBtn").addEventListener' in script
     assert 'preflight: "preflightStatusPopover"' in script
     assert '$("preflightStatusBtn").addEventListener' in script
+    assert 'radar: "radarStatusPopover"' in script
+    assert '$("radarStatusBtn").addEventListener' in script
+    assert '"/api/radar/status"' in script
+    assert '"/api/radar/manual_start"' in script
+    assert 'renderRadarInspection(payload.latest || null)' in script
     assert "function positionStatusPopover" in script
     assert "positionOpenStatusPopover" in script
     assert 'document.addEventListener("pointerdown"' in script
@@ -153,6 +164,8 @@ def main() -> None:
     assert "def _edit_map" in backend
     assert 'elif parsed.path == "/api/maps/edit":' in backend
     assert '"source": "web_map_editor"' in backend
+    assert 'elif parsed.path == "/api/radar/manual_start":' in backend
+    assert "def _radar_manual_start" in backend
 
     print("classic frontend contract tests passed")
 

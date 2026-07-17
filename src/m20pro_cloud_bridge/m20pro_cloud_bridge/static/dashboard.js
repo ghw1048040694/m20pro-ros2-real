@@ -249,7 +249,7 @@
         </table>`;
     }
     function renderRadarInspection(record) {
-      const box = $("radarInspection");
+      const box = $("radarStatusSummary");
       if (!box) return;
       const parsed = record && (record.parsed || record.raw);
       box.className = "radar-box";
@@ -516,6 +516,33 @@
         if (box) box.innerHTML = `<div class="radar-result-notice fail">${escapeHtml(err.message || err)}</div>`;
       } finally {
         state.loadingRadarResults = false;
+      }
+    }
+    async function loadRadarStatus() {
+      try {
+        const payload = await fetchJson("/api/radar/status");
+        renderRadarInspection(payload.latest || null);
+        return payload;
+      } catch (err) {
+        renderRadarInspection({parsed: {status: "error", state: "error", error: err.message || "无法读取雷达状态"}});
+        return null;
+      }
+    }
+    async function startManualRadarScan() {
+      const button = $("radarManualScanBtn");
+      if (!button) return;
+      const oldText = button.textContent;
+      button.disabled = true;
+      button.textContent = "启动中...";
+      try {
+        const payload = await api("POST", "/api/radar/manual_start", {mode: $("radarManualMode").value});
+        showOperationFeedback("雷达扫描已启动", payload.message || "已按当前位姿启动手动雷达扫描");
+        await loadRadarStatus();
+      } catch (err) {
+        showOperationFeedback("雷达扫描启动失败", err, true);
+      } finally {
+        button.disabled = false;
+        button.textContent = oldText;
       }
     }
     async function recordRadarArtifact(taskId, runId) {
@@ -935,6 +962,7 @@
       map: "mapStatusPopover",
       localization: "localizationStatusPopover",
       preflight: "preflightStatusPopover",
+      radar: "radarStatusPopover",
       recording: "recordingStatusPopover",
       task: "taskStatusPopover"
     };
@@ -942,6 +970,7 @@
       map: "mapStatusBtn",
       localization: "localizationStatusBtn",
       preflight: "preflightStatusBtn",
+      radar: "radarStatusBtn",
       recording: "recordingStatusBtn",
       task: "taskStatusBtn"
     };
@@ -3966,13 +3995,20 @@
     $("mapStatusBtn").addEventListener("click", () => toggleStatusPopover("map"));
     $("localizationStatusBtn").addEventListener("click", () => toggleStatusPopover("localization"));
     $("preflightStatusBtn").addEventListener("click", () => toggleStatusPopover("preflight"));
+    $("radarStatusBtn").addEventListener("click", () => {
+      toggleStatusPopover("radar");
+      loadRadarStatus().catch(console.warn);
+    });
     $("recordingStatusBtn").addEventListener("click", () => toggleStatusPopover("recording"));
     $("taskStatusBtn").addEventListener("click", () => toggleStatusPopover("task"));
     $("closeMapStatusBtn").addEventListener("click", () => setStatusPopover("", false));
     $("closeLocalizationStatusBtn").addEventListener("click", () => setStatusPopover("", false));
     $("closePreflightStatusBtn").addEventListener("click", () => setStatusPopover("", false));
+    $("closeRadarStatusBtn").addEventListener("click", () => setStatusPopover("", false));
     $("closeRecordingStatusBtn").addEventListener("click", () => setStatusPopover("", false));
     $("closeTaskStatusBtn").addEventListener("click", () => setStatusPopover("", false));
+    $("radarManualScanBtn").addEventListener("click", startManualRadarScan);
+    $("refreshRadarStatusBtn").addEventListener("click", () => loadRadarStatus().catch(console.warn));
     document.addEventListener("pointerdown", event => {
       const target = event.target;
       if (target && target.closest && (target.closest(".status-popover") || target.closest(".status-action"))) return;

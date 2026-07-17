@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>M20Pro 现场操作台</title>
   <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="/static/dashboard.css?v=20260717-status-popover-anchor-1" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=20260717-radar-popover-1" />
 
 </head>
 <body>
@@ -13,12 +13,12 @@
     <div class="top-brand"><strong>M20Pro</strong><span>现场操作台</span></div>
     <div class="top-status">
       <span class="status-chip"><span id="statusDot" class="dot"></span><strong id="statusText">连接中</strong></span>
+      <span class="status-chip"><span>电量</span><strong id="battery">-</strong></span>
       <span class="status-chip"><span>楼层</span><strong id="floor">-</strong></span>
       <button id="localizationStatusBtn" class="status-chip status-action" type="button" aria-expanded="false"><span>定位</span><strong id="localization">-</strong></button>
       <button id="preflightStatusBtn" class="status-chip status-action" type="button" aria-expanded="false" title="查看基础自检结果"><span>自检</span><strong id="preflightTopStatus">尚未自检</strong></button>
-      <span class="status-chip"><span>电量</span><strong id="battery">-</strong></span>
       <button id="taskStatusBtn" class="status-chip status-action" type="button" aria-expanded="false"><span>任务</span><strong id="taskTopStatus">空闲</strong></button>
-      <span class="status-chip"><span>雷达</span><strong id="radarTopStatus">等待</strong></span>
+      <button id="radarStatusBtn" class="status-chip status-action" type="button" aria-expanded="false" title="查看雷达状态并手动启动扫描"><span>雷达</span><strong id="radarTopStatus">等待</strong></button>
       <button id="recordingStatusBtn" class="status-chip status-action" type="button" aria-expanded="false"><span>录包</span><strong id="recordingTopStatus">未录制</strong></button>
     </div>
   </header>
@@ -48,6 +48,13 @@
     <div id="preflightCounts" class="preflight-counts" aria-live="polite"></div>
     <div id="preflightItems" class="preflight-items" aria-live="polite"><div class="small">尚未自检。</div></div>
     <div class="actions"><button class="primary" id="runPreflightBtn" type="button">重新自检</button><button id="refreshPreflightBtn" type="button">刷新结果</button></div>
+  </section>
+  <section id="radarStatusPopover" class="status-popover status-popover-wide" hidden>
+    <div class="status-popover-head"><strong>雷达状态</strong><button id="closeRadarStatusBtn" class="icon-button" type="button" title="关闭" aria-label="关闭">×</button></div>
+    <div id="radarStatusSummary" class="radar-box">等待雷达状态</div>
+    <div class="row"><label>手动模式</label><select id="radarManualMode"><option value="measuring">实测实量</option><option value="modeling">点云建模</option><option value="both">实测实量 + 点云建模</option></select></div>
+    <div class="actions"><button id="radarManualScanBtn" class="primary" type="button">手动启动扫描</button><button id="refreshRadarStatusBtn" type="button">刷新状态</button></div>
+    <div class="small">手动扫描使用机器狗当前已确认位姿；导航任务执行中或雷达已有扫描时不会重复启动。</div>
   </section>
 
   <section id="recordingStatusPopover" class="status-popover" hidden>
@@ -307,10 +314,6 @@
             <div id="detections" class="detection-results"><div class="small">暂无检测结果</div></div>
           </div>
           <div class="section">
-            <h2>雷达状态</h2>
-            <div id="radarInspection" class="radar-box">等待雷达状态</div>
-          </div>
-          <div class="section">
             <h2>雷达测量结果</h2>
             <div class="collection-toolbar radar-result-toolbar">
               <input id="radarResultSearch" type="search" placeholder="搜索任务、房间、点位或指标" aria-label="搜索雷达测量结果" />
@@ -343,7 +346,7 @@
     <div class="dialog-actions"><button id="confirmOperationFeedbackBtn" class="primary" type="button">确定</button></div>
   </dialog>
 
-  <script src="/static/dashboard.js?v=20260717-status-popover-anchor-1"></script>
+  <script src="/static/dashboard.js?v=20260717-radar-popover-1"></script>
 
 </body>
 </html>

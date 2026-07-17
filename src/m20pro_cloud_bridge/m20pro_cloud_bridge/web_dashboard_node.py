@@ -4434,6 +4434,80 @@ class WebDashboardNode(Node):
             "topic_result_count": len(topic_results),
         }
 
+    def _radar_manual_start(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        mode = str(payload.get("mode") or "measuring").strip().lower()
+        if mode not in ("measuring", "modeling", "both"):
+            return self._error("不支持的手动雷达模式")
+        with self._data_lock:
+            active = dict(self._settings.get("active_task") or {})
+        if active.get("status") == "running":
+            return self._error("当前有导航任务正在执行，请先完成任务或停止任务后再手动扫描")
+        with self._lock:
+            localization_ok = self._state.get("localization_ok") is True
+            pose = dict(self._state.get("pose") or {})
+            floor = str(self._state.get("floor") or "").strip()
+            latest = dict(self._state.get("radar_inspection") or {})
+        latest_parsed = latest.get("parsed") if isinstance(latest.get("parsed"), dict) else {}
+        latest_status = str(latest_parsed.get("status") or latest_parsed.get("state") or "").strip().lower()
+        if latest_status in ("starting", "running", "pending", "analyzing", "analysis_pending"):
+            return self._error("雷达当前正在扫描或分析，请等待本次结果完成")
+        if not localization_ok:
+            return self._error("当前定位未确认，无法用当前位姿启动手动雷达扫描")
+        try:
+            x = float(pose["x"])
+            y = float(pose["y"])
+            yaw = float(pose.get("yaw", 0.0))
+        except (KeyError, TypeError, ValueError):
+            return self._error("当前位姿不可用，无法启动手动雷达扫描")
+        if not all(math.isfinite(value) for value in (x, y, yaw)):
+            return self._error("当前位姿不是有效数值，无法启动手动雷达扫描")
+        if not floor:
+            return self._error("当前楼层未知，无法启动手动雷达扫描")
+
+        scan_modes = ("measuring", "modeling") if mode == "both" else (mode,)
+        scans = [
+            {
+                "mode": scan_mode,
+                "label": "实测实量" if scan_mode == "measuring" else "点云建模",
+                "result_suffix": "measure" if scan_mode == "measuring" else "cloud",
+                "artifact_policy": "auto_result" if scan_mode == "measuring" else "manual_import",
+                "manual_measure_required": scan_mode == "modeling",
+                "order": index,
+            }
+            for index, scan_mode in enumerate(scan_modes)
+        ]
+        run_id = new_id("manual_radar")
+        annotation = {
+            "id": run_id,
+            "label": "手动雷达扫描",
+            "type": "patrol",
+            "manual_point_type": "task",
+            "floor": floor,
+            "pose": {"x": x, "y": y, "z": float(pose.get("z", 0.0) or 0.0), "yaw": yaw},
+            "dwell_s": 0.0,
+            "radar": {"enabled": True, "scans": scans},
+        }
+        active_snapshot = {
+            "task_id": run_id,
+            "task_name": "手动雷达扫描",
+            "run_id": run_id,
+            "index": 0,
+            "status": "running",
+            "waypoint_started_at": now_text(),
+            "waypoint_started_monotonic": time.monotonic(),
+            "last_robot_pose": {"x": x, "y": y, "yaw": yaw},
+        }
+        self._publish_active_waypoint(annotation, active_snapshot, "dwelling")
+        return {
+            "ok": True,
+            "message": "已按当前位姿启动手动雷达扫描",
+            "run_id": run_id,
+            "mode": mode,
+            "floor": floor,
+            "pose": annotation["pose"],
+            "waypoint_key": self._active_waypoint_key(annotation, active_snapshot),
+        }
+
     def _radar_results_payload(self, query: Dict[str, List[str]]) -> Dict[str, Any]:
         jobs, filters, total = self._radar_filter_jobs(query)
         return {
@@ -6874,6 +6948,8 @@ class WebDashboardNode(Node):
                         self._send_api(node._radar_record_artifact(payload))
                     elif parsed.path == "/api/radar/manual_measurement":
                         self._send_api(node._radar_save_manual_measurement(payload))
+                    elif parsed.path == "/api/radar/manual_start":
+                        self._send_api(node._radar_manual_start(payload))
                     else:
                         self.send_error(HTTPStatus.NOT_FOUND)
                 finally:
