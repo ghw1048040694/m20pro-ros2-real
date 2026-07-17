@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>M20Pro 现场操作台</title>
   <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="/static/dashboard.css?v=20260716-map-editor-1" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=20260717-task-popover-1" />
 
 </head>
 <body>
@@ -18,7 +18,7 @@
       <button id="localizationStatusBtn" class="status-chip status-action" type="button" aria-expanded="false"><span>定位</span><strong id="localization">-</strong></button>
       <span class="status-chip"><span>自检</span><strong id="preflightTopStatus">启动中</strong></span>
       <span class="status-chip"><span>电量</span><strong id="battery">-</strong></span>
-      <span class="status-chip"><span>任务</span><strong id="taskTopStatus">空闲</strong></span>
+      <button id="taskStatusBtn" class="status-chip status-action" type="button" aria-expanded="false"><span>任务</span><strong id="taskTopStatus">空闲</strong></button>
       <span class="status-chip"><span>雷达</span><strong id="radarTopStatus">等待</strong></span>
       <button id="recordingStatusBtn" class="status-chip status-action" type="button" aria-expanded="false"><span>录包</span><strong id="recordingTopStatus">未录制</strong></button>
     </div>
@@ -49,6 +49,14 @@
     <div class="row"><label>名称</label><input id="recordingPrefix" value="testfield" /></div>
     <div class="actions"><button class="primary" id="startRecordingBtn">开始录包</button><button id="stopRecordingBtn">停止录包</button></div>
     <div id="recordingStatus" class="compact-status">未开始</div>
+  </section>
+  <section id="taskStatusPopover" class="status-popover status-popover-wide" hidden>
+    <div class="status-popover-head"><strong>任务进度</strong><button id="closeTaskStatusBtn" class="icon-button" type="button" title="关闭" aria-label="关闭">×</button></div>
+    <div id="taskExecutionFlow" class="task-execution-flow"><div class="small">暂无执行任务</div></div>
+    <div class="actions">
+      <button class="danger" id="stopTaskBtn">停止当前任务</button>
+      <button class="danger" id="resetTaskSessionBtn" title="停止残留目标、发送零速度并清理导航会话和代价地图">清理导航会话</button>
+    </div>
   </section>
   <main>
     <section class="map-wrap">
@@ -276,16 +284,6 @@
             <div id="taskList" class="list bounded-list"></div>
             <div id="taskPager" class="collection-pager"></div>
           </div>
-          <div class="section">
-            <h2>当前执行</h2>
-            <div id="taskPoseTracker" class="pose-tracker">等待位姿</div>
-            <div id="activeTaskSummary" class="preflight-summary">无任务</div>
-            <div id="taskExecutionFlow" class="task-execution-flow"><div class="small">暂无执行任务</div></div>
-            <div class="actions">
-              <button class="danger" id="stopTaskBtn">停止当前任务</button>
-              <button class="danger" id="resetTaskSessionBtn" title="停止残留目标、发送零速度并清理导航会话和代价地图">清理导航会话</button>
-            </div>
-          </div>
         </section>
 
         <section id="tab-detect" class="panel">
@@ -338,7 +336,7 @@
     <div class="dialog-actions"><button id="confirmOperationFeedbackBtn" class="primary" type="button">确定</button></div>
   </dialog>
 
-  <script src="/static/dashboard.js?v=20260717-localize-preview-1"></script>
+  <script src="/static/dashboard.js?v=20260717-task-popover-1"></script>
 
 </body>
 </html>

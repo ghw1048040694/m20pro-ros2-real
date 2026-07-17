@@ -42,6 +42,8 @@ def main() -> None:
         "尚未建立建图任务",
         "当前地图还没有任务；",
         'class="mono"',
+        'id="taskPoseTracker"',
+        'id="activeTaskSummary"',
     ):
         assert removed not in html
 
@@ -52,6 +54,9 @@ def main() -> None:
         "localizationStatusPopover",
         "recordingStatusBtn",
         "recordingStatusPopover",
+        "taskStatusBtn",
+        "taskStatusPopover",
+        "closeTaskStatusBtn",
         "preflightTopStatus",
         "taskExecutionFlow",
         "yoloStatus",
@@ -78,6 +83,8 @@ def main() -> None:
     assert 'for (const key of ["pose", "scan", "path", "local_path", "active_waypoint"])' in script
     assert "renderYoloWorkspace" in script
     assert "localizationPopoverOpen" in script
+    assert 'task: "taskStatusPopover"' in script
+    assert '$("taskStatusBtn").addEventListener' in script
     assert "mapModeLabel" not in script
     assert "renderTaskNextStep" not in script
     assert 'setStatusPopover("", false)' in script

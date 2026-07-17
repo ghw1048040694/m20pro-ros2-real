@@ -934,12 +934,14 @@
     const statusPopoverIds = {
       map: "mapStatusPopover",
       localization: "localizationStatusPopover",
-      recording: "recordingStatusPopover"
+      recording: "recordingStatusPopover",
+      task: "taskStatusPopover"
     };
     const statusButtonIds = {
       map: "mapStatusBtn",
       localization: "localizationStatusBtn",
-      recording: "recordingStatusBtn"
+      recording: "recordingStatusBtn",
+      task: "taskStatusBtn"
     };
     function setStatusPopover(name, open) {
       if (open && name && state.mapEditorActive && !setMapEditorActive(false)) return;
@@ -2270,7 +2272,6 @@
       $("localization").title = (s.localization_status && s.localization_status.message) || text(s.navigation_status);
       if ($("factoryNav")) $("factoryNav").textContent = text(s.navigation_status);
       renderPoseTracker("livePoseTracker", s);
-      renderPoseTracker("taskPoseTracker", s);
       renderRadarInspection(s.radar_inspection);
       const taskTop = $("taskTopStatus");
       const activeWaypoint = s.active_waypoint && s.active_waypoint.parsed ? s.active_waypoint.parsed : null;
@@ -2336,10 +2337,8 @@
         state.activeTaskLogUntil = 0;
         const waypoint = s.active_waypoint && s.active_waypoint.parsed ? s.active_waypoint.parsed : null;
         followRobotIfNeeded(s.active_task || null);
-        renderActiveTaskSummary(s.active_task || null, waypoint || null);
         renderTaskExecutionFlow(s.active_task || null, waypoint || null);
       } else if (Date.now() > state.activeTaskLogUntil) {
-        renderActiveTaskSummary(null, null);
         renderTaskExecutionFlow(null, null);
       }
       updateTaskControlButtons(s);
@@ -3095,7 +3094,6 @@
               btn.textContent = "启动中...";
               const payload = await api("POST", "/api/tasks/start", taskStartRequest(task));
               state.activeTaskLogUntil = Date.now() + 20000;
-              renderActiveTaskSummary(payload.active_task || null, null);
               renderTaskExecutionFlow(payload.active_task || null, null);
               await loadTasks();
             } catch (err) {
@@ -3148,11 +3146,7 @@
           });
         }
       } catch (err) {
-        const summary = $("activeTaskSummary");
-        if (summary) {
-          summary.className = "preflight-summary fail";
-          summary.textContent = payloadMessage(err, "任务列表加载失败");
-        }
+        showOperationFeedback("任务列表加载失败", err, true);
         console.warn(err);
       } finally {
         state.loadingTasks = false;
@@ -3868,7 +3862,6 @@
       btn.textContent = "停止中...";
       try {
         const payload = await api("POST", "/api/tasks/stop", {reason: "web_manual_stop"});
-        renderActiveTaskSummary(null, null);
         renderTaskExecutionFlow(null, null);
         $("cursor").textContent = payload.message || "已发送停止指令";
         await loadTasks();
@@ -3889,7 +3882,6 @@
       btn.textContent = "清理中...";
       try {
         const payload = await api("POST", "/api/tasks/stop", {reason: "web_manual_reset"});
-        renderActiveTaskSummary(null, null);
         renderTaskExecutionFlow(null, null);
         $("cursor").textContent = payload.message || "导航会话已清理";
         await loadTasks();
@@ -3901,12 +3893,14 @@
       }
     });
     window.addEventListener("resize", resizeCanvas);
-	    $("mapStatusBtn").addEventListener("click", () => toggleStatusPopover("map"));
-	    $("localizationStatusBtn").addEventListener("click", () => toggleStatusPopover("localization"));
-	    $("recordingStatusBtn").addEventListener("click", () => toggleStatusPopover("recording"));
-	    $("closeMapStatusBtn").addEventListener("click", () => setStatusPopover("", false));
-	    $("closeLocalizationStatusBtn").addEventListener("click", () => setStatusPopover("", false));
-	    $("closeRecordingStatusBtn").addEventListener("click", () => setStatusPopover("", false));
+    $("mapStatusBtn").addEventListener("click", () => toggleStatusPopover("map"));
+    $("localizationStatusBtn").addEventListener("click", () => toggleStatusPopover("localization"));
+    $("recordingStatusBtn").addEventListener("click", () => toggleStatusPopover("recording"));
+    $("taskStatusBtn").addEventListener("click", () => toggleStatusPopover("task"));
+    $("closeMapStatusBtn").addEventListener("click", () => setStatusPopover("", false));
+    $("closeLocalizationStatusBtn").addEventListener("click", () => setStatusPopover("", false));
+    $("closeRecordingStatusBtn").addEventListener("click", () => setStatusPopover("", false));
+    $("closeTaskStatusBtn").addEventListener("click", () => setStatusPopover("", false));
 	    $("closeOperationFeedbackBtn").addEventListener("click", () => $("operationFeedbackDialog").close());
 	    $("confirmOperationFeedbackBtn").addEventListener("click", () => $("operationFeedbackDialog").close());
 	    resizeCanvas();
