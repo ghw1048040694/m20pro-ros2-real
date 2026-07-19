@@ -490,11 +490,23 @@ static void convert_and_publish(
         stair_mode, now, std::move(stair_points), cfg.stair_profile_hold_s);
     const auto clearance = m20pro::classify_stair_clearance(profile_points, cfg.stair);
     auto stair_scan = filtered_stair_scan(cloud, cfg, clearance);
-    stair_scan_pub.Write(&stair_scan);
+    const bool stair_scan_written = stair_scan_pub.Write(&stair_scan);
     std_msgs::msg::String status;
     const int sequence = stats.stair_statuses.fetch_add(1) + 1;
     status.data(stair_status_json(stair_mode, clearance, sequence));
-    stair_status_pub.Write(&status);
+    const bool stair_status_written = stair_status_pub.Write(&status);
+    if (sequence <= 3 || sequence % 20 == 0) {
+      std::cout << "stair_clearance sequence=" << sequence
+                << " session=" << stair_mode.session_id
+                << " state=" << clearance.state
+                << " corridor_points=" << clearance.corridor_points
+                << " obstacle_points=" << clearance.obstacle_points
+                << " scan_written=" << stair_scan_written
+                << " scan_matched=" << stair_scan_pub.GetMatchedCount()
+                << " status_written=" << stair_status_written
+                << " status_matched=" << stair_status_pub.GetMatchedCount()
+                << std::endl;
+    }
   } else {
     stair_accumulator.clear();
   }

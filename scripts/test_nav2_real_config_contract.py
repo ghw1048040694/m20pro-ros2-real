@@ -249,6 +249,15 @@ def main() -> None:
     ):
         assert "${%s}" % variable in edge_unit
 
+    edge_source = (
+        ROOT
+        / "tools"
+        / "edge_scan_feasibility"
+        / "drdds_edge_scan_demo.cpp"
+    ).read_text(encoding="utf-8")
+    assert '" scan_matched=" << stair_scan_pub.GetMatchedCount()' in edge_source
+    assert '" status_matched=" << stair_status_pub.GetMatchedCount()' in edge_source
+
     for topic in (
         "/m20pro/navigation_scan",
         "/m20pro/stair_obstacle_scan",
