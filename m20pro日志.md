@@ -1,6 +1,6 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-07-19 16:15 CST
+Last updated: 2026-07-19 16:27 CST
 
 ## 2026-07-19 16:15 CST - 跨楼层路线真值与 104/106/定位原子事务补齐
 
@@ -11,6 +11,7 @@ Last updated: 2026-07-19 16:15 CST
 - 失败一致性：Nav2 切图成功但 `/map` 未匹配也视为失败；106 失败、目标层重定位失败、任务中途停止或后台异常均执行 104/106 回滚。回滚无法确认时返回 `state_uncertain=true`，`floor_manager` 清空当前楼层并停止任务，避免错误楼层继续导航。切层内部最长命令边界收紧，`floor_manager` 等待边界调整为 110 秒，低于任务总超时且覆盖完整回滚窗口。
 - 状态与文档：任务状态新增“准备同步切图 / 正在同步 104+106 并确认定位 / 目标层已确认”友好文案；新增 `docs/cross_floor_navigation.md`，统一说明建图、四点标定、上下行路线、任务顺序和失败恢复。
 - 本地聚焦验证：新增 `scripts/test_floor_route_contract.py`；路线、Nav 状态、地图选择、多楼层和经典前端合同测试及前端 `node --check` 已通过。当前尚未触发真机导航、切图、重定位或建图指令；待全量测试/构建后只部署 104 做无运动验收。
+- 全量与部署验证：仓库 34 个 `scripts/test_*.py` 全部通过，`m20pro_navigation`、`m20pro_cloud_bridge`、`m20pro_bringup`、`m20pro_inspection`、`m20pro_radar_inspection` 5 包构建通过；提交 `7885a01` 已原子部署到测试狗 104。服务 `active`、`NRestarts=0`，新服务启动后无 Traceback/ERROR；`/api/floor_routes` 返回 0 条路线且未创建 `floor_routes.json`，`floor_manager` 日志确认 `runtime floor routes updated; configured=False floors=(none)`，动态路线话题为 1 个发布者/1 个订阅者。当前 `active_task=null`、未重定位，未触发导航、速度、建图、切图或重定位命令；未访问/重启 106。104 的历史 staging 和部署备份已清空，只保留正式工作区。
 
 ## 2026-07-17 11:17 CST - 雷达状态收敛到状态栏并增加受控手动扫描
 
