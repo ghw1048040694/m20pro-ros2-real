@@ -19,6 +19,10 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
 
 from .geometry import quaternion_to_yaw, yaw_to_quaternion
+from .stair_safety_contract import (
+    parse_stair_clearance,
+    stair_clearance_gate_decision,
+)
 from .terrain_segment_contract import (
     terrain_entry_gait,
     terrain_segment_at_pose,
@@ -52,6 +56,15 @@ class FloorManager(Node):
         self.declare_parameter("floor_switch_result_topic", "/m20pro/floor_switch_result")
         self.declare_parameter("floor_context_topic", "/m20pro/set_current_floor")
         self.declare_parameter("floor_switch_timeout_s", 110.0)
+        self.declare_parameter("stair_perception_mode_topic", "/m20pro/stair_perception_mode")
+        self.declare_parameter("stair_clearance_topic", "/m20pro/stair_clearance")
+        self.declare_parameter("stair_clearance_startup_timeout_s", 4.0)
+        self.declare_parameter("stair_clearance_stale_timeout_s", 1.0)
+        self.declare_parameter("stair_clearance_required_samples", 3)
+        self.declare_parameter(
+            "stair_behavior_tree",
+            "package://m20pro_bringup/behavior_trees/m20pro_stair_traverse_foxy.xml",
+        )
         self.declare_parameter("robot_pose_topic", "/m20pro_tcp_bridge/map_pose")
         self.declare_parameter("initialpose_topic", "/initialpose")
         self.declare_parameter("navigate_to_pose_action", "/navigate_to_pose")
@@ -116,6 +129,8 @@ class FloorManager(Node):
         self.pending_initialpose: Optional[PoseWithCovarianceStamped] = None
         self.initial_floor_timer = None
         self.floor_switch_request_started_monotonic = 0.0
+        self.stair_perception_session: Optional[Dict[str, Any]] = None
+        self.latest_stair_clearance: Dict[str, Any] = {}
         self.rviz_floor_goal_subscriptions: List[Any] = []
         self._validate_floor_config()
 
@@ -163,6 +178,11 @@ class FloorManager(Node):
             str(self.get_parameter("floor_switch_request_topic").value),
             10,
         )
+        self.stair_perception_mode_pub = self.create_publisher(
+            String,
+            str(self.get_parameter("stair_perception_mode_topic").value),
+            10,
+        )
         route_qos = QoSProfile(depth=1)
         route_qos.reliability = ReliabilityPolicy.RELIABLE
         route_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
@@ -198,6 +218,12 @@ class FloorManager(Node):
         )
         self.create_subscription(
             String,
+            str(self.get_parameter("stair_clearance_topic").value),
+            self._on_stair_clearance,
+            10,
+        )
+        self.create_subscription(
+            String,
             str(self.get_parameter("stop_task_topic").value),
             self._on_stop_task,
             10,
@@ -225,6 +251,7 @@ class FloorManager(Node):
         self.create_timer(0.2, self._republish_initialpose)
         self.create_timer(1.0, self._publish_current_floor)
         self.create_timer(0.5, self._check_floor_switch_timeout)
+        self.create_timer(0.1, self._tick_stair_clearance)
 
         initial_floor = str(self.get_parameter("initial_floor").value).strip()
         if initial_floor:
@@ -432,6 +459,173 @@ class FloorManager(Node):
             return
         self.use_stairs(command)
 
+    def _on_stair_clearance(self, msg: String) -> None:
+        sample = parse_stair_clearance(
+            msg.data,
+            received_monotonic=time.monotonic(),
+        )
+        session = self.stair_perception_session
+        if not sample.get("ok") or session is None:
+            return
+        if str(sample.get("session_id") or "") != str(session.get("id") or ""):
+            return
+        previous = dict(self.latest_stair_clearance)
+        if int(sample.get("sequence") or 0) <= int(previous.get("sequence") or -1):
+            return
+        self.latest_stair_clearance = sample
+        if sample.get("state") == "clear":
+            session["clear_samples"] = int(session.get("clear_samples") or 0) + 1
+        else:
+            session["clear_samples"] = 0
+        self._tick_stair_clearance()
+
+    def _start_stair_clearance_session(self, transition: Dict[str, Any]) -> None:
+        session_id = "stair-clearance-%d" % int(time.time() * 1000.0)
+        self.latest_stair_clearance = {}
+        self.stair_perception_session = {
+            "id": session_id,
+            "route_id": str(transition.get("route_id") or transition.get("stair_name") or ""),
+            "source_floor": str(transition.get("source_floor") or self.current_floor),
+            "target_floor": str(transition.get("target_floor") or ""),
+            "direction": str(transition.get("direction") or ""),
+            "phase": "waiting_traverse",
+            "started_monotonic": time.monotonic(),
+            "last_mode_publish_monotonic": 0.0,
+            "clear_samples": 0,
+        }
+        self._publish_stair_status(
+            "checking_stair_clearance session_id=%s source_floor=%s target_floor=%s"
+            % (
+                session_id,
+                self.stair_perception_session["source_floor"],
+                self.stair_perception_session["target_floor"],
+            )
+        )
+        self._publish_stair_perception_mode(active=True, force=True)
+
+    def _prepare_stair_exit_clearance(self) -> None:
+        session = self.stair_perception_session
+        if session is None:
+            self._publish_stair_status("error reason=stair_clearance_session_missing")
+            self._clear_floor_mission_if_needed("stair_exit")
+            return
+        session["phase"] = "waiting_exit"
+        session["started_monotonic"] = time.monotonic()
+        session["clear_samples"] = 0
+        self.latest_stair_clearance = {}
+        self._publish_stair_status(
+            "checking_stair_exit_clearance session_id=%s target_floor=%s"
+            % (session.get("id"), self.current_floor)
+        )
+        self._publish_stair_perception_mode(active=True, force=True)
+
+    def _publish_stair_perception_mode(self, *, active: bool, force: bool = False) -> None:
+        session = self.stair_perception_session
+        now_monotonic = time.monotonic()
+        if active and session is not None:
+            if not force and now_monotonic - float(session.get("last_mode_publish_monotonic") or 0.0) < 0.5:
+                return
+            session["last_mode_publish_monotonic"] = now_monotonic
+            payload = {
+                "active": True,
+                "session_id": session.get("id"),
+                "route_id": session.get("route_id"),
+                "source_floor": session.get("source_floor"),
+                "target_floor": session.get("target_floor"),
+                "direction": session.get("direction"),
+                "phase": session.get("phase"),
+            }
+        else:
+            payload = {"active": False, "session_id": "", "phase": "inactive"}
+        message = String()
+        message.data = json.dumps(payload, separators=(",", ":"))
+        self.stair_perception_mode_pub.publish(message)
+
+    def _tick_stair_clearance(self) -> None:
+        session = self.stair_perception_session
+        if session is None:
+            return
+        self._publish_stair_perception_mode(active=True)
+        decision = stair_clearance_gate_decision(
+            session_id=str(session.get("id") or ""),
+            phase=str(session.get("phase") or ""),
+            sample=self.latest_stair_clearance,
+            clear_samples=int(session.get("clear_samples") or 0),
+            required_clear_samples=int(self.get_parameter("stair_clearance_required_samples").value),
+            started_monotonic=float(session.get("started_monotonic") or 0.0),
+            now_monotonic=time.monotonic(),
+            startup_timeout_s=float(self.get_parameter("stair_clearance_startup_timeout_s").value),
+            stale_timeout_s=float(self.get_parameter("stair_clearance_stale_timeout_s").value),
+        )
+        action = str(decision.get("action") or "")
+        if action == "start_motion":
+            phase = str(session.get("phase") or "")
+            if phase == "waiting_traverse":
+                self._begin_stair_traverse_motion()
+            elif phase == "waiting_exit":
+                session["phase"] = "exiting"
+                self._publish_stair_perception_mode(active=True, force=True)
+                self._publish_stair_status(
+                    "stair_exit_clearance_confirmed session_id=%s" % session.get("id")
+                )
+                self._schedule_post_exit_goal()
+        elif action == "abort":
+            self._abort_stair_clearance(str(decision.get("reason") or "stair_clearance_failed"))
+
+    def _begin_stair_traverse_motion(self) -> None:
+        transition = self.pending_stair_transition
+        session = self.stair_perception_session
+        if transition is None or session is None:
+            self._abort_stair_clearance("stair_transition_missing")
+            return
+        source_platform = transition.get("source_platform")
+        if not isinstance(source_platform, dict) or not source_platform:
+            self._abort_stair_clearance("stair_source_platform_missing")
+            return
+        session["phase"] = "traversing"
+        self._publish_stair_perception_mode(active=True, force=True)
+        gait_label = (
+            str(self.get_parameter("stair_up_gait_label").value)
+            if transition.get("direction") == "up"
+            else str(self.get_parameter("stair_down_gait_label").value)
+        )
+        self._publish_gait(gait_label)
+        self._publish_stair_status(
+            "stair_clearance_confirmed session_id=%s source_floor=%s target_floor=%s"
+            % (session.get("id"), transition.get("source_floor"), transition.get("target_floor"))
+        )
+        self._publish_stair_status(
+            "navigating_to_stair_platform source_floor=%s target_floor=%s stair=%s nav_mode=stair_safe"
+            % (
+                transition.get("source_floor"),
+                transition.get("target_floor"),
+                transition.get("stair_name"),
+            )
+        )
+        self._send_nav_goal(self._pose_from_xy_yaw(source_platform), "stair_traverse")
+
+    def _abort_stair_clearance(self, reason: str) -> None:
+        session = dict(self.stair_perception_session or {})
+        sample = dict(self.latest_stair_clearance or {})
+        self._publish_zero_cmd()
+        self._publish_stair_status(
+            "error reason=%s session_id=%s state=%s nearest_obstacle_m=%s"
+            % (
+                reason,
+                session.get("id") or "",
+                sample.get("state") or "missing",
+                sample.get("nearest_obstacle_m"),
+            )
+        )
+        self._cancel_active_nav_goal(reason)
+        self._clear_floor_mission_if_needed("stair_traverse")
+
+    def _deactivate_stair_perception(self) -> None:
+        if self.stair_perception_session is not None:
+            self._publish_stair_perception_mode(active=False, force=True)
+        self.stair_perception_session = None
+        self.latest_stair_clearance = {}
+
     def _on_floor_switch_result(self, msg: String) -> None:
         try:
             result = json.loads(msg.data)
@@ -471,9 +665,10 @@ class FloorManager(Node):
             % (target_floor, result.get("target_map_id") or pending.get("target_map_id") or "")
         )
         if self.pending_post_exit_pose:
-            self._schedule_post_exit_goal()
+            self._prepare_stair_exit_clearance()
         else:
             self.pending_flat_gait_after_switch = False
+            self._deactivate_stair_perception()
             self._publish_gait(str(self.get_parameter("flat_gait_label").value))
             self._publish_stair_status("complete target_floor=%s" % target_floor)
             if self.pending_post_switch_goal is not None:
@@ -826,6 +1021,16 @@ class FloorManager(Node):
         pose.header.stamp = self.get_clock().now().to_msg()
         goal = NavigateToPose.Goal()
         goal.pose = pose
+        if label in ("stair_traverse", "stair_exit"):
+            behavior_tree = self._resolve_path(
+                str(self.get_parameter("stair_behavior_tree").value)
+            )
+            if not behavior_tree or not os.path.isfile(behavior_tree):
+                self.get_logger().error("stair behavior tree is unavailable: %s" % behavior_tree)
+                self._publish_stair_status("error reason=stair_behavior_tree_missing")
+                self._clear_floor_mission_if_needed(label)
+                return
+            goal.behavior_tree = behavior_tree
         self.get_logger().info(
             "sending Nav2 goal label=%s x=%.2f y=%.2f"
             % (label, pose.pose.position.x, pose.pose.position.y)
@@ -987,6 +1192,7 @@ class FloorManager(Node):
         elif label == "stair_exit":
             self.pending_flat_gait_after_switch = False
             self.pending_post_exit_pose = None
+            self._deactivate_stair_perception()
             self._publish_gait(str(self.get_parameter("flat_gait_label").value))
             self._publish_stair_status("complete target_floor=%s" % self.current_floor)
             if self.pending_post_switch_goal is not None:
@@ -1169,6 +1375,7 @@ class FloorManager(Node):
         post_exit = self.pending_post_exit_pose
         if not post_exit:
             self.pending_flat_gait_after_switch = False
+            self._deactivate_stair_perception()
             self._publish_gait(str(self.get_parameter("flat_gait_label").value))
             self._publish_stair_status("complete target_floor=%s" % self.current_floor)
             if self.pending_post_switch_goal is not None:
@@ -1211,6 +1418,7 @@ class FloorManager(Node):
         self.pending_stair_transition = None
         self.pending_floor_switch = None
         self.floor_switch_request_started_monotonic = 0.0
+        self._deactivate_stair_perception()
         if self.stair_timer is not None:
             self.stair_timer.cancel()
             self.stair_timer = None
@@ -1248,6 +1456,9 @@ class FloorManager(Node):
         if self.pending_stair_transition is not None:
             self.get_logger().warning("stair traversal ignored; another traversal is active")
             return
+        if self.stair_perception_session is not None or self.pending_floor_switch is not None:
+            self.get_logger().warning("stair traversal ignored; stair safety session is active")
+            return
         if self.pending_floor:
             self.get_logger().warning("stair traversal ignored; floor switch is active")
             return
@@ -1279,11 +1490,11 @@ class FloorManager(Node):
             self._publish_stair_status("error reason=no_target_platform stair=%s" % stair_name)
             return
 
-        gait_label = (
-            str(self.get_parameter("stair_up_gait_label").value)
-            if direction == "up"
-            else str(self.get_parameter("stair_down_gait_label").value)
-        )
+        source_platform = self._resolve_stair_traverse_pose(stair)
+        if not source_platform:
+            self.get_logger().error("stair %s has no source platform pose" % stair_name)
+            self._publish_stair_status("error reason=no_source_platform stair=%s" % stair_name)
+            return
         self.pending_stair_transition = {
             "source_floor": self.current_floor,
             "target_floor": target_floor,
@@ -1293,13 +1504,12 @@ class FloorManager(Node):
             "target_map_id": str(stair.get("target_map_id") or self.floors.get(target_floor, {}).get("map_id") or ""),
             "metadata": self._resolve_stair_transition_metadata(stair),
             "target_platform": exit_pose,
-            "source_platform": self._resolve_stair_traverse_pose(stair),
+            "source_platform": source_platform,
             "post_exit": self._resolve_stair_post_exit_pose(stair),
         }
         metadata = self.pending_stair_transition["metadata"]
-        self._publish_gait(gait_label)
         self._publish_stair_status(
-            "started source_floor=%s target_floor=%s direction=%s stair=%s model=%s nav_mode=%s terrain=%s"
+            "stair_transition_prepared source_floor=%s target_floor=%s direction=%s stair=%s model=%s nav_mode=%s terrain=%s"
             % (
                 self.current_floor,
                 target_floor,
@@ -1310,37 +1520,7 @@ class FloorManager(Node):
                 metadata["terrain"],
             )
         )
-
-        source_platform = self.pending_stair_transition.get("source_platform")
-        if isinstance(source_platform, dict) and source_platform:
-            self._publish_stair_status(
-                "navigating_to_stair_platform source_floor=%s target_floor=%s stair=%s nav_mode=%s direction_mode=%s"
-                % (
-                    self.current_floor,
-                    target_floor,
-                    stair_name,
-                    metadata["nav_mode"],
-                    metadata["direction_mode"],
-                )
-            )
-            self._send_nav_goal(self._pose_from_xy_yaw(source_platform), "stair_traverse")
-            return
-
-        if metadata["model"] == "shared_platform":
-            self.pending_stair_transition = None
-            self.get_logger().error(
-                "stair %s uses shared_platform but has no source platform pose" % stair_name
-            )
-            self._publish_stair_status("error reason=no_source_platform stair=%s" % stair_name)
-            self._clear_floor_mission_if_needed("stair_traverse")
-            return
-
-        duration = max(0.1, float(self.get_parameter("stair_traversal_duration_s").value))
-        self._publish_stair_status(
-            "timed_stair_traversal source_floor=%s target_floor=%s stair=%s duration=%.1f"
-            % (self.current_floor, target_floor, stair_name, duration)
-        )
-        self.stair_timer = self.create_timer(duration, self._finish_pending_stair_transition)
+        self._start_stair_clearance_session(self.pending_stair_transition)
 
     def _resolve_stair_route(
         self,
@@ -1700,6 +1880,9 @@ class FloorManager(Node):
         if transition is None:
             return
         self.pending_stair_transition = None
+        if self.stair_perception_session is not None:
+            self.stair_perception_session["phase"] = "platform"
+            self._publish_stair_perception_mode(active=True, force=True)
         metadata = transition.get("metadata") or {}
         self._publish_stair_status(
             "requesting_coordinated_floor_switch source_floor=%s target_floor=%s direction=%s stair=%s model=%s"

@@ -3,7 +3,9 @@
 The only production perception chain is:
 
 ```text
-106 DrDDS /LIDAR/POINTS -> m20pro_edge_scan -> /scan -> 104 Nav2/Web
+106 DrDDS /LIDAR/POINTS -> m20pro_edge_scan -> /scan -> 104 AMCL/Web/recording
+                                      \-> stair 3D envelope -> stair obstacle scan
+                                                               -> 104 Nav2 selector
 ```
 
 104 must not subscribe to raw point clouds or run a lidar relay/fusion node.
@@ -44,3 +46,25 @@ the previous deployed converter were already consumed as body coordinates with
 TF conversion disabled. The edge node preserves that field interpretation and
 publishes the resulting scan as `m20pro_base_link`. Any future lidar firmware or
 mounting change requires a static alignment test before navigation.
+
+## Stair-safe output
+
+The normal `/scan` contract never changes. During a leased stair session the
+same 106 process additionally merges 0.50 seconds of forward-corridor 3D points,
+estimates the local tread envelope, and publishes:
+
+- `/m20pro/stair_obstacle_scan`: only residual obstacle geometry;
+- `/m20pro/stair_clearance`: `clear`, `blocked`, or `unknown` plus evidence;
+- `/m20pro/stair_perception_mode`: consumed as the 104 session heartbeat.
+
+Regular adjacent steps up to `STAIR_MAX_STEP_HEIGHT=0.24` are terrain. Stable
+geometry at least `STAIR_OBSTACLE_HEIGHT=0.26` above the local tread, or a larger
+height discontinuity, blocks motion. Sparse or malformed profiles are `unknown`
+and must never be treated as clear. The mode lease expires after 1.50 seconds so
+a dead 104 controller cannot leave 106 in stair mode indefinitely.
+
+The geometry threshold has a physical limit: a low object that is no taller
+than a valid step and is continuous with the stair profile cannot be reliably
+distinguished from the stair by this lidar alone. Stairways must still be
+cleared before a real run, and mounting/posture changes require a new recorded
+calibration test.

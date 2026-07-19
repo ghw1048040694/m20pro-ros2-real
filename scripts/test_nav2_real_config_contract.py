@@ -39,6 +39,8 @@ def main() -> None:
         assert "footprint" in costmap
         assert "robot_radius" not in costmap
         assert costmap["inflation_layer"]["inflation_radius"] >= 0.60
+        assert costmap["obstacle_layer"]["scan"]["topic"] == "/m20pro/navigation_scan"
+        assert costmap["obstacle_layer"]["scan"]["inf_is_valid"] is True
 
     tree_path = (
         ROOT
@@ -78,6 +80,19 @@ def main() -> None:
     assert timed_nodes
     for node in timed_nodes:
         assert int(node.attrib.get("server_timeout", "0")) >= 500
+
+    stair_tree_path = (
+        ROOT
+        / "src"
+        / "m20pro_bringup"
+        / "behavior_trees"
+        / "m20pro_stair_traverse_foxy.xml"
+    )
+    stair_root = ET.parse(stair_tree_path).getroot()
+    assert stair_root.find(".//ComputePathToPose") is not None
+    assert stair_root.find(".//FollowPath") is not None
+    for forbidden_tag in ("BackUp", "Spin", "ClearEntireCostmap", "RecoveryNode"):
+        assert stair_root.find(f".//{forbidden_tag}") is None
 
     dashboard = (
         ROOT
@@ -146,6 +161,31 @@ def main() -> None:
     assert '"/waypoint_follower"' not in dashboard
     assert 'default_value="/m20pro/recording_scan"' in real_launch
     assert '"scan_topic": web_scan_topic' in real_launch
+    assert 'executable="navigation_scan_selector"' in real_launch
+    assert '"mode_timeout_s": 1.5' in real_launch
+
+    scan_selector = (
+        ROOT
+        / "src"
+        / "m20pro_navigation"
+        / "m20pro_navigation"
+        / "navigation_scan_selector.py"
+    ).read_text(encoding="utf-8")
+    floor_manager = (
+        ROOT
+        / "src"
+        / "m20pro_navigation"
+        / "m20pro_navigation"
+        / "floor_manager.py"
+    ).read_text(encoding="utf-8")
+    assert 'self.declare_parameter("normal_scan_topic", "/scan")' in scan_selector
+    assert 'self.declare_parameter("stair_scan_topic", "/m20pro/stair_obstacle_scan")' in scan_selector
+    assert 'self.declare_parameter("output_topic", "/m20pro/navigation_scan")' in scan_selector
+    assert "def _expire_stair_mode" in scan_selector
+    assert "if self.stair_active:" in scan_selector
+    assert 'label in ("stair_traverse", "stair_exit")' in floor_manager
+    assert "goal.behavior_tree = behavior_tree" in floor_manager
+    assert "stair_clearance_gate_decision(" in floor_manager
 
     fastdds_profile = (
         ROOT
@@ -185,6 +225,38 @@ def main() -> None:
     assert float(edge_env["HEIGHT_MAX"]) >= 0.60
     assert int(edge_env["MAX_POINTS"]) == 0
     assert 0.5 <= float(edge_env["BIN_HOLD_S"]) <= 1.0
+    assert edge_env["STAIR_SCAN_TOPIC"] == "/m20pro/stair_obstacle_scan"
+    assert edge_env["STAIR_STATUS_TOPIC"] == "/m20pro/stair_clearance"
+    assert edge_env["STAIR_MODE_TOPIC"] == "/m20pro/stair_perception_mode"
+    assert 0.3 <= float(edge_env["STAIR_PROFILE_HOLD_S"]) <= 0.75
+    assert 1.0 <= float(edge_env["STAIR_MODE_TIMEOUT_S"]) <= 2.0
+    assert float(edge_env["STAIR_MAX_STEP_HEIGHT"]) < float(edge_env["STAIR_OBSTACLE_HEIGHT"])
+    assert int(edge_env["STAIR_MIN_CORRIDOR_POINTS"]) > 0
+
+    edge_unit = (
+        ROOT
+        / "tools"
+        / "edge_scan_feasibility"
+        / "service"
+        / "m20pro-edge-scan-106.service.example"
+    ).read_text(encoding="utf-8")
+    for variable in (
+        "STAIR_SCAN_TOPIC",
+        "STAIR_STATUS_TOPIC",
+        "STAIR_MODE_TOPIC",
+        "STAIR_PROFILE_HOLD_S",
+        "STAIR_MODE_TIMEOUT_S",
+    ):
+        assert "${%s}" % variable in edge_unit
+
+    for topic in (
+        "/m20pro/navigation_scan",
+        "/m20pro/stair_obstacle_scan",
+        "/m20pro/stair_clearance",
+        "/m20pro/stair_perception_mode",
+        "/m20pro/navigation_scan_status",
+    ):
+        assert topic in recorder
 
     print("real Nav2 configuration contract tests passed")
 

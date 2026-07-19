@@ -89,6 +89,16 @@ def friendly_nav_status(status_text: str) -> str:
             return "%s完成" % transition_labels[label]
     if text.startswith("navigating_to_stair_entry"):
         return "跨楼层：正在前往楼梯入口"
+    if text.startswith("stair_transition_prepared"):
+        return "跨楼层：楼梯路线已确认，正在启动三维净空检查"
+    if text.startswith("checking_stair_clearance"):
+        return "跨楼层：正在确认楼梯通道净空"
+    if text.startswith("stair_clearance_confirmed"):
+        return "跨楼层：楼梯净空已确认，正在切换楼梯步态"
+    if text.startswith("checking_stair_exit_clearance"):
+        return "跨楼层：目标层已定位，正在确认楼梯出口净空"
+    if text.startswith("stair_exit_clearance_confirmed"):
+        return "跨楼层：出口净空已确认，正在离开楼梯区域"
     if text.startswith("started source_floor="):
         return "跨楼层：已切换楼梯步态，准备通过楼梯"
     if text.startswith("navigating_to_stair_platform"):
@@ -149,6 +159,18 @@ def friendly_nav_status(status_text: str) -> str:
     if "nav_goal_failed" in text:
         return "Nav2 当前点位执行失败，请查看状态码和现场障碍"
     if text.startswith("error "):
+        reason = str(payload.get("reason") or "")
+        stair_clearance_errors = {
+            "stair_clearance_blocked": "楼梯通道检测到异常障碍，任务已停止",
+            "stair_clearance_unknown": "楼梯三维轮廓无法确认安全，任务已停止",
+            "stair_clearance_timeout": "楼梯净空检查超时，任务已停止",
+            "stair_clearance_missing": "楼梯净空数据缺失，任务已停止",
+            "stair_clearance_stale": "楼梯净空数据已过期，任务已停止",
+            "stair_clearance_session_missing": "楼梯安全会话丢失，任务已停止",
+            "stair_behavior_tree_missing": "楼梯专用导航配置缺失，任务已停止",
+        }
+        if reason in stair_clearance_errors:
+            return stair_clearance_errors[reason]
         return "导航链路报错，任务已停止"
     return text
 

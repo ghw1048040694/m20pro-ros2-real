@@ -2976,6 +2976,9 @@ class WebDashboardNode(Node):
         ]
         navigation_topics = [
             self._topic("scan_topic"),
+            "/m20pro/navigation_scan",
+            "/m20pro/stair_obstacle_scan",
+            "/m20pro/stair_clearance",
             self._topic("odom_topic"),
             self._topic("pose_topic"),
             self._topic("localization_ok_topic"),

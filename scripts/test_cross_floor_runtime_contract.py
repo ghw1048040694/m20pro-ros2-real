@@ -18,9 +18,17 @@ def main() -> None:
         "/m20pro/floor_switch_request",
         "/m20pro/floor_switch_result",
         "/m20pro/set_current_floor",
+        "/m20pro/stair_perception_mode",
+        "/m20pro/stair_clearance",
     ):
-        assert topic in web
         assert topic in floor_manager
+        if topic in (
+            "/m20pro/floor_route_config",
+            "/m20pro/floor_switch_request",
+            "/m20pro/floor_switch_result",
+            "/m20pro/set_current_floor",
+        ):
+            assert topic in web
 
     assert "DurabilityPolicy.TRANSIENT_LOCAL" in web
     assert "DurabilityPolicy.TRANSIENT_LOCAL" in floor_manager
@@ -43,6 +51,12 @@ def main() -> None:
     assert 'self.current_floor = ""' in floor_manager
     assert "self.pending_floor_switch = None" in floor_manager
     assert "floor_switch_timeout_s" in floor_manager, "coordinated switch must have a bounded wait"
+    assert "_start_stair_clearance_session(self.pending_stair_transition)" in floor_manager
+    assert "_prepare_stair_exit_clearance()" in floor_manager
+    assert "_deactivate_stair_perception()" in floor_manager
+    assert 'session["phase"] = "platform"' in floor_manager
+    assert 'label in ("stair_traverse", "stair_exit")' in floor_manager
+    assert "self._cancel_active_nav_goal(reason)" in floor_manager
 
     print("cross-floor runtime contract tests passed")
 

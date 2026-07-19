@@ -329,6 +329,22 @@ def generate_launch_description():
         ),
         Node(
             package="m20pro_navigation",
+            executable="navigation_scan_selector",
+            name="m20pro_navigation_scan_selector",
+            output="screen",
+            parameters=[
+                {
+                    "normal_scan_topic": scan_topic,
+                    "stair_scan_topic": "/m20pro/stair_obstacle_scan",
+                    "mode_topic": "/m20pro/stair_perception_mode",
+                    "output_topic": "/m20pro/navigation_scan",
+                    "mode_timeout_s": 1.5,
+                }
+            ],
+            condition=IfCondition(enable_nav2 if nav2_stack_available else "false"),
+        ),
+        Node(
+            package="m20pro_navigation",
             executable="floor_manager",
             name="m20pro_floor_manager",
             output="screen",
@@ -339,6 +355,7 @@ def generate_launch_description():
                     "load_initial_floor": ParameterValue(load_initial_floor, value_type=bool),
                     "stair_zones_topic": stair_zones_topic,
                     "flat_gait_label": "flat",
+                    "stair_behavior_tree": "package://m20pro_bringup/behavior_trees/m20pro_stair_traverse_foxy.xml",
                 }
             ],
             condition=IfCondition(enable_floor_manager if nav2_stack_available else "false"),

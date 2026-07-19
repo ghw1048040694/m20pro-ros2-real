@@ -30,6 +30,7 @@ setup(
             "system_check = m20pro_navigation.system_check_node:main",
             "config_audit = m20pro_navigation.config_audit_node:main",
             "scan_recording_relay = m20pro_navigation.scan_recording_relay:main",
+            "navigation_scan_selector = m20pro_navigation.navigation_scan_selector:main",
         ],
     },
 )

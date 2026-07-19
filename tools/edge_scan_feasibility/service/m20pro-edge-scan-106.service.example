@@ -8,7 +8,7 @@ StartLimitIntervalSec=0
 Type=simple
 User=root
 EnvironmentFile=-/etc/m20pro-edge-scan-106.env
-ExecStart=/bin/bash -lc 'source /opt/robot/scripts/setup_ros2.sh && exec /usr/local/lib/m20pro/m20pro_edge_scan "${INPUT_TOPIC}" "${OUTPUT_TOPIC}" "${DURATION_S}" "${DOMAIN}" "${USE_SHM}" "${PREFIX}" "${HEIGHT_MIN}" "${HEIGHT_MAX}" "${MAX_PUBLISH_HZ}" "${MAX_POINTS}" "${FRAME_ID}" "${ANGLE_INCREMENT}" "${RANGE_MAX}" "${RANGE_MIN}" "${BIN_HOLD_S}"'
+ExecStart=/bin/bash -lc 'source /opt/robot/scripts/setup_ros2.sh && exec /usr/local/lib/m20pro/m20pro_edge_scan "${INPUT_TOPIC}" "${OUTPUT_TOPIC}" "${DURATION_S}" "${DOMAIN}" "${USE_SHM}" "${PREFIX}" "${HEIGHT_MIN}" "${HEIGHT_MAX}" "${MAX_PUBLISH_HZ}" "${MAX_POINTS}" "${FRAME_ID}" "${ANGLE_INCREMENT}" "${RANGE_MAX}" "${RANGE_MIN}" "${BIN_HOLD_S}" "${STAIR_SCAN_TOPIC}" "${STAIR_STATUS_TOPIC}" "${STAIR_MODE_TOPIC}" "${STAIR_FORWARD_MIN}" "${STAIR_FORWARD_MAX}" "${STAIR_HALF_WIDTH}" "${STAIR_OBSTACLE_HEIGHT}" "${STAIR_MAX_STEP_HEIGHT}" "${STAIR_MIN_CORRIDOR_POINTS}" "${STAIR_MIN_PROFILE_BINS}" "${STAIR_MIN_OBSTACLE_POINTS}" "${STAIR_PROFILE_HOLD_S}" "${STAIR_MODE_TIMEOUT_S}"'
 Restart=always
 RestartSec=3
 
