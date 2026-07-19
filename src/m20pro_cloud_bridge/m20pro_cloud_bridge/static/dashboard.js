@@ -48,6 +48,7 @@
       mapSwitching: false,
       liveRequestInFlight: false,
       multiFloor: null,
+      floorRoutes: {routes: [], candidates: [], maps: []},
       mappingSession: null,
       latestMappingSession: null,
       mappingCompletedStages: [],
@@ -86,6 +87,7 @@
           preflight: state.preflight,
           followRobot: state.followRobot,
           multiFloor: state.multiFloor,
+          floorRoutes: state.floorRoutes,
           mappingSession: state.mappingSession,
           latestMappingSession: state.latestMappingSession,
           taskDraftIds: state.taskDraftIds.slice(),
@@ -2418,7 +2420,7 @@
       if ($("mapStatusDetail")) $("mapStatusDetail").textContent = `${map.width} x ${map.height} / ${map.resolution.toFixed(3)} m/格`;
       updateMapModeUi();
       updateMarkControls();
-      await loadAnnotations();
+      await Promise.all([loadAnnotations(), loadFloorRoutes()]);
       if (resetView) resetMapView(false);
       resizeCanvas();
     }
@@ -2761,7 +2763,7 @@
         btn.addEventListener("click", async () => {
           try {
             await api("DELETE", `/api/annotations?id=${encodeURIComponent(btn.dataset.deleteMark)}`);
-            await loadAnnotations();
+            await Promise.all([loadAnnotations(), loadFloorRoutes()]);
             draw();
             showOperationFeedback("点位已删除", "点位已从当前地图移除。任务数据会按后端合同保持一致。 ");
           } catch (err) {
@@ -3260,6 +3262,81 @@
       renderCrossFloorComposer();
       renderMappingFloorSteps();
       return payload;
+    }
+
+    function floorRouteCandidate(id) {
+      return (state.floorRoutes.candidates || []).find(item => String(item.id) === String(id)) || null;
+    }
+
+    function replaceFloorRouteOptions(select, candidates, placeholder) {
+      if (!select) return;
+      const previous = select.value;
+      select.innerHTML = "";
+      const empty = document.createElement("option");
+      empty.value = "";
+      empty.textContent = placeholder;
+      select.appendChild(empty);
+      for (const item of candidates) {
+        const option = document.createElement("option");
+        option.value = item.id;
+        option.textContent = `${item.floor} / ${item.label}`;
+        select.appendChild(option);
+      }
+      select.value = candidates.some(item => String(item.id) === previous) ? previous : (candidates.length === 1 ? candidates[0].id : "");
+    }
+
+    function renderFloorRouteWorkspace() {
+      const candidates = state.floorRoutes.candidates || [];
+      const entries = candidates.filter(item => item.type === "stair_entry");
+      replaceFloorRouteOptions($("floorRouteEntry"), entries, entries.length ? "选择爬楼梯点" : "请先标注爬楼梯点");
+      const entry = floorRouteCandidate($("floorRouteEntry").value);
+      const sourceSwitches = candidates.filter(item => item.type === "stair_switch"
+        && entry && item.floor === entry.floor && item.map_id === entry.map_id);
+      replaceFloorRouteOptions($("floorRouteSourcePlatform"), sourceSwitches, sourceSwitches.length ? "选择起始层切换点" : "缺少同地图切换点");
+      const targetSwitches = candidates.filter(item => item.type === "stair_switch"
+        && entry && item.floor !== entry.floor);
+      replaceFloorRouteOptions($("floorRouteTargetPlatform"), targetSwitches, targetSwitches.length ? "选择目标层切换点" : "缺少目标层切换点");
+      const targetPlatform = floorRouteCandidate($("floorRouteTargetPlatform").value);
+      const exits = candidates.filter(item => item.type === "stair_exit"
+        && targetPlatform && item.floor === targetPlatform.floor && item.map_id === targetPlatform.map_id);
+      replaceFloorRouteOptions($("floorRoutePostExit"), exits, exits.length ? "选择目标层出楼梯点" : "缺少目标层出口点");
+
+      const sourcePlatform = floorRouteCandidate($("floorRouteSourcePlatform").value);
+      const postExit = floorRouteCandidate($("floorRoutePostExit").value);
+      const complete = !!(entry && sourcePlatform && targetPlatform && postExit);
+      $("saveFloorRouteBtn").disabled = !complete;
+      $("floorRoutePreview").textContent = complete
+        ? `${entry.floor} / ${entry.label} → ${sourcePlatform.label} → 切换 ${targetPlatform.floor} / ${targetPlatform.label} → ${postExit.label}`
+        : "依次选择起始层入口、两侧切换点和目标层出口";
+
+      const list = $("floorRouteList");
+      list.innerHTML = "";
+      const mapNames = new Map((state.floorRoutes.maps || []).map(item => [String(item.id), item.name || item.id]));
+      for (const route of state.floorRoutes.routes || []) {
+        const item = document.createElement("div");
+        item.className = "item";
+        item.innerHTML = `
+          <div class="item-head"><span>${escapeHtml(route.name || route.id)}</span><span class="tag">${route.direction === "down" ? "下楼" : "上楼"}</span></div>
+          <div class="item-meta">${escapeHtml(route.source_floor)} → ${escapeHtml(route.target_floor)} / ${escapeHtml(mapNames.get(String(route.source_map_id)) || route.source_map_id)} → ${escapeHtml(mapNames.get(String(route.target_map_id)) || route.target_map_id)}</div>
+          <div class="actions"><button class="danger" data-delete-floor-route="${escapeHtml(route.id)}">删除路线</button></div>`;
+        list.appendChild(item);
+      }
+      if (!(state.floorRoutes.routes || []).length) list.innerHTML = '<div class="small">尚未配置有向跨楼层路线</div>';
+      for (const button of list.querySelectorAll("[data-delete-floor-route]")) {
+        button.addEventListener("click", async () => {
+          if (!window.confirm("删除这条跨楼层路线？相关点位和地图不会删除。")) return;
+          try {
+            await api("POST", "/api/floor_routes/delete", {id: button.dataset.deleteFloorRoute});
+            await Promise.all([loadFloorRoutes(), loadMultiFloorWorkspace()]);
+          } catch (err) { showOperationFeedback("删除路线失败", err, true); }
+        });
+      }
+    }
+
+    async function loadFloorRoutes() {
+      state.floorRoutes = await fetchJson("/api/floor_routes");
+      renderFloorRouteWorkspace();
+      return state.floorRoutes;
     }
     async function loadTasks() {
       if (state.loadingTasks) return;
@@ -3824,6 +3901,24 @@
       renderMappingFloorSteps();
     });
     $("mappingMode").addEventListener("change", updateMappingModeUi);
+    for (const id of ["floorRouteEntry", "floorRouteSourcePlatform", "floorRouteTargetPlatform", "floorRoutePostExit"]) {
+      $(id).addEventListener("change", renderFloorRouteWorkspace);
+    }
+    $("reloadFloorRoutesBtn").addEventListener("click", () => loadFloorRoutes().catch(console.warn));
+    $("saveFloorRouteBtn").addEventListener("click", async () => {
+      try {
+        const payload = await api("POST", "/api/floor_routes", {
+          name: $("floorRouteName").value.trim(),
+          entry_annotation_id: $("floorRouteEntry").value,
+          source_platform_annotation_id: $("floorRouteSourcePlatform").value,
+          target_platform_annotation_id: $("floorRouteTargetPlatform").value,
+          post_exit_annotation_id: $("floorRoutePostExit").value
+        });
+        $("floorRouteName").value = "";
+        await Promise.all([loadFloorRoutes(), loadMultiFloorWorkspace()]);
+        showOperationFeedback("跨楼层路线已保存", payload.message || "路线已下发到导航系统");
+      } catch (err) { showOperationFeedback("保存跨楼层路线失败", err, true); }
+    });
     function mappingFlowError(err, stage) {
       const normalized = err && typeof err === "object"
         ? err
@@ -3847,6 +3942,22 @@
         throw mappingFlowError(err, "environment");
       }
       showMappingProgress("environment", environment);
+      const reusableSession = [state.mappingSession, state.latestMappingSession]
+        .find(session => mappingSessionMatchesDraft(session));
+      if (reusableSession) {
+        if (reusableSession.status === "mapping") {
+          const err = {ok: false, message: `${reusableSession.active_floor || "当前楼层"} 正在建图，请先完成/保存建图`};
+          showMappingProgress("mapping", err, true);
+          throw mappingFlowError(err, "mapping");
+        }
+        state.mappingSession = reusableSession;
+        state.sessionId = reusableSession.id;
+        setFloorControlValue("importFloor", reusableSession.active_floor);
+        $("importName").value = reusableSession.map_name || "";
+        showMappingProgress("session", {session: reusableSession});
+        renderMappingFloorSteps();
+        return reusableSession;
+      }
       showMappingProgress("session", null, false, true);
       try {
         const payload = await api("POST", "/api/mapping/session", {
@@ -3870,6 +3981,17 @@
         showMappingProgress("session", err, true);
         throw mappingFlowError(err, "session");
       }
+    }
+
+    function mappingSessionMatchesDraft(session) {
+      if (!session || !session.id) return false;
+      const floors = selectedMappingFloors();
+      const sessionFloors = Array.isArray(session.floors) ? session.floors.map(String) : [];
+      return String(session.project_name || "") === $("projectName").value.trim()
+        && String(session.building || "") === $("buildingName").value.trim()
+        && String(session.mode || "single") === String($("mappingMode").value || "single")
+        && sessionFloors.length === floors.length
+        && sessionFloors.every((floor, index) => floor === floors[index]);
     }
     $("startMappingBtn").addEventListener("click", async () => {
       if (!window.confirm("启动 106 真实建图？系统将先检查 106 环境、建立建图任务，再启动建图；本流程使用 -b，只建图，不立即切换为导航地图。")) return;
@@ -3938,7 +4060,7 @@
         } catch (err) {
           console.warn(err);
         }
-        await loadAnnotations();
+        await Promise.all([loadAnnotations(), loadFloorRoutes()]);
         await loadMultiFloorWorkspace();
         draw();
         setStatusPopover("", false);
@@ -4047,7 +4169,7 @@
             Speed: asInteger("markSpeed", 1)
           }
         });
-        await loadAnnotations();
+        await Promise.all([loadAnnotations(), loadFloorRoutes()]);
         state.markDraft = null;
         state.markDraftSource = "map_click";
         renderMarkPoseSummary();
@@ -4251,6 +4373,7 @@
     loadMaps()
       .then(loadAnnotations)
       .then(loadMultiFloorWorkspace)
+      .then(loadFloorRoutes)
       .then(loadPreflight)
       .then(loadTasks)
       .then(() => Promise.all([loadRadarResults(), loadRecordingStatus()]))

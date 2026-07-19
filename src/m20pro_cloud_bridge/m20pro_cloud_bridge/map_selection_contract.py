@@ -162,6 +162,7 @@ def apply_selected_map_choice_state(
     previous_map_id: Optional[str],
     record: Optional[Dict[str, Any]],
     nav2_load: Dict[str, Any],
+    reason: str = "manual_select",
     now_text: Optional[NowText] = None,
 ) -> Dict[str, Any]:
     updated = dict(settings)
@@ -176,7 +177,7 @@ def apply_selected_map_choice_state(
             map_id=selected_id,
             map_name=record.get("name") if isinstance(record, dict) else None,
             yaml_path=nav2_load.get("yaml_path"),
-            reason="manual_select",
+            reason=str(reason or "manual_select"),
             now_text=now_text or default_now_text,
         )
         updated["map_relocalization_required"] = relocalization_required

@@ -303,6 +303,21 @@ def test_friendly_nav_status() -> None:
         "switching map text",
     )
     assert_equal(
+        friendly_nav_status("requesting_coordinated_floor_switch source_floor=F20 target_floor=F21"),
+        "跨楼层：已到楼梯平台，准备同步切换 106 与 104 地图",
+        "coordinated switch preparation text",
+    )
+    assert_equal(
+        friendly_nav_status("floor_switch_request_sent request_id=req source_floor=F20 target_floor=F21"),
+        "跨楼层：正在同步切换 106 与 104 地图并确认定位",
+        "coordinated switch transaction text",
+    )
+    assert_equal(
+        friendly_nav_status("coordinated_floor_switch_confirmed target_floor=F21 map_id=map21"),
+        "跨楼层：地图与目标层定位已确认",
+        "coordinated switch confirmed text",
+    )
+    assert_equal(
         friendly_nav_status("blocked reason=not_at_entry distance=1.2 tolerance=0.8"),
         "跨楼层被阻塞：距离楼梯入口 1.20 m，超过 0.80 m",
         "blocked stair entry text",

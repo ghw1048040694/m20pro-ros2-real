@@ -974,6 +974,8 @@
       font-size: 15px;
     }
     .route-preview { color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .floor-route-list { max-height: 260px; overflow: auto; margin-top: 10px; }
+    .floor-route-list .item { margin-bottom: 6px; }
     .item-details {
       border: 0;
       margin: 5px 0 0;

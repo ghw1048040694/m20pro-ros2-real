@@ -231,6 +231,21 @@ def test_apply_selected_map_choice_state() -> None:
     assert_equal(selected["relocalization_required"]["map_name"], "F20_TEST", "relocalization map name")
     assert_equal(selected["relocalization_required"]["reason"], "manual_select", "manual select reason")
 
+    cross_floor = apply_selected_map_choice_state(
+        {"selected_map_id": "map_a"},
+        map_id="map_b",
+        previous_map_id="map_a",
+        record={"name": "F21_TEST"},
+        nav2_load={"ok": True, "loaded": True, "yaml_path": "/tmp/map_b.yaml"},
+        reason="cross_floor_transition",
+        now_text=now_text,
+    )
+    assert_equal(
+        cross_floor["settings"]["map_relocalization_required"]["reason"],
+        "cross_floor_transition",
+        "cross-floor switch reason",
+    )
+
     unchanged = apply_selected_map_choice_state(
         {"selected_map_id": "map_a", "map_relocalization_required": {"old": True}},
         map_id="map_a",

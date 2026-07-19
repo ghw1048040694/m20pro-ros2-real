@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>M20Pro 现场操作台</title>
   <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="/static/dashboard.css?v=20260717-map-delete-layout-1" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=20260719-cross-floor-1" />
 
 </head>
 <body>
@@ -159,6 +159,35 @@
             <div class="actions">
               <button class="primary" id="importMapBtn">从 106 拉到 104</button>
             </div>
+          </div>
+          <div class="section">
+            <h2>跨楼层路线</h2>
+            <div class="row">
+              <label>路线名称</label>
+              <input id="floorRouteName" placeholder="例如 1层到2层东楼梯" />
+            </div>
+            <div class="row">
+              <label>起始层入口</label>
+              <select id="floorRouteEntry"></select>
+            </div>
+            <div class="row">
+              <label>起始层切换点</label>
+              <select id="floorRouteSourcePlatform"></select>
+            </div>
+            <div class="row">
+              <label>目标层切换点</label>
+              <select id="floorRouteTargetPlatform"></select>
+            </div>
+            <div class="row">
+              <label>目标层出口</label>
+              <select id="floorRoutePostExit"></select>
+            </div>
+            <div id="floorRoutePreview" class="route-preview">请先在两层地图标注楼梯语义点</div>
+            <div class="actions">
+              <button class="primary" id="saveFloorRouteBtn" disabled>保存有向路线</button>
+              <button id="reloadFloorRoutesBtn">刷新</button>
+            </div>
+            <div id="floorRouteList" class="list floor-route-list"></div>
           </div>
         </section>
 
@@ -342,7 +371,7 @@
   </dialog>
 
   <script src="http://10.21.31.104:8888/video1/hls.min.js"></script>
-  <script src="/static/dashboard.js?v=20260717-map-delete-layout-1"></script>
+  <script src="/static/dashboard.js?v=20260719-cross-floor-1"></script>
 
 </body>
 </html>

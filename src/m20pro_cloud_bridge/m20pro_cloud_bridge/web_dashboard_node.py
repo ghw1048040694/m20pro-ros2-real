@@ -74,6 +74,15 @@ from .floor_identity_contract import (
     validate_mapping_session_identity,
     validate_registered_floor,
 )
+from .floor_route_contract import (
+    floor_route_public_payload,
+    remove_floor_route,
+    resolve_floor_switch_request,
+    runtime_floor_config,
+    upsert_floor_route,
+    validate_floor_route,
+    validate_floor_route_set,
+)
 from .localization_contract import (
     factory_localization_ok_from_sources,
     initialpose_api_response_payload,
@@ -706,7 +715,6 @@ class WebDashboardNode(Node):
         self.map_archive_dir.mkdir(parents=True, exist_ok=True)
 
         self._projects = self._load_json("projects.json", [])
-        self._route_config_floor_ids = self._static_route_floor_ids()
         self._maps = self._load_json("maps.json", [])
         builtin_maps = self._load_builtin_maps()
         self._default_builtin_floor: Optional[str] = builtin_maps["default_floor"]
@@ -715,6 +723,8 @@ class WebDashboardNode(Node):
         self._annotations = self._load_json("annotations.json", [])
         self._tasks = self._load_json("tasks.json", [])
         self._sessions = self._load_json("mapping_sessions.json", [])
+        self._floor_routes = self._load_json("floor_routes.json", [])
+        self._route_config_floor_ids = self._configured_route_floor_ids()
         self._settings = self._load_json(
             "settings.json",
             {"selected_map_id": None, "working_map_id": None, "active_task": None},
@@ -743,6 +753,8 @@ class WebDashboardNode(Node):
         self._startup_map_sync_attempts = 0
         self._startup_map_sync_lock = threading.Lock()
         self._startup_map_sync_inflight = False
+        self._floor_switch_lock = threading.Lock()
+        self._floor_switch_inflight: Optional[str] = None
 
         self.floor_goal_pub = self.create_publisher(
             PoseStamped,
@@ -772,6 +784,24 @@ class WebDashboardNode(Node):
         self.stair_zones_pub = self.create_publisher(
             String,
             str(self.get_parameter("stair_zones_topic").value),
+            10,
+        )
+        route_qos = QoSProfile(depth=1)
+        route_qos.reliability = ReliabilityPolicy.RELIABLE
+        route_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        self.floor_route_config_pub = self.create_publisher(
+            String,
+            str(self.get_parameter("floor_route_config_topic").value),
+            route_qos,
+        )
+        self.floor_switch_result_pub = self.create_publisher(
+            String,
+            str(self.get_parameter("floor_switch_result_topic").value),
+            10,
+        )
+        self.floor_context_pub = self.create_publisher(
+            String,
+            str(self.get_parameter("floor_context_topic").value),
             10,
         )
         self.clear_costmap_clients = []
@@ -821,6 +851,7 @@ class WebDashboardNode(Node):
         }
 
         self._create_subscriptions()
+        self._publish_runtime_floor_config()
         self.create_timer(1.0, self._tick_active_task)
         self.create_timer(2.0, self._publish_selected_stair_zones)
         self._server = self._start_http_server()
@@ -867,6 +898,11 @@ class WebDashboardNode(Node):
         self.declare_parameter("map_import_timeout_s", 180.0)
         self.declare_parameter("enable_stair_zone_postprocess", True)
         self.declare_parameter("stair_zones_topic", "/m20pro/stair_zones")
+        self.declare_parameter("floor_route_config_topic", "/m20pro/floor_route_config")
+        self.declare_parameter("floor_switch_request_topic", "/m20pro/floor_switch_request")
+        self.declare_parameter("floor_switch_result_topic", "/m20pro/floor_switch_result")
+        self.declare_parameter("floor_context_topic", "/m20pro/set_current_floor")
+        self.declare_parameter("cross_floor_factory_apply_timeout_s", 30.0)
         self.declare_parameter("goal_reached_tolerance_m", 0.3)
         self.declare_parameter("task_goal_resend_interval_s", 5.0)
         self.declare_parameter("task_goal_accept_timeout_s", 12.0)
@@ -1242,6 +1278,12 @@ class WebDashboardNode(Node):
         scan_qos.reliability = ReliabilityPolicy.BEST_EFFORT
 
         self.create_subscription(String, self._topic("current_floor_topic"), self._on_current_floor, 10)
+        self.create_subscription(
+            String,
+            self._topic("floor_switch_request_topic"),
+            self._on_floor_switch_request,
+            10,
+        )
         self.create_subscription(String, self._topic("stair_status_topic"), self._on_stair_status, 10)
         self.create_subscription(String, self._topic("gait_command_topic"), self._on_gait_command, 10)
         self.create_subscription(String, self._topic("gait_result_topic"), self._on_gait_result, 10)
@@ -2314,18 +2356,25 @@ class WebDashboardNode(Node):
             }
         try:
             with path.open("r", encoding="utf-8") as file:
-                config = yaml.safe_load(file) or {}
-            if not isinstance(config, dict):
+                base_config = yaml.safe_load(file) or {}
+            if not isinstance(base_config, dict):
                 raise ValueError("配置根节点必须是对象")
-            static_floors = configured_floor_ids(config)
             with self._data_lock:
                 projects = [dict(item) for item in self._projects]
+                routes = [dict(item) for item in self._floor_routes]
+            config = (
+                runtime_floor_config(routes, mission=base_config.get("mission"))
+                if routes
+                else dict(base_config)
+            )
+            route_floors = configured_floor_ids(config)
             config = augment_floor_config(config, projects)
             return {
                 "ok": True,
                 "config": config,
                 "path": str(path),
-                "route_config_floors": static_floors,
+                "route_config_floors": route_floors,
+                "dynamic_route_count": len(routes),
             }
         except Exception as exc:
             return {
@@ -2346,6 +2395,11 @@ class WebDashboardNode(Node):
         except Exception:
             return set()
         return set(configured_floor_ids(config if isinstance(config, dict) else {}))
+
+    def _configured_route_floor_ids(self) -> set:
+        if self._floor_routes:
+            return set(configured_floor_ids(runtime_floor_config(self._floor_routes)))
+        return self._static_route_floor_ids()
 
     def _operational_floor(self, reported_floor: Any, selected_map_id: Any = None) -> Any:
         reported = str(reported_floor or "").strip() or None
@@ -2379,6 +2433,332 @@ class WebDashboardNode(Node):
             workspace["message"] = config_payload.get("message")
             workspace["config_error"] = config_payload.get("error")
         return workspace
+
+    def _route_map_yaml(self, record: Dict[str, Any]) -> str:
+        value = str(record.get("yaml_path") or record.get("map_yaml") or "").strip()
+        if not value:
+            return ""
+        try:
+            path = FsPath(self._resolve_path(value))
+        except Exception:
+            return ""
+        return str(path) if path.is_file() else ""
+
+    def _floor_routes_payload(self) -> Dict[str, Any]:
+        with self._data_lock:
+            return floor_route_public_payload(
+                self._floor_routes,
+                annotations=self._annotations,
+                maps=self._all_maps_unlocked(),
+            )
+
+    def _publish_runtime_floor_config(self) -> None:
+        config_payload = self._floor_config_payload()
+        if not config_payload.get("ok"):
+            self.get_logger().warning(str(config_payload.get("message") or "楼梯路线配置不可用"))
+            return
+        message = String()
+        message.data = json.dumps(
+            {
+                "version": now_text(),
+                "config": config_payload["config"],
+                "route_count": int(config_payload.get("dynamic_route_count") or 0),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        self.floor_route_config_pub.publish(message)
+
+    def _save_floor_route(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        with self._data_lock:
+            active = dict(self._settings.get("active_task") or {})
+            if active.get("status") == "running":
+                return self._error("任务执行中不能修改跨楼层路线")
+            maps = {str(item.get("id")): dict(item) for item in self._all_maps_unlocked() if item.get("id")}
+            annotations = {
+                str(item.get("id")): dict(item)
+                for item in self._annotations
+                if item.get("id")
+            }
+            existing = [dict(item) for item in self._floor_routes]
+        route_id = str(payload.get("id") or "").strip() or new_id("floor_route")
+        validated = validate_floor_route(
+            payload,
+            annotations_by_id=annotations,
+            maps_by_id=maps,
+            resolve_map_yaml=self._route_map_yaml,
+            route_id=route_id,
+            now_text=now_text(),
+        )
+        if not validated.get("ok"):
+            return self._error(
+                str(validated.get("message") or "楼梯路线无效"),
+                {key: value for key, value in validated.items() if key not in ("ok", "message")},
+            )
+        route = dict(validated["route"])
+        candidate_routes = upsert_floor_route(existing, route)
+        route_set = validate_floor_route_set(candidate_routes)
+        if not route_set.get("ok"):
+            return self._error(
+                str(route_set.get("message") or "跨楼层路线集合无效"),
+                {key: value for key, value in route_set.items() if key not in ("ok", "message")},
+            )
+        with self._data_lock:
+            self._floor_routes = candidate_routes
+            self._save_json("floor_routes.json", self._floor_routes)
+            self._route_config_floor_ids = self._configured_route_floor_ids()
+        self._publish_runtime_floor_config()
+        self._append_event(
+            "跨楼层路线已保存",
+            {
+                "route_id": route["id"],
+                "source_floor": route["source_floor"],
+                "target_floor": route["target_floor"],
+                "source_map_id": route["source_map_id"],
+                "target_map_id": route["target_map_id"],
+            },
+        )
+        return {"ok": True, "route": route, "message": "跨楼层路线已保存并下发到 floor_manager"}
+
+    def _delete_floor_route(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        route_id = str(payload.get("id") or payload.get("route_id") or "").strip()
+        if not route_id:
+            return self._error("请指定要删除的跨楼层路线")
+        with self._data_lock:
+            active = dict(self._settings.get("active_task") or {})
+            if active.get("status") == "running":
+                return self._error("任务执行中不能删除跨楼层路线")
+            updated, removed = remove_floor_route(self._floor_routes, route_id)
+            if not removed:
+                return self._error("跨楼层路线不存在")
+            self._floor_routes = updated
+            self._save_json("floor_routes.json", self._floor_routes)
+            self._route_config_floor_ids = self._configured_route_floor_ids()
+        self._publish_runtime_floor_config()
+        self._append_event("跨楼层路线已删除", {"route_id": route_id})
+        return {"ok": True, "route_id": route_id, "message": "跨楼层路线已删除"}
+
+    def _publish_floor_switch_result(self, payload: Dict[str, Any]) -> None:
+        message = String()
+        message.data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        self.floor_switch_result_pub.publish(message)
+        self._append_event("跨楼层地图事务", payload)
+
+    def _on_floor_switch_request(self, msg: String) -> None:
+        try:
+            request = json.loads(msg.data)
+        except Exception as exc:
+            self._publish_floor_switch_result(
+                {"ok": False, "code": "floor_switch_request_invalid", "message": str(exc)}
+            )
+            return
+        if not isinstance(request, dict):
+            self._publish_floor_switch_result(
+                {"ok": False, "code": "floor_switch_request_invalid", "message": "切层请求不是对象"}
+            )
+            return
+        request_id = str(request.get("request_id") or "").strip()
+        if not request_id:
+            self._publish_floor_switch_result(
+                {"ok": False, "code": "floor_switch_request_id_missing", "message": "切层请求缺少 request_id"}
+            )
+            return
+        with self._floor_switch_lock:
+            if self._floor_switch_inflight:
+                self._publish_floor_switch_result(
+                    {
+                        "ok": False,
+                        "request_id": request_id,
+                        "code": "floor_switch_busy",
+                        "message": "已有跨楼层地图事务正在执行",
+                        "active_request_id": self._floor_switch_inflight,
+                    }
+                )
+                return
+            self._floor_switch_inflight = request_id
+        threading.Thread(
+            target=self._run_floor_switch_transaction,
+            args=(dict(request),),
+            daemon=True,
+            name=f"floor-switch-{request_id[-8:]}",
+        ).start()
+
+    def _run_floor_switch_transaction(self, request: Dict[str, Any]) -> None:
+        request_id = str(request.get("request_id") or "")
+        source_map_id = ""
+        factory_timeout_s: Optional[float] = None
+        activation_succeeded = False
+        try:
+            with self._data_lock:
+                active = dict(self._settings.get("active_task") or {})
+                routes = [dict(item) for item in self._floor_routes]
+                selected_map_id = self._settings.get("selected_map_id")
+            context = resolve_floor_switch_request(
+                request,
+                routes=routes,
+                active_task=active,
+                selected_map_id=selected_map_id,
+            )
+            if not context.get("ok"):
+                self._publish_floor_switch_result(
+                    {
+                        **context,
+                        "request_id": request_id,
+                    }
+                )
+                return
+            route = dict(context["route"])
+            source_floor = str(context["source_floor"])
+            target_floor = str(context["target_floor"])
+            source_map_id = str(context["source_map_id"])
+            task_id = str(context["task_id"])
+            target_map_id = str(route.get("target_map_id") or "").strip()
+            target_pose = dict(route.get("target_platform") or {})
+            factory_timeout_s = max(
+                10.0,
+                min(60.0, float(self.get_parameter("cross_floor_factory_apply_timeout_s").value)),
+            )
+            activation = self._select_map(
+                {"map_id": target_map_id},
+                allow_active_task=True,
+                reason="cross_floor_transition",
+                factory_timeout_s=factory_timeout_s,
+            )
+            if not activation.get("ok"):
+                self._publish_floor_switch_result(
+                    {
+                        "ok": False,
+                        "request_id": request_id,
+                        "route_id": route.get("id"),
+                        "source_floor": source_floor,
+                        "target_floor": target_floor,
+                        "target_map_id": target_map_id,
+                        "code": str(activation.get("code") or "floor_switch_map_failed"),
+                        "message": str(activation.get("message") or "106/104 地图切换失败"),
+                        "map_transaction": activation,
+                        "state_uncertain": bool(activation.get("state_uncertain")),
+                    }
+                )
+                return
+            activation_succeeded = True
+            if not self._floor_switch_task_is_active(task_id):
+                rollback = self._rollback_floor_switch_map(source_map_id, factory_timeout_s)
+                activation_succeeded = False
+                self._publish_floor_switch_result(
+                    {
+                        "ok": False,
+                        "request_id": request_id,
+                        "route_id": route.get("id"),
+                        "source_floor": source_floor,
+                        "target_floor": target_floor,
+                        "target_map_id": target_map_id,
+                        "code": "floor_switch_task_cancelled",
+                        "message": "跨楼层任务已停止，地图事务已回滚",
+                        "map_transaction": activation,
+                        "rollback": rollback,
+                        "state_uncertain": not bool(rollback.get("ok")),
+                    }
+                )
+                return
+            relocalization = self._publish_initialpose(
+                {
+                    "floor": target_floor,
+                    "frame_id": "map",
+                    "x": target_pose.get("x"),
+                    "y": target_pose.get("y"),
+                    "z": target_pose.get("z", 0.0),
+                    "yaw": target_pose.get("yaw"),
+                },
+                allow_active_task=True,
+                event_text="跨楼层自动重定位",
+            )
+            task_still_active = self._floor_switch_task_is_active(task_id)
+            if not relocalization.get("confirmed") or not task_still_active:
+                rollback = self._rollback_floor_switch_map(source_map_id, factory_timeout_s)
+                activation_succeeded = False
+                state_uncertain = not bool(rollback.get("ok"))
+                cancelled = not task_still_active
+                self._publish_floor_switch_result(
+                    {
+                        "ok": False,
+                        "request_id": request_id,
+                        "route_id": route.get("id"),
+                        "source_floor": source_floor,
+                        "target_floor": target_floor,
+                        "target_map_id": target_map_id,
+                        "code": (
+                            "floor_switch_task_cancelled"
+                            if cancelled
+                            else str(relocalization.get("code") or "floor_switch_relocalization_failed")
+                        ),
+                        "message": (
+                            "跨楼层任务已停止，地图事务已回滚"
+                            if cancelled
+                            else str(relocalization.get("message") or "目标层 2101 重定位未确认")
+                        ),
+                        "map_transaction": activation,
+                        "relocalization": relocalization,
+                        "rollback": rollback,
+                        "state_uncertain": state_uncertain,
+                    }
+                )
+                return
+            self._publish_floor_switch_result(
+                {
+                    "ok": True,
+                    "request_id": request_id,
+                    "route_id": route.get("id"),
+                    "source_floor": source_floor,
+                    "target_floor": target_floor,
+                    "target_map_id": target_map_id,
+                    "target_pose": target_pose,
+                    "message": "106 原厂地图、104 Nav2 地图和 2101 重定位均已确认",
+                    "map_transaction": activation,
+                    "relocalization": relocalization,
+                }
+            )
+            activation_succeeded = False
+        except Exception as exc:
+            self.get_logger().exception("cross-floor map transaction failed")
+            rollback = None
+            if activation_succeeded and source_map_id and factory_timeout_s is not None:
+                rollback = self._rollback_floor_switch_map(source_map_id, factory_timeout_s)
+            self._publish_floor_switch_result(
+                {
+                    "ok": False,
+                    "request_id": request_id,
+                    "code": "floor_switch_exception",
+                    "message": str(exc),
+                    "rollback": rollback,
+                    "state_uncertain": bool(activation_succeeded and not (rollback or {}).get("ok")),
+                }
+            )
+        finally:
+            with self._floor_switch_lock:
+                if self._floor_switch_inflight == request_id:
+                    self._floor_switch_inflight = None
+
+    def _floor_switch_task_is_active(self, task_id: str) -> bool:
+        with self._data_lock:
+            active = dict(self._settings.get("active_task") or {})
+        return (
+            bool(task_id)
+            and str(active.get("task_id") or "") == str(task_id)
+            and str(active.get("status") or "") == "running"
+            and bool(active.get("multi_floor"))
+        )
+
+    def _rollback_floor_switch_map(
+        self,
+        source_map_id: str,
+        factory_timeout_s: float,
+    ) -> Dict[str, Any]:
+        return self._select_map(
+            {"map_id": source_map_id},
+            allow_active_task=True,
+            reason="cross_floor_rollback",
+            factory_timeout_s=factory_timeout_s,
+        )
 
     def _floor_identity_validation(self, floor: Any, *, subject: str) -> Dict[str, Any]:
         config_payload = self._floor_config_payload()
@@ -2830,6 +3210,16 @@ class WebDashboardNode(Node):
             active = dict(self._settings.get("active_task") or {})
             if active.get("status") == "running":
                 return self._error("任务执行中不能删除地图，请先停止当前任务")
+            route_dependencies = [
+                str(item.get("id") or "")
+                for item in self._floor_routes
+                if map_id in (str(item.get("source_map_id") or ""), str(item.get("target_map_id") or ""))
+            ]
+            if route_dependencies:
+                return self._error(
+                    "地图正在被跨楼层路线使用，请先删除对应路线",
+                    {"code": "map_used_by_floor_route", "route_ids": route_dependencies},
+                )
             record = self._find_map_record_unlocked(map_id)
             if record is None:
                 return self._error("地图不存在")
@@ -3134,14 +3524,22 @@ class WebDashboardNode(Node):
             % (len(cloned_annotations), len(cloned_tasks)),
         }
 
-    def _select_map(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _select_map(
+        self,
+        payload: Dict[str, Any],
+        *,
+        allow_active_task: bool = False,
+        reason: str = "manual_select",
+        factory_timeout_s: Optional[float] = None,
+    ) -> Dict[str, Any]:
         map_id = str(payload.get("map_id") or "").strip() or None
         record: Optional[Dict[str, Any]] = None
         with self._data_lock:
             active = self._settings.get("active_task") or {}
-            if active.get("status") == "running":
+            if active.get("status") == "running" and not allow_active_task:
                 return self._error("任务执行中不能切换地图，请先停止当前任务")
             previous_map_id = self._settings.get("selected_map_id")
+            previous_record = self._find_map_record_unlocked(previous_map_id)
             if map_id:
                 record = self._find_map_record_unlocked(map_id)
                 if record is None:
@@ -3156,9 +3554,19 @@ class WebDashboardNode(Node):
         if map_id:
             nav2_load = self._load_selected_map_into_nav2(record)
             if not nav2_load.get("ok"):
+                rollback_nav2 = (
+                    self._load_selected_map_into_nav2(previous_record)
+                    if previous_record is not None and nav2_load.get("map_change_possible")
+                    else {"ok": True, "skipped": True, "message": "Nav2 地图未发生可见切换，无需回滚"}
+                )
                 return self._error(
                     str(nav2_load["message"]),
-                    {"code": "nav2_map_load_failed", "nav2_load_map": nav2_load},
+                    {
+                        "code": "nav2_map_load_failed",
+                        "nav2_load_map": nav2_load,
+                        "rollback_nav2_map": rollback_nav2,
+                        "state_uncertain": not bool(rollback_nav2.get("ok")),
+                    },
                 )
         else:
             nav2_load = {
@@ -3166,18 +3574,36 @@ class WebDashboardNode(Node):
                 "skipped": True,
                 "message": "已切换到实时 /map 观察；未调用 Nav2 load_map",
             }
-        factory_apply = self._apply_selected_map_to_factory(record) if map_id and record else {
+        factory_apply = self._apply_selected_map_to_factory(
+            record,
+            timeout_s=factory_timeout_s,
+        ) if map_id and record else {
             "ok": True,
             "skipped": True,
             "message": "未选择固定地图；未调用 106 drmap apply",
         }
         if not factory_apply.get("ok"):
+            rollback_nav2 = (
+                self._load_selected_map_into_nav2(previous_record)
+                if previous_record is not None
+                else {"ok": True, "skipped": True, "message": "没有上一张固定地图可回滚"}
+            )
+            rollback_factory = (
+                self._apply_selected_map_to_factory(previous_record, timeout_s=factory_timeout_s)
+                if previous_record is not None
+                else {"ok": True, "skipped": True, "message": "没有上一张 106 固定地图可回滚"}
+            )
             return self._error(
                 str(factory_apply.get("message") or "106 原厂地图切换失败"),
                 {
                     "code": "factory_map_apply_failed",
                     "nav2_load_map": nav2_load,
                     "factory_apply_map": factory_apply,
+                    "rollback_nav2_map": rollback_nav2,
+                    "rollback_factory_map": rollback_factory,
+                    "state_uncertain": not (
+                        bool(rollback_nav2.get("ok")) and bool(rollback_factory.get("ok"))
+                    ),
                 },
             )
         with self._data_lock:
@@ -3187,6 +3613,7 @@ class WebDashboardNode(Node):
                 previous_map_id=previous_map_id,
                 record=record,
                 nav2_load=nav2_load,
+                reason=reason,
                 now_text=now_text,
             )
             self._settings = result["settings"]
@@ -3201,6 +3628,11 @@ class WebDashboardNode(Node):
                 self._state["pose_history"] = []
                 self._state["path"] = {"version": int(self._state.get("path", {}).get("version", 0) or 0) + 1, "points": []}
                 self._state["local_path"] = {"version": int(self._state.get("local_path", {}).get("version", 0) or 0) + 1, "points": []}
+        if record is not None and reason != "cross_floor_transition":
+            floor_message = String()
+            floor_message.data = str(record.get("floor") or "").strip()
+            if floor_message.data:
+                self.floor_context_pub.publish(floor_message)
         effective_map_id = self._effective_map_id()
         self._remember_working_map_id(effective_map_id, reason="select_map_effective_map")
         with self._data_lock:
@@ -3275,12 +3707,14 @@ class WebDashboardNode(Node):
         while rclpy.ok() and not future.done() and time.monotonic() < deadline:
             time.sleep(0.02)
         if not future.done():
+            future.cancel()
             return {
                 "ok": False,
                 "code": "load_map_timeout",
                 "message": f"Nav2 load_map 超时 {timeout_s:.1f}s",
                 "yaml_path": str(yaml_path),
                 "image_repair": image_repair,
+                "map_change_possible": True,
             }
         try:
             response = future.result()
@@ -3304,6 +3738,17 @@ class WebDashboardNode(Node):
             }
         self._clear_task_costmaps("select_map_load_nav2")
         match = self._wait_for_selected_map_match(selected_map)
+        if not match.get("ready"):
+            return {
+                "ok": False,
+                "code": "selected_map_not_observed",
+                "message": "Nav2 load_map 已返回成功，但 /map 未确认切换到目标地图",
+                "yaml_path": str(yaml_path),
+                "result": result,
+                "selected_map_status": match,
+                "image_repair": image_repair,
+                "map_change_possible": True,
+            }
         return {
             "ok": True,
             "loaded": True,
@@ -3711,7 +4156,12 @@ class WebDashboardNode(Node):
             timeout=timeout,
         )
 
-    def _apply_selected_map_to_factory(self, record: Dict[str, Any]) -> Dict[str, Any]:
+    def _apply_selected_map_to_factory(
+        self,
+        record: Dict[str, Any],
+        *,
+        timeout_s: Optional[float] = None,
+    ) -> Dict[str, Any]:
         source_path = str(
             record.get("factory_apply_path")
             or record.get("source_path")
@@ -3726,7 +4176,11 @@ class WebDashboardNode(Node):
             return {"ok": True, "skipped": True, "message": "地图不是 106 原厂地图包；未调用 drmap apply", "source_path": source_path}
         factory_host = str(self.get_parameter("factory_host").value).strip()
         factory_user = str(self.get_parameter("factory_user").value).strip()
-        timeout = min(120.0, max(10.0, float(self.get_parameter("map_import_timeout_s").value)))
+        timeout = (
+            min(120.0, max(10.0, float(timeout_s)))
+            if timeout_s is not None
+            else min(120.0, max(10.0, float(self.get_parameter("map_import_timeout_s").value)))
+        )
         command = f"sudo -n drmap apply {shlex.quote(source_path)}"
         result = self._run_factory_shell(
             command,
@@ -4286,6 +4740,22 @@ class WebDashboardNode(Node):
             active = self._settings.get("active_task") or {}
             if active.get("status") == "running" and annotation_id in (active.get("annotation_ids") or []):
                 return self._error("点位正在当前任务中执行，请先停止任务再删除")
+            route_dependencies = [
+                str(route.get("id") or "")
+                for route in self._floor_routes
+                if annotation_id
+                in (
+                    str(route.get("entry_annotation_id") or ""),
+                    str(route.get("source_platform_annotation_id") or ""),
+                    str(route.get("target_platform_annotation_id") or ""),
+                    str(route.get("post_exit_annotation_id") or ""),
+                )
+            ]
+            if route_dependencies:
+                return self._error(
+                    "点位正在被跨楼层路线使用，请先删除对应路线",
+                    {"code": "annotation_used_by_floor_route", "route_ids": route_dependencies},
+                )
             before = len(self._annotations)
             self._annotations = [item for item in self._annotations if item.get("id") != annotation_id]
             if len(self._annotations) == before:
@@ -4309,6 +4779,22 @@ class WebDashboardNode(Node):
             active = self._settings.get("active_task") or {}
             if active.get("status") == "running" and annotation_id in (active.get("annotation_ids") or []):
                 return self._error("点位正在当前任务中执行，请先停止任务再修改")
+            route_dependencies = [
+                str(route.get("id") or "")
+                for route in self._floor_routes
+                if annotation_id
+                in (
+                    str(route.get("entry_annotation_id") or ""),
+                    str(route.get("source_platform_annotation_id") or ""),
+                    str(route.get("target_platform_annotation_id") or ""),
+                    str(route.get("post_exit_annotation_id") or ""),
+                )
+            ]
+            if route_dependencies:
+                return self._error(
+                    "点位正在被跨楼层路线使用，请先删除路线后再修改",
+                    {"code": "annotation_used_by_floor_route", "route_ids": route_dependencies},
+                )
             existing = next((dict(item) for item in self._annotations if item.get("id") == annotation_id), None)
         if existing is None:
             return self._error("点位不存在")
@@ -5812,10 +6298,16 @@ class WebDashboardNode(Node):
             "message": "已发送停止/复位指令" if stopped_task_id else "已显式复位导航状态",
         }
 
-    def _publish_initialpose(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _publish_initialpose(
+        self,
+        payload: Dict[str, Any],
+        *,
+        allow_active_task: bool = False,
+        event_text: str = "网页发布重定位",
+    ) -> Dict[str, Any]:
         with self._data_lock:
             active = self._settings.get("active_task") or {}
-            if active.get("status") == "running":
+            if active.get("status") == "running" and not allow_active_task:
                 return self._error("任务执行中不能重定位，请先停止当前任务")
         request_started_at = time.time()
         request = parse_initialpose_request(payload)
@@ -5916,7 +6408,7 @@ class WebDashboardNode(Node):
             floor=floor,
             pose={"x": x, "y": y, "z": z, "yaw": yaw},
         )
-        self._append_event("网页发布重定位", result)
+        self._append_event(str(event_text or "网页发布重定位"), result)
         return result
 
     def _wait_for_relocalization_verification(
@@ -7115,6 +7607,8 @@ class WebDashboardNode(Node):
                         self._send_json(node._maps_payload())
                     elif parsed.path == "/api/multi_floor":
                         self._send_json(node._multi_floor_payload())
+                    elif parsed.path == "/api/floor_routes":
+                        self._send_json(node._floor_routes_payload())
                     elif parsed.path == "/api/annotations":
                         self._send_json(node._annotations_payload(query))
                     elif parsed.path == "/api/tasks":
@@ -7194,6 +7688,10 @@ class WebDashboardNode(Node):
                         self._send_api(node._create_task(payload))
                     elif parsed.path == "/api/tasks/cross_floor":
                         self._send_api(node._create_cross_floor_task(payload))
+                    elif parsed.path == "/api/floor_routes":
+                        self._send_api(node._save_floor_route(payload))
+                    elif parsed.path == "/api/floor_routes/delete":
+                        self._send_api(node._delete_floor_route(payload))
                     elif parsed.path == "/api/tasks/update":
                         self._send_api(node._update_task(payload))
                     elif parsed.path == "/api/tasks/start":

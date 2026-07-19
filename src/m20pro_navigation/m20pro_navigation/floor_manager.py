@@ -15,6 +15,7 @@ from nav2_msgs.action import NavigateToPose
 from nav2_msgs.srv import ClearEntireCostmap, LoadMap
 from rclpy.action import ActionClient
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
 
 from .geometry import quaternion_to_yaw, yaw_to_quaternion
@@ -46,6 +47,11 @@ class FloorManager(Node):
         self.declare_parameter("stair_status_topic", "/m20pro/stair_status")
         self.declare_parameter("gait_command_topic", "/m20pro/gait_command")
         self.declare_parameter("stair_zones_topic", "/m20pro/stair_zones")
+        self.declare_parameter("floor_route_config_topic", "/m20pro/floor_route_config")
+        self.declare_parameter("floor_switch_request_topic", "/m20pro/floor_switch_request")
+        self.declare_parameter("floor_switch_result_topic", "/m20pro/floor_switch_result")
+        self.declare_parameter("floor_context_topic", "/m20pro/set_current_floor")
+        self.declare_parameter("floor_switch_timeout_s", 110.0)
         self.declare_parameter("robot_pose_topic", "/m20pro_tcp_bridge/map_pose")
         self.declare_parameter("initialpose_topic", "/initialpose")
         self.declare_parameter("navigate_to_pose_action", "/navigate_to_pose")
@@ -77,7 +83,7 @@ class FloorManager(Node):
         self.config_file = self._resolve_path(str(self.get_parameter("config_file").value))
         self.config = self._load_config(self.config_file)
         self.floors: Dict[str, Dict[str, Any]] = dict(self.config.get("floors", {}))
-        self.route_configured = bool(self.floors)
+        self.route_configured = self._has_stair_routes(self.floors)
 
         self.current_floor = ""
         self.pending_floor: Optional[str] = None
@@ -89,6 +95,7 @@ class FloorManager(Node):
         self.pending_post_switch_goal: Optional[PoseStamped] = None
         self.pending_post_switch_goal_floor: Optional[str] = None
         self.pending_post_exit_pose: Optional[Dict[str, Any]] = None
+        self.pending_floor_switch: Optional[Dict[str, Any]] = None
         self.active_floor_mission = False
         self.active_nav_goal_handle: Optional[Any] = None
         self.active_nav_goal_label = ""
@@ -108,6 +115,7 @@ class FloorManager(Node):
         self.initialpose_repeats_left = 0
         self.pending_initialpose: Optional[PoseWithCovarianceStamped] = None
         self.initial_floor_timer = None
+        self.floor_switch_request_started_monotonic = 0.0
         self.rviz_floor_goal_subscriptions: List[Any] = []
         self._validate_floor_config()
 
@@ -150,6 +158,32 @@ class FloorManager(Node):
             str(self.get_parameter("cmd_vel_topic").value),
             10,
         )
+        self.floor_switch_request_pub = self.create_publisher(
+            String,
+            str(self.get_parameter("floor_switch_request_topic").value),
+            10,
+        )
+        route_qos = QoSProfile(depth=1)
+        route_qos.reliability = ReliabilityPolicy.RELIABLE
+        route_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        self.create_subscription(
+            String,
+            str(self.get_parameter("floor_route_config_topic").value),
+            self._on_floor_route_config,
+            route_qos,
+        )
+        self.create_subscription(
+            String,
+            str(self.get_parameter("floor_switch_result_topic").value),
+            self._on_floor_switch_result,
+            10,
+        )
+        self.create_subscription(
+            String,
+            str(self.get_parameter("floor_context_topic").value),
+            self._on_floor_context,
+            10,
+        )
         self.create_subscription(
             String,
             str(self.get_parameter("switch_floor_topic").value),
@@ -190,6 +224,7 @@ class FloorManager(Node):
         )
         self.create_timer(0.2, self._republish_initialpose)
         self.create_timer(1.0, self._publish_current_floor)
+        self.create_timer(0.5, self._check_floor_switch_timeout)
 
         initial_floor = str(self.get_parameter("initial_floor").value).strip()
         if initial_floor:
@@ -259,6 +294,38 @@ class FloorManager(Node):
         if not isinstance(data, dict):
             raise RuntimeError("floor manager config must be a YAML mapping")
         return data
+
+    @staticmethod
+    def _has_stair_routes(floors: Dict[str, Dict[str, Any]]) -> bool:
+        return any(
+            isinstance(floor, dict)
+            and isinstance(floor.get("stairs"), dict)
+            and any(isinstance(route, dict) and route.get("target_floor") for route in floor["stairs"].values())
+            for floor in floors.values()
+        )
+
+    def _on_floor_route_config(self, msg: String) -> None:
+        try:
+            payload = json.loads(msg.data)
+            config = payload.get("config") if isinstance(payload, dict) else None
+        except Exception as exc:
+            self.get_logger().warning("ignored invalid runtime floor route config: %s" % exc)
+            return
+        if not isinstance(config, dict) or not isinstance(config.get("floors"), dict):
+            self.get_logger().warning("ignored runtime floor route config without floors")
+            return
+        if self.active_floor_mission:
+            self.get_logger().warning("ignored runtime floor route update while a floor mission is active")
+            return
+        self.config = dict(config)
+        self.floors = dict(config.get("floors") or {})
+        self.route_configured = self._has_stair_routes(self.floors)
+        self.terrain_segments_by_floor = terrain_segments_from_config(self.config)
+        self._validate_floor_config()
+        self.get_logger().info(
+            "runtime floor routes updated; configured=%s floors=%s"
+            % (self.route_configured, ",".join(sorted(self.floors)) or "(none)")
+        )
 
     def _validate_floor_config(self) -> None:
         for floor_id, floor in self.floors.items():
@@ -347,12 +414,86 @@ class FloorManager(Node):
             return
         self.switch_floor(target_floor)
 
+    def _on_floor_context(self, msg: String) -> None:
+        floor = str(msg.data or "").strip()
+        if not floor or self.active_floor_mission or self.pending_floor_switch is not None:
+            return
+        if self.route_configured and floor not in self.floors:
+            self.get_logger().warning("ignored floor context outside configured route profile: %s" % floor)
+            return
+        self.current_floor = floor
+        self._publish_current_floor()
+        self.get_logger().info("current floor synchronized from selected map: %s" % floor)
+
     def _on_stair_command(self, msg: String) -> None:
         command = msg.data.strip()
         if not command:
             self.get_logger().warning("ignored empty stair command")
             return
         self.use_stairs(command)
+
+    def _on_floor_switch_result(self, msg: String) -> None:
+        try:
+            result = json.loads(msg.data)
+        except Exception as exc:
+            self.get_logger().warning("ignored invalid floor switch result: %s" % exc)
+            return
+        pending = self.pending_floor_switch
+        if not isinstance(result, dict) or pending is None:
+            return
+        if str(result.get("request_id") or "") != str(pending.get("request_id") or ""):
+            return
+        self.pending_floor_switch = None
+        self.floor_switch_request_started_monotonic = 0.0
+        if not result.get("ok"):
+            self.get_logger().error("coordinated floor switch failed: %s" % result.get("message"))
+            self._publish_zero_cmd()
+            if bool(result.get("state_uncertain")):
+                self.current_floor = ""
+                self._publish_current_floor()
+            self._publish_stair_status(
+                "error reason=coordinated_floor_switch_failed source_floor=%s target_floor=%s code=%s"
+                % (
+                    pending.get("source_floor"),
+                    pending.get("target_floor"),
+                    result.get("code") or "unknown",
+                )
+            )
+            self._clear_floor_mission_if_needed("floor_goal")
+            return
+        target_floor = str(pending.get("target_floor") or "")
+        self.current_floor = target_floor
+        self.pending_flat_gait_after_switch = True
+        self.pending_post_exit_pose = dict(pending.get("post_exit") or {})
+        self._publish_current_floor()
+        self._publish_stair_status(
+            "coordinated_floor_switch_confirmed target_floor=%s map_id=%s"
+            % (target_floor, result.get("target_map_id") or pending.get("target_map_id") or "")
+        )
+        if self.pending_post_exit_pose:
+            self._schedule_post_exit_goal()
+        else:
+            self.pending_flat_gait_after_switch = False
+            self._publish_gait(str(self.get_parameter("flat_gait_label").value))
+            self._publish_stair_status("complete target_floor=%s" % target_floor)
+            if self.pending_post_switch_goal is not None:
+                self._schedule_post_switch_goal()
+
+    def _check_floor_switch_timeout(self) -> None:
+        if self.pending_floor_switch is None or self.floor_switch_request_started_monotonic <= 0.0:
+            return
+        timeout_s = max(5.0, float(self.get_parameter("floor_switch_timeout_s").value))
+        if time.monotonic() - self.floor_switch_request_started_monotonic <= timeout_s:
+            return
+        pending = dict(self.pending_floor_switch)
+        self.pending_floor_switch = None
+        self.floor_switch_request_started_monotonic = 0.0
+        self._publish_zero_cmd()
+        self._publish_stair_status(
+            "error reason=coordinated_floor_switch_timeout source_floor=%s target_floor=%s"
+            % (pending.get("source_floor"), pending.get("target_floor"))
+        )
+        self._clear_floor_mission_if_needed("floor_goal")
 
     def _on_stop_task(self, msg: String) -> None:
         reason = msg.data.strip() or "stop_task"
@@ -1068,6 +1209,8 @@ class FloorManager(Node):
         self.pending_post_exit_pose = None
         self.pending_flat_gait_after_switch = False
         self.pending_stair_transition = None
+        self.pending_floor_switch = None
+        self.floor_switch_request_started_monotonic = 0.0
         if self.stair_timer is not None:
             self.stair_timer.cancel()
             self.stair_timer = None
@@ -1146,6 +1289,8 @@ class FloorManager(Node):
             "target_floor": target_floor,
             "direction": direction,
             "stair_name": stair_name,
+            "route_id": str(stair.get("route_id") or stair_name),
+            "target_map_id": str(stair.get("target_map_id") or self.floors.get(target_floor, {}).get("map_id") or ""),
             "metadata": self._resolve_stair_transition_metadata(stair),
             "target_platform": exit_pose,
             "source_platform": self._resolve_stair_traverse_pose(stair),
@@ -1555,11 +1700,9 @@ class FloorManager(Node):
         if transition is None:
             return
         self.pending_stair_transition = None
-        self.pending_flat_gait_after_switch = True
-        self.pending_post_exit_pose = dict(transition.get("post_exit") or {})
         metadata = transition.get("metadata") or {}
         self._publish_stair_status(
-            "switching_map_at_platform source_floor=%s target_floor=%s direction=%s stair=%s model=%s"
+            "requesting_coordinated_floor_switch source_floor=%s target_floor=%s direction=%s stair=%s model=%s"
             % (
                 transition["source_floor"],
                 transition["target_floor"],
@@ -1568,9 +1711,36 @@ class FloorManager(Node):
                 metadata.get("model", "shared_platform"),
             )
         )
-        self.switch_floor(
-            str(transition["target_floor"]),
-            pose_override=dict(transition["target_platform"]),
+        self._request_coordinated_floor_switch(transition)
+
+    def _request_coordinated_floor_switch(self, transition: Dict[str, Any]) -> None:
+        if self.pending_floor_switch is not None:
+            self._publish_stair_status("error reason=floor_switch_request_already_pending")
+            self._clear_floor_mission_if_needed("floor_goal")
+            return
+        request_id = "floor-switch-%d" % int(time.time() * 1000.0)
+        request = {
+            "request_id": request_id,
+            "route_id": str(transition.get("route_id") or transition.get("stair_name") or ""),
+            "source_floor": str(transition.get("source_floor") or self.current_floor),
+            "target_floor": str(transition.get("target_floor") or ""),
+            "target_map_id": str(transition.get("target_map_id") or ""),
+            "target_pose": dict(transition.get("target_platform") or {}),
+            "post_exit": dict(transition.get("post_exit") or {}),
+        }
+        self.pending_floor_switch = dict(request)
+        self.floor_switch_request_started_monotonic = time.monotonic()
+        message = String()
+        message.data = json.dumps(request, separators=(",", ":"))
+        self.floor_switch_request_pub.publish(message)
+        self._publish_stair_status(
+            "floor_switch_request_sent request_id=%s source_floor=%s target_floor=%s map_id=%s"
+            % (
+                request_id,
+                request["source_floor"],
+                request["target_floor"],
+                request["target_map_id"],
+            )
         )
 
     def _publish_gait(self, label: str) -> None:

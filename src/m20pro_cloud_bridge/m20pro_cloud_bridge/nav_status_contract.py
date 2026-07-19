@@ -93,6 +93,12 @@ def friendly_nav_status(status_text: str) -> str:
         return "跨楼层：已切换楼梯步态，准备通过楼梯"
     if text.startswith("navigating_to_stair_platform"):
         return "跨楼层：正在通过楼梯平台"
+    if text.startswith("requesting_coordinated_floor_switch"):
+        return "跨楼层：已到楼梯平台，准备同步切换 106 与 104 地图"
+    if text.startswith("floor_switch_request_sent"):
+        return "跨楼层：正在同步切换 106 与 104 地图并确认定位"
+    if text.startswith("coordinated_floor_switch_confirmed"):
+        return "跨楼层：地图与目标层定位已确认"
     if text.startswith("switching_map_at_platform"):
         return "跨楼层：楼梯平台到位，正在切换楼层地图"
     if text.startswith("navigating_from_platform_to_flat"):

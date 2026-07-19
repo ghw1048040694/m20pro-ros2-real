@@ -86,6 +86,15 @@ def main() -> None:
         "mapEditorToolbar",
         "mapEditorSaveBtn",
         "deleteMapBtn",
+        "floorRouteName",
+        "floorRouteEntry",
+        "floorRouteSourcePlatform",
+        "floorRouteTargetPlatform",
+        "floorRoutePostExit",
+        "floorRoutePreview",
+        "saveFloorRouteBtn",
+        "reloadFloorRoutesBtn",
+        "floorRouteList",
     ):
         assert f'id="{element_id}"' in html
 
@@ -171,8 +180,16 @@ def main() -> None:
     assert "function paintMapEditor" in script
     assert "button.textContent = item.label || item.id;" in script
     assert "button.textContent = `+ ${item.label || item.id}`" not in script
-    assert "20260717-map-delete-layout-1" in html
+    assert "20260719-cross-floor-1" in html
     assert "clamp(460px, 34vw, 620px)" in css
+    assert "function mappingSessionMatchesDraft" in script
+    assert "const reusableSession = [state.mappingSession, state.latestMappingSession]" in script
+    assert '"/api/floor_routes"' in script
+    assert '"/api/floor_routes/delete"' in script
+    assert 'elif parsed.path == "/api/floor_routes":' in backend
+    assert 'elif parsed.path == "/api/floor_routes/delete":' in backend
+    assert "def _run_floor_switch_transaction" in backend
+    assert "floor_switch_request_topic" in backend
 
     assert "DASHBOARD_LITE_DIR" not in backend
     assert 'parsed.path in ("/lite", "/lite/")' in backend

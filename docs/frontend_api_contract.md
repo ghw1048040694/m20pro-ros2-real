@@ -748,6 +748,40 @@ ROS 2 功能包也可以订阅：
 
 导入只归档，不自动启用。启用地图仍需调用 `/api/maps/select`。
 
+## 跨楼层路线接口
+
+跨楼层路线不是由项目楼层或地图名称自动推导的。每条路线必须绑定两张正式地图和四个实测语义点，并按方向保存；`F1 -> F2` 不会隐式生成 `F2 -> F1`。
+
+### GET `/api/floor_routes`
+
+返回已保存的有向路线、可用于路线配置的楼梯语义点和地图摘要。只有 `stair_entry`、`stair_switch`、`stair_exit` 且位姿有效的点会进入候选列表。
+
+### POST `/api/floor_routes`
+
+```json
+{
+  "name": "1层到2层东楼梯",
+  "entry_annotation_id": "point_f1_entry",
+  "source_platform_annotation_id": "point_f1_switch",
+  "target_platform_annotation_id": "point_f2_switch",
+  "post_exit_annotation_id": "point_f2_exit"
+}
+```
+
+保存时后端强制检查：两侧点位类型、楼层、地图和坐标一致；两张地图均具备 104 Nav2 yaml 和非 `active` 的 106 原厂地图包；同一楼层的所有路线只能引用同一张正式地图。路线持久化到 Web `data_dir/floor_routes.json`，并通过 transient-local `/m20pro/floor_route_config` 动态下发给 `floor_manager`。
+
+### POST `/api/floor_routes/delete`
+
+```json
+{"id": "floor_route_xxx"}
+```
+
+路线被删除前，其地图和四个点位不能删除或修改。任务执行中禁止增删路线。
+
+### 内部切层协议
+
+`floor_manager` 到达起始层共享平台后发布 `/m20pro/floor_switch_request`；Web 校验当前任务、路线、起始地图和目标身份后，依次切换 104 Nav2 地图、执行 106 `drmap apply`、发布目标层初始位姿并等待 2101/定位/位姿证据。只有全部确认才通过 `/m20pro/floor_switch_result` 返回成功。地图切换、重定位、任务取消或异常失败时执行 104/106 回滚；回滚不完整会返回 `state_uncertain=true`，`floor_manager` 清空当前楼层并停止任务。
+
 ## YOLO 和视频接口
 
 ### YOLO 检测
