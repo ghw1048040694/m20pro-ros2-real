@@ -1,105 +1,107 @@
-# M20Pro production field-tuning source of truth.
+# M20Pro 现场参数唯一配置源。
 #
-# Edit this file on the upper computer, then run:
+# 只在上位机修改本文件，修改后依次执行：
 #   ./scripts/apply_field_profile.sh --check
 #   ./scripts/apply_field_profile.sh
 #
-# Do not edit generated /etc files on 104 or 106. A configured perception
-# threshold does not increase the robot's physical stair-climbing capability.
-schema_version: 2
-profile_name: default_field
+# 不要直接修改 104/106 上自动生成的 /etc 配置文件。
+# 感知阈值只能改变软件判定，不能提高机器狗真实的爬楼、关节或附着能力。
+schema_version: 2                 # 配置结构版本，程序使用，禁止自行修改
+profile_name: default_field       # 配置名称，仅允许 ASCII 字母、数字、点、下划线和短横线
 
+# 点云转二维激光参数（运行在 106）
 scan:
-  height_min_m: -0.25
-  height_max_m: 0.60
-  publish_hz: 4.0
-  bin_hold_s: 0.75
-  angle_increment_rad: 0.0174533
-  range_min_m: 0.20
-  range_max_m: 10.0
+  height_min_m: -0.25             # 参与投影的最低高度，单位 m，相对机器狗基座
+  height_max_m: 0.60              # 参与投影的最高高度，单位 m，必须大于最低高度
+  publish_hz: 4.0                 # 106 发布 /scan 的最高频率，单位 Hz
+  bin_hold_s: 0.75                # 激光角度栅格保留最近有效点的时间，单位 s
+  angle_increment_rad: 0.0174533  # 二维激光角分辨率，单位 rad，当前约为 1 度
+  range_min_m: 0.20               # 最小有效测距，单位 m
+  range_max_m: 10.0               # 最大有效测距，单位 m，必须大于最小测距
 
+# 楼梯三维感知参数（只在楼梯会话期间启用）
 stair:
-  # Site-tunable riser limit. Never set this above a physically verified
-  # M20Pro stair-gait limit.
-  max_step_height_m: 0.24
-  # The actual residual-obstacle threshold is derived as:
-  # max_step_height_m + obstacle_height_margin_m.
-  obstacle_height_margin_m: 0.02
-  forward_min_m: 0.30
-  forward_max_m: 2.20
-  corridor_half_width_m: 0.55
-  min_corridor_points: 80
-  min_profile_bins: 5
-  min_obstacle_points: 10
-  profile_hold_s: 0.50
-  mode_timeout_s: 1.50
+  max_step_height_m: 0.24         # 允许识别为台阶的最大单级高度，单位 m；不得超过厂家实测物理上限
+  obstacle_height_margin_m: 0.02 # 台阶上限之外的障碍余量，单位 m；实际障碍阈值由两者相加派生
+  forward_min_m: 0.30             # 楼梯感知走廊起始距离，单位 m
+  forward_max_m: 2.20             # 楼梯感知走廊最远距离，单位 m
+  corridor_half_width_m: 0.55    # 楼梯感知走廊半宽，单位 m，即左右各取该宽度
+  min_corridor_points: 80         # 建立楼梯剖面所需的最少走廊点数
+  min_profile_bins: 5             # 判定楼梯剖面有效所需的最少高度栅格数
+  min_obstacle_points: 10         # 判定稳定障碍物所需的最少点数
+  profile_hold_s: 0.50            # 三维楼梯剖面短时保留时间，单位 s
+  mode_timeout_s: 1.50            # 楼梯模式心跳超时，单位 s；超时自动恢复平地感知
 
+# 楼梯运动安全门：只有连续收到足够的新鲜 clear 结果才允许继续
 stair_safety:
-  required_clear_samples: 3
-  startup_timeout_s: 4.0
-  stale_timeout_s: 1.0
+  required_clear_samples: 3       # 放行前要求连续 clear 的样本数
+  startup_timeout_s: 4.0          # 等待首批楼梯净空结果的最长时间，单位 s
+  stale_timeout_s: 1.0            # 净空结果最大允许年龄，单位 s；不得大于楼梯模式超时
 
+# 跨楼层交接、切图和重复目标保护
 stair_transition:
-  # Cross-floor handoff timing and duplicate-goal protection.
-  entry_tolerance_m: 0.80
-  floor_switch_timeout_s: 110.0
-  post_switch_goal_delay_s: 1.0
-  duplicate_goal_tolerance_m: 0.08
-  duplicate_goal_yaw_tolerance_rad: 0.12
+  entry_tolerance_m: 0.80         # 到达爬楼入口点的允许位置误差，单位 m
+  floor_switch_timeout_s: 110.0   # 104/106 切图并完成目标层重定位的总超时，单位 s
+  post_switch_goal_delay_s: 1.0   # 切层确认后再下发下一目标的等待时间，单位 s
+  duplicate_goal_tolerance_m: 0.08 # 两目标位置差小于该值时视为重复，单位 m
+  duplicate_goal_yaw_tolerance_rad: 0.12 # 两目标朝向差小于该值时视为重复，单位 rad
 
+# Nav2 导航参数（插件、话题、坐标系、footprint 和行为树不在现场配置中修改）
 navigation:
-  # DWB command limits. Deceleration values are positive magnitudes here.
+  # DWB 控制器与恢复动作；减速度在本文件填写正数幅值，运行时自动转为 DWB 负值。
   controller:
-    frequency_hz: 10.0
-    max_linear_speed_mps: 0.45
-    max_angular_speed_radps: 0.75
-    linear_acceleration_limit_mps2: 2.20
-    angular_acceleration_limit_radps2: 2.00
-    linear_deceleration_limit_mps2: 2.20
-    angular_deceleration_limit_radps2: 2.00
-    stopped_linear_speed_mps: 0.12
-    recovery_min_angular_speed_radps: 0.35
-    recovery_simulation_time_s: 2.0
+    frequency_hz: 10.0            # 局部控制循环频率，单位 Hz；越高越实时但 CPU 开销越大
+    max_linear_speed_mps: 0.45    # 最大前进速度，单位 m/s
+    max_angular_speed_radps: 0.75 # 最大旋转速度，单位 rad/s
+    linear_acceleration_limit_mps2: 2.20 # 线加速度上限，单位 m/s^2
+    angular_acceleration_limit_radps2: 2.00 # 角加速度上限，单位 rad/s^2
+    linear_deceleration_limit_mps2: 2.20 # 线减速度正数幅值，单位 m/s^2
+    angular_deceleration_limit_radps2: 2.00 # 角减速度正数幅值，单位 rad/s^2
+    stopped_linear_speed_mps: 0.12 # 低于该线速度视为停止，单位 m/s；必须小于最大前进速度
+    recovery_min_angular_speed_radps: 0.35 # 平地旋转恢复的最小角速度，单位 rad/s
+    recovery_simulation_time_s: 2.0 # 恢复动作向前模拟检查时间，单位 s
+  # 到点精度；位置和朝向分别判断，收紧朝向不会同步收紧位置。
   goal:
-    xy_tolerance_m: 0.35
-    yaw_tolerance_rad: 0.20
+    xy_tolerance_m: 0.35          # 目标点平面位置容差，单位 m
+    yaw_tolerance_rad: 0.20       # 目标点最终朝向容差，单位 rad，当前约 11.5 度
+  # 卡住判断；Foxy 只按平移距离判断进度，原地修正朝向时不要把半径设得过大。
   progress:
-    # A smaller radius is more tolerant of rotate-in-place progress.
-    required_movement_radius_m: 0.10
-    movement_time_allowance_s: 12.0
+    required_movement_radius_m: 0.10 # 在允许时间内至少应移动的距离，单位 m；不得大于到点位置容差
+    movement_time_allowance_s: 12.0 # 达到最小移动距离所允许的时间，单位 s
+  # DWB 轨迹预测与采样；采样数越大，每个控制周期的 CPU 开销越高。
   local_planner:
-    # Higher sample counts cost more CPU on every controller cycle.
-    simulation_time_s: 1.50
-    linear_velocity_samples: 12
-    angular_velocity_samples: 20
+    simulation_time_s: 1.50       # 每条候选轨迹向前模拟的时间，单位 s
+    linear_velocity_samples: 12   # 每周期采样的线速度数量，必须为整数
+    angular_velocity_samples: 20  # 每周期采样的角速度数量，必须为整数
+  # 局部/全局代价地图；发布频率不得高于更新频率，清障距离不得小于障碍标记距离。
   costmap:
-    # Publish rates must not exceed update rates; raytrace must cover obstacles.
-    local_update_frequency_hz: 8.0
-    local_publish_frequency_hz: 2.0
-    global_update_frequency_hz: 1.0
-    global_publish_frequency_hz: 0.5
-    obstacle_range_m: 3.0
-    raytrace_range_m: 3.5
-    observation_persistence_s: 0.30
-    inflation_radius_m: 0.62
-    inflation_cost_scaling_factor: 4.0
+    local_update_frequency_hz: 8.0 # 局部代价地图内部更新频率，单位 Hz
+    local_publish_frequency_hz: 2.0 # 局部代价地图对外发布频率，单位 Hz
+    global_update_frequency_hz: 1.0 # 全局代价地图内部更新频率，单位 Hz
+    global_publish_frequency_hz: 0.5 # 全局代价地图对外发布频率，单位 Hz
+    obstacle_range_m: 3.0         # 激光用于标记障碍物的最远距离，单位 m
+    raytrace_range_m: 3.5         # 激光用于清除旧障碍物的最远距离，单位 m
+    observation_persistence_s: 0.30 # 障碍观测短时保留时间，单位 s；过大将导致动态障碍残留
+    inflation_radius_m: 0.62      # 障碍物膨胀半径，单位 m，局部与全局地图共用
+    inflation_cost_scaling_factor: 4.0 # 膨胀代价衰减系数；越大表示代价随距离下降越快
+  # 全局路径规划器参数
   global_planner:
-    expected_frequency_hz: 1.0
-    goal_tolerance_m: 0.50
+    expected_frequency_hz: 1.0    # 期望全局规划频率，单位 Hz
+    goal_tolerance_m: 0.50        # 目标被占用时搜索附近可达点的容差，单位 m；不得小于到点位置容差
 
+# 定位稳定性高级参数；现场调整时一次只改一组，并结合 rosbag 验证。
 localization:
-  # Advanced stability settings. Change one group at a time and verify with a bag.
-  tf_fallback_max_age_s: 1.0
-  pose_jump_reject_m: 0.60
-  pose_jump_candidate_radius_m: 0.30
-  pose_jump_candidate_yaw_tolerance_rad: 0.35
-  stationary_drift_reject_m: 0.20
-  stationary_drift_reject_yaw_rad: 0.30
-  motion_command_hold_s: 1.0
-  command_linear_deadband_mps: 0.03
-  command_angular_deadband_rad_s: 0.05
-  filter_hold_last_good_s: 1.0
-  relocalization_jump_grace_s: 3.0
-  relocalization_jump_grace_radius_m: 1.0
-  odom_rebase_jump_m: 0.60
-  odom_rebase_jump_yaw_rad: 0.75
+  tf_fallback_max_age_s: 1.0     # 备用 TF 位姿允许的最大年龄，单位 s
+  pose_jump_reject_m: 0.60       # 非重定位状态下单次位置跳变拒绝阈值，单位 m
+  pose_jump_candidate_radius_m: 0.30 # 连续跳变候选之间允许的位置差，单位 m
+  pose_jump_candidate_yaw_tolerance_rad: 0.35 # 连续跳变候选之间允许的朝向差，单位 rad
+  stationary_drift_reject_m: 0.20 # 无运动命令时允许的位置漂移，单位 m；超过后定位失效
+  stationary_drift_reject_yaw_rad: 0.30 # 无运动命令时允许的朝向漂移，单位 rad
+  motion_command_hold_s: 1.0     # 最后一条运动命令后仍按“运动中”处理的保持时间，单位 s
+  command_linear_deadband_mps: 0.03 # 判断是否存在有效线速度命令的死区，单位 m/s
+  command_angular_deadband_rad_s: 0.05 # 判断是否存在有效角速度命令的死区，单位 rad/s
+  filter_hold_last_good_s: 1.0   # 异常位姿期间最多保留最近可信位姿的时间，单位 s
+  relocalization_jump_grace_s: 3.0 # 重定位成功后允许大幅位姿变化的宽限时间，单位 s
+  relocalization_jump_grace_radius_m: 1.0 # 重定位宽限期允许的位置变化范围，单位 m
+  odom_rebase_jump_m: 0.60       # 触发 map→odom 连续性重基准的位置跳变量，单位 m
+  odom_rebase_jump_yaw_rad: 0.75 # 触发 map→odom 连续性重基准的朝向跳变量，单位 rad
