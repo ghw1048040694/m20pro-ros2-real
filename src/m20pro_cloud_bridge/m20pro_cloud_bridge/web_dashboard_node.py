@@ -73,6 +73,7 @@ from .floor_identity_contract import (
     validate_floor_matches_map,
     validate_mapping_session_identity,
     validate_registered_floor,
+    validate_runtime_map_floor,
 )
 from .floor_route_contract import (
     floor_route_public_payload,
@@ -2760,7 +2761,13 @@ class WebDashboardNode(Node):
             factory_timeout_s=factory_timeout_s,
         )
 
-    def _floor_identity_validation(self, floor: Any, *, subject: str) -> Dict[str, Any]:
+    def _floor_identity_validation(
+        self,
+        floor: Any,
+        *,
+        subject: str,
+        allow_runtime_map: bool = False,
+    ) -> Dict[str, Any]:
         config_payload = self._floor_config_payload()
         if not config_payload.get("ok"):
             return {
@@ -2770,7 +2777,8 @@ class WebDashboardNode(Node):
                 "path": config_payload.get("path"),
                 "error": config_payload.get("error"),
             }
-        return validate_registered_floor(floor, config_payload["config"], subject=subject)
+        validator = validate_runtime_map_floor if allow_runtime_map else validate_registered_floor
+        return validator(floor, config_payload["config"], subject=subject)
 
     def _floor_map_identity_validation(
         self,
@@ -2792,6 +2800,7 @@ class WebDashboardNode(Node):
             map_record,
             config_payload["config"],
             subject=subject,
+            allow_unregistered_map=True,
         )
 
     def _preflight_payload(self) -> Dict[str, Any]:
@@ -3548,7 +3557,11 @@ class WebDashboardNode(Node):
                 if record is None:
                     return self._error("地图不存在")
         if record is not None:
-            identity = self._floor_identity_validation(record.get("floor"), subject="地图楼层")
+            identity = self._floor_identity_validation(
+                record.get("floor"),
+                subject="地图楼层",
+                allow_runtime_map=True,
+            )
             if not identity.get("ok"):
                 return self._error(
                     str(identity["message"]),

@@ -20,6 +20,7 @@ from m20pro_cloud_bridge.floor_identity_contract import (  # noqa: E402
     validate_floor_matches_map,
     validate_mapping_session_identity,
     validate_registered_floor,
+    validate_runtime_map_floor,
 )
 
 
@@ -119,6 +120,27 @@ def test_runtime_maps_are_not_a_floor_registry() -> None:
     assert_equal(mapping["ok"], True, "runtime map can define an actual floor label")
 
 
+def test_project_registration_does_not_block_ordinary_map_selection() -> None:
+    project_only = augment_floor_config(
+        RUNTIME_CONFIG,
+        [{"id": "demo", "floors": ["F1"]}],
+    )
+    ordinary = validate_runtime_map_floor("F20", project_only, subject="地图楼层")
+    assert_equal(ordinary["ok"], True, "ordinary map is valid outside project floors")
+    assert_equal(ordinary["registry_mode"], "runtime_map", "ordinary map uses runtime identity")
+    record = {"id": "builtin_F20", "floor": "F20"}
+    bound = validate_floor_matches_map(
+        "F20",
+        record,
+        project_only,
+        subject="点位楼层",
+        allow_unregistered_map=True,
+    )
+    assert_equal(bound["ok"], True, "ordinary map point binding is valid")
+    strict = validate_registered_floor("F20", project_only, subject="地图楼层")
+    assert_equal(strict["code"], "floor_identity_unknown", "route/task registry remains strict")
+
+
 def main() -> int:
     for test in (
         test_registry_and_unknown_floor,
@@ -128,6 +150,7 @@ def main() -> int:
         test_mapping_identity,
         test_map_binding,
         test_runtime_maps_are_not_a_floor_registry,
+        test_project_registration_does_not_block_ordinary_map_selection,
     ):
         test()
         print(f"[OK] {test.__name__}")

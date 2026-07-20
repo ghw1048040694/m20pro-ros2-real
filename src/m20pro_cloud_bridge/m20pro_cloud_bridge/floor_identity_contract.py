@@ -134,6 +134,40 @@ def validate_registered_floor(
     return {"ok": True, "floor": normalized, "registered_floors": registered}
 
 
+def validate_runtime_map_floor(
+    floor: Any,
+    config: Dict[str, Any],
+    *,
+    subject: str = "地图楼层",
+) -> Dict[str, Any]:
+    """Validate a map label without treating project floors as a map whitelist.
+
+    A project may retain its declared floors after an individual map is deleted,
+    and the map library also contains ordinary maps unrelated to that project.
+    Map selection must therefore validate the label format, while route/task
+    contracts continue to use ``validate_registered_floor`` strictly.
+    """
+    floor_id = str(floor or "").strip()
+    normalized = normalize_floor_id(floor_id)
+    if not normalized:
+        return {
+            "ok": False,
+            "code": "floor_identity_missing" if not floor_id else "floor_identity_invalid",
+            "message": f"{subject}不能为空" if not floor_id else f"{subject}格式无效",
+            "floor": floor_id,
+            "registered_floors": configured_floor_ids(config),
+        }
+    floors = config.get("floors") if isinstance(config.get("floors"), dict) else {}
+    entry = floors.get(normalized) if isinstance(floors, dict) else None
+    registry_source = str(entry.get("registry_source") or "") if isinstance(entry, dict) else ""
+    return {
+        "ok": True,
+        "floor": normalized,
+        "registered_floors": configured_floor_ids(config),
+        "registry_mode": "route" if normalized in configured_floor_ids(config) and registry_source != "project" else "runtime_map",
+    }
+
+
 def validate_mapping_session_identity(
     payload: Dict[str, Any],
     config: Dict[str, Any],
@@ -220,8 +254,10 @@ def validate_floor_matches_map(
     config: Dict[str, Any],
     *,
     subject: str,
+    allow_unregistered_map: bool = False,
 ) -> Dict[str, Any]:
-    requested = validate_registered_floor(floor, config, subject=subject)
+    validator = validate_runtime_map_floor if allow_unregistered_map else validate_registered_floor
+    requested = validator(floor, config, subject=subject)
     if not requested.get("ok"):
         return requested
     map_floor = normalize_floor_id(map_record.get("floor"))
@@ -232,7 +268,7 @@ def validate_floor_matches_map(
             "message": "地图没有有效的楼层/地图标签",
             "map_id": map_record.get("id"),
         }
-    registered_map = validate_registered_floor(map_floor, config, subject="地图楼层")
+    registered_map = validator(map_floor, config, subject="地图楼层")
     if not registered_map.get("ok"):
         return registered_map
     if requested["floor"] != map_floor:
