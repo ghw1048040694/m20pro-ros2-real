@@ -1,6 +1,14 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-07-20 10:08 CST
+Last updated: 2026-07-20 10:22 CST
+
+## 2026-07-20 10:22 CST - 单一现场参数真机部署与双端哈希验收
+
+- 提交 `2fc65f6` 已通过唯一入口 `apply_field_profile.sh` 按 106→104→106 顺序部署。106 使用真实 DrDDS 头文件/库编译 edge scan 成功；104 Foxy 的 `m20pro_bringup`、`m20pro_cloud_bridge`、`m20pro_navigation`、`m20pro_inspection`、`m20pro_radar_inspection` 五包构建成功。部署前后均为 `active_task=null`，工位未定位，没有发送导航目标、速度、步态、建图、地图切换或重定位命令。
+- 配置一致性：上位机、104 源文件和 106 自动生成 `/etc/m20pro-edge-scan-106.env` 的 SHA-256 均为 `2b61f228fb8aaed3f8de9d934bd302256dc2e7558df529e1ccee347302db9971`；104 运行中 `floor_manager`、`navigation_scan_selector` 参数返回同一 hash，安全连续样本为 3、模式租约为 1.5 秒。
+- Nav2 实参：由于工位未定位，启动门没有激活插件，ROS 参数服务不会提前声明 goal checker/costmap 插件参数；直接读取 controller server 正在使用的 `RewrittenYaml` 文件确认控制频率 `10.0Hz`、XY 容差 `0.35m`、朝向容差 `0.2rad`，局部和全局膨胀半径均为 `0.62m`，占位符没有进入运行时。
+- fail-closed 烟测：只发布错误 hash 的楼梯感知模式消息，不发送运动命令。104 扫描选择器记录 `rejected ... profile mismatch`，106 记录 `stair_mode_profile_mismatch`，两端都没有进入楼梯模式；随后普通 edge `/scan` 继续 `perception_ready`，frame 为 `m20pro_base_link`、有效距离约 270、年龄约 0.01 秒。
+- 运行与清理：`m20pro-real.service`、`m20pro-edge-scan-106.service` 均为 `active`、`NRestarts=0`；新服务启动后未见配置异常、Traceback 或进程死亡。104 成功部署备份和 staging 已删除，106 edge staging、临时构建目录、旧 env 模板及旧独立演示脚本均不存在；上位机网络和 103 未修改。
 
 ## 2026-07-20 10:08 CST - 现场参数收敛为 104/106/Nav2 单一配置源
 
