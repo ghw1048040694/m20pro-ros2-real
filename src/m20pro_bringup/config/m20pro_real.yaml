@@ -25,19 +25,23 @@ m20pro_tcp_bridge:
     tf_pose_fallback_topic: "/tf"
     tf_pose_fallback_map_frame: "map"
     tf_pose_fallback_base_frame: "base_link"
-    tf_pose_fallback_max_age_s: 1.0
+    tf_pose_fallback_max_age_s: __FIELD_PROFILE_TF_FALLBACK_MAX_AGE__
     tf_pose_fallback_require_location_ok: true
     # Uncommanded localization jumps are never accepted after a stability delay.
     pose_jump_accept_after_s: 0.0
-    pose_jump_candidate_radius_m: 0.30
-    pose_jump_candidate_yaw_tolerance_rad: 0.35
-    pose_stationary_drift_reject_m: 0.20
-    pose_stationary_drift_reject_yaw_rad: 0.30
-    pose_motion_command_hold_s: 1.0
-    pose_command_linear_deadband_mps: 0.03
-    pose_command_angular_deadband_rad_s: 0.05
-    odom_rebase_jump_m: 0.6
-    odom_rebase_jump_yaw_rad: 0.75
+    pose_jump_reject_m: __FIELD_PROFILE_POSE_JUMP_REJECT__
+    pose_jump_candidate_radius_m: __FIELD_PROFILE_POSE_JUMP_CANDIDATE_RADIUS__
+    pose_jump_candidate_yaw_tolerance_rad: __FIELD_PROFILE_POSE_JUMP_CANDIDATE_YAW__
+    pose_stationary_drift_reject_m: __FIELD_PROFILE_STATIONARY_DRIFT_REJECT__
+    pose_stationary_drift_reject_yaw_rad: __FIELD_PROFILE_STATIONARY_DRIFT_REJECT_YAW__
+    pose_motion_command_hold_s: __FIELD_PROFILE_MOTION_COMMAND_HOLD__
+    pose_command_linear_deadband_mps: __FIELD_PROFILE_LINEAR_DEADBAND__
+    pose_command_angular_deadband_rad_s: __FIELD_PROFILE_ANGULAR_DEADBAND__
+    pose_filter_hold_last_good_s: __FIELD_PROFILE_FILTER_HOLD_LAST_GOOD__
+    pose_relocalization_jump_grace_s: __FIELD_PROFILE_RELOCALIZATION_GRACE__
+    pose_relocalization_jump_grace_radius_m: __FIELD_PROFILE_RELOCALIZATION_GRACE_RADIUS__
+    odom_rebase_jump_m: __FIELD_PROFILE_ODOM_REBASE_JUMP__
+    odom_rebase_jump_yaw_rad: __FIELD_PROFILE_ODOM_REBASE_JUMP_YAW__
     flatten_odom_z: true
     odom_z: 0.0
     publish_tf: true

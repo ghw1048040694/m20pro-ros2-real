@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from copy import deepcopy
 from pathlib import Path
 import sys
 import xml.etree.ElementTree as ET
@@ -11,8 +12,43 @@ sys.path.insert(0, str(ROOT / "src/m20pro_navigation"))
 
 from m20pro_navigation.field_profile_contract import (  # noqa: E402
     edge_environment,
+    floor_manager_field_parameters,
     load_field_profile,
+    nav2_parameter_rewrites,
+    tcp_bridge_parameters,
 )
+
+
+def apply_nav2_rewrites(config: dict, rewrites: dict) -> dict:
+    rendered = deepcopy(config)
+
+    def replace_leaf_values(value: object) -> None:
+        if not isinstance(value, dict):
+            return
+        for key, item in value.items():
+            if key in rewrites:
+                value[key] = yaml.safe_load(rewrites[key])
+            else:
+                replace_leaf_values(item)
+
+    replace_leaf_values(rendered)
+    for path, raw_value in rewrites.items():
+        if "." not in path:
+            continue
+        target = rendered
+        keys = path.split(".")
+        for key in keys[:-1]:
+            target = target[key]
+        target[keys[-1]] = yaml.safe_load(raw_value)
+    return rendered
+
+
+def field_placeholders(value: object) -> list:
+    if isinstance(value, dict):
+        return [item for nested in value.values() for item in field_placeholders(nested)]
+    if isinstance(value, str) and value.startswith("__FIELD_PROFILE_"):
+        return [value]
+    return []
 
 
 def main() -> None:
@@ -22,29 +58,47 @@ def main() -> None:
         ROOT / "src/m20pro_bringup/config/m20pro_field_profile.yaml"
     )
     navigation_profile = field_profile["navigation"]
+    localization_profile = field_profile["localization"]
     real_config_path = ROOT / "src" / "m20pro_bringup" / "config" / "m20pro_real.yaml"
     real_config = yaml.safe_load(real_config_path.read_text(encoding="utf-8"))
     bridge_config = real_config["m20pro_tcp_bridge"]["ros__parameters"]
     assert float(bridge_config["pose_jump_accept_after_s"]) == 0.0
-    assert float(bridge_config["pose_stationary_drift_reject_m"]) > 0.0
-    assert float(bridge_config["pose_motion_command_hold_s"]) > 0.0
+    assert bridge_config["pose_stationary_drift_reject_m"] == "__FIELD_PROFILE_STATIONARY_DRIFT_REJECT__"
+    assert bridge_config["pose_motion_command_hold_s"] == "__FIELD_PROFILE_MOTION_COMMAND_HOLD__"
+    assert localization_profile["stationary_drift_reject_m"] > 0.0
+    assert localization_profile["motion_command_hold_s"] > 0.0
     controller = config["controller_server"]["ros__parameters"]
     follow = controller["FollowPath"]
     local = config["local_costmap"]["local_costmap"]["ros__parameters"]
     global_costmap = config["global_costmap"]["global_costmap"]["ros__parameters"]
+    controller_profile = navigation_profile["controller"]
+    goal_profile = navigation_profile["goal"]
+    progress_profile = navigation_profile["progress"]
+    local_planner_profile = navigation_profile["local_planner"]
+    costmap_profile = navigation_profile["costmap"]
+    planner_profile = navigation_profile["global_planner"]
+    nav2_rewrites = nav2_parameter_rewrites(field_profile)
+    bridge_rewrites = tcp_bridge_parameters(field_profile)
+    floor_rewrites = floor_manager_field_parameters(field_profile)
 
     assert controller["controller_frequency"] == "__FIELD_PROFILE_CONTROLLER_FREQUENCY__"
-    assert navigation_profile["controller_frequency_hz"] <= 10.0
-    assert controller["progress_checker"]["movement_time_allowance"] >= 12.0
+    assert controller_profile["frequency_hz"] <= 10.0
+    assert controller["progress_checker"]["required_movement_radius"] == "__FIELD_PROFILE_PROGRESS_RADIUS__"
+    assert controller["progress_checker"]["movement_time_allowance"] == "__FIELD_PROFILE_PROGRESS_TIME__"
+    assert progress_profile["movement_time_allowance_s"] >= 12.0
     assert controller["goal_checker"]["stateful"] is False
     assert controller["goal_checker"]["xy_goal_tolerance"] == "__FIELD_PROFILE_XY_GOAL_TOLERANCE__"
     assert controller["goal_checker"]["yaw_goal_tolerance"] == "__FIELD_PROFILE_YAW_GOAL_TOLERANCE__"
     assert follow["xy_goal_tolerance"] == "__FIELD_PROFILE_XY_GOAL_TOLERANCE__"
-    assert abs(navigation_profile["xy_goal_tolerance_m"] - 0.35) < 1e-6
-    assert 0.15 <= navigation_profile["yaw_goal_tolerance_rad"] <= 0.25
+    assert abs(goal_profile["xy_tolerance_m"] - 0.35) < 1e-6
+    assert 0.15 <= goal_profile["yaw_tolerance_rad"] <= 0.25
     assert "ObstacleFootprint" in follow["critics"]
     assert "BaseObstacle" not in follow["critics"]
-    assert follow["sim_time"] >= 1.5
+    assert follow["sim_time"] == "__FIELD_PROFILE_SIMULATION_TIME__"
+    assert local_planner_profile["simulation_time_s"] >= 1.5
+    assert follow["max_vel_x"] == "__FIELD_PROFILE_MAX_LINEAR_SPEED__"
+    assert follow["max_speed_xy"] == "__FIELD_PROFILE_MAX_LINEAR_SPEED__"
+    assert follow["max_vel_theta"] == "__FIELD_PROFILE_MAX_ANGULAR_SPEED__"
     assert follow["publish_local_plan"] is True
     assert follow["stateful"] is False
     assert local["always_send_full_costmap"] is True
@@ -53,9 +107,38 @@ def main() -> None:
         assert "footprint" in costmap
         assert "robot_radius" not in costmap
         assert costmap["inflation_layer"]["inflation_radius"] == "__FIELD_PROFILE_INFLATION_RADIUS__"
-        assert navigation_profile["inflation_radius_m"] >= 0.60
+        assert costmap_profile["inflation_radius_m"] >= 0.60
+        assert costmap["inflation_layer"]["cost_scaling_factor"] == "__FIELD_PROFILE_INFLATION_COST_SCALING__"
         assert costmap["obstacle_layer"]["scan"]["topic"] == "/m20pro/navigation_scan"
         assert costmap["obstacle_layer"]["scan"]["inf_is_valid"] is True
+        assert costmap["obstacle_layer"]["scan"]["obstacle_range"] == "__FIELD_PROFILE_OBSTACLE_RANGE__"
+        assert costmap["obstacle_layer"]["scan"]["raytrace_range"] == "__FIELD_PROFILE_RAYTRACE_RANGE__"
+    assert local["update_frequency"] == "__FIELD_PROFILE_LOCAL_COSTMAP_UPDATE_FREQUENCY__"
+    assert global_costmap["update_frequency"] == "__FIELD_PROFILE_GLOBAL_COSTMAP_UPDATE_FREQUENCY__"
+    planner = config["planner_server"]["ros__parameters"]
+    assert planner["expected_planner_frequency"] == "__FIELD_PROFILE_PLANNER_FREQUENCY__"
+    assert planner["GridBased"]["tolerance"] == "__FIELD_PROFILE_PLANNER_GOAL_TOLERANCE__"
+    assert planner_profile["goal_tolerance_m"] >= goal_profile["xy_tolerance_m"]
+    assert float(nav2_rewrites["max_vel_x"]) == controller_profile["max_linear_speed_mps"]
+    assert float(nav2_rewrites["max_speed_xy"]) == controller_profile["max_linear_speed_mps"]
+    assert float(nav2_rewrites["decel_lim_x"]) == -controller_profile[
+        "linear_deceleration_limit_mps2"
+    ]
+    assert len(nav2_rewrites) == 31
+    assert len(bridge_rewrites) == 14
+    assert len(floor_rewrites) == 10
+    for parameter_name in bridge_rewrites:
+        assert bridge_config[parameter_name].startswith("__FIELD_PROFILE_")
+    rendered_nav2 = apply_nav2_rewrites(config, nav2_rewrites)
+    assert field_placeholders(rendered_nav2) == []
+    rendered_controller = rendered_nav2["controller_server"]["ros__parameters"]
+    assert rendered_controller["FollowPath"]["decel_lim_x"] == -2.2
+    assert rendered_nav2["local_costmap"]["local_costmap"]["ros__parameters"][
+        "update_frequency"
+    ] == 8.0
+    assert rendered_nav2["global_costmap"]["global_costmap"]["ros__parameters"][
+        "update_frequency"
+    ] == 1.0
 
     tree_path = (
         ROOT
@@ -179,13 +262,10 @@ def main() -> None:
     assert 'executable="navigation_scan_selector"' in real_launch
     assert '"mode_timeout_s": profile_stair["mode_timeout_s"]' in real_launch
     assert "load_field_profile(default_field_profile)" in real_launch
-    for field_argument in (
-        "controller_frequency",
-        "xy_goal_tolerance",
-        "yaw_goal_tolerance",
-        "inflation_radius",
-    ):
-        assert field_argument in nav_launch
+    assert "**nav2_parameter_rewrites(field_profile)" in nav_launch
+    assert 'LaunchConfiguration("controller_frequency")' not in nav_launch
+    assert "**localization_parameters" in real_launch
+    assert "**floor_manager_parameters" in real_launch
 
     scan_selector = (
         ROOT

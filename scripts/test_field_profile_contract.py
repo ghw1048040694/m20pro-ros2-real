@@ -37,6 +37,12 @@ def rejected(raw: dict) -> bool:
     return False
 
 
+def leaf_count(value: object) -> int:
+    if isinstance(value, dict):
+        return sum(leaf_count(item) for item in value.values())
+    return 1
+
+
 def main() -> None:
     profile = load_field_profile(PROFILE_PATH)
     assert profile["profile_hash"] == load_field_profile(PROFILE_PATH)["profile_hash"]
@@ -45,6 +51,19 @@ def main() -> None:
         profile["stair"]["max_step_height_m"]
         + profile["stair"]["obstacle_height_margin_m"]
     )
+    editable = {
+        key: raw_profile()[key]
+        for key in (
+            "scan",
+            "stair",
+            "stair_safety",
+            "stair_transition",
+            "navigation",
+            "localization",
+        )
+    }
+    assert leaf_count(editable) == 67
+    assert leaf_count(editable["navigation"]) == 28
 
     typo = raw_profile()
     typo["stair"]["max_step_heigth_m"] = typo["stair"].pop("max_step_height_m")
@@ -63,6 +82,29 @@ def main() -> None:
     stale_lease["stair_safety"]["stale_timeout_s"] = 2.0
     stale_lease["stair"]["mode_timeout_s"] = 1.5
     assert rejected(stale_lease)
+
+    unsafe_speed = raw_profile()
+    unsafe_speed["navigation"]["controller"]["stopped_linear_speed_mps"] = 0.50
+    assert rejected(unsafe_speed)
+
+    impossible_costmap_rate = raw_profile()
+    impossible_costmap_rate["navigation"]["costmap"]["local_publish_frequency_hz"] = 10.0
+    impossible_costmap_rate["navigation"]["costmap"]["local_update_frequency_hz"] = 8.0
+    assert rejected(impossible_costmap_rate)
+
+    impossible_raytrace = raw_profile()
+    impossible_raytrace["navigation"]["costmap"]["raytrace_range_m"] = 2.0
+    impossible_raytrace["navigation"]["costmap"]["obstacle_range_m"] = 3.0
+    assert rejected(impossible_raytrace)
+
+    unsafe_localization = raw_profile()
+    unsafe_localization["localization"]["pose_jump_candidate_radius_m"] = 0.8
+    unsafe_localization["localization"]["pose_jump_reject_m"] = 0.6
+    assert rejected(unsafe_localization)
+
+    legacy_schema = raw_profile()
+    legacy_schema["schema_version"] = 1
+    assert rejected(legacy_schema)
 
     changed = deepcopy(raw_profile())
     changed["stair"]["max_step_height_m"] = 0.25

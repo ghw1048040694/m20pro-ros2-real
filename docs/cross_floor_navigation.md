@@ -58,7 +58,7 @@
 
 ## 现场参数
 
-点云高度带、楼梯几何阈值、净空样本/超时和 Nav2 现场调参统一写在 `src/m20pro_bringup/config/m20pro_field_profile.yaml`。`stair.obstacle_height_m` 不可单独配置，而是由 `max_step_height_m + obstacle_height_margin_m` 生成，避免台阶上限和障碍阈值分叉。
+点云高度带、楼梯几何阈值、净空样本/超时、楼层切换等待、Nav2 运动/规划/代价地图和定位稳定性参数统一写在 `src/m20pro_bringup/config/m20pro_field_profile.yaml`。schema v2 共开放 67 个现场参数，其中导航 28 个。`stair.obstacle_height_m` 不可单独配置，而是由 `max_step_height_m + obstacle_height_margin_m` 生成，避免台阶上限和障碍阈值分叉。
 
 上位机先运行 `./scripts/apply_field_profile.sh --check`，确认后再运行 `./scripts/apply_field_profile.sh`。后者只允许在无活动任务时更新，完整部署 106 和 104 后核对两端配置哈希；任何一端不一致都不能进入楼梯模式。不要编辑 106 `/etc` 生成文件，不支持任务中热更新，也不保留旧值回退。
 

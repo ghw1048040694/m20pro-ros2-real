@@ -89,8 +89,8 @@ controller_server:
       # Rotation near a waypoint is valid progress for this wheel-legged platform.
       # Foxy's SimpleProgressChecker only measures translation, so use a small
       # translation threshold and enough time for the final heading correction.
-      required_movement_radius: 0.10
-      movement_time_allowance: 12.0
+      required_movement_radius: __FIELD_PROFILE_PROGRESS_RADIUS__
+      movement_time_allowance: __FIELD_PROFILE_PROGRESS_TIME__
 
     goal_checker:
       plugin: "nav2_controller::SimpleGoalChecker"
@@ -108,27 +108,27 @@ controller_server:
       publish_local_plan: true
       min_vel_x: 0.0
       min_vel_y: 0.0
-      max_vel_x: 0.45
+      max_vel_x: __FIELD_PROFILE_MAX_LINEAR_SPEED__
       max_vel_y: 0.0
-      max_vel_theta: 0.75
+      max_vel_theta: __FIELD_PROFILE_MAX_ANGULAR_SPEED__
       min_speed_xy: 0.0
-      max_speed_xy: 0.45
+      max_speed_xy: __FIELD_PROFILE_MAX_LINEAR_SPEED__
       min_speed_theta: 0.0
-      acc_lim_x: 2.2
+      acc_lim_x: __FIELD_PROFILE_LINEAR_ACCELERATION__
       acc_lim_y: 0.0
-      acc_lim_theta: 2.0
-      decel_lim_x: -2.2
+      acc_lim_theta: __FIELD_PROFILE_ANGULAR_ACCELERATION__
+      decel_lim_x: __FIELD_PROFILE_LINEAR_DECELERATION__
       decel_lim_y: 0.0
-      decel_lim_theta: -2.0
-      vx_samples: 12
+      decel_lim_theta: __FIELD_PROFILE_ANGULAR_DECELERATION__
+      vx_samples: __FIELD_PROFILE_LINEAR_SAMPLES__
       vy_samples: 1
-      vtheta_samples: 20
-      sim_time: 1.5
+      vtheta_samples: __FIELD_PROFILE_ANGULAR_SAMPLES__
+      sim_time: __FIELD_PROFILE_SIMULATION_TIME__
       linear_granularity: 0.05
       angular_granularity: 0.025
       transform_tolerance: 0.2
       xy_goal_tolerance: __FIELD_PROFILE_XY_GOAL_TOLERANCE__
-      trans_stopped_velocity: 0.12
+      trans_stopped_velocity: __FIELD_PROFILE_STOPPED_LINEAR_SPEED__
       short_circuit_trajectory_evaluation: true
       stateful: false
       critics: ["RotateToGoal", "Oscillation", "ObstacleFootprint", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
@@ -146,8 +146,8 @@ controller_server:
 local_costmap:
   local_costmap:
     ros__parameters:
-      update_frequency: 8.0
-      publish_frequency: 2.0
+      update_frequency: __FIELD_PROFILE_LOCAL_COSTMAP_UPDATE_FREQUENCY__
+      publish_frequency: __FIELD_PROFILE_LOCAL_COSTMAP_PUBLISH_FREQUENCY__
       global_frame: odom
       robot_base_frame: m20pro_base_link
       use_sim_time: false
@@ -172,13 +172,13 @@ local_costmap:
           marking: true
           data_type: "LaserScan"
           inf_is_valid: true
-          obstacle_range: 3.0
-          raytrace_range: 3.5
-          observation_persistence: 0.3
+          obstacle_range: __FIELD_PROFILE_OBSTACLE_RANGE__
+          raytrace_range: __FIELD_PROFILE_RAYTRACE_RANGE__
+          observation_persistence: __FIELD_PROFILE_OBSERVATION_PERSISTENCE__
 
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 4.0
+        cost_scaling_factor: __FIELD_PROFILE_INFLATION_COST_SCALING__
         inflation_radius: __FIELD_PROFILE_INFLATION_RADIUS__
 
       # A rolling costmap update does not carry its changed origin. Publish the
@@ -188,8 +188,8 @@ local_costmap:
 global_costmap:
   global_costmap:
     ros__parameters:
-      update_frequency: 1.0
-      publish_frequency: 0.5
+      update_frequency: __FIELD_PROFILE_GLOBAL_COSTMAP_UPDATE_FREQUENCY__
+      publish_frequency: __FIELD_PROFILE_GLOBAL_COSTMAP_PUBLISH_FREQUENCY__
       global_frame: map
       robot_base_frame: m20pro_base_link
       use_sim_time: false
@@ -213,13 +213,13 @@ global_costmap:
           marking: true
           data_type: "LaserScan"
           inf_is_valid: true
-          obstacle_range: 3.0
-          raytrace_range: 3.5
-          observation_persistence: 0.3
+          obstacle_range: __FIELD_PROFILE_OBSTACLE_RANGE__
+          raytrace_range: __FIELD_PROFILE_RAYTRACE_RANGE__
+          observation_persistence: __FIELD_PROFILE_OBSERVATION_PERSISTENCE__
 
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 4.0
+        cost_scaling_factor: __FIELD_PROFILE_INFLATION_COST_SCALING__
         inflation_radius: __FIELD_PROFILE_INFLATION_RADIUS__
 
       always_send_full_costmap: false
@@ -231,12 +231,12 @@ map_server:
 
 planner_server:
   ros__parameters:
-    expected_planner_frequency: 1.0
+    expected_planner_frequency: __FIELD_PROFILE_PLANNER_FREQUENCY__
     use_sim_time: false
     planner_plugins: ["GridBased"]
     GridBased:
       plugin: "nav2_navfn_planner/NavfnPlanner"
-      tolerance: 0.5
+      tolerance: __FIELD_PROFILE_PLANNER_GOAL_TOLERANCE__
       use_astar: true
       allow_unknown: true
 
@@ -256,7 +256,7 @@ recoveries_server:
     robot_base_frame: m20pro_base_link
     transform_timeout: 0.1
     use_sim_time: false
-    simulate_ahead_time: 2.0
-    max_rotational_vel: 0.75
-    min_rotational_vel: 0.35
-    rotational_acc_lim: 2.0
+    simulate_ahead_time: __FIELD_PROFILE_RECOVERY_SIMULATION_TIME__
+    max_rotational_vel: __FIELD_PROFILE_MAX_ANGULAR_SPEED__
+    min_rotational_vel: __FIELD_PROFILE_RECOVERY_MIN_ANGULAR_SPEED__
+    rotational_acc_lim: __FIELD_PROFILE_ANGULAR_ACCELERATION__

@@ -110,7 +110,7 @@ source install/setup.bash
 
 ## 现场参数统一配置
 
-现场允许调整的点云、楼梯安全和 Nav2 参数只有一个源文件：
+现场允许调整的点云、楼梯安全、楼梯过渡、Nav2 和定位稳定性参数只有一个源文件：
 
 ```text
 src/m20pro_bringup/config/m20pro_field_profile.yaml
@@ -124,6 +124,10 @@ src/m20pro_bringup/config/m20pro_field_profile.yaml
 ```
 
 应用入口会拒绝任务执行期间换参，先校验字段、范围和参数耦合，再按完整部署流程同时更新 106 和 104。106 的 `/etc/m20pro-edge-scan-106.env` 是自动生成物，不可手工编辑；Nav2 参数文件中的现场项也是不可直接运行的占位符，只能由该配置启动时重写。104 和 106 会携带并核对同一份配置的 SHA-256，不一致时拒绝进入楼梯模式，不提供旧参数回退或热更新。
+
+当前 schema v2 共开放 67 个现场参数，其中 `navigation` 28 个，按 `controller / goal / progress / local_planner / costmap / global_planner` 分组；另有 `scan`、`stair`、`stair_safety`、`stair_transition` 和 `localization`。插件类型、话题、坐标系、机器人 footprint、行为树结构和固定安全开关仍属于工程架构，不允许从现场配置改变。
+
+导航减速度在统一配置中填写正数幅值，运行时自动转换成 DWB 要求的负值；同一最大线速度同时驱动 `max_vel_x/max_speed_xy`，同一障碍、清障和膨胀参数同时驱动局部与全局代价地图。校验器会拒绝停止阈值大于最大速度、发布频率高于刷新频率、清障范围小于障碍范围以及定位阈值相互冲突等组合。
 
 `stair.max_step_height_m` 是感知分类阈值，不代表机器狗的机械爬升能力。现场提高它之前必须先确认厂家给出的步态能力并用录包和有人看护的低风险测试验证；不能靠改大参数让机器狗强行通过超出物理能力的台阶。
 

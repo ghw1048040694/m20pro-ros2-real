@@ -9,7 +9,11 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
-from m20pro_navigation.field_profile_contract import load_field_profile
+from m20pro_navigation.field_profile_contract import (
+    floor_manager_field_parameters,
+    load_field_profile,
+    tcp_bridge_parameters,
+)
 
 
 def has_package(package_name: str) -> bool:
@@ -36,8 +40,8 @@ def generate_launch_description():
     )
     field_profile = load_field_profile(default_field_profile)
     profile_stair = field_profile["stair"]
-    profile_stair_safety = field_profile["stair_safety"]
-    profile_navigation = field_profile["navigation"]
+    localization_parameters = tcp_bridge_parameters(field_profile)
+    floor_manager_parameters = floor_manager_field_parameters(field_profile)
     default_floor_config = os.path.join(bringup_share, "config", "runtime_navigation.yaml")
     default_map_manifest = os.path.join(bringup_share, "config", "map_manifest.yaml")
     default_map = os.path.join(bringup_share, "maps", "F20", "occ_grid.yaml")
@@ -277,6 +281,7 @@ def generate_launch_description():
                     ),
                     "enable_initialpose_3d_relocalization": False,
                     "enable_axis_command": ParameterValue(enable_axis_command, value_type=bool),
+                    **localization_parameters,
                 },
             ],
             condition=UnlessCondition(enable_initialpose_3d_adapter),
@@ -297,6 +302,7 @@ def generate_launch_description():
                     "enable_initialpose_3d_relocalization": ParameterValue(
                         enable_initialpose_relocalization, value_type=bool
                     ),
+                    **localization_parameters,
                 },
             ],
             condition=IfCondition(enable_initialpose_3d_adapter),
@@ -372,17 +378,7 @@ def generate_launch_description():
                     "stair_zones_topic": stair_zones_topic,
                     "flat_gait_label": "flat",
                     "stair_behavior_tree": "package://m20pro_bringup/behavior_trees/m20pro_stair_traverse_foxy.xml",
-                    "field_profile_name": field_profile["profile_name"],
-                    "field_profile_hash": field_profile["profile_hash"],
-                    "stair_clearance_startup_timeout_s": profile_stair_safety[
-                        "startup_timeout_s"
-                    ],
-                    "stair_clearance_stale_timeout_s": profile_stair_safety[
-                        "stale_timeout_s"
-                    ],
-                    "stair_clearance_required_samples": profile_stair_safety[
-                        "required_clear_samples"
-                    ],
+                    **floor_manager_parameters,
                 }
             ],
             condition=IfCondition(enable_floor_manager if nav2_stack_available else "false"),
@@ -427,18 +423,6 @@ def generate_launch_description():
                         "use_composition": "False",
                         "map_subscribe_transient_local": "True",
                         "autostart": "False",
-                        "controller_frequency": str(
-                            profile_navigation["controller_frequency_hz"]
-                        ),
-                        "xy_goal_tolerance": str(
-                            profile_navigation["xy_goal_tolerance_m"]
-                        ),
-                        "yaw_goal_tolerance": str(
-                            profile_navigation["yaw_goal_tolerance_rad"]
-                        ),
-                        "inflation_radius": str(
-                            profile_navigation["inflation_radius_m"]
-                        ),
                     }.items(),
                     condition=IfCondition(enable_nav2),
                 )

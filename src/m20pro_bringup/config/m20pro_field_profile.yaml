@@ -6,7 +6,7 @@
 #
 # Do not edit generated /etc files on 104 or 106. A configured perception
 # threshold does not increase the robot's physical stair-climbing capability.
-schema_version: 1
+schema_version: 2
 profile_name: default_field
 
 scan:
@@ -39,8 +39,67 @@ stair_safety:
   startup_timeout_s: 4.0
   stale_timeout_s: 1.0
 
+stair_transition:
+  # Cross-floor handoff timing and duplicate-goal protection.
+  entry_tolerance_m: 0.80
+  floor_switch_timeout_s: 110.0
+  post_switch_goal_delay_s: 1.0
+  duplicate_goal_tolerance_m: 0.08
+  duplicate_goal_yaw_tolerance_rad: 0.12
+
 navigation:
-  controller_frequency_hz: 10.0
-  xy_goal_tolerance_m: 0.35
-  yaw_goal_tolerance_rad: 0.20
-  inflation_radius_m: 0.62
+  # DWB command limits. Deceleration values are positive magnitudes here.
+  controller:
+    frequency_hz: 10.0
+    max_linear_speed_mps: 0.45
+    max_angular_speed_radps: 0.75
+    linear_acceleration_limit_mps2: 2.20
+    angular_acceleration_limit_radps2: 2.00
+    linear_deceleration_limit_mps2: 2.20
+    angular_deceleration_limit_radps2: 2.00
+    stopped_linear_speed_mps: 0.12
+    recovery_min_angular_speed_radps: 0.35
+    recovery_simulation_time_s: 2.0
+  goal:
+    xy_tolerance_m: 0.35
+    yaw_tolerance_rad: 0.20
+  progress:
+    # A smaller radius is more tolerant of rotate-in-place progress.
+    required_movement_radius_m: 0.10
+    movement_time_allowance_s: 12.0
+  local_planner:
+    # Higher sample counts cost more CPU on every controller cycle.
+    simulation_time_s: 1.50
+    linear_velocity_samples: 12
+    angular_velocity_samples: 20
+  costmap:
+    # Publish rates must not exceed update rates; raytrace must cover obstacles.
+    local_update_frequency_hz: 8.0
+    local_publish_frequency_hz: 2.0
+    global_update_frequency_hz: 1.0
+    global_publish_frequency_hz: 0.5
+    obstacle_range_m: 3.0
+    raytrace_range_m: 3.5
+    observation_persistence_s: 0.30
+    inflation_radius_m: 0.62
+    inflation_cost_scaling_factor: 4.0
+  global_planner:
+    expected_frequency_hz: 1.0
+    goal_tolerance_m: 0.50
+
+localization:
+  # Advanced stability settings. Change one group at a time and verify with a bag.
+  tf_fallback_max_age_s: 1.0
+  pose_jump_reject_m: 0.60
+  pose_jump_candidate_radius_m: 0.30
+  pose_jump_candidate_yaw_tolerance_rad: 0.35
+  stationary_drift_reject_m: 0.20
+  stationary_drift_reject_yaw_rad: 0.30
+  motion_command_hold_s: 1.0
+  command_linear_deadband_mps: 0.03
+  command_angular_deadband_rad_s: 0.05
+  filter_hold_last_good_s: 1.0
+  relocalization_jump_grace_s: 3.0
+  relocalization_jump_grace_radius_m: 1.0
+  odom_rebase_jump_m: 0.60
+  odom_rebase_jump_yaw_rad: 0.75

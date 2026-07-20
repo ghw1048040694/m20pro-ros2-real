@@ -12,7 +12,7 @@ from typing import Any, Dict, Iterable, Mapping
 import yaml
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 PROFILE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 TOP_LEVEL_KEYS = {
@@ -21,7 +21,9 @@ TOP_LEVEL_KEYS = {
     "scan",
     "stair",
     "stair_safety",
+    "stair_transition",
     "navigation",
+    "localization",
 }
 SCAN_KEYS = {
     "height_min_m",
@@ -50,10 +52,76 @@ STAIR_SAFETY_KEYS = {
     "stale_timeout_s",
 }
 NAVIGATION_KEYS = {
-    "controller_frequency_hz",
-    "xy_goal_tolerance_m",
-    "yaw_goal_tolerance_rad",
-    "inflation_radius_m",
+    "controller",
+    "goal",
+    "progress",
+    "local_planner",
+    "costmap",
+    "global_planner",
+}
+
+STAIR_TRANSITION_SPEC = {
+    "entry_tolerance_m": ("number", 0.30, 2.00),
+    "floor_switch_timeout_s": ("number", 30.0, 300.0),
+    "post_switch_goal_delay_s": ("number", 0.10, 10.0),
+    "duplicate_goal_tolerance_m": ("number", 0.01, 0.50),
+    "duplicate_goal_yaw_tolerance_rad": ("number", 0.02, 0.80),
+}
+CONTROLLER_SPEC = {
+    "frequency_hz": ("number", 2.0, 20.0),
+    "max_linear_speed_mps": ("number", 0.10, 0.80),
+    "max_angular_speed_radps": ("number", 0.40, 1.20),
+    "linear_acceleration_limit_mps2": ("number", 0.10, 5.00),
+    "angular_acceleration_limit_radps2": ("number", 0.10, 5.00),
+    "linear_deceleration_limit_mps2": ("number", 0.10, 5.00),
+    "angular_deceleration_limit_radps2": ("number", 0.10, 5.00),
+    "stopped_linear_speed_mps": ("number", 0.01, 0.30),
+    "recovery_min_angular_speed_radps": ("number", 0.10, 0.80),
+    "recovery_simulation_time_s": ("number", 0.50, 5.00),
+}
+GOAL_SPEC = {
+    "xy_tolerance_m": ("number", 0.10, 0.80),
+    "yaw_tolerance_rad": ("number", 0.05, 0.80),
+}
+PROGRESS_SPEC = {
+    "required_movement_radius_m": ("number", 0.02, 0.50),
+    "movement_time_allowance_s": ("number", 3.0, 60.0),
+}
+LOCAL_PLANNER_SPEC = {
+    "simulation_time_s": ("number", 0.50, 5.00),
+    "linear_velocity_samples": ("integer", 3, 50),
+    "angular_velocity_samples": ("integer", 5, 80),
+}
+COSTMAP_SPEC = {
+    "local_update_frequency_hz": ("number", 2.0, 20.0),
+    "local_publish_frequency_hz": ("number", 0.5, 10.0),
+    "global_update_frequency_hz": ("number", 0.2, 10.0),
+    "global_publish_frequency_hz": ("number", 0.1, 5.0),
+    "obstacle_range_m": ("number", 1.0, 8.0),
+    "raytrace_range_m": ("number", 1.2, 10.0),
+    "observation_persistence_s": ("number", 0.0, 2.0),
+    "inflation_radius_m": ("number", 0.40, 2.00),
+    "inflation_cost_scaling_factor": ("number", 0.50, 10.0),
+}
+GLOBAL_PLANNER_SPEC = {
+    "expected_frequency_hz": ("number", 0.10, 10.0),
+    "goal_tolerance_m": ("number", 0.10, 2.00),
+}
+LOCALIZATION_SPEC = {
+    "tf_fallback_max_age_s": ("number", 0.20, 5.00),
+    "pose_jump_reject_m": ("number", 0.20, 3.00),
+    "pose_jump_candidate_radius_m": ("number", 0.05, 1.00),
+    "pose_jump_candidate_yaw_tolerance_rad": ("number", 0.05, 1.50),
+    "stationary_drift_reject_m": ("number", 0.05, 1.00),
+    "stationary_drift_reject_yaw_rad": ("number", 0.05, 1.00),
+    "motion_command_hold_s": ("number", 0.10, 5.00),
+    "command_linear_deadband_mps": ("number", 0.005, 0.20),
+    "command_angular_deadband_rad_s": ("number", 0.01, 0.50),
+    "filter_hold_last_good_s": ("number", 0.10, 5.00),
+    "relocalization_jump_grace_s": ("number", 0.50, 10.0),
+    "relocalization_jump_grace_radius_m": ("number", 0.20, 5.00),
+    "odom_rebase_jump_m": ("number", 0.20, 3.00),
+    "odom_rebase_jump_yaw_rad": ("number", 0.20, 3.14),
 }
 
 
@@ -114,6 +182,26 @@ def _integer(
     return value
 
 
+def _validated_group(
+    value: Mapping[str, Any],
+    path: str,
+    specification: Mapping[str, Any],
+) -> Dict[str, Any]:
+    _exact_keys(value, specification, path)
+    result: Dict[str, Any] = {}
+    for key, (kind, minimum, maximum) in specification.items():
+        field_path = f"{path}.{key}"
+        if kind == "integer":
+            result[key] = _integer(
+                value[key], field_path, minimum=int(minimum), maximum=int(maximum)
+            )
+        else:
+            result[key] = _number(
+                value[key], field_path, minimum=float(minimum), maximum=float(maximum)
+            )
+    return result
+
+
 def validate_field_profile(raw: Any) -> Dict[str, Any]:
     source = _mapping(raw, "profile")
     _exact_keys(source, TOP_LEVEL_KEYS, "profile")
@@ -130,11 +218,24 @@ def validate_field_profile(raw: Any) -> Dict[str, Any]:
     scan_raw = _mapping(source["scan"], "scan")
     stair_raw = _mapping(source["stair"], "stair")
     safety_raw = _mapping(source["stair_safety"], "stair_safety")
+    transition_raw = _mapping(source["stair_transition"], "stair_transition")
     navigation_raw = _mapping(source["navigation"], "navigation")
+    localization_raw = _mapping(source["localization"], "localization")
     _exact_keys(scan_raw, SCAN_KEYS, "scan")
     _exact_keys(stair_raw, STAIR_KEYS, "stair")
     _exact_keys(safety_raw, STAIR_SAFETY_KEYS, "stair_safety")
     _exact_keys(navigation_raw, NAVIGATION_KEYS, "navigation")
+
+    controller_raw = _mapping(navigation_raw["controller"], "navigation.controller")
+    goal_raw = _mapping(navigation_raw["goal"], "navigation.goal")
+    progress_raw = _mapping(navigation_raw["progress"], "navigation.progress")
+    local_planner_raw = _mapping(
+        navigation_raw["local_planner"], "navigation.local_planner"
+    )
+    costmap_raw = _mapping(navigation_raw["costmap"], "navigation.costmap")
+    global_planner_raw = _mapping(
+        navigation_raw["global_planner"], "navigation.global_planner"
+    )
 
     scan = {
         "height_min_m": _number(scan_raw["height_min_m"], "scan.height_min_m", minimum=-2.0, maximum=0.0),
@@ -237,32 +338,85 @@ def validate_field_profile(raw: Any) -> Dict[str, Any]:
             "stair_safety.stale_timeout_s must not exceed stair.mode_timeout_s"
         )
 
+    stair_transition = _validated_group(
+        transition_raw, "stair_transition", STAIR_TRANSITION_SPEC
+    )
+
+    controller = _validated_group(
+        controller_raw, "navigation.controller", CONTROLLER_SPEC
+    )
+    if controller["stopped_linear_speed_mps"] >= controller["max_linear_speed_mps"]:
+        raise FieldProfileError(
+            "navigation.controller.stopped_linear_speed_mps must be below max_linear_speed_mps"
+        )
+    if (
+        controller["recovery_min_angular_speed_radps"]
+        > controller["max_angular_speed_radps"]
+    ):
+        raise FieldProfileError(
+            "navigation.controller.recovery_min_angular_speed_radps must not exceed max_angular_speed_radps"
+        )
+
+    goal = _validated_group(goal_raw, "navigation.goal", GOAL_SPEC)
+    progress = _validated_group(progress_raw, "navigation.progress", PROGRESS_SPEC)
+    if progress["required_movement_radius_m"] > goal["xy_tolerance_m"]:
+        raise FieldProfileError(
+            "navigation.progress.required_movement_radius_m must not exceed goal.xy_tolerance_m"
+        )
+
+    local_planner = _validated_group(
+        local_planner_raw, "navigation.local_planner", LOCAL_PLANNER_SPEC
+    )
+    costmap = _validated_group(costmap_raw, "navigation.costmap", COSTMAP_SPEC)
+    if costmap["local_publish_frequency_hz"] > costmap["local_update_frequency_hz"]:
+        raise FieldProfileError(
+            "navigation.costmap.local_publish_frequency_hz must not exceed local_update_frequency_hz"
+        )
+    if costmap["global_publish_frequency_hz"] > costmap["global_update_frequency_hz"]:
+        raise FieldProfileError(
+            "navigation.costmap.global_publish_frequency_hz must not exceed global_update_frequency_hz"
+        )
+    if costmap["raytrace_range_m"] < costmap["obstacle_range_m"]:
+        raise FieldProfileError(
+            "navigation.costmap.raytrace_range_m must not be below obstacle_range_m"
+        )
+
+    global_planner = _validated_group(
+        global_planner_raw, "navigation.global_planner", GLOBAL_PLANNER_SPEC
+    )
+    if global_planner["goal_tolerance_m"] < goal["xy_tolerance_m"]:
+        raise FieldProfileError(
+            "navigation.global_planner.goal_tolerance_m must not be below goal.xy_tolerance_m"
+        )
+
     navigation = {
-        "controller_frequency_hz": _number(
-            navigation_raw["controller_frequency_hz"],
-            "navigation.controller_frequency_hz",
-            minimum=2.0,
-            maximum=20.0,
-        ),
-        "xy_goal_tolerance_m": _number(
-            navigation_raw["xy_goal_tolerance_m"],
-            "navigation.xy_goal_tolerance_m",
-            minimum=0.10,
-            maximum=0.80,
-        ),
-        "yaw_goal_tolerance_rad": _number(
-            navigation_raw["yaw_goal_tolerance_rad"],
-            "navigation.yaw_goal_tolerance_rad",
-            minimum=0.05,
-            maximum=0.80,
-        ),
-        "inflation_radius_m": _number(
-            navigation_raw["inflation_radius_m"],
-            "navigation.inflation_radius_m",
-            minimum=0.40,
-            maximum=2.00,
-        ),
+        "controller": controller,
+        "goal": goal,
+        "progress": progress,
+        "local_planner": local_planner,
+        "costmap": costmap,
+        "global_planner": global_planner,
     }
+
+    localization = _validated_group(
+        localization_raw, "localization", LOCALIZATION_SPEC
+    )
+    if localization["pose_jump_candidate_radius_m"] > localization["pose_jump_reject_m"]:
+        raise FieldProfileError(
+            "localization.pose_jump_candidate_radius_m must not exceed pose_jump_reject_m"
+        )
+    if localization["stationary_drift_reject_m"] > localization["pose_jump_reject_m"]:
+        raise FieldProfileError(
+            "localization.stationary_drift_reject_m must not exceed pose_jump_reject_m"
+        )
+    if localization["relocalization_jump_grace_radius_m"] < localization["pose_jump_reject_m"]:
+        raise FieldProfileError(
+            "localization.relocalization_jump_grace_radius_m must not be below pose_jump_reject_m"
+        )
+    if localization["odom_rebase_jump_m"] < localization["pose_jump_reject_m"]:
+        raise FieldProfileError(
+            "localization.odom_rebase_jump_m must not be below pose_jump_reject_m"
+        )
 
     normalized = {
         "schema_version": schema_version,
@@ -270,7 +424,9 @@ def validate_field_profile(raw: Any) -> Dict[str, Any]:
         "scan": scan,
         "stair": {key: value for key, value in stair.items() if key != "obstacle_height_m"},
         "stair_safety": stair_safety,
+        "stair_transition": stair_transition,
         "navigation": navigation,
+        "localization": localization,
     }
     canonical = json.dumps(
         normalized,
@@ -300,6 +456,117 @@ def _format_env_value(value: Any) -> str:
     if isinstance(value, float):
         return format(value, ".12g")
     return str(value)
+
+
+def nav2_parameter_rewrites(profile: Mapping[str, Any]) -> Dict[str, str]:
+    navigation = profile["navigation"]
+    controller = navigation["controller"]
+    goal = navigation["goal"]
+    progress = navigation["progress"]
+    local_planner = navigation["local_planner"]
+    costmap = navigation["costmap"]
+    global_planner = navigation["global_planner"]
+    values = {
+        "controller_frequency": controller["frequency_hz"],
+        "required_movement_radius": progress["required_movement_radius_m"],
+        "movement_time_allowance": progress["movement_time_allowance_s"],
+        "xy_goal_tolerance": goal["xy_tolerance_m"],
+        "yaw_goal_tolerance": goal["yaw_tolerance_rad"],
+        "max_vel_x": controller["max_linear_speed_mps"],
+        "max_speed_xy": controller["max_linear_speed_mps"],
+        "max_vel_theta": controller["max_angular_speed_radps"],
+        "acc_lim_x": controller["linear_acceleration_limit_mps2"],
+        "acc_lim_theta": controller["angular_acceleration_limit_radps2"],
+        "decel_lim_x": -controller["linear_deceleration_limit_mps2"],
+        "decel_lim_theta": -controller["angular_deceleration_limit_radps2"],
+        "trans_stopped_velocity": controller["stopped_linear_speed_mps"],
+        "vx_samples": local_planner["linear_velocity_samples"],
+        "vtheta_samples": local_planner["angular_velocity_samples"],
+        "sim_time": local_planner["simulation_time_s"],
+        "obstacle_range": costmap["obstacle_range_m"],
+        "raytrace_range": costmap["raytrace_range_m"],
+        "observation_persistence": costmap["observation_persistence_s"],
+        "inflation_radius": costmap["inflation_radius_m"],
+        "cost_scaling_factor": costmap["inflation_cost_scaling_factor"],
+        "local_costmap.local_costmap.ros__parameters.update_frequency": costmap[
+            "local_update_frequency_hz"
+        ],
+        "local_costmap.local_costmap.ros__parameters.publish_frequency": costmap[
+            "local_publish_frequency_hz"
+        ],
+        "global_costmap.global_costmap.ros__parameters.update_frequency": costmap[
+            "global_update_frequency_hz"
+        ],
+        "global_costmap.global_costmap.ros__parameters.publish_frequency": costmap[
+            "global_publish_frequency_hz"
+        ],
+        "planner_server.ros__parameters.expected_planner_frequency": global_planner[
+            "expected_frequency_hz"
+        ],
+        "planner_server.ros__parameters.GridBased.tolerance": global_planner[
+            "goal_tolerance_m"
+        ],
+        "recoveries_server.ros__parameters.simulate_ahead_time": controller[
+            "recovery_simulation_time_s"
+        ],
+        "recoveries_server.ros__parameters.max_rotational_vel": controller[
+            "max_angular_speed_radps"
+        ],
+        "recoveries_server.ros__parameters.min_rotational_vel": controller[
+            "recovery_min_angular_speed_radps"
+        ],
+        "recoveries_server.ros__parameters.rotational_acc_lim": controller[
+            "angular_acceleration_limit_radps2"
+        ],
+    }
+    return {key: _format_env_value(value) for key, value in values.items()}
+
+
+def tcp_bridge_parameters(profile: Mapping[str, Any]) -> Dict[str, Any]:
+    localization = profile["localization"]
+    return {
+        "tf_pose_fallback_max_age_s": localization["tf_fallback_max_age_s"],
+        "pose_jump_reject_m": localization["pose_jump_reject_m"],
+        "pose_jump_candidate_radius_m": localization["pose_jump_candidate_radius_m"],
+        "pose_jump_candidate_yaw_tolerance_rad": localization[
+            "pose_jump_candidate_yaw_tolerance_rad"
+        ],
+        "pose_stationary_drift_reject_m": localization["stationary_drift_reject_m"],
+        "pose_stationary_drift_reject_yaw_rad": localization[
+            "stationary_drift_reject_yaw_rad"
+        ],
+        "pose_motion_command_hold_s": localization["motion_command_hold_s"],
+        "pose_command_linear_deadband_mps": localization["command_linear_deadband_mps"],
+        "pose_command_angular_deadband_rad_s": localization[
+            "command_angular_deadband_rad_s"
+        ],
+        "pose_filter_hold_last_good_s": localization["filter_hold_last_good_s"],
+        "pose_relocalization_jump_grace_s": localization["relocalization_jump_grace_s"],
+        "pose_relocalization_jump_grace_radius_m": localization[
+            "relocalization_jump_grace_radius_m"
+        ],
+        "odom_rebase_jump_m": localization["odom_rebase_jump_m"],
+        "odom_rebase_jump_yaw_rad": localization["odom_rebase_jump_yaw_rad"],
+    }
+
+
+def floor_manager_field_parameters(profile: Mapping[str, Any]) -> Dict[str, Any]:
+    safety = profile["stair_safety"]
+    transition = profile["stair_transition"]
+    return {
+        "field_profile_name": profile["profile_name"],
+        "field_profile_hash": profile["profile_hash"],
+        "stair_clearance_startup_timeout_s": safety["startup_timeout_s"],
+        "stair_clearance_stale_timeout_s": safety["stale_timeout_s"],
+        "stair_clearance_required_samples": safety["required_clear_samples"],
+        "stair_entry_tolerance_m": transition["entry_tolerance_m"],
+        "floor_switch_timeout_s": transition["floor_switch_timeout_s"],
+        "post_switch_goal_delay_s": transition["post_switch_goal_delay_s"],
+        "duplicate_goal_tolerance_m": transition["duplicate_goal_tolerance_m"],
+        "duplicate_goal_yaw_tolerance_rad": transition[
+            "duplicate_goal_yaw_tolerance_rad"
+        ],
+    }
 
 
 def edge_environment(profile: Mapping[str, Any]) -> Dict[str, Any]:

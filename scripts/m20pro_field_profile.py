@@ -30,7 +30,9 @@ def profile_summary(profile: dict) -> dict:
         "scan": profile["scan"],
         "stair": profile["stair"],
         "stair_safety": profile["stair_safety"],
+        "stair_transition": profile["stair_transition"],
         "navigation": profile["navigation"],
+        "localization": profile["localization"],
     }
 
 
@@ -83,6 +85,17 @@ def main() -> int:
             summary["stair"]["mode_timeout_s"],
         )
     )
+    print(
+        "navigation speed/goal/costmap: %.2f m/s / %.2f rad/s / %.2f m / %.2f rad / %.2f m"
+        % (
+            summary["navigation"]["controller"]["max_linear_speed_mps"],
+            summary["navigation"]["controller"]["max_angular_speed_radps"],
+            summary["navigation"]["goal"]["xy_tolerance_m"],
+            summary["navigation"]["goal"]["yaw_tolerance_rad"],
+            summary["navigation"]["costmap"]["inflation_radius_m"],
+        )
+    )
+    print("editable field parameters: 67 (navigation: 28)")
     return 0
 
 
