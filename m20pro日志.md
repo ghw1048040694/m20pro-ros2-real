@@ -1,6 +1,14 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-07-20 11:06 CST
+Last updated: 2026-07-20 11:15 CST
+
+## 2026-07-20 11:15 CST - Foxy 强类型参数修复真机签收
+
+- 修复提交 `2a999f3ff5c2f7f0ad9bf26e490817d2f843d579` 已按 106→104→106 顺序完成原子部署；106 edge scan 使用真实 DrDDS 依赖重新构建，104 Foxy 五包构建成功，成功部署的 staging/backup 已清理。104 `m20pro-real.service` 和 106 `m20pro-edge-scan-106.service` 均为 active、`NRestarts=0`。
+- 故障节点恢复：`/m20pro_tcp_bridge`、`/controller_server`、`/planner_server` 及局部/全局 costmap 节点全部在线，Web 基础自检由“缺少三个核心节点”恢复为通过。当前工位未重定位，Nav2 生命周期按启动门保持 unconfigured，代价地图延后启动属于设计行为，不是节点退出。
+- 运行实参签收：104 root 只读检查当前最终主/Nav2 YAML，占位符计数均为 0；TCP fallback `1.0=float`，controller frequency `10.0=float`，DWB `vx_samples=12=int`、`decel_lim_x=-2.2=float`，局部/全局更新频率分别为 `8.0/1.0`，planner frequency `1.0=float`。ROS 参数服务同时确认 TCP、controller、planner 为 Double，floor manager 和 scan selector 的 profile hash 均为 `4d756cf0ee461f464cd875c4f95c5e7fc0559ccc9beb92f7cf6c663c57ae1e56`，安全连续样本为 3。
+- 日志与感知：新服务启动后的 journal 不再出现 `expected double/got integer`、`got string`、现场占位符、Traceback 或进程退出；106 `/scan` 新鲜度约 0.26 秒、有效距离约 260，frame 为 `m20pro_base_link`。首轮失败版本遗留的三个旧主参数临时文件已删除，当前只保留运行进程使用的主/Nav2 各一份，服务退出时由 trap 清理。
+- 安全边界：部署前后 `active_task=null`、`localization_ok=false`；本轮没有执行导航、速度、步态、建图、地图切换、重定位或 Nav2 生命周期激活。
 
 ## 2026-07-20 11:06 CST - 根治 Foxy 现场参数类型失真
 
