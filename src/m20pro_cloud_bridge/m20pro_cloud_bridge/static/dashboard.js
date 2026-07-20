@@ -1102,6 +1102,14 @@
       const popover = $(statusPopoverIds[name]);
       setStatusPopover(name, !popover || popover.hidden);
     }
+    function isLocalizationMapInteraction(target) {
+      return !!(
+        state.localizationPopoverOpen
+        && target
+        && target.closest
+        && target.closest(".canvas-box")
+      );
+    }
     function sleepMs(ms) {
       return new Promise(resolve => setTimeout(resolve, ms));
     }
@@ -4360,6 +4368,7 @@
     $("refreshRadarStatusBtn").addEventListener("click", () => loadRadarStatus().catch(console.warn));
     document.addEventListener("pointerdown", event => {
       const target = event.target;
+      if (isLocalizationMapInteraction(target)) return;
       if (target && target.closest && (target.closest(".status-popover") || target.closest(".status-action"))) return;
       setStatusPopover("", false);
     });

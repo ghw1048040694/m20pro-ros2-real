@@ -116,6 +116,9 @@ def main() -> None:
     assert "const usingDraft = localizationDraftActive();" in script
     assert 'return !!state.localizeDraft;' in script
     assert "must not depend on which popover/tab currently owns pointer focus" in script
+    assert "function isLocalizationMapInteraction" in script
+    assert 'target.closest(".canvas-box")' in script
+    assert "if (isLocalizationMapInteraction(target)) return;" in script
     assert "if (!robotFloor) return true;" in script
     assert "confirmed different floor should suppress its red scan overlay" in script
     assert "renderYoloWorkspace" in script
@@ -186,7 +189,7 @@ def main() -> None:
     assert "function paintMapEditor" in script
     assert "button.textContent = item.label || item.id;" in script
     assert "button.textContent = `+ ${item.label || item.id}`" not in script
-    assert "20260720-relocalize-preview-2" in html
+    assert "20260720-relocalize-preview-3" in html
     assert "clamp(460px, 34vw, 620px)" in css
     assert "function mappingSessionMatchesDraft" in script
     assert "const reusableSession = [state.mappingSession, state.latestMappingSession]" in script
