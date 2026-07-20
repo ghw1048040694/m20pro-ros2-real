@@ -1,6 +1,14 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-07-20 10:48 CST
+Last updated: 2026-07-20 11:06 CST
+
+## 2026-07-20 11:06 CST - 根治 Foxy 现场参数类型失真
+
+- 首轮 v2 部署事实：提交 `1ca3851` 部署后，106 edge scan 保持健康，但 104 的 `controller_server` 因“期望 double、得到 integer”退出，`planner_server` 因“期望 double、得到 string”退出，`m20pro_tcp_bridge` 收到未替换的 `__FIELD_PROFILE_TF_FALLBACK_MAX_AGE__` 后退出；主 systemd 单元本身仍为 active，因此不能只用单元状态判断整栈可用。期间 `active_task=null`、定位无效，没有运动风险。
+- 根因：Foxy 的 `RewrittenYaml(convert_types=True)` 只对普通叶名称重写可靠，整路径重写不会像上位机 Humble 一样完成类型转换；同时旧字符串格式化会把 `2.0` 输出为 `2`。主参数文件与后置 launch 字典在 Foxy 下也存在参数文件优先级差异，导致模板占位符覆盖后置定位参数。本地模拟 Humble 行为的合同测试因此产生了假通过。
+- 单机制修复：现场 YAML 仍是唯一人工配置源；`field_profile_contract.py` 新增严格的纯渲染函数，深拷贝模板并把全部现场占位符直接替换为原生 Python float/int，未知占位符、模板漏占位符和渲染后残留均拒绝启动。减速度只在该处派生为负值，shadow/move 轴开关和重定位模式也写入同一份最终主参数。
+- 启动链收敛：`m20pro_real_full.sh` 在 ROS 启动前生成一份最终主参数 YAML 和一份最终 Nav2 YAML，经 `real_params_file`/`real_nav2_params_file` 贯穿主 launch，进程退出后清理临时文件。Nav2 子 launch 删除全部现场参数重写，仅保留 `use_sim_time`、行为树路径、autostart 等 Nav2 标准动态叶项；TCP launch 删除定位参数二次覆盖，不保留并行回退机制。
+- 回归验证：最终 YAML 中现场占位符为 0；14 个定位值、控制/规划/代价地图频率和减速度保持 float，DWB 采样数保持 int，局部/全局代价地图频率保持独立值。仓库 36 个 `scripts/test_*.py` 全部通过，Humble 五包完整构建、Python/Shell 语法和 `git diff --check` 通过。本条写入时待提交并按 106→104→106 顺序重新部署；验收期间不执行导航、速度、步态、建图、切图或重定位。
 
 ## 2026-07-20 10:48 CST - 现场总参数扩展为 schema v2
 

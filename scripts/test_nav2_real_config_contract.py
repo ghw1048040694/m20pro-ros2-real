@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-from copy import deepcopy
 from pathlib import Path
 import sys
 import xml.etree.ElementTree as ET
@@ -14,33 +13,10 @@ from m20pro_navigation.field_profile_contract import (  # noqa: E402
     edge_environment,
     floor_manager_field_parameters,
     load_field_profile,
-    nav2_parameter_rewrites,
+    render_m20pro_parameters,
+    render_nav2_parameters,
     tcp_bridge_parameters,
 )
-
-
-def apply_nav2_rewrites(config: dict, rewrites: dict) -> dict:
-    rendered = deepcopy(config)
-
-    def replace_leaf_values(value: object) -> None:
-        if not isinstance(value, dict):
-            return
-        for key, item in value.items():
-            if key in rewrites:
-                value[key] = yaml.safe_load(rewrites[key])
-            else:
-                replace_leaf_values(item)
-
-    replace_leaf_values(rendered)
-    for path, raw_value in rewrites.items():
-        if "." not in path:
-            continue
-        target = rendered
-        keys = path.split(".")
-        for key in keys[:-1]:
-            target = target[key]
-        target[keys[-1]] = yaml.safe_load(raw_value)
-    return rendered
 
 
 def field_placeholders(value: object) -> list:
@@ -77,7 +53,6 @@ def main() -> None:
     local_planner_profile = navigation_profile["local_planner"]
     costmap_profile = navigation_profile["costmap"]
     planner_profile = navigation_profile["global_planner"]
-    nav2_rewrites = nav2_parameter_rewrites(field_profile)
     bridge_rewrites = tcp_bridge_parameters(field_profile)
     floor_rewrites = floor_manager_field_parameters(field_profile)
 
@@ -119,26 +94,42 @@ def main() -> None:
     assert planner["expected_planner_frequency"] == "__FIELD_PROFILE_PLANNER_FREQUENCY__"
     assert planner["GridBased"]["tolerance"] == "__FIELD_PROFILE_PLANNER_GOAL_TOLERANCE__"
     assert planner_profile["goal_tolerance_m"] >= goal_profile["xy_tolerance_m"]
-    assert float(nav2_rewrites["max_vel_x"]) == controller_profile["max_linear_speed_mps"]
-    assert float(nav2_rewrites["max_speed_xy"]) == controller_profile["max_linear_speed_mps"]
-    assert float(nav2_rewrites["decel_lim_x"]) == -controller_profile[
-        "linear_deceleration_limit_mps2"
-    ]
-    assert len(nav2_rewrites) == 31
     assert len(bridge_rewrites) == 14
     assert len(floor_rewrites) == 10
     for parameter_name in bridge_rewrites:
         assert bridge_config[parameter_name].startswith("__FIELD_PROFILE_")
-    rendered_nav2 = apply_nav2_rewrites(config, nav2_rewrites)
+    rendered_nav2 = render_nav2_parameters(config, field_profile)
+    rendered_real = render_m20pro_parameters(
+        real_config, field_profile, enable_axis_command=False
+    )
     assert field_placeholders(rendered_nav2) == []
+    assert field_placeholders(rendered_real) == []
     rendered_controller = rendered_nav2["controller_server"]["ros__parameters"]
     assert rendered_controller["FollowPath"]["decel_lim_x"] == -2.2
+    assert type(rendered_controller["FollowPath"]["decel_lim_x"]) is float
+    assert type(rendered_controller["FollowPath"]["decel_lim_theta"]) is float
+    assert type(rendered_controller["FollowPath"]["vx_samples"]) is int
+    assert type(rendered_controller["FollowPath"]["vtheta_samples"]) is int
+    assert type(rendered_controller["controller_frequency"]) is float
+    assert type(rendered_controller["progress_checker"]["movement_time_allowance"]) is float
     assert rendered_nav2["local_costmap"]["local_costmap"]["ros__parameters"][
         "update_frequency"
     ] == 8.0
     assert rendered_nav2["global_costmap"]["global_costmap"]["ros__parameters"][
         "update_frequency"
     ] == 1.0
+    assert type(
+        rendered_nav2["planner_server"]["ros__parameters"][
+            "expected_planner_frequency"
+        ]
+    ) is float
+    rendered_bridge = rendered_real["m20pro_tcp_bridge"]["ros__parameters"]
+    for parameter_name, expected in bridge_rewrites.items():
+        assert rendered_bridge[parameter_name] == expected
+        assert type(rendered_bridge[parameter_name]) is float
+    assert rendered_bridge["enable_axis_command"] is False
+    assert rendered_bridge["enable_initialpose_relocalization"] is True
+    assert rendered_bridge["enable_initialpose_3d_relocalization"] is False
 
     tree_path = (
         ROOT
@@ -262,9 +253,11 @@ def main() -> None:
     assert 'executable="navigation_scan_selector"' in real_launch
     assert '"mode_timeout_s": profile_stair["mode_timeout_s"]' in real_launch
     assert "load_field_profile(default_field_profile)" in real_launch
-    assert "**nav2_parameter_rewrites(field_profile)" in nav_launch
+    assert "nav2_parameter_rewrites" not in nav_launch
+    assert "__FIELD_PROFILE_" not in nav_launch
+    assert "local_costmap.local_costmap.ros__parameters" not in nav_launch
     assert 'LaunchConfiguration("controller_frequency")' not in nav_launch
-    assert "**localization_parameters" in real_launch
+    assert "localization_parameters" not in real_launch
     assert "**floor_manager_parameters" in real_launch
 
     scan_selector = (
@@ -309,6 +302,10 @@ def main() -> None:
         / "m20pro_real_full.sh"
     ).read_text(encoding="utf-8")
     assert "export PYTHONDONTWRITEBYTECODE=1" in real_start
+    assert "render-real-yaml" in real_start
+    assert "render-nav2-yaml" in real_start
+    assert 'real_nav2_params_file:="${RUNTIME_NAV2_PARAMS}"' in real_start
+    assert "cleanup_runtime_params" in real_start
 
     edge_env = edge_environment(field_profile)
     assert float(edge_env["HEIGHT_MIN"]) <= -0.25

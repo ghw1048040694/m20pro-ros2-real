@@ -12,7 +12,6 @@ from launch_ros.parameter_descriptions import ParameterValue
 from m20pro_navigation.field_profile_contract import (
     floor_manager_field_parameters,
     load_field_profile,
-    tcp_bridge_parameters,
 )
 
 
@@ -40,7 +39,6 @@ def generate_launch_description():
     )
     field_profile = load_field_profile(default_field_profile)
     profile_stair = field_profile["stair"]
-    localization_parameters = tcp_bridge_parameters(field_profile)
     floor_manager_parameters = floor_manager_field_parameters(field_profile)
     default_floor_config = os.path.join(bringup_share, "config", "runtime_navigation.yaml")
     default_map_manifest = os.path.join(bringup_share, "config", "map_manifest.yaml")
@@ -281,7 +279,6 @@ def generate_launch_description():
                     ),
                     "enable_initialpose_3d_relocalization": False,
                     "enable_axis_command": ParameterValue(enable_axis_command, value_type=bool),
-                    **localization_parameters,
                 },
             ],
             condition=UnlessCondition(enable_initialpose_3d_adapter),
@@ -302,7 +299,6 @@ def generate_launch_description():
                     "enable_initialpose_3d_relocalization": ParameterValue(
                         enable_initialpose_relocalization, value_type=bool
                     ),
-                    **localization_parameters,
                 },
             ],
             condition=IfCondition(enable_initialpose_3d_adapter),

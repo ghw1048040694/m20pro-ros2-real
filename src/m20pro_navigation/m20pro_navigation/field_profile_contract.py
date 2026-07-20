@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import re
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping
 
@@ -458,7 +459,43 @@ def _format_env_value(value: Any) -> str:
     return str(value)
 
 
-def nav2_parameter_rewrites(profile: Mapping[str, Any]) -> Dict[str, str]:
+def _replace_field_placeholders(
+    source: Mapping[str, Any], replacements: Mapping[str, Any]
+) -> Dict[str, Any]:
+    rendered = deepcopy(source)
+    used = set()
+
+    def replace(value: Any, path: str) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: replace(item, f"{path}.{key}" if path else str(key))
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [replace(item, f"{path}[{index}]") for index, item in enumerate(value)]
+        if isinstance(value, str) and value.startswith("__FIELD_PROFILE_"):
+            if value not in replacements:
+                raise FieldProfileError(
+                    f"unknown field profile placeholder {value!r} at {path}"
+                )
+            used.add(value)
+            return replacements[value]
+        return value
+
+    rendered = replace(rendered, "")
+    missing = sorted(set(replacements) - used)
+    if missing:
+        raise FieldProfileError(
+            "parameter template missing field profile placeholders: "
+            + ", ".join(missing)
+        )
+    return rendered
+
+
+def render_nav2_parameters(
+    source: Mapping[str, Any], profile: Mapping[str, Any]
+) -> Dict[str, Any]:
+    """Render the Nav2 template with native numeric parameter types."""
     navigation = profile["navigation"]
     controller = navigation["controller"]
     goal = navigation["goal"]
@@ -466,60 +503,65 @@ def nav2_parameter_rewrites(profile: Mapping[str, Any]) -> Dict[str, str]:
     local_planner = navigation["local_planner"]
     costmap = navigation["costmap"]
     global_planner = navigation["global_planner"]
-    values = {
-        "controller_frequency": controller["frequency_hz"],
-        "required_movement_radius": progress["required_movement_radius_m"],
-        "movement_time_allowance": progress["movement_time_allowance_s"],
-        "xy_goal_tolerance": goal["xy_tolerance_m"],
-        "yaw_goal_tolerance": goal["yaw_tolerance_rad"],
-        "max_vel_x": controller["max_linear_speed_mps"],
-        "max_speed_xy": controller["max_linear_speed_mps"],
-        "max_vel_theta": controller["max_angular_speed_radps"],
-        "acc_lim_x": controller["linear_acceleration_limit_mps2"],
-        "acc_lim_theta": controller["angular_acceleration_limit_radps2"],
-        "decel_lim_x": -controller["linear_deceleration_limit_mps2"],
-        "decel_lim_theta": -controller["angular_deceleration_limit_radps2"],
-        "trans_stopped_velocity": controller["stopped_linear_speed_mps"],
-        "vx_samples": local_planner["linear_velocity_samples"],
-        "vtheta_samples": local_planner["angular_velocity_samples"],
-        "sim_time": local_planner["simulation_time_s"],
-        "obstacle_range": costmap["obstacle_range_m"],
-        "raytrace_range": costmap["raytrace_range_m"],
-        "observation_persistence": costmap["observation_persistence_s"],
-        "inflation_radius": costmap["inflation_radius_m"],
-        "cost_scaling_factor": costmap["inflation_cost_scaling_factor"],
-        "local_costmap.local_costmap.ros__parameters.update_frequency": costmap[
-            "local_update_frequency_hz"
+    replacements = {
+        "__FIELD_PROFILE_CONTROLLER_FREQUENCY__": controller["frequency_hz"],
+        "__FIELD_PROFILE_PROGRESS_RADIUS__": progress["required_movement_radius_m"],
+        "__FIELD_PROFILE_PROGRESS_TIME__": progress["movement_time_allowance_s"],
+        "__FIELD_PROFILE_XY_GOAL_TOLERANCE__": goal["xy_tolerance_m"],
+        "__FIELD_PROFILE_YAW_GOAL_TOLERANCE__": goal["yaw_tolerance_rad"],
+        "__FIELD_PROFILE_MAX_LINEAR_SPEED__": controller["max_linear_speed_mps"],
+        "__FIELD_PROFILE_MAX_ANGULAR_SPEED__": controller["max_angular_speed_radps"],
+        "__FIELD_PROFILE_LINEAR_ACCELERATION__": controller[
+            "linear_acceleration_limit_mps2"
         ],
-        "local_costmap.local_costmap.ros__parameters.publish_frequency": costmap[
-            "local_publish_frequency_hz"
-        ],
-        "global_costmap.global_costmap.ros__parameters.update_frequency": costmap[
-            "global_update_frequency_hz"
-        ],
-        "global_costmap.global_costmap.ros__parameters.publish_frequency": costmap[
-            "global_publish_frequency_hz"
-        ],
-        "planner_server.ros__parameters.expected_planner_frequency": global_planner[
-            "expected_frequency_hz"
-        ],
-        "planner_server.ros__parameters.GridBased.tolerance": global_planner[
-            "goal_tolerance_m"
-        ],
-        "recoveries_server.ros__parameters.simulate_ahead_time": controller[
-            "recovery_simulation_time_s"
-        ],
-        "recoveries_server.ros__parameters.max_rotational_vel": controller[
-            "max_angular_speed_radps"
-        ],
-        "recoveries_server.ros__parameters.min_rotational_vel": controller[
-            "recovery_min_angular_speed_radps"
-        ],
-        "recoveries_server.ros__parameters.rotational_acc_lim": controller[
+        "__FIELD_PROFILE_ANGULAR_ACCELERATION__": controller[
             "angular_acceleration_limit_radps2"
         ],
+        "__FIELD_PROFILE_LINEAR_DECELERATION__": -controller[
+            "linear_deceleration_limit_mps2"
+        ],
+        "__FIELD_PROFILE_ANGULAR_DECELERATION__": -controller[
+            "angular_deceleration_limit_radps2"
+        ],
+        "__FIELD_PROFILE_STOPPED_LINEAR_SPEED__": controller[
+            "stopped_linear_speed_mps"
+        ],
+        "__FIELD_PROFILE_LINEAR_SAMPLES__": local_planner["linear_velocity_samples"],
+        "__FIELD_PROFILE_ANGULAR_SAMPLES__": local_planner["angular_velocity_samples"],
+        "__FIELD_PROFILE_SIMULATION_TIME__": local_planner["simulation_time_s"],
+        "__FIELD_PROFILE_OBSTACLE_RANGE__": costmap["obstacle_range_m"],
+        "__FIELD_PROFILE_RAYTRACE_RANGE__": costmap["raytrace_range_m"],
+        "__FIELD_PROFILE_OBSERVATION_PERSISTENCE__": costmap[
+            "observation_persistence_s"
+        ],
+        "__FIELD_PROFILE_INFLATION_RADIUS__": costmap["inflation_radius_m"],
+        "__FIELD_PROFILE_INFLATION_COST_SCALING__": costmap[
+            "inflation_cost_scaling_factor"
+        ],
+        "__FIELD_PROFILE_LOCAL_COSTMAP_UPDATE_FREQUENCY__": costmap[
+            "local_update_frequency_hz"
+        ],
+        "__FIELD_PROFILE_LOCAL_COSTMAP_PUBLISH_FREQUENCY__": costmap[
+            "local_publish_frequency_hz"
+        ],
+        "__FIELD_PROFILE_GLOBAL_COSTMAP_UPDATE_FREQUENCY__": costmap[
+            "global_update_frequency_hz"
+        ],
+        "__FIELD_PROFILE_GLOBAL_COSTMAP_PUBLISH_FREQUENCY__": costmap[
+            "global_publish_frequency_hz"
+        ],
+        "__FIELD_PROFILE_PLANNER_FREQUENCY__": global_planner["expected_frequency_hz"],
+        "__FIELD_PROFILE_PLANNER_GOAL_TOLERANCE__": global_planner[
+            "goal_tolerance_m"
+        ],
+        "__FIELD_PROFILE_RECOVERY_SIMULATION_TIME__": controller[
+            "recovery_simulation_time_s"
+        ],
+        "__FIELD_PROFILE_RECOVERY_MIN_ANGULAR_SPEED__": controller[
+            "recovery_min_angular_speed_radps"
+        ],
     }
-    return {key: _format_env_value(value) for key, value in values.items()}
+    return _replace_field_placeholders(source, replacements)
 
 
 def tcp_bridge_parameters(profile: Mapping[str, Any]) -> Dict[str, Any]:
@@ -548,6 +590,46 @@ def tcp_bridge_parameters(profile: Mapping[str, Any]) -> Dict[str, Any]:
         "odom_rebase_jump_m": localization["odom_rebase_jump_m"],
         "odom_rebase_jump_yaw_rad": localization["odom_rebase_jump_yaw_rad"],
     }
+
+
+def render_m20pro_parameters(
+    source: Mapping[str, Any],
+    profile: Mapping[str, Any],
+    *,
+    enable_axis_command: bool,
+) -> Dict[str, Any]:
+    """Render the final production node parameters with native value types."""
+    if type(enable_axis_command) is not bool:
+        raise FieldProfileError("enable_axis_command must be a boolean")
+    localization = tcp_bridge_parameters(profile)
+    placeholder_by_parameter = {
+        "tf_pose_fallback_max_age_s": "__FIELD_PROFILE_TF_FALLBACK_MAX_AGE__",
+        "pose_jump_reject_m": "__FIELD_PROFILE_POSE_JUMP_REJECT__",
+        "pose_jump_candidate_radius_m": "__FIELD_PROFILE_POSE_JUMP_CANDIDATE_RADIUS__",
+        "pose_jump_candidate_yaw_tolerance_rad": "__FIELD_PROFILE_POSE_JUMP_CANDIDATE_YAW__",
+        "pose_stationary_drift_reject_m": "__FIELD_PROFILE_STATIONARY_DRIFT_REJECT__",
+        "pose_stationary_drift_reject_yaw_rad": "__FIELD_PROFILE_STATIONARY_DRIFT_REJECT_YAW__",
+        "pose_motion_command_hold_s": "__FIELD_PROFILE_MOTION_COMMAND_HOLD__",
+        "pose_command_linear_deadband_mps": "__FIELD_PROFILE_LINEAR_DEADBAND__",
+        "pose_command_angular_deadband_rad_s": "__FIELD_PROFILE_ANGULAR_DEADBAND__",
+        "pose_filter_hold_last_good_s": "__FIELD_PROFILE_FILTER_HOLD_LAST_GOOD__",
+        "pose_relocalization_jump_grace_s": "__FIELD_PROFILE_RELOCALIZATION_GRACE__",
+        "pose_relocalization_jump_grace_radius_m": "__FIELD_PROFILE_RELOCALIZATION_GRACE_RADIUS__",
+        "odom_rebase_jump_m": "__FIELD_PROFILE_ODOM_REBASE_JUMP__",
+        "odom_rebase_jump_yaw_rad": "__FIELD_PROFILE_ODOM_REBASE_JUMP_YAW__",
+    }
+    replacements = {
+        placeholder: localization[parameter]
+        for parameter, placeholder in placeholder_by_parameter.items()
+    }
+    rendered = _replace_field_placeholders(source, replacements)
+    bridge = rendered.setdefault("m20pro_tcp_bridge", {}).setdefault(
+        "ros__parameters", {}
+    )
+    bridge["enable_axis_command"] = enable_axis_command
+    bridge["enable_initialpose_relocalization"] = True
+    bridge["enable_initialpose_3d_relocalization"] = False
+    return rendered
 
 
 def floor_manager_field_parameters(profile: Mapping[str, Any]) -> Dict[str, Any]:

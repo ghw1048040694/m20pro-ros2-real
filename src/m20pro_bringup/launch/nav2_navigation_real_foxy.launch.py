@@ -6,17 +6,10 @@ from launch.actions import DeclareLaunchArgument, SetEnvironmentVariable
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from nav2_common.launch import RewrittenYaml
-from m20pro_navigation.field_profile_contract import (
-    load_field_profile,
-    nav2_parameter_rewrites,
-)
 
 
 def generate_launch_description():
     bringup_share = get_package_share_directory("m20pro_bringup")
-    field_profile = load_field_profile(
-        os.path.join(bringup_share, "config", "m20pro_field_profile.yaml")
-    )
     namespace = LaunchConfiguration("namespace")
     use_sim_time = LaunchConfiguration("use_sim_time")
     autostart = LaunchConfiguration("autostart")
@@ -42,7 +35,6 @@ def generate_launch_description():
             "default_bt_xml_filename": default_bt_xml_filename,
             "autostart": autostart,
             "map_subscribe_transient_local": map_subscribe_transient_local,
-            **nav2_parameter_rewrites(field_profile),
         },
         convert_types=True,
     )

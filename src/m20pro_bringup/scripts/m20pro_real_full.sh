@@ -221,47 +221,45 @@ if [[ -n "${SELECTED_MAP_YAML}" ]]; then
   COMMON_ARGS+=(map:="${SELECTED_MAP_YAML}")
 fi
 
-BASE_REAL_PARAMS="${WS_DIR}/install/m20pro_bringup/share/m20pro_bringup/config/m20pro_real.yaml"
-make_runtime_params() {
-  local axis_enabled="$1"
-  local output
-  output="$(mktemp "/tmp/m20pro_real_params_${MODE}.XXXXXX.yaml")"
-  python3 - "${BASE_REAL_PARAMS}" "${output}" "${axis_enabled}" <<'PY'
-import sys
-import yaml
-
-src, dst, axis_text = sys.argv[1:4]
-with open(src, "r", encoding="utf-8") as file:
-    data = yaml.safe_load(file) or {}
-
-bridge = data.setdefault("m20pro_tcp_bridge", {}).setdefault("ros__parameters", {})
-bridge["enable_axis_command"] = axis_text.lower() in ("1", "true", "yes", "on")
-bridge["enable_initialpose_relocalization"] = True
-bridge["enable_initialpose_3d_relocalization"] = False
-
-with open(dst, "w", encoding="utf-8") as file:
-    yaml.safe_dump(data, file, allow_unicode=True, sort_keys=False)
-PY
-  echo "${output}"
-}
-
 case "${MODE}" in
   shadow|safe)
-    RUNTIME_PARAMS="$(make_runtime_params false)"
-    exec ros2 launch m20pro_bringup m20pro.launch.py \
-      "${COMMON_ARGS[@]}" \
-      real_params_file:="${RUNTIME_PARAMS}" \
-      enable_axis_command:=false
+    AXIS_ENABLED=false
     ;;
   move)
-    RUNTIME_PARAMS="$(make_runtime_params true)"
-    exec ros2 launch m20pro_bringup m20pro.launch.py \
-      "${COMMON_ARGS[@]}" \
-      real_params_file:="${RUNTIME_PARAMS}" \
-      enable_axis_command:=true
+    AXIS_ENABLED=true
     ;;
   *)
     echo "Usage: $0 [shadow|move]" >&2
     exit 2
     ;;
 esac
+
+FIELD_PROFILE="${BRINGUP_PREFIX}/share/m20pro_bringup/config/m20pro_field_profile.yaml"
+BASE_REAL_PARAMS="${BRINGUP_PREFIX}/share/m20pro_bringup/config/m20pro_real.yaml"
+BASE_NAV2_PARAMS="${BRINGUP_PREFIX}/share/m20pro_bringup/config/nav2_params_real.yaml"
+PROFILE_TOOL="${WS_DIR}/scripts/m20pro_field_profile.py"
+RUNTIME_PARAMS=""
+RUNTIME_NAV2_PARAMS=""
+cleanup_runtime_params() {
+  [[ -z "${RUNTIME_PARAMS}" ]] || rm -f -- "${RUNTIME_PARAMS}"
+  [[ -z "${RUNTIME_NAV2_PARAMS}" ]] || rm -f -- "${RUNTIME_NAV2_PARAMS}"
+}
+trap cleanup_runtime_params EXIT
+
+RUNTIME_PARAMS="$(mktemp "/tmp/m20pro_real_params_${MODE}.XXXXXX.yaml")"
+RUNTIME_NAV2_PARAMS="$(mktemp "/tmp/m20pro_nav2_params_${MODE}.XXXXXX.yaml")"
+"${PROFILE_TOOL}" render-real-yaml \
+  --profile "${FIELD_PROFILE}" \
+  --input "${BASE_REAL_PARAMS}" \
+  --output "${RUNTIME_PARAMS}" \
+  --axis-enabled "${AXIS_ENABLED}"
+"${PROFILE_TOOL}" render-nav2-yaml \
+  --profile "${FIELD_PROFILE}" \
+  --input "${BASE_NAV2_PARAMS}" \
+  --output "${RUNTIME_NAV2_PARAMS}"
+
+ros2 launch m20pro_bringup m20pro.launch.py \
+  "${COMMON_ARGS[@]}" \
+  real_params_file:="${RUNTIME_PARAMS}" \
+  real_nav2_params_file:="${RUNTIME_NAV2_PARAMS}" \
+  enable_axis_command:="${AXIS_ENABLED}"

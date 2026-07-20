@@ -8,6 +8,8 @@ import json
 import sys
 from pathlib import Path
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src/m20pro_navigation"))
@@ -16,6 +18,8 @@ from m20pro_navigation.field_profile_contract import (  # noqa: E402
     FieldProfileError,
     load_field_profile,
     render_edge_environment,
+    render_m20pro_parameters,
+    render_nav2_parameters,
 )
 
 
@@ -36,17 +40,66 @@ def profile_summary(profile: dict) -> dict:
     }
 
 
+def render_yaml(
+    command: str,
+    profile: dict,
+    source: Path,
+    output: Path,
+    axis_enabled: bool,
+) -> None:
+    try:
+        raw = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        raise FieldProfileError(f"cannot read parameter template {source}: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise FieldProfileError(f"parameter template {source} must be a mapping")
+    if command == "render-real-yaml":
+        rendered = render_m20pro_parameters(
+            raw, profile, enable_axis_command=axis_enabled
+        )
+    else:
+        rendered = render_nav2_parameters(raw, profile)
+    text = yaml.safe_dump(rendered, allow_unicode=True, sort_keys=False)
+    if "__FIELD_PROFILE_" in text:
+        raise FieldProfileError(f"rendered parameter file still has placeholders: {source}")
+    try:
+        output.write_text(text, encoding="utf-8")
+    except OSError as exc:
+        raise FieldProfileError(f"cannot write rendered parameters {output}: {exc}") from exc
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "command",
-        choices=("check", "show-json", "render-edge-env"),
+        choices=(
+            "check",
+            "show-json",
+            "render-edge-env",
+            "render-real-yaml",
+            "render-nav2-yaml",
+        ),
         nargs="?",
         default="check",
     )
+    parser.add_argument("--profile", type=Path, default=DEFAULT_PROFILE)
+    parser.add_argument("--input", type=Path)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--axis-enabled", choices=("true", "false"), default="false")
     args = parser.parse_args()
     try:
-        profile = load_field_profile(DEFAULT_PROFILE)
+        profile = load_field_profile(args.profile)
+        if args.command in ("render-real-yaml", "render-nav2-yaml"):
+            if args.input is None or args.output is None:
+                parser.error(f"{args.command} requires --input and --output")
+            render_yaml(
+                args.command,
+                profile,
+                args.input,
+                args.output,
+                args.axis_enabled == "true",
+            )
+            return 0
     except FieldProfileError as exc:
         print(f"field profile invalid: {exc}", file=sys.stderr)
         return 2
