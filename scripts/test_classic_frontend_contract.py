@@ -190,6 +190,7 @@ def main() -> None:
     assert "button.textContent = item.label || item.id;" in script
     assert "button.textContent = `+ ${item.label || item.id}`" not in script
     assert "20260720-relocalize-preview-4" in html
+    assert html.count("20260720-relocalize-preview-4") == 2
     assert 'id="locFloor"' not in html
     assert '$("locFloor")' not in script
     assert "clamp(460px, 34vw, 620px)" in css
