@@ -941,7 +941,9 @@
       );
     }
     function localizationDraftActive() {
-      return activePointerMode() === "localize" && !!state.localizeDraft;
+      // The draft remains the active preview until it is confirmed or replaced;
+      // it must not depend on which popover/tab currently owns pointer focus.
+      return !!state.localizeDraft;
     }
     function markBlockedReason(payload = state.latest) {
       if (!state.map) return "还没有地图，等地图加载后再标点";

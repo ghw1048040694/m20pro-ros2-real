@@ -1,6 +1,12 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-07-20 14:33 CST
+Last updated: 2026-07-20 14:37 CST
+
+## 2026-07-20 14:37 CST - 修复重定位草稿与激光颜色状态再次分叉
+
+- 现场截图确认上一版修复仍有第二个边界漏洞：红色重定位箭头存在，但激光轮廓仍为蓝色。根因是 `drawLocalizeDraft()` 只检查草稿是否存在，而 `drawScanOverlay()` 通过 `localizationDraftActive()` 额外检查当前弹层/指针焦点仍为 `localize`，两条显示链路因此分叉。
+- 根治修改：`localizationDraftActive()` 现在只以 `state.localizeDraft` 是否存在为准；草稿在重定位成功确认或被替换前始终代表待提交预览，不受弹层关闭、Tab 切换或指针焦点影响。跨楼层保护仍只在已明确确认处于其他楼层时隐藏轮廓。
+- 静态资源版本更新为 `20260720-relocalize-preview-2`；JavaScript 语法、经典前端和定位合同测试通过。本条记录时待提交并只部署 104，未操作 103/106、网络、定位、导航或运动服务。
 
 ## 2026-07-20 14:33 CST - 重定位红色激光预览修复部署验收
 
