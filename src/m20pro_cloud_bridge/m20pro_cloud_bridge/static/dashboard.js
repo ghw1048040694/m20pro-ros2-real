@@ -51,6 +51,7 @@
       floorRoutes: {routes: [], candidates: [], maps: []},
       mappingSession: null,
       latestMappingSession: null,
+      mappingMapNameTouched: false,
       mappingCompletedStages: [],
       taskDraftIds: [],
       crossFloorDraftIds: [],
@@ -3266,7 +3267,7 @@
       populateFloorControls(payload);
       if (state.mappingSession && state.mappingSession.id) {
         state.sessionId = state.mappingSession.id;
-        $("mappingMapName").value = state.mappingSession.map_name || "";
+        if (!state.mappingMapNameTouched) $("mappingMapName").value = state.mappingSession.map_name || "";
         setFloorControlValue("importFloor", state.mappingSession.active_floor);
         $("importName").value = state.mappingSession.map_name || "";
       }
@@ -3910,6 +3911,9 @@
       syncMappingFloorOptions(selectedMappingFloors()[0]);
       renderMappingFloorSteps();
     });
+    $("mappingMapName").addEventListener("input", () => {
+      state.mappingMapNameTouched = true;
+    });
     $("mappingMode").addEventListener("change", updateMappingModeUi);
     for (const id of ["floorRouteEntry", "floorRouteSourcePlatform", "floorRouteTargetPlatform", "floorRoutePostExit"]) {
       $(id).addEventListener("change", renderFloorRouteWorkspace);
@@ -3952,14 +3956,20 @@
         throw mappingFlowError(err, "environment");
       }
       showMappingProgress("environment", environment);
-      const reusableSession = [state.mappingSession, state.latestMappingSession]
-        .find(session => mappingSessionMatchesDraft(session));
+      const activeSession = [state.mappingSession, state.latestMappingSession]
+        .find(session => session && String(session.status || "") === "mapping");
+      if (activeSession) {
+        const err = {ok: false, message: `${activeSession.active_floor || "当前楼层"} 正在建图，请先完成或取消当前建图任务`};
+        showMappingProgress("mapping", err, true);
+        throw mappingFlowError(err, "mapping");
+      }
+      const currentSession = state.mappingSession;
+      const reusableSession = currentSession
+        && mappingSessionMatchesDraft(currentSession)
+        && !["saved", "imported", "cancelled"].includes(String(currentSession.status || ""))
+        ? currentSession
+        : null;
       if (reusableSession) {
-        if (reusableSession.status === "mapping") {
-          const err = {ok: false, message: `${reusableSession.active_floor || "当前楼层"} 正在建图，请先完成/保存建图`};
-          showMappingProgress("mapping", err, true);
-          throw mappingFlowError(err, "mapping");
-        }
         state.mappingSession = reusableSession;
         state.sessionId = reusableSession.id;
         setFloorControlValue("importFloor", reusableSession.active_floor);
@@ -3970,18 +3980,21 @@
       }
       showMappingProgress("session", null, false, true);
       try {
+        const mapName = state.mappingMapNameTouched ? $("mappingMapName").value.trim() : "";
+        if (!state.mappingMapNameTouched) $("mappingMapName").value = "";
         const payload = await api("POST", "/api/mapping/session", {
           project_name: $("projectName").value,
           building: $("buildingName").value,
           mode: $("mappingMode").value,
           floors,
-          map_name: $("mappingMapName").value.trim()
+          map_name: mapName
         });
         state.sessionId = payload.session.id;
         state.mappingSession = payload.session;
         $("mappingMode").value = payload.session.mode;
         $("mappingFloors").value = (payload.session.floors || []).join(payload.session.mode === "multi" ? ", " : "");
         updateMappingModeUi();
+        state.mappingMapNameTouched = false;
         if (!$("importName").value.trim()) $("importName").value = payload.session.map_name || "";
         setFloorControlValue("importFloor", payload.session.active_floor);
         showMappingProgress("session", payload);

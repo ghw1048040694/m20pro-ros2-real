@@ -189,13 +189,16 @@ def main() -> None:
     assert "function paintMapEditor" in script
     assert "button.textContent = item.label || item.id;" in script
     assert "button.textContent = `+ ${item.label || item.id}`" not in script
-    assert "20260720-relocalize-preview-4" in html
-    assert html.count("20260720-relocalize-preview-4") == 2
+    assert "20260720-mapping-session-1" in html
+    assert html.count("20260720-mapping-session-1") == 2
     assert 'id="locFloor"' not in html
     assert '$("locFloor")' not in script
+    assert "mappingMapNameTouched" in script
+    assert "const activeSession = [state.mappingSession, state.latestMappingSession]" in script
+    assert "mapping_start_precondition(session)" in backend
     assert "clamp(460px, 34vw, 620px)" in css
     assert "function mappingSessionMatchesDraft" in script
-    assert "const reusableSession = [state.mappingSession, state.latestMappingSession]" in script
+    assert "const currentSession = state.mappingSession;" in script
     assert '"/api/floor_routes"' in script
     assert '"/api/floor_routes/delete"' in script
     assert 'elif parsed.path == "/api/floor_routes":' in backend

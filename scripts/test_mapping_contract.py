@@ -16,6 +16,7 @@ from m20pro_cloud_bridge.mapping_contract import (  # noqa: E402
     mark_mapping_floor_imported,
     mapping_command_context,
     mapping_command_status,
+    mapping_start_precondition,
     normalize_mapping_session_request,
     prepare_mapping_session_create,
     sanitize_mapping_name,
@@ -196,6 +197,13 @@ def test_mapping_command_status() -> None:
     assert_equal(mapping_command_status("unknown", "created", {"ok": False}), "created", "failure keeps status")
 
 
+def test_mapping_start_precondition() -> None:
+    assert_equal(mapping_start_precondition({"status": "created"})["ok"], True, "created can start")
+    assert_equal(mapping_start_precondition({"status": "mapping"})["code"], "mapping_session_busy", "mapping is busy")
+    assert_equal(mapping_start_precondition({"status": "saved"})["code"], "mapping_session_terminal", "saved is terminal")
+    assert_equal(mapping_start_precondition({"status": "imported"})["code"], "mapping_session_terminal", "imported is terminal")
+
+
 def test_apply_mapping_command_result() -> None:
     session = {"id": "s1", "status": "created", "updated_at": "old"}
     updated = apply_mapping_command_result(
@@ -240,6 +248,7 @@ def main() -> int:
         test_per_floor_mapping_lifecycle,
         test_prepare_mapping_session_create_adds_project,
         test_mapping_command_status,
+        test_mapping_start_precondition,
         test_apply_mapping_command_result,
         test_mapping_command_context,
     ):

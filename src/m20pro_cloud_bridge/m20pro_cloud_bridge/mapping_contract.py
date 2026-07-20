@@ -230,6 +230,24 @@ def mapping_command_status(param_name: str, current_status: Any, result: Dict[st
     return str(current_status or "updated")
 
 
+def mapping_start_precondition(session: Dict[str, Any]) -> Dict[str, Any]:
+    """Allow starting only a fresh/resumable session, never a terminal one."""
+    status = str((session or {}).get("status") or "").strip()
+    if status == "mapping":
+        return {
+            "ok": False,
+            "code": "mapping_session_busy",
+            "message": "该建图任务已经在进行中，请先完成或取消当前建图",
+        }
+    if status in ("saved", "imported", "cancelled"):
+        return {
+            "ok": False,
+            "code": "mapping_session_terminal",
+            "message": "该建图任务已经结束，请建立新的建图任务后再启动",
+        }
+    return {"ok": True, "status": status or "created"}
+
+
 def apply_mapping_command_result(
     session: Dict[str, Any],
     *,

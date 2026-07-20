@@ -131,6 +131,7 @@ from .mapping_contract import (
     apply_mapping_command_result,
     mark_mapping_floor_imported,
     mapping_command_context,
+    mapping_start_precondition,
     prepare_mapping_session_create,
     select_mapping_floor,
 )
@@ -3888,6 +3889,13 @@ class WebDashboardNode(Node):
         session = self._find_session(session_id)
         if session is None:
             return self._error("建图任务不存在，请先建立建图任务")
+        if param_name == "factory_mapping_start_command":
+            start_check = mapping_start_precondition(session)
+            if not start_check.get("ok"):
+                return self._error(
+                    str(start_check["message"]),
+                    {key: value for key, value in start_check.items() if key not in ("ok", "message")},
+                )
         identity = self._floor_identity_validation(session.get("active_floor"), subject="当前建图楼层")
         if not identity.get("ok"):
             return self._error(
