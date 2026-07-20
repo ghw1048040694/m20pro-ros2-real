@@ -15,9 +15,12 @@ Install the 106 service as root with:
 ./scripts/106_enable_edge_scan_service.sh
 ```
 
-The installer builds and installs `/usr/local/lib/m20pro/m20pro_edge_scan`,
-installs `/etc/m20pro-edge-scan-106.env`, and enables and starts
-`m20pro-edge-scan-106.service`.
+The installer validates the repository's canonical
+`src/m20pro_bringup/config/m20pro_field_profile.yaml`, generates and atomically
+installs `/etc/m20pro-edge-scan-106.env`, builds
+`/usr/local/lib/m20pro/m20pro_edge_scan`, and enables and restarts
+`m20pro-edge-scan-106.service`. The `/etc` file is a generated artifact and is
+never an editable configuration source.
 
 Production acceptance requires:
 
@@ -28,7 +31,7 @@ Production acceptance requires:
 - 104 has no relay/fusion process and does not subscribe to raw point clouds;
 - `/dev/shm` remains below the system warning threshold.
 
-The production height band is `-0.25..0.60 m` in the vendor point coordinate
+The default production height band is `-0.25..0.60 m` in the vendor point coordinate
 interpretation. It matches the previously field-tested real pointcloud
 converter and includes obstacles below the body center while rejecting the
 floor. Production uses the full cloud (`MAX_POINTS=0`); stride sampling is not
@@ -57,11 +60,16 @@ estimates the local tread envelope, and publishes:
 - `/m20pro/stair_clearance`: `clear`, `blocked`, or `unknown` plus evidence;
 - `/m20pro/stair_perception_mode`: consumed as the 104 session heartbeat.
 
-Regular adjacent steps up to `STAIR_MAX_STEP_HEIGHT=0.24` are terrain. Stable
-geometry at least `STAIR_OBSTACLE_HEIGHT=0.26` above the local tread, or a larger
+With the default field profile, regular adjacent steps up to `0.24 m` are terrain. Stable
+geometry at least `0.26 m` above the local tread, or a larger
 height discontinuity, blocks motion. Sparse or malformed profiles are `unknown`
 and must never be treated as clear. The mode lease expires after 1.50 seconds so
 a dead 104 controller cannot leave 106 in stair mode indefinitely.
+
+The mode request and clearance result carry the canonical profile name and
+SHA-256. 106 rejects a stair request from a 104 running a different profile;
+104 also rejects a clearance result with a different hash. There is no legacy
+env fallback and the edge binary cannot be started with a partial argument set.
 
 The geometry threshold has a physical limit: a low object that is no taller
 than a valid step and is continuous with the stair profile cannot be reliably

@@ -36,4 +36,4 @@ g++ "${cxx_flags[@]}" \
 echo "Built ${OUT_DIR}/drdds_lidar_probe"
 echo "Built ${OUT_DIR}/m20pro_edge_scan"
 echo "Try: ${OUT_DIR}/drdds_lidar_probe /LIDAR/POINTS 0 0 rt 8"
-echo "Try: ${OUT_DIR}/m20pro_edge_scan /LIDAR/POINTS /scan 20"
+echo "The binary requires the complete generated field profile; install it with scripts/106_enable_edge_scan_service.sh."

@@ -20,7 +20,11 @@ fi
 
 echo "[local_deploy_edge_scan_to_106] remote=${HOST}:${REMOTE_WS}"
 
-ssh "${HOST}" "rm -rf '${STAGE}'; mkdir -p '${STAGE}/scripts' '${STAGE}/tools/edge_scan_feasibility'"
+ssh "${HOST}" "rm -rf '${STAGE}'; mkdir -p \
+  '${STAGE}/scripts' \
+  '${STAGE}/tools/edge_scan_feasibility' \
+  '${STAGE}/src/m20pro_bringup/config' \
+  '${STAGE}/src/m20pro_navigation/m20pro_navigation'"
 
 rsync -az --delete --no-owner --no-group \
   --exclude='__pycache__/' \
@@ -28,25 +32,47 @@ rsync -az --delete --no-owner --no-group \
   "${HOST}:${STAGE}/tools/edge_scan_feasibility/"
 rsync -az --no-owner --no-group \
   "${ROOT_DIR}/scripts/106_enable_edge_scan_service.sh" \
-  "${HOST}:${STAGE}/scripts/106_enable_edge_scan_service.sh"
+  "${ROOT_DIR}/scripts/m20pro_field_profile.py" \
+  "${HOST}:${STAGE}/scripts/"
+rsync -az --no-owner --no-group \
+  "${ROOT_DIR}/src/m20pro_bringup/config/m20pro_field_profile.yaml" \
+  "${HOST}:${STAGE}/src/m20pro_bringup/config/"
+rsync -az --no-owner --no-group \
+  "${ROOT_DIR}/src/m20pro_navigation/m20pro_navigation/field_profile_contract.py" \
+  "${ROOT_DIR}/src/m20pro_navigation/m20pro_navigation/__init__.py" \
+  "${HOST}:${STAGE}/src/m20pro_navigation/m20pro_navigation/"
 
 ssh -tt "${HOST}" "bash -lc '
 set -e
 sudo -v
 sudo -n install -d -m 0755 "${REMOTE_WS}/scripts" \
-  "${REMOTE_WS}/tools/edge_scan_feasibility"
+  "${REMOTE_WS}/tools/edge_scan_feasibility" \
+  "${REMOTE_WS}/src/m20pro_bringup/config" \
+  "${REMOTE_WS}/src/m20pro_navigation/m20pro_navigation"
 sudo -n rsync -a --delete \
   "${STAGE}/tools/edge_scan_feasibility/" \
   "${REMOTE_WS}/tools/edge_scan_feasibility/"
 sudo -n install -m 0755 \
   "${STAGE}/scripts/106_enable_edge_scan_service.sh" \
   "${REMOTE_WS}/scripts/106_enable_edge_scan_service.sh"
+sudo -n install -m 0755 \
+  "${STAGE}/scripts/m20pro_field_profile.py" \
+  "${REMOTE_WS}/scripts/m20pro_field_profile.py"
+sudo -n install -m 0644 \
+  "${STAGE}/src/m20pro_bringup/config/m20pro_field_profile.yaml" \
+  "${REMOTE_WS}/src/m20pro_bringup/config/m20pro_field_profile.yaml"
+sudo -n install -m 0644 \
+  "${STAGE}/src/m20pro_navigation/m20pro_navigation/field_profile_contract.py" \
+  "${STAGE}/src/m20pro_navigation/m20pro_navigation/__init__.py" \
+  "${REMOTE_WS}/src/m20pro_navigation/m20pro_navigation/"
 sudo -n chown -R \"\$(id -u):\$(id -g)\" \
   "${REMOTE_WS}/scripts/106_enable_edge_scan_service.sh" \
+  "${REMOTE_WS}/scripts/m20pro_field_profile.py" \
+  "${REMOTE_WS}/src/m20pro_bringup/config/m20pro_field_profile.yaml" \
+  "${REMOTE_WS}/src/m20pro_navigation/m20pro_navigation" \
   "${REMOTE_WS}/tools/edge_scan_feasibility"
 sudo -n env M20PRO_WS="${REMOTE_WS}" \
   bash "${REMOTE_WS}/scripts/106_enable_edge_scan_service.sh"
-sudo -n systemctl restart m20pro-edge-scan-106.service
 sudo -n systemctl is-enabled --quiet m20pro-edge-scan-106.service
 sudo -n systemctl is-active --quiet m20pro-edge-scan-106.service
 '"

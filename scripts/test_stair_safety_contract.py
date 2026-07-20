@@ -22,6 +22,7 @@ def sample(state: str = "clear", sequence: object = 1, **extra: object) -> dict:
         "version": 1,
         "active": True,
         "session_id": "session-1",
+        "profile_hash": "a" * 64,
         "sequence": sequence,
         "state": state,
         "corridor_points": 120,
@@ -35,6 +36,7 @@ def sample(state: str = "clear", sequence: object = 1, **extra: object) -> dict:
 def decision(*, phase: str, parsed: dict, clear_samples: int, now: float) -> dict:
     return stair_clearance_gate_decision(
         session_id="session-1",
+        profile_hash="a" * 64,
         phase=phase,
         sample=parsed,
         clear_samples=clear_samples,
@@ -51,6 +53,7 @@ def test_parser_is_strict_and_never_raises() -> None:
     assert parse_stair_clearance("not-json", received_monotonic=1.0)["ok"] is False
     assert sample(sequence="bad")["ok"] is False
     assert sample(active=False)["ok"] is False
+    assert sample(profile_hash="")["ok"] is False
     malformed_counts = sample(corridor_points="bad", profile_bins=None, obstacle_points=-3)
     assert malformed_counts["ok"] is True
     assert malformed_counts["corridor_points"] == 0
@@ -74,6 +77,13 @@ def test_motion_fails_closed_on_bad_or_stale_data() -> None:
     stale = decision(phase="traversing", parsed=sample(), clear_samples=3, now=11.1)
     assert stale["action"] == "abort"
     assert stale["reason"] == "stair_clearance_stale"
+    mismatch = decision(
+        phase="traversing",
+        parsed=sample(profile_hash="b" * 64),
+        clear_samples=3,
+        now=10.5,
+    )
+    assert mismatch == {"action": "abort", "reason": "stair_profile_mismatch"}
 
 
 def main() -> int:

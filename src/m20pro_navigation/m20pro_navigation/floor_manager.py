@@ -58,9 +58,11 @@ class FloorManager(Node):
         self.declare_parameter("floor_switch_timeout_s", 110.0)
         self.declare_parameter("stair_perception_mode_topic", "/m20pro/stair_perception_mode")
         self.declare_parameter("stair_clearance_topic", "/m20pro/stair_clearance")
-        self.declare_parameter("stair_clearance_startup_timeout_s", 4.0)
-        self.declare_parameter("stair_clearance_stale_timeout_s", 1.0)
-        self.declare_parameter("stair_clearance_required_samples", 3)
+        self.declare_parameter("field_profile_name", "")
+        self.declare_parameter("field_profile_hash", "")
+        self.declare_parameter("stair_clearance_startup_timeout_s", 0.0)
+        self.declare_parameter("stair_clearance_stale_timeout_s", 0.0)
+        self.declare_parameter("stair_clearance_required_samples", 0)
         self.declare_parameter(
             "stair_behavior_tree",
             "package://m20pro_bringup/behavior_trees/m20pro_stair_traverse_foxy.xml",
@@ -92,6 +94,18 @@ class FloorManager(Node):
         self.declare_parameter("duplicate_goal_tolerance_m", 0.08)
         self.declare_parameter("duplicate_goal_yaw_tolerance_rad", 0.12)
         self.declare_parameter("nav_feedback_status_period_s", 1.0)
+
+        self.field_profile_name = str(self.get_parameter("field_profile_name").value).strip()
+        self.field_profile_hash = str(self.get_parameter("field_profile_hash").value).strip()
+        if (
+            not self.field_profile_name
+            or len(self.field_profile_hash) != 64
+            or any(ch not in "0123456789abcdef" for ch in self.field_profile_hash)
+            or float(self.get_parameter("stair_clearance_startup_timeout_s").value) <= 0.0
+            or float(self.get_parameter("stair_clearance_stale_timeout_s").value) <= 0.0
+            or int(self.get_parameter("stair_clearance_required_samples").value) <= 0
+        ):
+            raise RuntimeError("floor_manager requires a validated canonical field profile")
 
         self.config_file = self._resolve_path(str(self.get_parameter("config_file").value))
         self.config = self._load_config(self.config_file)
@@ -269,8 +283,13 @@ class FloorManager(Node):
                 self.get_logger().warning("unknown initial_floor: %s" % initial_floor)
 
         self.get_logger().info(
-            "floor manager ready; route_configured=%s floors: %s"
-            % (self.route_configured, ", ".join(sorted(self.floors.keys())) or "(ordinary maps)")
+            "floor manager ready; field_profile=%s hash=%s route_configured=%s floors: %s"
+            % (
+                self.field_profile_name,
+                self.field_profile_hash,
+                self.route_configured,
+                ", ".join(sorted(self.floors.keys())) or "(ordinary maps)",
+            )
         )
 
     def _create_rviz_floor_goal_subscriptions(self) -> None:
@@ -489,6 +508,8 @@ class FloorManager(Node):
             "target_floor": str(transition.get("target_floor") or ""),
             "direction": str(transition.get("direction") or ""),
             "phase": "waiting_traverse",
+            "profile_name": self.field_profile_name,
+            "profile_hash": self.field_profile_hash,
             "started_monotonic": time.monotonic(),
             "last_mode_publish_monotonic": 0.0,
             "clear_samples": 0,
@@ -534,9 +555,17 @@ class FloorManager(Node):
                 "target_floor": session.get("target_floor"),
                 "direction": session.get("direction"),
                 "phase": session.get("phase"),
+                "profile_name": session.get("profile_name"),
+                "profile_hash": session.get("profile_hash"),
             }
         else:
-            payload = {"active": False, "session_id": "", "phase": "inactive"}
+            payload = {
+                "active": False,
+                "session_id": "",
+                "phase": "inactive",
+                "profile_name": self.field_profile_name,
+                "profile_hash": self.field_profile_hash,
+            }
         message = String()
         message.data = json.dumps(payload, separators=(",", ":"))
         self.stair_perception_mode_pub.publish(message)
@@ -548,6 +577,7 @@ class FloorManager(Node):
         self._publish_stair_perception_mode(active=True)
         decision = stair_clearance_gate_decision(
             session_id=str(session.get("id") or ""),
+            profile_hash=self.field_profile_hash,
             phase=str(session.get("phase") or ""),
             sample=self.latest_stair_clearance,
             clear_samples=int(session.get("clear_samples") or 0),

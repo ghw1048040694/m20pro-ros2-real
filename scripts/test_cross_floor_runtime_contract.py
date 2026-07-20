@@ -54,6 +54,8 @@ def main() -> None:
     assert "_start_stair_clearance_session(self.pending_stair_transition)" in floor_manager
     assert "_prepare_stair_exit_clearance()" in floor_manager
     assert "_deactivate_stair_perception()" in floor_manager
+    assert '"profile_hash": session.get("profile_hash")' in floor_manager
+    assert "profile_hash=self.field_profile_hash" in floor_manager
     assert 'session["phase"] = "platform"' in floor_manager
     assert 'label in ("stair_traverse", "stair_exit")' in floor_manager
     assert "self._cancel_active_nav_goal(reason)" in floor_manager

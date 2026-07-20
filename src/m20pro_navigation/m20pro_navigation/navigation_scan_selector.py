@@ -19,10 +19,25 @@ class NavigationScanSelector(Node):
         self.declare_parameter("mode_topic", "/m20pro/stair_perception_mode")
         self.declare_parameter("output_topic", "/m20pro/navigation_scan")
         self.declare_parameter("status_topic", "/m20pro/navigation_scan_status")
-        self.declare_parameter("mode_timeout_s", 1.5)
+        self.declare_parameter("mode_timeout_s", 0.0)
+        self.declare_parameter("field_profile_name", "")
+        self.declare_parameter("field_profile_hash", "")
+
+        self.field_profile_name = str(self.get_parameter("field_profile_name").value).strip()
+        self.field_profile_hash = str(self.get_parameter("field_profile_hash").value).strip()
+        if (
+            not self.field_profile_name
+            or len(self.field_profile_hash) != 64
+            or any(ch not in "0123456789abcdef" for ch in self.field_profile_hash)
+            or float(self.get_parameter("mode_timeout_s").value) <= 0.0
+        ):
+            raise RuntimeError("navigation_scan_selector requires a validated canonical field profile")
 
         self.stair_active = False
         self.session_id = ""
+        self.mode_profile_name = ""
+        self.mode_profile_hash = ""
+        self.rejected_mode_profile_signature: Optional[tuple] = None
         self.last_normal_monotonic = 0.0
         self.last_stair_monotonic = 0.0
         self.last_output_source = "none"
@@ -61,7 +76,10 @@ class NavigationScanSelector(Node):
         )
         self.create_timer(0.1, self._expire_stair_mode)
         self.create_timer(1.0, self._publish_status)
-        self.get_logger().info("navigation scan selector ready in flat mode")
+        self.get_logger().info(
+            "navigation scan selector ready in flat mode; field_profile=%s hash=%s"
+            % (self.field_profile_name, self.field_profile_hash)
+        )
 
     def _on_mode(self, msg: String) -> None:
         try:
@@ -70,10 +88,32 @@ class NavigationScanSelector(Node):
             return
         active = bool(payload.get("active")) if isinstance(payload, dict) else False
         session_id = str(payload.get("session_id") or "") if isinstance(payload, dict) else ""
-        active = active and bool(session_id)
-        changed = active != self.stair_active or session_id != self.session_id
+        profile_name = str(payload.get("profile_name") or "") if isinstance(payload, dict) else ""
+        profile_hash = str(payload.get("profile_hash") or "") if isinstance(payload, dict) else ""
+        profile_matches = (
+            profile_name == self.field_profile_name and profile_hash == self.field_profile_hash
+        )
+        rejected_signature = (profile_name, profile_hash)
+        if (
+            active
+            and not profile_matches
+            and self.rejected_mode_profile_signature != rejected_signature
+        ):
+            self.get_logger().error(
+                "rejected stair scan mode due to field profile mismatch expected=%s received=%s"
+                % (self.field_profile_hash, profile_hash or "missing")
+            )
+            self.rejected_mode_profile_signature = rejected_signature
+        elif not active or profile_matches:
+            self.rejected_mode_profile_signature = None
+        active = active and bool(session_id) and profile_matches
+        changed = active != self.stair_active or (
+            active and session_id != self.session_id
+        )
         self.stair_active = active
         self.session_id = session_id if active else ""
+        self.mode_profile_name = profile_name
+        self.mode_profile_hash = profile_hash
         self.last_mode_monotonic = time.monotonic() if active else 0.0
         if changed:
             self.last_stair_monotonic = 0.0
@@ -121,6 +161,10 @@ class NavigationScanSelector(Node):
         payload: Dict[str, Any] = {
             "active": self.stair_active,
             "session_id": self.session_id or None,
+            "field_profile_name": self.field_profile_name,
+            "field_profile_hash": self.field_profile_hash,
+            "mode_profile_name": self.mode_profile_name or None,
+            "mode_profile_hash": self.mode_profile_hash or None,
             "source": self.last_output_source,
             "normal_scan_age_s": self._age(self.last_normal_monotonic),
             "stair_scan_age_s": self._age(self.last_stair_monotonic),

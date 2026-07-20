@@ -1,0 +1,46 @@
+# M20Pro production field-tuning source of truth.
+#
+# Edit this file on the upper computer, then run:
+#   ./scripts/apply_field_profile.sh --check
+#   ./scripts/apply_field_profile.sh
+#
+# Do not edit generated /etc files on 104 or 106. A configured perception
+# threshold does not increase the robot's physical stair-climbing capability.
+schema_version: 1
+profile_name: default_field
+
+scan:
+  height_min_m: -0.25
+  height_max_m: 0.60
+  publish_hz: 4.0
+  bin_hold_s: 0.75
+  angle_increment_rad: 0.0174533
+  range_min_m: 0.20
+  range_max_m: 10.0
+
+stair:
+  # Site-tunable riser limit. Never set this above a physically verified
+  # M20Pro stair-gait limit.
+  max_step_height_m: 0.24
+  # The actual residual-obstacle threshold is derived as:
+  # max_step_height_m + obstacle_height_margin_m.
+  obstacle_height_margin_m: 0.02
+  forward_min_m: 0.30
+  forward_max_m: 2.20
+  corridor_half_width_m: 0.55
+  min_corridor_points: 80
+  min_profile_bins: 5
+  min_obstacle_points: 10
+  profile_hold_s: 0.50
+  mode_timeout_s: 1.50
+
+stair_safety:
+  required_clear_samples: 3
+  startup_timeout_s: 4.0
+  stale_timeout_s: 1.0
+
+navigation:
+  controller_frequency_hz: 10.0
+  xy_goal_tolerance_m: 0.35
+  yaw_goal_tolerance_rad: 0.20
+  inflation_radius_m: 0.62

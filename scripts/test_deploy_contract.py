@@ -20,6 +20,9 @@ def main() -> None:
     )
 
     assert "local_deploy_edge_scan_to_106.sh" in deploy
+    assert "m20pro_field_profile.py\" check" in deploy
+    assert "matched_on=104,106" in deploy
+    assert "sudo -n sed" not in deploy
     assert deploy.index("local_deploy_edge_scan_to_106.sh") < deploy.index("rsync -az --delete")
     assert "systemctl restart m20pro-edge-scan-106.service" in deploy
     assert 'if [[ "${M20PRO_DEPLOY_SKIP_EDGE:-0}" != "1" ]]; then' in deploy
@@ -31,12 +34,15 @@ def main() -> None:
 
     assert "106_enable_edge_scan_service.sh" in edge
     assert "tools/edge_scan_feasibility" in edge
+    assert "m20pro_field_profile.yaml" in edge
+    assert "field_profile_contract.py" in edge
+    assert "m20pro_field_profile.py" in edge
     assert 'STAGE="${REMOTE_WS}.edge_stage.${STAMP}"' in edge
     assert "--no-owner --no-group" in edge
     assert '"${STAGE}/tools/edge_scan_feasibility/"' in edge
     assert 'sudo -n rsync -a --delete' in edge
     assert 'sudo -n chown -R' in edge
-    assert 'systemctl restart m20pro-edge-scan-106.service' in edge
+    assert 'systemctl restart m20pro-edge-scan-106.service' not in edge
     assert "systemctl is-enabled --quiet m20pro-edge-scan-106.service" in edge
     assert "systemctl is-active --quiet m20pro-edge-scan-106.service" in edge
 

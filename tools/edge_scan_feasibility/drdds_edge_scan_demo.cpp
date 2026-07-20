@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -42,6 +43,8 @@ struct Config {
   std::string stair_mode_topic{"/m20pro/stair_perception_mode"};
   float stair_profile_hold_s{0.50f};
   float stair_mode_timeout_s{1.50f};
+  std::string field_profile_name;
+  std::string field_profile_hash;
   m20pro::StairClearanceConfig stair;
 };
 
@@ -65,6 +68,9 @@ struct StairModeState {
   std::string route_id;
   std::string direction;
   std::string phase;
+  std::string profile_name;
+  std::string profile_hash;
+  std::string rejected_profile_hash;
   Clock::time_point last_update{};
 };
 
@@ -74,6 +80,8 @@ struct StairModeSnapshot {
   std::string route_id;
   std::string direction;
   std::string phase;
+  std::string profile_name;
+  std::string profile_hash;
 };
 
 struct ScanAccumulator {
@@ -257,6 +265,8 @@ static StairModeSnapshot snapshot_stair_mode(
     source.route_id.clear();
     source.direction.clear();
     source.phase.clear();
+    source.profile_name.clear();
+    source.profile_hash.clear();
     source.last_update = Clock::time_point{};
   }
   snapshot.active = source.active;
@@ -264,6 +274,8 @@ static StairModeSnapshot snapshot_stair_mode(
   snapshot.route_id = source.route_id;
   snapshot.direction = source.direction;
   snapshot.phase = source.phase;
+  snapshot.profile_name = source.profile_name;
+  snapshot.profile_hash = source.profile_hash;
   return snapshot;
 }
 
@@ -316,6 +328,8 @@ static std::string stair_status_json(
          << ",\"route_id\":\"" << json_escape(mode.route_id) << "\""
          << ",\"direction\":\"" << json_escape(mode.direction) << "\""
          << ",\"phase\":\"" << json_escape(mode.phase) << "\""
+         << ",\"profile_name\":\"" << json_escape(mode.profile_name) << "\""
+         << ",\"profile_hash\":\"" << json_escape(mode.profile_hash) << "\""
          << ",\"state\":\"" << clearance.state << "\""
          << ",\"reason\":\"" << clearance.reason << "\""
          << ",\"corridor_points\":" << clearance.corridor_points
@@ -560,11 +574,26 @@ static Config parse_args(int argc, char **argv) {
   if (argc > 26) cfg.stair.min_obstacle_points = std::stoi(argv[26]);
   if (argc > 27) cfg.stair_profile_hold_s = std::stof(argv[27]);
   if (argc > 28) cfg.stair_mode_timeout_s = std::stof(argv[28]);
+  if (argc > 29) cfg.field_profile_name = argv[29];
+  if (argc > 30) cfg.field_profile_hash = argv[30];
   return cfg;
 }
 
 int main(int argc, char **argv) {
+  if (argc != 31) {
+    std::cerr << "m20pro_edge_scan requires the complete generated field profile; "
+              << "start it through m20pro-edge-scan-106.service" << std::endl;
+    return 2;
+  }
   Config cfg = parse_args(argc, argv);
+  const bool valid_profile_hash = cfg.field_profile_hash.size() == 64 &&
+      std::all_of(
+          cfg.field_profile_hash.begin(), cfg.field_profile_hash.end(),
+          [](unsigned char ch) { return std::isxdigit(ch) != 0; });
+  if (cfg.field_profile_name.empty() || !valid_profile_hash) {
+    std::cerr << "invalid generated field profile identity" << std::endl;
+    return 2;
+  }
   Stats stats;
   ScanAccumulator accumulator;
   StairPointAccumulator stair_accumulator;
@@ -577,27 +606,44 @@ int main(int argc, char **argv) {
       cfg.stair_scan_topic, cfg.domain, cfg.use_shm, cfg.prefix);
   ChannelString stair_status_pub(
       cfg.stair_status_topic, cfg.domain, cfg.use_shm, cfg.prefix);
-  auto mode_cb = [&stair_mode](const std_msgs::msg::String *message) {
+  auto mode_cb = [&stair_mode, &cfg](const std_msgs::msg::String *message) {
     const std::string text = message->data();
     const bool requested_active = json_bool_value(text, "active", false);
     const std::string session_id = json_string_value(text, "session_id");
     const std::string route_id = json_string_value(text, "route_id");
     const std::string direction = json_string_value(text, "direction");
     const std::string phase = json_string_value(text, "phase");
+    const std::string profile_name = json_string_value(text, "profile_name");
+    const std::string profile_hash = json_string_value(text, "profile_hash");
     std::lock_guard<std::mutex> lock(stair_mode.mutex);
-    const bool active = requested_active && !session_id.empty();
-    const bool changed = active != stair_mode.active || session_id != stair_mode.session_id ||
-        phase != stair_mode.phase;
+    const bool profile_matches = profile_name == cfg.field_profile_name &&
+        profile_hash == cfg.field_profile_hash;
+    const bool active = requested_active && !session_id.empty() && profile_matches;
+    if (requested_active && !profile_matches &&
+        stair_mode.rejected_profile_hash != profile_hash) {
+      std::cerr << "stair_mode_profile_mismatch expected=" << cfg.field_profile_hash
+                << " received=" << (profile_hash.empty() ? "missing" : profile_hash)
+                << std::endl;
+      stair_mode.rejected_profile_hash = profile_hash;
+    } else if (!requested_active || profile_matches) {
+      stair_mode.rejected_profile_hash.clear();
+    }
+    const bool changed = active != stair_mode.active ||
+        (active && (session_id != stair_mode.session_id || phase != stair_mode.phase));
     stair_mode.active = active;
     stair_mode.session_id = active ? session_id : "";
     stair_mode.route_id = active ? route_id : "";
     stair_mode.direction = active ? direction : "";
     stair_mode.phase = active ? phase : "";
+    stair_mode.profile_name = active ? profile_name : "";
+    stair_mode.profile_hash = active ? profile_hash : "";
     stair_mode.last_update = active ? Clock::now() : Clock::time_point{};
     if (changed) {
       std::cout << "stair_mode active=" << stair_mode.active
                 << " session=" << stair_mode.session_id
-                << " phase=" << stair_mode.phase << std::endl;
+                << " phase=" << stair_mode.phase
+                << " profile_hash=" << (stair_mode.profile_hash.empty() ? "-" : stair_mode.profile_hash)
+                << std::endl;
     }
   };
   ChannelString stair_mode_sub(
@@ -627,6 +673,8 @@ int main(int argc, char **argv) {
             << " stair_mode=" << cfg.stair_mode_topic
             << " stair_profile_hold_s=" << cfg.stair_profile_hold_s
             << " stair_mode_timeout_s=" << cfg.stair_mode_timeout_s
+            << " field_profile=" << cfg.field_profile_name
+            << " field_profile_hash=" << cfg.field_profile_hash
             << " stair_corridor=[" << cfg.stair.forward_min << ","
             << cfg.stair.forward_max << "]x+-" << cfg.stair.half_width
             << std::endl;

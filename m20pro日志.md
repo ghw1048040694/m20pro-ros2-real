@@ -1,6 +1,16 @@
 # M20 Pro Project Notes
 
-Last updated: 2026-07-19 17:54 CST
+Last updated: 2026-07-20 10:08 CST
+
+## 2026-07-20 10:08 CST - 现场参数收敛为 104/106/Nav2 单一配置源
+
+- 根因收口：此前 106 的可编辑 env、104 launch 中的楼梯超时默认值和 Nav2 YAML 中的目标容差/膨胀参数分别保存同一批现场参数，修改单级台阶上限时还必须手工同步障碍阈值，存在配置分叉且无法证明 104/106 使用同一版本。本轮不增加节点或常驻进程，把唯一人工配置源固定为 `src/m20pro_bringup/config/m20pro_field_profile.yaml`。
+- 严格配置契约：新增纯 Python 校验/渲染库，要求 schema 与每层 key 精确匹配，拼错/漏项/未知字段、字符串整数、越界值和相互冲突的超时直接拒绝；配置规范化后生成稳定 SHA-256。`obstacle_height_m` 不允许单独填写，只由 `max_step_height_m + obstacle_height_margin_m` 派生，消除台阶上限与障碍判定两套值。
+- 106 单一入口：删除仓库内旧 `m20pro-edge-scan-106.env.edge_scan` 和带独立参数默认值的 `run_balanced_demo_on_106.sh`。安装脚本只从统一 YAML 原子生成 `/etc/m20pro-edge-scan-106.env`，systemd env 改为必需文件，edge 二进制要求完整生成参数和配置身份，不能再用部分参数启动旧机制；安装后清理临时构建目录。
+- 104/Nav2 单一入口：正式 launch 读取已安装统一 YAML，把楼梯租约、安全样本/超时和配置身份注入 `floor_manager`、扫描选择器，并把控制频率、XY/朝向到点容差和局部/全局膨胀半径统一重写进 Nav2。旧 Nav2 数值改为不可直接运行的占位符，104 两个楼梯节点的相关默认值改为无效值，缺少统一配置时拒绝启动；未被正式主栈使用的旧 `m20pro_path_follower` 配置块已删除。
+- 跨主机一致性：楼梯模式请求和净空结果均携带 profile name/hash；106 hash 不匹配时拒绝开启三维楼梯分类，104 扫描选择器拒绝切换楼梯扫描，安全门收到不同 hash 的净空结果立即以 `stair_profile_mismatch` 中止。整狗部署在接触主机前校验配置，部署后要求上位机、104、106 哈希完全一致；不支持任务中热更新，也没有旧参数回退。
+- 人工入口与物理边界：新增 `./scripts/apply_field_profile.sh --check` 和空闲状态下的完整应用入口，README、跨楼层方案和 edge 文档均指向同一文件。`max_step_height_m` 只是感知分类阈值，不能提高机器狗关节、步态或附着能力；临时高台阶仍必须先确认厂家物理上限，再录包并在有人看护和手柄急停条件下验证。
+- 当前验证：仓库全部 `scripts/test_*.py` 已通过；新增测试覆盖稳定 hash、派生阈值、错字段/错范围拒绝、旧 env 不存在、Nav2 运行时重写和楼梯 hash 不匹配 fail-closed。Python 编译、Shell 语法及 `git diff --check` 通过。本条记录时尚未部署正式 104/106，未执行导航、速度、步态、建图、地图切换或重定位。
 
 ## 2026-07-19 17:23 CST - 从三维点云根治楼梯台阶与动态障碍混淆
 

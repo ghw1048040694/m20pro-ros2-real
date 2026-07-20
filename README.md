@@ -108,6 +108,25 @@ source install/setup.bash
 ./scripts/104_stop_web.sh
 ```
 
+## 现场参数统一配置
+
+现场允许调整的点云、楼梯安全和 Nav2 参数只有一个源文件：
+
+```text
+src/m20pro_bringup/config/m20pro_field_profile.yaml
+```
+
+修改后必须先检查再整体应用：
+
+```bash
+./scripts/apply_field_profile.sh --check
+./scripts/apply_field_profile.sh
+```
+
+应用入口会拒绝任务执行期间换参，先校验字段、范围和参数耦合，再按完整部署流程同时更新 106 和 104。106 的 `/etc/m20pro-edge-scan-106.env` 是自动生成物，不可手工编辑；Nav2 参数文件中的现场项也是不可直接运行的占位符，只能由该配置启动时重写。104 和 106 会携带并核对同一份配置的 SHA-256，不一致时拒绝进入楼梯模式，不提供旧参数回退或热更新。
+
+`stair.max_step_height_m` 是感知分类阈值，不代表机器狗的机械爬升能力。现场提高它之前必须先确认厂家给出的步态能力并用录包和有人看护的低风险测试验证；不能靠改大参数让机器狗强行通过超出物理能力的台阶。
+
 在上位机拉回 104 录包：
 
 ```bash

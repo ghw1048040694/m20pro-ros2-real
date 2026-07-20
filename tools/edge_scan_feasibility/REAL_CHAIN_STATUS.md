@@ -18,6 +18,13 @@ in `/scan`, without retaining stale obstacles indefinitely.
 There is no production fallback to local fusion. If `/scan` is stale or empty,
 navigation must remain blocked until the 106 service or DDS link is restored.
 
+All field-tunable scan, stair and Nav2 values originate in
+`src/m20pro_bringup/config/m20pro_field_profile.yaml`. Deployment renders the
+106 systemd environment and 104 loads the same installed file. The old 106 env
+template and partial-argument demo launcher have been removed. A profile hash
+mismatch is fail-closed for stair mode, and profiles are never hot-reloaded
+during a task.
+
 Stair sessions add a bounded 0.50-second 3D tread-envelope classifier on 106.
 Normal steps remain terrain, while residual objects are published on
 `/m20pro/stair_obstacle_scan` and the fail-closed state is published on

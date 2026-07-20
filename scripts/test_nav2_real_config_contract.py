@@ -1,16 +1,27 @@
 #!/usr/bin/env python3
 from pathlib import Path
+import sys
 import xml.etree.ElementTree as ET
 
 import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src/m20pro_navigation"))
+
+from m20pro_navigation.field_profile_contract import (  # noqa: E402
+    edge_environment,
+    load_field_profile,
+)
 
 
 def main() -> None:
     config_path = ROOT / "src" / "m20pro_bringup" / "config" / "nav2_params_real.yaml"
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    field_profile = load_field_profile(
+        ROOT / "src/m20pro_bringup/config/m20pro_field_profile.yaml"
+    )
+    navigation_profile = field_profile["navigation"]
     real_config_path = ROOT / "src" / "m20pro_bringup" / "config" / "m20pro_real.yaml"
     real_config = yaml.safe_load(real_config_path.read_text(encoding="utf-8"))
     bridge_config = real_config["m20pro_tcp_bridge"]["ros__parameters"]
@@ -22,12 +33,15 @@ def main() -> None:
     local = config["local_costmap"]["local_costmap"]["ros__parameters"]
     global_costmap = config["global_costmap"]["global_costmap"]["ros__parameters"]
 
-    assert controller["controller_frequency"] <= 10.0
+    assert controller["controller_frequency"] == "__FIELD_PROFILE_CONTROLLER_FREQUENCY__"
+    assert navigation_profile["controller_frequency_hz"] <= 10.0
     assert controller["progress_checker"]["movement_time_allowance"] >= 12.0
     assert controller["goal_checker"]["stateful"] is False
-    assert abs(float(controller["goal_checker"]["xy_goal_tolerance"]) - 0.35) < 1e-6
-    assert 0.15 <= float(controller["goal_checker"]["yaw_goal_tolerance"]) <= 0.25
-    assert abs(float(follow["xy_goal_tolerance"]) - 0.35) < 1e-6
+    assert controller["goal_checker"]["xy_goal_tolerance"] == "__FIELD_PROFILE_XY_GOAL_TOLERANCE__"
+    assert controller["goal_checker"]["yaw_goal_tolerance"] == "__FIELD_PROFILE_YAW_GOAL_TOLERANCE__"
+    assert follow["xy_goal_tolerance"] == "__FIELD_PROFILE_XY_GOAL_TOLERANCE__"
+    assert abs(navigation_profile["xy_goal_tolerance_m"] - 0.35) < 1e-6
+    assert 0.15 <= navigation_profile["yaw_goal_tolerance_rad"] <= 0.25
     assert "ObstacleFootprint" in follow["critics"]
     assert "BaseObstacle" not in follow["critics"]
     assert follow["sim_time"] >= 1.5
@@ -38,7 +52,8 @@ def main() -> None:
     for costmap in (local, global_costmap):
         assert "footprint" in costmap
         assert "robot_radius" not in costmap
-        assert costmap["inflation_layer"]["inflation_radius"] >= 0.60
+        assert costmap["inflation_layer"]["inflation_radius"] == "__FIELD_PROFILE_INFLATION_RADIUS__"
+        assert navigation_profile["inflation_radius_m"] >= 0.60
         assert costmap["obstacle_layer"]["scan"]["topic"] == "/m20pro/navigation_scan"
         assert costmap["obstacle_layer"]["scan"]["inf_is_valid"] is True
 
@@ -162,7 +177,15 @@ def main() -> None:
     assert 'default_value="/m20pro/recording_scan"' in real_launch
     assert '"scan_topic": web_scan_topic' in real_launch
     assert 'executable="navigation_scan_selector"' in real_launch
-    assert '"mode_timeout_s": 1.5' in real_launch
+    assert '"mode_timeout_s": profile_stair["mode_timeout_s"]' in real_launch
+    assert "load_field_profile(default_field_profile)" in real_launch
+    for field_argument in (
+        "controller_frequency",
+        "xy_goal_tolerance",
+        "yaw_goal_tolerance",
+        "inflation_radius",
+    ):
+        assert field_argument in nav_launch
 
     scan_selector = (
         ROOT
@@ -207,20 +230,7 @@ def main() -> None:
     ).read_text(encoding="utf-8")
     assert "export PYTHONDONTWRITEBYTECODE=1" in real_start
 
-    edge_env_path = (
-        ROOT
-        / "tools"
-        / "edge_scan_feasibility"
-        / "service"
-        / "m20pro-edge-scan-106.env.edge_scan"
-    )
-    edge_env = {}
-    for raw_line in edge_env_path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        edge_env[key] = value
+    edge_env = edge_environment(field_profile)
     assert float(edge_env["HEIGHT_MIN"]) <= -0.25
     assert float(edge_env["HEIGHT_MAX"]) >= 0.60
     assert int(edge_env["MAX_POINTS"]) == 0
@@ -230,8 +240,13 @@ def main() -> None:
     assert edge_env["STAIR_MODE_TOPIC"] == "/m20pro/stair_perception_mode"
     assert 0.3 <= float(edge_env["STAIR_PROFILE_HOLD_S"]) <= 0.75
     assert 1.0 <= float(edge_env["STAIR_MODE_TIMEOUT_S"]) <= 2.0
-    assert float(edge_env["STAIR_MAX_STEP_HEIGHT"]) < float(edge_env["STAIR_OBSTACLE_HEIGHT"])
+    assert edge_env["STAIR_MAX_STEP_HEIGHT"] < edge_env["STAIR_OBSTACLE_HEIGHT"]
     assert int(edge_env["STAIR_MIN_CORRIDOR_POINTS"]) > 0
+    assert edge_env["FIELD_PROFILE_HASH"] == field_profile["profile_hash"]
+    assert not (
+        ROOT
+        / "tools/edge_scan_feasibility/service/m20pro-edge-scan-106.env.edge_scan"
+    ).exists()
 
     edge_unit = (
         ROOT
@@ -246,6 +261,8 @@ def main() -> None:
         "STAIR_MODE_TOPIC",
         "STAIR_PROFILE_HOLD_S",
         "STAIR_MODE_TIMEOUT_S",
+        "FIELD_PROFILE_NAME",
+        "FIELD_PROFILE_HASH",
     ):
         assert "${%s}" % variable in edge_unit
 
@@ -257,6 +274,8 @@ def main() -> None:
     ).read_text(encoding="utf-8")
     assert '" scan_matched=" << stair_scan_pub.GetMatchedCount()' in edge_source
     assert '" status_matched=" << stair_status_pub.GetMatchedCount()' in edge_source
+    assert "stair_mode_profile_mismatch" in edge_source
+    assert '<< ",\\\"profile_hash\\\":\\\""' in edge_source
 
     for topic in (
         "/m20pro/navigation_scan",
