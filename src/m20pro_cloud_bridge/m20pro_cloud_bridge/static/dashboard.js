@@ -895,7 +895,10 @@
       const shownFloor = displayedMapFloor();
       const robotFloor = currentRobotFloor(payload);
       if (!shownFloor) return true;
-      if (!robotFloor) return false;
+      // Before relocalization the factory floor can be unknown. A pending
+      // draft is an explicit operator preview on the selected map, so only a
+      // confirmed different floor should suppress its red scan overlay.
+      if (!robotFloor) return true;
       return shownFloor === robotFloor;
     }
     function selectedMapRelocalizationText(payload = state.latest) {

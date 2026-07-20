@@ -112,6 +112,10 @@ def main() -> None:
     assert "detection-results" in css
     assert "renderTaskExecutionFlow" in script
     assert 'for (const key of ["pose", "scan", "path", "local_path", "active_waypoint"])' in script
+    assert "function drawScanOverlay" in script
+    assert "const usingDraft = localizationDraftActive();" in script
+    assert "if (!robotFloor) return true;" in script
+    assert "confirmed different floor should suppress its red scan overlay" in script
     assert "renderYoloWorkspace" in script
     assert "function drawYoloOverlay" in script
     assert "function setYoloAnnotatedStream" not in script
@@ -180,7 +184,7 @@ def main() -> None:
     assert "function paintMapEditor" in script
     assert "button.textContent = item.label || item.id;" in script
     assert "button.textContent = `+ ${item.label || item.id}`" not in script
-    assert "20260719-cross-floor-1" in html
+    assert "20260720-relocalize-preview-1" in html
     assert "clamp(460px, 34vw, 620px)" in css
     assert "function mappingSessionMatchesDraft" in script
     assert "const reusableSession = [state.mappingSession, state.latestMappingSession]" in script
