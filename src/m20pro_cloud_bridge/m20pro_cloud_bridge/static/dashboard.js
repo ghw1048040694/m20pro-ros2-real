@@ -3011,8 +3011,9 @@
     }
     function populateFloorControls(workspace) {
       const floorIds = (workspace && workspace.floors || []).map(item => String(item.id || "")).filter(Boolean);
-      if (!floorIds.length) return;
       const mapFloor = displayedMapFloor();
+      if (mapFloor && !floorIds.includes(mapFloor)) floorIds.push(mapFloor);
+      if (!floorIds.length) return;
       const currentFloor = String((workspace && workspace.current_floor) || "");
       const preferred = floorIds.includes(mapFloor) ? mapFloor : (floorIds.includes(currentFloor) ? currentFloor : floorIds[0]);
       if (!state.floorControlsInitialized) {
@@ -3025,9 +3026,7 @@
       }
       updateMappingModeUi();
       setFloorControlValue("importFloor", (state.mappingSession || {}).active_floor || preferred);
-      replaceFloorOptions($("locFloor"), floorIds, preferred);
       replaceFloorOptions($("markFloor"), floorIds, preferred);
-      $("locFloor").value = preferred;
       $("markFloor").value = preferred;
       state.floorControlsInitialized = true;
     }
@@ -3872,8 +3871,7 @@
           x,
           y,
           z: 0,
-          yaw: Number.isFinite(yaw) ? yaw : 0,
-          floor: $("locFloor").value.trim()
+          yaw: Number.isFinite(yaw) ? yaw : 0
         });
         state.relocalizationApiLogUntil = Date.now() + 12000;
         if (payload.localization_status) {
@@ -3902,7 +3900,6 @@
         return;
       }
       setLocalizeDraft({x: pose.x, y: pose.y, yaw: pose.yaw}, "已取当前机器人位姿");
-      setFloorControlValue("locFloor", displayedMapFloor());
     });
     $("scanOverlayToggle").addEventListener("change", () => {
       state.scanOverlay = $("scanOverlayToggle").checked;

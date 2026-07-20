@@ -197,6 +197,30 @@ def test_runtime_map_library_has_no_implicit_routes() -> None:
     assert_equal(workspace["ready"], True, "ordinary map library is ready")
 
 
+def test_project_floor_registry_does_not_hide_ordinary_map() -> None:
+    workspace = build_multi_floor_workspace(
+        floor_config={
+            "floors": {
+                "F1": {"level": 1, "registry_source": "project", "stairs": {}},
+            }
+        },
+        maps=[
+            {"id": "map1", "name": "工地 F1", "floor": "F1", "factory_apply_path": "/var/opt/robot/data/maps/f1"},
+            {"id": "map20", "name": "F20 工位图", "floor": "F20", "factory_apply_path": "/var/opt/robot/data/maps/f20"},
+        ],
+        annotations=[],
+        sessions=[],
+        current_floor="F20",
+        selected_map_id="map20",
+    )
+    assert_equal([item["id"] for item in workspace["floors"]], ["F1", "F20"], "project and ordinary floors visible")
+    selected = next(item for item in workspace["floors"] if item["id"] == "F20")
+    assert_equal(selected["selected"], True, "ordinary map selected floor")
+    assert_equal(selected["current"], True, "ordinary map current floor")
+    assert_equal(selected["route_configured"], False, "project registry does not create route")
+    assert_equal(workspace["identity_issue_count"], 0, "ordinary map is not an identity issue")
+
+
 def test_cross_floor_task_order_and_route() -> None:
     known = {item["id"]: item for item in annotations()}
     context = cross_floor_task_context(
@@ -240,6 +264,7 @@ def main() -> int:
         test_workspace_excludes_unregistered_floor_data,
         test_project_single_floor_does_not_require_cross_floor_route,
         test_runtime_map_library_has_no_implicit_routes,
+        test_project_floor_registry_does_not_hide_ordinary_map,
         test_cross_floor_task_order_and_route,
     ):
         test()

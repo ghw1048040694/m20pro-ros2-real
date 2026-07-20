@@ -137,7 +137,21 @@ def build_multi_floor_workspace(
     map_items = [_map_summary(item) for item in maps if isinstance(item, dict) and item.get("id")]
     annotation_items = [dict(item) for item in annotations if isinstance(item, dict) and item.get("id")]
     session_items = [dict(item) for item in sessions if isinstance(item, dict)]
-    route_floor_ids = set(str(item).strip() for item in configured_floors if str(item).strip())
+    # Project-created floor identities are metadata for ordinary maps. Only
+    # explicitly configured route floors form the strict cross-floor registry.
+    route_floor_ids = {
+        str(item).strip()
+        for item, data in configured_floors.items()
+        if str(item).strip()
+        and not (isinstance(data, dict) and str(data.get("registry_source") or "") == "project")
+    }
+    project_floor_ids = {
+        str(item).strip()
+        for item, data in configured_floors.items()
+        if str(item).strip()
+        and isinstance(data, dict)
+        and str(data.get("registry_source") or "") == "project"
+    }
     map_floor_ids = {item["floor"] for item in map_items if item["floor"]}
     annotation_floor_ids = {
         str(item.get("floor") or "").strip()
@@ -153,7 +167,7 @@ def build_multi_floor_workspace(
     # With no explicit route profile, map/point labels are ordinary runtime
     # identities and must remain visible in the workspace. A route profile
     # still acts as a strict registry for cross-floor data integrity.
-    floor_ids = route_floor_ids | (
+    floor_ids = route_floor_ids | project_floor_ids | (
         map_floor_ids | annotation_floor_ids | session_floor_ids
         if not route_floor_ids
         else set()

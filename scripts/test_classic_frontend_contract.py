@@ -189,7 +189,9 @@ def main() -> None:
     assert "function paintMapEditor" in script
     assert "button.textContent = item.label || item.id;" in script
     assert "button.textContent = `+ ${item.label || item.id}`" not in script
-    assert "20260720-relocalize-preview-3" in html
+    assert "20260720-relocalize-preview-4" in html
+    assert 'id="locFloor"' not in html
+    assert '$("locFloor")' not in script
     assert "clamp(460px, 34vw, 620px)" in css
     assert "function mappingSessionMatchesDraft" in script
     assert "const reusableSession = [state.mappingSession, state.latestMappingSession]" in script

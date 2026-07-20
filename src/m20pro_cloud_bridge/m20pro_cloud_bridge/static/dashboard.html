@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>M20Pro 现场操作台</title>
   <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="/static/dashboard.css?v=20260720-relocalize-preview-3" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=20260720-relocalize-preview-4" />
 
 </head>
 <body>
@@ -34,7 +34,6 @@
     <div class="status-popover-head"><strong>重定位</strong><button id="closeLocalizationStatusBtn" class="icon-button" type="button" title="关闭" aria-label="关闭">×</button></div>
     <div class="row"><label>坐标 X/Y</label><input id="locXY" placeholder="在地图上拖拽取点" /></div>
     <div class="row"><label>朝向(rad)</label><input id="locYaw" value="0.0" /></div>
-    <div class="row"><label>楼层</label><select id="locFloor" disabled></select></div>
     <div class="actions"><button class="primary" id="sendInitialPoseBtn">执行重定位</button><button id="useRobotPoseForLocBtn">使用当前位姿</button></div>
     <label class="checkline"><input id="scanOverlayToggle" type="checkbox" checked /><span>显示实时激光轮廓</span></label>
     <div class="small" id="scanOverlayStatus">等待 /scan 数据</div>
