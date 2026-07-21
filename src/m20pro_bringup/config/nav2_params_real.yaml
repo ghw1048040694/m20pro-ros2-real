@@ -132,7 +132,7 @@ controller_server:
       short_circuit_trajectory_evaluation: true
       stateful: false
       critics: ["RotateToGoal", "Oscillation", "ObstacleFootprint", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
-      ObstacleFootprint.scale: 0.05
+      ObstacleFootprint.scale: __FIELD_PROFILE_OBSTACLE_CRITIC_SCALE__
       PathAlign.scale: 24.0
       PathAlign.forward_point_distance: 0.22
       GoalAlign.scale: 18.0

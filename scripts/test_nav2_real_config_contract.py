@@ -76,6 +76,8 @@ def main() -> None:
     assert "BaseObstacle" not in follow["critics"]
     assert follow["sim_time"] == "__FIELD_PROFILE_SIMULATION_TIME__"
     assert local_planner_profile["simulation_time_s"] >= 1.5
+    assert follow["ObstacleFootprint.scale"] == "__FIELD_PROFILE_OBSTACLE_CRITIC_SCALE__"
+    assert local_planner_profile["obstacle_critic_scale"] >= 1.0
     assert follow["max_vel_x"] == "__FIELD_PROFILE_MAX_LINEAR_SPEED__"
     assert follow["max_speed_xy"] == "__FIELD_PROFILE_MAX_LINEAR_SPEED__"
     assert follow["max_vel_theta"] == "__FIELD_PROFILE_MAX_ANGULAR_SPEED__"
@@ -256,6 +258,7 @@ def main() -> None:
     assert 'default_value="/m20pro/recording_scan"' in real_launch
     assert '"scan_topic": web_scan_topic' in real_launch
     assert 'executable="navigation_scan_selector"' in real_launch
+    assert '"input_topic": "/m20pro/navigation_scan"' in real_launch
     assert '"mode_timeout_s": profile_stair["mode_timeout_s"]' in real_launch
     assert "load_field_profile(default_field_profile)" in real_launch
     assert "nav2_parameter_rewrites" not in nav_launch
@@ -302,6 +305,7 @@ def main() -> None:
     assert 'self.declare_parameter("normal_scan_topic", "/scan")' in scan_selector
     assert 'self.declare_parameter("stair_scan_topic", "/m20pro/stair_obstacle_scan")' in scan_selector
     assert 'self.declare_parameter("output_topic", "/m20pro/navigation_scan")' in scan_selector
+    assert "output_qos.reliability = ReliabilityPolicy.RELIABLE" in scan_selector
     assert "def _expire_stair_mode" in scan_selector
     assert "if self.stair_active:" in scan_selector
     assert 'label in ("stair_traverse", "stair_exit")' in floor_manager

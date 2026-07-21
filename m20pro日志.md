@@ -24108,3 +24108,19 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 
 - 提交 `3b0da08` 已 104-only 部署，未访问或重启 106；5 包构建成功，服务 `active`、`NRestarts=0`、当前无活动任务。
 - 104 地图库当前 15 张，其中 3 张历史项目资产已按普通业务地图开放删除；没有实际删除任何地图。再次用当前地图做非破坏性请求，后端仍返回 `map_in_use`，确认使用中保护不受影响。
+
+## 2026-07-21 21:22 CST - 收口导航避障扫描链路并修正提前避障能力
+
+- 今晚录包复核：
+  - `充电导航测试_20260721_205016` 和 `6个点位测试6_20260721_204103` 中，`/m20pro/recording_scan` 仍约 3.3Hz，但 `/m20pro/navigation_scan` 为 0 条；录包看似有激光，Nav2 实际消费的选择后扫描流却没有形成稳定可记录的发布端。
+  - `人工接管1_20260721_202323` 中 local costmap 能出现 lethal 单元，但 DWB 对侧前方膨胀区的提前惩罚偏弱，仍可能在距离障碍较近时保持较高前进速度；正前方完全阻塞时才稳定停下。
+  - `四个点位测试6_20260721_195809` 的点位链路可继续下发后续目标，不能把今晚所有现象归因于多点任务；避障问题主要在感知出口和局部轨迹代价。
+- 根因修正：
+  - `navigation_scan_selector` 的输入继续使用传感器 Best Effort QoS，唯一输出 `/m20pro/navigation_scan` 改为 Reliable QoS，保证 Nav2、rosbag2 和镜像节点不会因 QoS 协商静默分叉。
+  - `scan_recording_relay` 不再直接旁路原始 `/scan`，改为镜像 Nav2 实际使用的 `/m20pro/navigation_scan`；`/m20pro/recording_scan` 现在与导航输入严格同源，录包门禁也能真实反映导航感知是否可用。
+  - 现场参数新增 `navigation.local_planner.obstacle_critic_scale`，当前为 `1.00`，替代历史硬编码 `ObstacleFootprint.scale=0.05`，让 DWB 在膨胀区提前降低速度/选择绕行轨迹，而不是等到 lethal 才拒绝轨迹。
+  - `observation_persistence_s` 从 `0.30s` 调整为 `0.75s`，覆盖 106 实测约 3.3Hz 扫描周期及 DDS 抖动，避免局部代价地图在两帧之间清掉动态障碍；仍由激光清除射线及时移除已离开的障碍。
+- 验证：
+  - 全量 `scripts/test_*.py` 通过；现场参数契约计数更新为 79 项，导航组 29 项。
+  - `m20pro_navigation`、`m20pro_bringup` 构建通过；渲染后的 Nav2 参数确认 `ObstacleFootprint.scale=1.0`、观测保持 `0.75s`、代价地图输入为 `/m20pro/navigation_scan`；Python 编译和 `git diff --check` 通过。
+  - 本轮只修改上位机源码和日志，尚未部署或重启 104/106，未下发导航、速度、重定位或网络命令；部署后必须用“正前方静态障碍 + 人员短时挡路 + 障碍移开”三段流程复测并录包确认。

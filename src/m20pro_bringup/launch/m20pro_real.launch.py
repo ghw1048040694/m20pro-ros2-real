@@ -354,7 +354,14 @@ def generate_launch_description():
             executable="scan_recording_relay",
             name="m20pro_scan_recording_relay",
             output="screen",
-            parameters=[{"input_topic": scan_topic, "output_topic": "/m20pro/recording_scan"}],
+            parameters=[
+                {
+                    # Keep rosbag and the web display on the exact scan stream
+                    # consumed by Nav2, including stair-mode selection.
+                    "input_topic": "/m20pro/navigation_scan",
+                    "output_topic": "/m20pro/recording_scan",
+                }
+            ],
         ),
         Node(
             package="m20pro_navigation",

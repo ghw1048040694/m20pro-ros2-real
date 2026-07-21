@@ -93,6 +93,7 @@ LOCAL_PLANNER_SPEC = {
     "simulation_time_s": ("number", 0.50, 5.00),
     "linear_velocity_samples": ("integer", 3, 50),
     "angular_velocity_samples": ("integer", 5, 80),
+    "obstacle_critic_scale": ("number", 0.10, 10.00),
 }
 COSTMAP_SPEC = {
     "local_update_frequency_hz": ("number", 2.0, 20.0),
@@ -567,6 +568,9 @@ def render_nav2_parameters(
         "__FIELD_PROFILE_LINEAR_SAMPLES__": local_planner["linear_velocity_samples"],
         "__FIELD_PROFILE_ANGULAR_SAMPLES__": local_planner["angular_velocity_samples"],
         "__FIELD_PROFILE_SIMULATION_TIME__": local_planner["simulation_time_s"],
+        "__FIELD_PROFILE_OBSTACLE_CRITIC_SCALE__": local_planner[
+            "obstacle_critic_scale"
+        ],
         "__FIELD_PROFILE_OBSTACLE_RANGE__": costmap["obstacle_range_m"],
         "__FIELD_PROFILE_RAYTRACE_RANGE__": costmap["raytrace_range_m"],
         "__FIELD_PROFILE_OBSERVATION_PERSISTENCE__": costmap[

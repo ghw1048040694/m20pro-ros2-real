@@ -46,10 +46,16 @@ class NavigationScanSelector(Node):
         scan_qos = QoSProfile(depth=5)
         scan_qos.reliability = ReliabilityPolicy.BEST_EFFORT
         scan_qos.durability = DurabilityPolicy.VOLATILE
+        # The selector is the single navigation-scan boundary.  Keep its
+        # input sensor-compatible, but publish reliably so Nav2, rosbag2 and
+        # the recording mirror cannot silently negotiate different streams.
+        output_qos = QoSProfile(depth=10)
+        output_qos.reliability = ReliabilityPolicy.RELIABLE
+        output_qos.durability = DurabilityPolicy.VOLATILE
         self.scan_pub = self.create_publisher(
             LaserScan,
             str(self.get_parameter("output_topic").value),
-            scan_qos,
+            output_qos,
         )
         self.status_pub = self.create_publisher(
             String,

@@ -73,6 +73,7 @@ navigation:
     simulation_time_s: 1.50       # 每条候选轨迹向前模拟的时间，单位 s
     linear_velocity_samples: 12   # 每周期采样的线速度数量，必须为整数
     angular_velocity_samples: 20  # 每周期采样的角速度数量，必须为整数
+    obstacle_critic_scale: 1.00   # DWB 对膨胀区和障碍足迹的提前惩罚权重，越大越早绕障
   # 局部/全局代价地图；发布频率不得高于更新频率，清障距离不得小于障碍标记距离。
   costmap:
     local_update_frequency_hz: 8.0 # 局部代价地图内部更新频率，单位 Hz
@@ -81,7 +82,7 @@ navigation:
     global_publish_frequency_hz: 0.5 # 全局代价地图对外发布频率，单位 Hz
     obstacle_range_m: 3.0         # 激光用于标记障碍物的最远距离，单位 m
     raytrace_range_m: 3.5         # 激光用于清除旧障碍物的最远距离，单位 m
-    observation_persistence_s: 0.30 # 障碍观测短时保留时间，单位 s；过大将导致动态障碍残留
+    observation_persistence_s: 0.75 # 障碍观测保留时间，单位 s；覆盖 106 实际约 3.3Hz 扫描间隔和抖动
     inflation_radius_m: 0.62      # 障碍物膨胀半径，单位 m，局部与全局地图共用
     inflation_cost_scaling_factor: 4.0 # 膨胀代价衰减系数；越大表示代价随距离下降越快
   # 全局路径规划器参数

@@ -64,8 +64,8 @@ def main() -> None:
             "localization",
         )
     }
-    assert leaf_count(editable) == 78
-    assert leaf_count(editable["navigation"]) == 28
+    assert leaf_count(editable) == 79
+    assert leaf_count(editable["navigation"]) == 29
     assert leaf_count(editable["teleoperation"]) == 7
 
     typo = raw_profile()
