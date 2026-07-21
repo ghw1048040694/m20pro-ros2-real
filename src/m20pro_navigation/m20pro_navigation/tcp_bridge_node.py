@@ -1,4 +1,6 @@
 import math
+import socket
+import threading
 import time
 from typing import Optional
 
@@ -13,7 +15,7 @@ from tf2_ros import TransformBroadcaster
 from .geometry import quaternion_to_yaw, yaw_to_quaternion
 from .odom_alignment_contract import odom_alignment_update
 from .pose_stability_contract import stationary_pose_update, stable_jump_decision
-from .tcp_protocol import M20TcpClient, patrol_items
+from .tcp_protocol import M20ProtocolError, M20TcpClient, patrol_items
 
 
 class M20TcpBridge(Node):
@@ -78,6 +80,7 @@ class M20TcpBridge(Node):
         self.declare_parameter("enable_motion_state_command", True)
         self.declare_parameter("motion_state_command_topic", "/m20pro/motion_state_command")
         self.declare_parameter("motion_state_result_topic", "/m20pro_tcp_bridge/motion_state_result")
+        self.declare_parameter("motion_state_response_timeout_s", 2.0)
         self.declare_parameter("enable_usage_mode_command", False)
         self.declare_parameter("usage_mode_command_topic", "/m20pro/usage_mode_command")
         self.declare_parameter("enable_initialpose_relocalization", True)
@@ -126,6 +129,7 @@ class M20TcpBridge(Node):
         self.last_pose_warning_time = None
         self.last_status_warning_time = None
         self.last_invalid_pose_warning_time = None
+        self._motion_state_command_lock = threading.Lock()
         self.last_good_map_pose = None
         self.pending_jump_pose = None
         self.last_relocalization_request_time = None
@@ -234,7 +238,7 @@ class M20TcpBridge(Node):
             self.connected = True
             self.get_logger().info("connected to M20 body protocol")
             return True
-        except OSError as exc:
+        except (OSError, M20ProtocolError) as exc:
             if self.connected:
                 self.get_logger().warning("lost M20 TCP connection: %s" % exc)
             self.connected = False
@@ -274,7 +278,7 @@ class M20TcpBridge(Node):
 
         try:
             self.client.request(2, 23, {"GaitParam": gait_param}, wait_response=False)
-        except OSError as exc:
+        except (OSError, M20ProtocolError) as exc:
             text = "failed: %s" % exc
             self.get_logger().warning("gait command failed: %s" % exc)
             self._publish_gait_result(text)
@@ -296,19 +300,75 @@ class M20TcpBridge(Node):
                 "failed: unknown motion state command '%s'" % msg.data
             )
             return
-        if not self._ensure_connected():
-            self._publish_motion_state_result("failed: tcp connection unavailable")
+        if not self._motion_state_command_lock.acquire(blocking=False):
+            self._publish_motion_state_result("failed: motion state command busy")
             return
+        thread = threading.Thread(
+            target=self._send_motion_state_command,
+            args=(msg.data, motion_state),
+            name="m20pro-motion-state",
+            daemon=True,
+        )
+        thread.start()
+
+    def _send_motion_state_command(self, command: str, motion_state: int) -> None:
         try:
-            self.client.request(2, 22, {"MotionParam": motion_state}, wait_response=False)
-        except OSError as exc:
+            if not self._ensure_connected():
+                self._publish_motion_state_result("failed: tcp connection unavailable")
+                return
+            response = self.client.request(
+                2,
+                22,
+                {"MotionParam": motion_state},
+                response_timeout=max(
+                    0.5,
+                    float(self.get_parameter("motion_state_response_timeout_s").value),
+                ),
+            )
+            items = patrol_items(response)
+            if response is None:
+                text = "sent_without_ack: state=%s MotionParam=%d" % (command.strip(), motion_state)
+            else:
+                raw_error_code = items.get("ErrorCode")
+                try:
+                    if raw_error_code is None:
+                        raise ValueError("missing ErrorCode")
+                    error_code = (
+                        int(raw_error_code, 0)
+                        if isinstance(raw_error_code, str)
+                        else int(raw_error_code)
+                    )
+                except (TypeError, ValueError):
+                    error_code = -1
+                if error_code != 0:
+                    text = "failed: ErrorCode=0x%04X state=%s MotionParam=%d" % (
+                        error_code & 0xFFFF,
+                        command.strip(),
+                        motion_state,
+                    )
+                else:
+                    text = "accepted: state=%s MotionParam=%d ErrorCode=0" % (
+                        command.strip(),
+                        motion_state,
+                    )
+        except socket.timeout as exc:
+            text = "sent_without_ack: state=%s MotionParam=%d (%s)" % (
+                command.strip(),
+                motion_state,
+                exc,
+            )
+        except (OSError, M20ProtocolError) as exc:
             text = "failed: %s" % exc
             self.get_logger().warning("motion state command failed: %s" % exc)
             self._publish_motion_state_result(text)
-            return
-        text = "sent: state=%s MotionParam=%d" % (msg.data.strip(), motion_state)
-        self.get_logger().info("vendor motion state command sent: %s" % text)
-        self._publish_motion_state_result(text)
+        else:
+            if text.startswith("failed:"):
+                self.get_logger().warning("vendor motion state command rejected: %s" % text)
+            else:
+                self.get_logger().info("vendor motion state command result: %s" % text)
+            self._publish_motion_state_result(text)
+        finally:
+            self._motion_state_command_lock.release()
 
     def _publish_motion_state_result(self, text: str) -> None:
         msg = String()

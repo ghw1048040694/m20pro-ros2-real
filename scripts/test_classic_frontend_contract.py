@@ -192,8 +192,8 @@ def main() -> None:
     assert "function paintMapEditor" in script
     assert "button.textContent = item.label || item.id;" in script
     assert "button.textContent = `+ ${item.label || item.id}`" not in script
-    assert "20260721-teleop-3" in html
-    assert html.count("20260721-teleop-3") == 2
+    assert "20260721-teleop-4" in html
+    assert html.count("20260721-teleop-4") == 2
     for element_id in (
         "batteryStatusBtn",
         "batteryStatusPopover",
@@ -205,6 +205,9 @@ def main() -> None:
         "teleopPostureBtn",
         "teleopSoftStopBtn",
         "teleopZeroBtn",
+        "teleopConfirmDialog",
+        "confirmTeleopConfirmBtn",
+        "cancelTeleopConfirmBtn",
     ):
         assert f'id="{element_id}"' in html
     for endpoint in (
@@ -222,6 +225,10 @@ def main() -> None:
     assert '>趴下</button>' in html
     assert "targetPostureAction" in script
     assert "function startTeleopHeartbeat" in script
+    assert "function requestTeleopConfirmation" in script
+    assert "确认窗口不会暂停遥控心跳" in script
+    assert "state.teleop.releasing = true" in script
+    assert "!state.teleop.releasing" in script
     assert "window.addEventListener(\"blur\"" in script
     assert "document.addEventListener(\"visibilitychange\"" in script
     assert "teleop-pad" in css

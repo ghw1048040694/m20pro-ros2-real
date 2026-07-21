@@ -31,7 +31,7 @@ class CommandMuxNode(Node):
         self.declare_parameter("initial_mode", "navigation")
         self.declare_parameter("watchdog_rate_hz", 20.0)
         self.declare_parameter("navigation_command_timeout_s", 0.6)
-        self.declare_parameter("teleop_command_timeout_s", 0.35)
+        self.declare_parameter("teleop_command_timeout_s", 0.8)
         self.declare_parameter("teleop_max_forward_speed_mps", 0.18)
         self.declare_parameter("teleop_max_reverse_speed_mps", 0.12)
         self.declare_parameter("teleop_max_lateral_speed_mps", 0.18)

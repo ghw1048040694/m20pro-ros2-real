@@ -1037,6 +1037,24 @@
       if (dialog.open) dialog.close();
       dialog.showModal();
     }
+    let teleopConfirmResolver = null;
+    function closeTeleopConfirm(confirmed) {
+      const dialog = $("teleopConfirmDialog");
+      if (dialog && dialog.open) dialog.close();
+      const resolver = teleopConfirmResolver;
+      teleopConfirmResolver = null;
+      if (resolver) resolver(Boolean(confirmed));
+    }
+    function requestTeleopConfirmation(title, message) {
+      const dialog = $("teleopConfirmDialog");
+      if (!dialog) return Promise.resolve(false);
+      if (teleopConfirmResolver) closeTeleopConfirm(false);
+      $("teleopConfirmTitle").textContent = title || "确认遥控动作";
+      $("teleopConfirmContext").textContent = "确认窗口不会暂停遥控心跳";
+      $("teleopConfirmMessage").textContent = message || "确认执行该动作？";
+      dialog.showModal();
+      return new Promise(resolve => { teleopConfirmResolver = resolve; });
+    }
     function setLog(id, payload) {
       const box = $(id);
       if (box) box.textContent = payloadMessage(payload, "等待状态更新");
@@ -1479,7 +1497,7 @@
           ...axes
         });
       } catch (err) {
-        if (state.teleop.sessionId === sessionId) {
+        if (state.teleop.sessionId === sessionId && !state.teleop.releasing) {
           clearLocalTeleop();
           renderTeleoperation({
             active: false,
@@ -1491,7 +1509,7 @@
         }
       } finally {
         state.teleop.requestInFlight = false;
-        if (state.teleop.pendingCommand && state.teleop.sessionId === sessionId) {
+        if (state.teleop.pendingCommand && !state.teleop.releasing && state.teleop.sessionId === sessionId) {
           state.teleop.pendingCommand = false;
           sendTeleopCommand();
         }
@@ -1553,9 +1571,17 @@
       const labels = {stand: "起立", lie: "趴下"};
       if (!state.teleop.sessionId && action !== "soft_stop") return;
       const label = labels[action] || "软急停";
-      if (!window.confirm(`确认执行${label}？\n\n执行前会停止遥控，动作完成后需要重新人工接管。`)) return;
+      if (!await requestTeleopConfirmation(`确认${label}`, `执行前会停止遥控，动作完成后需要重新人工接管。\n\n确认执行${label}？`)) return;
       const button = $("teleopPostureBtn");
       if (button) button.disabled = true;
+      // Stop the lease before the server releases it. An already scheduled
+      // heartbeat must not arrive after release and show a misleading error.
+      state.teleop.releasing = true;
+      state.teleop.pendingCommand = false;
+      if (state.teleop.heartbeatTimer !== null) {
+        clearInterval(state.teleop.heartbeatTimer);
+        state.teleop.heartbeatTimer = null;
+      }
       try {
         const payload = await api("POST", "/api/teleop/motion", {
           action,
@@ -1566,6 +1592,7 @@
         renderTeleoperation(payload.teleoperation || {active: false});
         showOperationFeedback(label, payload);
       } catch (err) {
+        clearLocalTeleop();
         showOperationFeedback(`${label}失败`, err, true);
         loadTeleopStatus().catch(console.warn);
       } finally {
@@ -1573,9 +1600,15 @@
       }
     }
     async function softEmergencyStopTeleop() {
-      if (!window.confirm("确认执行软急停？\n\n机器狗将切换到关节阻尼状态，网页遥控和自主任务都会锁定。")) return;
+      if (!await requestTeleopConfirmation("确认软急停", "机器狗将切换到关节阻尼状态，网页遥控和自主任务都会锁定。\n\n确认执行软急停？")) return;
       const button = $("teleopSoftStopBtn");
       if (button) button.disabled = true;
+      state.teleop.releasing = true;
+      state.teleop.pendingCommand = false;
+      if (state.teleop.heartbeatTimer !== null) {
+        clearInterval(state.teleop.heartbeatTimer);
+        state.teleop.heartbeatTimer = null;
+      }
       try {
         const payload = await api("POST", "/api/teleop/motion", {
           action: "soft_stop",
@@ -1586,7 +1619,9 @@
         renderTeleoperation(payload.teleoperation || {active: false});
         showOperationFeedback("软急停", payload);
       } catch (err) {
+        clearLocalTeleop();
         showOperationFeedback("软急停失败", err, true);
+        loadTeleopStatus().catch(console.warn);
       } finally {
         if (button) button.disabled = false;
       }
@@ -4770,6 +4805,10 @@
     });
 	    $("closeOperationFeedbackBtn").addEventListener("click", () => $("operationFeedbackDialog").close());
 	    $("confirmOperationFeedbackBtn").addEventListener("click", () => $("operationFeedbackDialog").close());
+	    $("closeTeleopConfirmBtn").addEventListener("click", () => closeTeleopConfirm(false));
+	    $("cancelTeleopConfirmBtn").addEventListener("click", () => closeTeleopConfirm(false));
+	    $("confirmTeleopConfirmBtn").addEventListener("click", () => closeTeleopConfirm(true));
+	    $("teleopConfirmDialog").addEventListener("cancel", event => { event.preventDefault(); closeTeleopConfirm(false); });
 	    resizeCanvas();
 	    setVideoActive(null);
 	    if ($("workModeLocalizeBtn")) {

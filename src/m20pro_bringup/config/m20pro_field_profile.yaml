@@ -92,7 +92,7 @@ navigation:
 # 网页人工接管参数；遥控与 Nav2 经速度仲裁后才能进入 103 运动链路。
 teleoperation:
   watchdog_rate_hz: 20.0          # 速度仲裁器检查指令超时的频率，单位 Hz
-  command_timeout_s: 0.35         # 网页遥控心跳超过该时间立即零速停车，单位 s
+  command_timeout_s: 0.80         # 网页遥控心跳超过该时间立即零速停车，单位 s
   navigation_timeout_s: 0.60      # Nav2 速度样本超过该时间立即零速停车，单位 s
   max_forward_speed_mps: 0.18     # 遥控最大前进速度，单位 m/s
   max_reverse_speed_mps: 0.12     # 遥控最大后退速度，单位 m/s

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>M20 Pro ROS 2 跨楼层巡检导航系统</title>
   <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="/static/dashboard.css?v=20260721-teleop-3" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=20260721-teleop-4" />
 
 </head>
 <body>
@@ -396,8 +396,14 @@
     <div class="dialog-actions"><button id="confirmOperationFeedbackBtn" class="primary" type="button">确定</button></div>
   </dialog>
 
+  <dialog id="teleopConfirmDialog" class="operation-dialog feedback-dialog">
+    <div class="operation-dialog-head"><div><div id="teleopConfirmTitle" class="operation-dialog-title">确认遥控动作</div><div id="teleopConfirmContext" class="operation-dialog-context"></div></div><button id="closeTeleopConfirmBtn" class="icon-button" type="button" title="取消" aria-label="取消">×</button></div>
+    <div id="teleopConfirmMessage" class="operation-message"></div>
+    <div class="dialog-actions"><button id="cancelTeleopConfirmBtn" type="button">取消</button><button id="confirmTeleopConfirmBtn" class="primary" type="button">确认</button></div>
+  </dialog>
+
   <script src="http://10.21.31.104:8888/video1/hls.min.js"></script>
-  <script src="/static/dashboard.js?v=20260721-teleop-3"></script>
+  <script src="/static/dashboard.js?v=20260721-teleop-4"></script>
 
 </body>
 </html>

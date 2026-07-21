@@ -774,6 +774,9 @@ class WebDashboardNode(Node):
             "command": {"linear_x": 0.0, "linear_y": 0.0, "angular_z": 0.0},
             "last_stop_reason": "not_started",
         }
+        self._motion_state_result_condition = threading.Condition()
+        self._motion_state_result_seq = 0
+        self._motion_state_command_lock = threading.Lock()
 
         self.floor_goal_pub = self.create_publisher(
             PoseStamped,
@@ -997,7 +1000,7 @@ class WebDashboardNode(Node):
             "command_mux_navigation_service", "/m20pro/cmd_vel_mux/enable_navigation"
         )
         self.declare_parameter("command_mux_teleop_service", "/m20pro/cmd_vel_mux/enable_teleop")
-        self.declare_parameter("teleop_command_timeout_s", 0.35)
+        self.declare_parameter("teleop_command_timeout_s", 0.8)
         self.declare_parameter("teleop_max_forward_speed_mps", 0.18)
         self.declare_parameter("teleop_max_reverse_speed_mps", 0.12)
         self.declare_parameter("teleop_max_lateral_speed_mps", 0.18)
@@ -1017,6 +1020,8 @@ class WebDashboardNode(Node):
         self.declare_parameter("gait_result_topic", "/m20pro_tcp_bridge/gait_result")
         self.declare_parameter("motion_state_command_topic", "/m20pro/motion_state_command")
         self.declare_parameter("motion_state_result_topic", "/m20pro_tcp_bridge/motion_state_result")
+        self.declare_parameter("motion_state_discovery_timeout_s", 2.0)
+        self.declare_parameter("motion_state_result_timeout_s", 3.0)
         self.declare_parameter("usage_mode_result_topic", "/m20pro_tcp_bridge/usage_mode_result")
         self.declare_parameter("localization_ok_topic", "/m20pro_tcp_bridge/localization_ok")
         self.declare_parameter("navigation_status_topic", "/m20pro_tcp_bridge/navigation_status")
@@ -1484,6 +1489,9 @@ class WebDashboardNode(Node):
         with self._lock:
             self._state["motion_state_result"] = msg.data
             self._mark_topic("motion_state_result")
+        with self._motion_state_result_condition:
+            self._motion_state_result_seq += 1
+            self._motion_state_result_condition.notify_all()
 
     def _on_usage_mode_result(self, msg: String) -> None:
         with self._lock:
@@ -5915,15 +5923,81 @@ class WebDashboardNode(Node):
         return {"ok": True, "sequence": sequence, "command": command}
 
     def _publish_motion_state_command(self, action: str) -> Dict[str, Any]:
-        if self.motion_state_cmd_pub.get_subscription_count() <= 0:
+        action = str(action).strip().lower()
+        if action not in ("stand", "lie", "soft_stop"):
             return self._error(
-                "运动状态控制接口未就绪，已禁止下发动作",
-                {"code": "motion_state_command_unavailable"},
+                "未知运动状态动作",
+                {"code": "motion_state_action_invalid", "action": action},
             )
-        message = String()
-        message.data = str(action)
-        self.motion_state_cmd_pub.publish(message)
-        return {"ok": True, "action": str(action), "pending": True}
+        # One command at a time keeps a late response from one posture change
+        # from being mistaken for the response to the next one.
+        if not self._motion_state_command_lock.acquire(blocking=False):
+            return self._error(
+                "上一条运动状态指令仍在等待原厂回执",
+                {"code": "motion_state_command_busy"},
+            )
+        try:
+            discovery_timeout_s = max(
+                0.1, float(self.get_parameter("motion_state_discovery_timeout_s").value)
+            )
+            deadline = time.monotonic() + discovery_timeout_s
+            while rclpy.ok() and self.motion_state_cmd_pub.get_subscription_count() <= 0:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    return self._error(
+                        "运动状态控制接口未就绪，已禁止下发动作",
+                        {"code": "motion_state_command_unavailable", "timeout_s": discovery_timeout_s},
+                    )
+                time.sleep(min(0.05, remaining))
+            if self.motion_state_cmd_pub.get_subscription_count() <= 0:
+                return self._error(
+                    "运动状态控制接口未就绪，已禁止下发动作",
+                    {"code": "motion_state_command_unavailable", "timeout_s": discovery_timeout_s},
+                )
+
+            with self._motion_state_result_condition:
+                result_seq = self._motion_state_result_seq
+            message = String()
+            message.data = action
+            self.motion_state_cmd_pub.publish(message)
+            result_timeout_s = max(
+                0.1, float(self.get_parameter("motion_state_result_timeout_s").value)
+            )
+            deadline = time.monotonic() + result_timeout_s
+            with self._motion_state_result_condition:
+                while self._motion_state_result_seq <= result_seq:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0.0:
+                        return self._error(
+                            "运动状态指令已发送，但未收到 TCP 桥回执",
+                            {
+                                "code": "motion_state_result_timeout",
+                                "action": action,
+                                "timeout_s": result_timeout_s,
+                            },
+                        )
+                    self._motion_state_result_condition.wait(timeout=remaining)
+            with self._lock:
+                result_text = str(self._state.get("motion_state_result") or "")
+            if result_text.startswith("accepted:"):
+                return {
+                    "ok": True,
+                    "action": action,
+                    "pending": False,
+                    "confirmed": True,
+                    "result": result_text,
+                }
+            if result_text.startswith("sent_without_ack:"):
+                return self._error(
+                    "原厂未返回运动状态回执，未确认动作是否执行",
+                    {"code": "motion_state_no_ack", "action": action, "result": result_text},
+                )
+            return self._error(
+                "原厂拒绝运动状态动作",
+                {"code": "motion_state_rejected", "action": action, "result": result_text},
+            )
+        finally:
+            self._motion_state_command_lock.release()
 
     def _teleop_motion(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         action = str(payload.get("action") or "").strip().lower().replace("-", "_")
