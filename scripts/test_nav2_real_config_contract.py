@@ -259,6 +259,7 @@ def main() -> None:
     assert '"scan_topic": web_scan_topic' in real_launch
     assert 'executable="navigation_scan_selector"' in real_launch
     assert '"input_topic": "/m20pro/navigation_scan"' in real_launch
+    assert '"scan_topic": "/m20pro/navigation_scan"' in real_launch
     assert '"mode_timeout_s": profile_stair["mode_timeout_s"]' in real_launch
     assert "load_field_profile(default_field_profile)" in real_launch
     assert "nav2_parameter_rewrites" not in nav_launch
@@ -306,6 +307,23 @@ def main() -> None:
     assert 'self.declare_parameter("stair_scan_topic", "/m20pro/stair_obstacle_scan")' in scan_selector
     assert 'self.declare_parameter("output_topic", "/m20pro/navigation_scan")' in scan_selector
     assert "output_qos.reliability = ReliabilityPolicy.RELIABLE" in scan_selector
+    startup_gate_source = (
+        ROOT
+        / "src"
+        / "m20pro_navigation"
+        / "m20pro_navigation"
+        / "nav2_startup_gate.py"
+    ).read_text(encoding="utf-8")
+    system_check_source = (
+        ROOT
+        / "src"
+        / "m20pro_navigation"
+        / "m20pro_navigation"
+        / "system_check_node.py"
+    ).read_text(encoding="utf-8")
+    assert 'self.declare_parameter("scan_topic", "/m20pro/navigation_scan")' in startup_gate_source
+    assert 'self.declare_parameter("scan_topic", "/m20pro/navigation_scan")' in system_check_source
+    assert 'self.create_subscription(LaserScan, self.scan_topic' in system_check_source
     assert "def _expire_stair_mode" in scan_selector
     assert "if self.stair_active:" in scan_selector
     assert 'label in ("stair_traverse", "stair_exit")' in floor_manager

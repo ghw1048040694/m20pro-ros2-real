@@ -456,6 +456,7 @@ def generate_launch_description():
             parameters=[
                 {
                     "enabled": ParameterValue(enable_nav2_startup_gate, value_type=bool),
+                    "scan_topic": "/m20pro/navigation_scan",
                     "required_fresh_age_s": 3.0,
                     "startup_retry_s": 10.0,
                     "startup_timeout_s": 20.0,
@@ -574,6 +575,7 @@ def generate_launch_description():
             parameters=[
                 {
                     "mode": "real",
+                    "scan_topic": "/m20pro/navigation_scan",
                     "check_period_s": 5.0,
                     "require_topic_messages": False,
                     "require_nav2": nav2_stack_available,

@@ -24123,4 +24123,10 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 验证：
   - 全量 `scripts/test_*.py` 通过；现场参数契约计数更新为 79 项，导航组 29 项。
   - `m20pro_navigation`、`m20pro_bringup` 构建通过；渲染后的 Nav2 参数确认 `ObstacleFootprint.scale=1.0`、观测保持 `0.75s`、代价地图输入为 `/m20pro/navigation_scan`；Python 编译和 `git diff --check` 通过。
-  - 本轮只修改上位机源码和日志，尚未部署或重启 104/106，未下发导航、速度、重定位或网络命令；部署后必须用“正前方静态障碍 + 人员短时挡路 + 障碍移开”三段流程复测并录包确认。
+- 本轮只修改上位机源码和日志，尚未部署或重启 104/106，未下发导航、速度、重定位或网络命令；部署后必须用“正前方静态障碍 + 人员短时挡路 + 障碍移开”三段流程复测并录包确认。
+
+## 2026-07-21 21:31 CST - 将导航启动门和系统自检绑定到唯一扫描出口
+
+- 复核扫描统一改动后发现，Nav2 启动门和系统自检仍默认监听原始 `/scan`；这会在 `/m20pro/navigation_scan` 没有样本时错误放行导航，造成“自检通过但避障失效”的假 ready。
+- 修正：启动门、系统自检和仍可手动启动的旧路径跟随器统一以 `/m20pro/navigation_scan` 为默认扫描话题；real launch 显式传入同一话题。原始 `/scan` 只保留为选择器输入和 AMCL 定位输入，不再作为导航感知 readiness 证据。
+- 验证：更新导航契约断言；本轮仍需重新执行全量契约测试、Python 编译、两个 ROS 包构建和 `git diff --check`，尚未部署或重启 104/106。

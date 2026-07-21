@@ -31,6 +31,7 @@ class SystemCheckNode(Node):
         self.declare_parameter("require_nodes", True)
         self.declare_parameter("require_floor_manager", True)
         self.declare_parameter("require_topic_messages", True)
+        self.declare_parameter("scan_topic", "/m20pro/navigation_scan")
         self.declare_parameter("check_scan_content", False)
         self.declare_parameter("check_local_costmap_content", False)
         self.declare_parameter("check_tf_height", False)
@@ -55,6 +56,7 @@ class SystemCheckNode(Node):
         )
 
         self.mode = str(self.get_parameter("mode").value).strip() or "real"
+        self.scan_topic = str(self.get_parameter("scan_topic").value).strip() or "/m20pro/navigation_scan"
         self.start_time = self.get_clock().now()
         self.reported_ok = False
         self.seen_topics: Set[str] = set()
@@ -94,7 +96,7 @@ class SystemCheckNode(Node):
             scan_qos = QoSProfile(depth=10)
             scan_qos.reliability = ReliabilityPolicy.BEST_EFFORT
             scan_qos.durability = DurabilityPolicy.VOLATILE
-            self.create_subscription(LaserScan, "/scan", self._on_scan, scan_qos)
+            self.create_subscription(LaserScan, self.scan_topic, self._on_scan, scan_qos)
 
         if self._bool("require_costmaps"):
             if require_messages or need_local_costmap_stats:
@@ -140,7 +142,7 @@ class SystemCheckNode(Node):
         return callback
 
     def _on_scan(self, msg: LaserScan) -> None:
-        self.seen_topics.add("/scan")
+        self.seen_topics.add(self.scan_topic)
         if not self._bool("check_scan_content") and not self._bool("check_local_costmap_content"):
             return
         finite = [
@@ -183,7 +185,7 @@ class SystemCheckNode(Node):
         if self._bool("require_map"):
             topics.append("/map")
         if self._bool("require_scan"):
-            topics.append("/scan")
+            topics.append(self.scan_topic)
         if self._bool("require_costmaps"):
             topics.extend(["/local_costmap/costmap", "/global_costmap/costmap"])
         if self._bool("require_floor_manager"):

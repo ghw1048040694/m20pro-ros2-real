@@ -20,7 +20,7 @@ class PathFollower(Node):
         self.declare_parameter("path_topic", "/planned_path")
         self.declare_parameter("cmd_vel_topic", "/cmd_vel_nav")
         self.declare_parameter("obstacle_topic", "/m20pro_tcp_bridge/obstacle_active")
-        self.declare_parameter("scan_topic", "/scan")
+        self.declare_parameter("scan_topic", "/m20pro/navigation_scan")
         self.declare_parameter("lookahead_m", 0.8)
         self.declare_parameter("goal_tolerance_m", 0.25)
         self.declare_parameter("yaw_tolerance_rad", 0.20)

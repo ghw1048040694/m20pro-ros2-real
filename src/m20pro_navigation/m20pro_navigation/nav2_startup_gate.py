@@ -23,7 +23,7 @@ class Nav2StartupGate(Node):
         self.declare_parameter("enabled", True)
         self.declare_parameter("localization_topic", "/m20pro_tcp_bridge/localization_ok")
         self.declare_parameter("pose_topic", "/m20pro_tcp_bridge/map_pose")
-        self.declare_parameter("scan_topic", "/scan")
+        self.declare_parameter("scan_topic", "/m20pro/navigation_scan")
         self.declare_parameter("map_topic", "/map")
         self.declare_parameter(
             "lifecycle_manager_service",
@@ -237,7 +237,7 @@ class Nav2StartupGate(Node):
         if not self.map_seen:
             return False, "waiting /map"
         if not self._fresh(self.scan_time, now) or self.scan_finite <= 0:
-            return False, "waiting fresh /scan"
+            return False, "waiting fresh %s" % str(self.get_parameter("scan_topic").value)
         if self.localization_ok is not True or not self._fresh(self.localization_time, now):
             return False, "waiting localization_ok=true"
         if not self.pose_valid or not self._fresh(self.pose_time, now):
