@@ -62,11 +62,26 @@ def test_name_bool_error_helpers() -> None:
     assert_true(random_suffix(0), "suffix has minimum length")
 
 
+def test_task_start_gate_wiring() -> None:
+    source = (ROOT / "src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py").read_text(
+        encoding="utf-8"
+    )
+    assert_true(
+        source.count("task_start_localization_gate_decision(") >= 2,
+        "startup and forced dispatch both use the localization gate",
+    )
+    assert_true(
+        'self.declare_parameter("goal_reached_tolerance_m", 0.35)' in source,
+        "dashboard fallback matches field profile XY tolerance",
+    )
+
+
 def main() -> int:
     for test in (
         test_parse_json_text,
         test_age_helpers,
         test_name_bool_error_helpers,
+        test_task_start_gate_wiring,
     ):
         test()
         print(f"[OK] {test.__name__}")

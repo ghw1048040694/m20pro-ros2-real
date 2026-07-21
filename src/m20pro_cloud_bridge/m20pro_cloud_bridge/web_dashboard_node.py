@@ -230,6 +230,7 @@ from .task_progress_contract import (
     localization_lost_timeout_decision,
     near_goal_wait_decision,
     prepare_near_goal_wait_update,
+    task_start_localization_gate_decision,
     update_active_task_progress_state,
 )
 from .active_waypoint_contract import (
@@ -956,7 +957,9 @@ class WebDashboardNode(Node):
         self.declare_parameter("floor_switch_result_topic", "/m20pro/floor_switch_result")
         self.declare_parameter("floor_context_topic", "/m20pro/set_current_floor")
         self.declare_parameter("cross_floor_factory_apply_timeout_s", 30.0)
-        self.declare_parameter("goal_reached_tolerance_m", 0.3)
+        # Production launches override this from navigation.goal.xy_tolerance_m;
+        # keep the fallback aligned with the checked-in field profile.
+        self.declare_parameter("goal_reached_tolerance_m", 0.35)
         self.declare_parameter("task_goal_resend_interval_s", 5.0)
         self.declare_parameter("task_goal_accept_timeout_s", 12.0)
         self.declare_parameter("task_waypoint_timeout_s", 180.0)
@@ -6605,6 +6608,28 @@ class WebDashboardNode(Node):
         *,
         require_nav_alignment: bool = False,
     ) -> Dict[str, Any]:
+        with self._lock:
+            localization_ok = self._state.get("localization_ok")
+            pose = dict(self._state.get("pose") or {})
+        with self._data_lock:
+            map_relocalization_required = self._settings.get("map_relocalization_required")
+        localization_gate = task_start_localization_gate_decision(
+            localization_ok=localization_ok,
+            pose=pose,
+            pose_age=pose_age_sec(pose, time.time()),
+            pose_timeout_s=float(self.get_parameter("task_start_pose_timeout_s").value),
+            map_relocalization_required=map_relocalization_required,
+        )
+        if localization_gate.get("action") != "pass":
+            return self._error(
+                str(localization_gate.get("message") or "当前定位未满足任务启动条件"),
+                {
+                    "code": str(localization_gate.get("code") or "task_start_localization_not_ready"),
+                    "localization_ok": localization_ok,
+                    "pose_age_s": localization_gate.get("pose_age_s"),
+                    "pose_timeout_s": localization_gate.get("pose_timeout_s"),
+                },
+            )
         odom_alignment = None
         if require_nav_alignment:
             with self._lock:
@@ -7743,6 +7768,25 @@ class WebDashboardNode(Node):
         if annotation is None:
             failure = active_annotation_missing_failure(active)
             self._fail_active_task_from_payload(failure, task_id=active.get("task_id"))
+            return
+        with self._lock:
+            localization_ok = self._state.get("localization_ok")
+            pose = dict(self._state.get("pose") or {})
+        with self._data_lock:
+            map_relocalization_required = self._settings.get("map_relocalization_required")
+        localization_gate = task_start_localization_gate_decision(
+            localization_ok=localization_ok,
+            pose=pose,
+            pose_age=pose_age_sec(pose, time.time()),
+            pose_timeout_s=float(self.get_parameter("task_start_pose_timeout_s").value),
+            map_relocalization_required=map_relocalization_required,
+        )
+        if localization_gate.get("action") != "pass":
+            self._mark_active_task_waiting(
+                active,
+                str(localization_gate.get("code") or "localization_not_confirmed"),
+                str(localization_gate.get("message") or "当前定位未确认，已暂停下发目标"),
+            )
             return
         now_monotonic = time.monotonic()
         decision = goal_dispatch_decision(

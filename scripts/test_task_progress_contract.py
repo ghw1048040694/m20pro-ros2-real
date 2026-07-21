@@ -26,6 +26,7 @@ from m20pro_cloud_bridge.task_progress_contract import (  # noqa: E402
     prepare_near_goal_wait_update,
     stall_failure_extra,
     stall_warning_event_payload,
+    task_start_localization_gate_decision,
     task_stall_decision,
     timeout_failure_extra,
     update_active_task_progress_state,
@@ -248,6 +249,37 @@ def test_cross_floor_pre_dispatch_decision() -> None:
     )
     assert_equal(waiting["action"], "wait", "published cross-floor goal waits for floor switch")
     assert_equal(waiting["code"], "cross_floor_transitioning", "cross-floor waiting code")
+
+
+def test_task_start_localization_gate() -> None:
+    base = {
+        "localization_ok": True,
+        "pose": {"x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0},
+        "pose_age": 0.2,
+        "pose_timeout_s": 3.0,
+    }
+    ready = task_start_localization_gate_decision(**base)
+    assert_equal(ready["action"], "pass", "task start gate accepts fresh localization")
+
+    failed = task_start_localization_gate_decision(**{**base, "localization_ok": False})
+    assert_equal(failed["action"], "reject", "task start gate rejects failed localization")
+    assert_equal(failed["code"], "localization_not_confirmed", "failed localization code")
+
+    locked = task_start_localization_gate_decision(
+        **{**base, "map_relocalization_required": {"map_id": "map_a"}}
+    )
+    assert_equal(locked["code"], "map_relocalization_required", "map relocalization lock code")
+
+    stale = task_start_localization_gate_decision(**{**base, "pose_age": 3.1})
+    assert_equal(stale["code"], "pose_stale", "stale pose code")
+
+    unknown_age = task_start_localization_gate_decision(**{**base, "pose_age": float("nan")})
+    assert_equal(unknown_age["code"], "pose_stale", "non-finite pose age code")
+
+    invalid = task_start_localization_gate_decision(
+        **{**base, "pose": {"x": 0.0, "y": 0.0, "z": 0.0, "yaw": float("nan")}}
+    )
+    assert_equal(invalid["code"], "pose_missing_or_invalid", "invalid pose code")
 
 
 def test_progress_detects_stall_and_recovery() -> None:
@@ -620,6 +652,7 @@ def main() -> int:
         test_distance_decision,
         test_pre_dispatch_decision,
         test_cross_floor_pre_dispatch_decision,
+        test_task_start_localization_gate,
         test_progress_detects_stall_and_recovery,
         test_stall_decision,
         test_apply_stall_warning_state,

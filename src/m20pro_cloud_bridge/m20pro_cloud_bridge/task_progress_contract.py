@@ -20,6 +20,76 @@ def _optional_float(value: Any) -> Optional[float]:
         return None
 
 
+def task_start_localization_gate_decision(
+    *,
+    localization_ok: Any,
+    pose: Dict[str, Any],
+    pose_age: Optional[float],
+    pose_timeout_s: float,
+    map_relocalization_required: Any = None,
+) -> Dict[str, Any]:
+    """Decide whether a task may create its first navigation goal.
+
+    This is deliberately stricter than the runtime tick gate.  A task must
+    never be created and then wait for localization: doing so lets a forced
+    first dispatch publish a goal before the normal timer has observed the
+    failed localization state.
+    """
+    if map_relocalization_required:
+        return {
+            "action": "reject",
+            "code": "map_relocalization_required",
+            "message": "当前地图仍要求重定位，未启动任务；请先完成重定位并确认定位成功",
+        }
+    if localization_ok is not True:
+        return {
+            "action": "reject",
+            "code": "localization_not_confirmed",
+            "message": "当前定位未确认，未启动任务；请先完成重定位并确认定位成功",
+        }
+    if not isinstance(pose, dict):
+        return {
+            "action": "reject",
+            "code": "pose_missing_or_invalid",
+            "message": "当前地图位姿不可用，未启动任务；请先等待位姿恢复",
+        }
+    try:
+        values = [float(pose[key]) for key in ("x", "y", "z", "yaw")]
+    except (KeyError, TypeError, ValueError):
+        return {
+            "action": "reject",
+            "code": "pose_missing_or_invalid",
+            "message": "当前地图位姿不可用，未启动任务；请先等待位姿恢复",
+        }
+    if not all(math.isfinite(value) for value in values):
+        return {
+            "action": "reject",
+            "code": "pose_missing_or_invalid",
+            "message": "当前地图位姿不是有效数值，未启动任务；请先等待位姿恢复",
+        }
+    timeout_s = max(0.5, float(pose_timeout_s))
+    try:
+        age_value = None if pose_age is None else float(pose_age)
+    except (TypeError, ValueError):
+        age_value = None
+    if age_value is None or not math.isfinite(age_value) or age_value > timeout_s:
+        age_text = "未知" if age_value is None else "%.1f" % age_value
+        return {
+            "action": "reject",
+            "code": "pose_stale",
+            "message": "当前地图位姿已过期（%s 秒），未启动任务；请先等待位姿恢复" % age_text,
+            "pose_age_s": age_value,
+            "pose_timeout_s": timeout_s,
+        }
+    return {
+        "action": "pass",
+        "code": "task_start_ready",
+        "message": "任务启动定位门禁通过",
+        "pose_age_s": age_value,
+        "pose_timeout_s": timeout_s,
+    }
+
+
 def _wrap_angle(angle: float) -> float:
     while angle > math.pi:
         angle -= 2.0 * math.pi

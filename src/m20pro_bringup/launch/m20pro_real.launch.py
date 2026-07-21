@@ -13,6 +13,7 @@ from m20pro_navigation.field_profile_contract import (
     command_mux_field_parameters,
     floor_manager_field_parameters,
     load_field_profile,
+    web_navigation_field_parameters,
     web_teleoperation_field_parameters,
 )
 
@@ -43,6 +44,7 @@ def generate_launch_description():
     profile_stair = field_profile["stair"]
     floor_manager_parameters = floor_manager_field_parameters(field_profile)
     command_mux_parameters = command_mux_field_parameters(field_profile)
+    web_navigation_parameters = web_navigation_field_parameters(field_profile)
     web_teleoperation_parameters = web_teleoperation_field_parameters(field_profile)
     default_floor_config = os.path.join(bringup_share, "config", "runtime_navigation.yaml")
     default_map_manifest = os.path.join(bringup_share, "config", "map_manifest.yaml")
@@ -551,6 +553,7 @@ def generate_launch_description():
                     "radar_results_dir": radar_output_dir,
                     "cmd_vel_topic": "/cmd_vel_nav",
                     "teleop_cmd_vel_topic": "/cmd_vel_teleop",
+                    **web_navigation_parameters,
                     **web_teleoperation_parameters,
                 }
             ],

@@ -16,6 +16,7 @@ from m20pro_navigation.field_profile_contract import (  # noqa: E402
     render_m20pro_parameters,
     render_nav2_parameters,
     tcp_bridge_parameters,
+    web_navigation_field_parameters,
 )
 
 
@@ -53,6 +54,7 @@ def main() -> None:
     local_planner_profile = navigation_profile["local_planner"]
     costmap_profile = navigation_profile["costmap"]
     planner_profile = navigation_profile["global_planner"]
+    web_navigation = web_navigation_field_parameters(field_profile)
     bridge_rewrites = tcp_bridge_parameters(field_profile)
     floor_rewrites = floor_manager_field_parameters(field_profile)
 
@@ -66,6 +68,7 @@ def main() -> None:
     assert controller["goal_checker"]["yaw_goal_tolerance"] == "__FIELD_PROFILE_YAW_GOAL_TOLERANCE__"
     assert follow["xy_goal_tolerance"] == "__FIELD_PROFILE_XY_GOAL_TOLERANCE__"
     assert abs(goal_profile["xy_tolerance_m"] - 0.35) < 1e-6
+    assert web_navigation["goal_reached_tolerance_m"] == goal_profile["xy_tolerance_m"]
     assert 0.15 <= goal_profile["yaw_tolerance_rad"] <= 0.25
     assert "ObstacleFootprint" in follow["critics"]
     assert "BaseObstacle" not in follow["critics"]

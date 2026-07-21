@@ -19,6 +19,7 @@ from m20pro_navigation.field_profile_contract import (  # noqa: E402
     load_field_profile,
     render_edge_environment,
     validate_field_profile,
+    web_navigation_field_parameters,
 )
 
 
@@ -124,6 +125,8 @@ def main() -> None:
     assert changed_profile["stair"]["obstacle_height_m"] == 0.27
 
     environment = edge_environment(profile)
+    web_navigation = web_navigation_field_parameters(profile)
+    assert web_navigation["goal_reached_tolerance_m"] == profile["navigation"]["goal"]["xy_tolerance_m"]
     rendered = render_edge_environment(profile)
     assert environment["STAIR_OBSTACLE_HEIGHT"] == profile["stair"]["obstacle_height_m"]
     assert environment["FIELD_PROFILE_HASH"] == profile["profile_hash"]

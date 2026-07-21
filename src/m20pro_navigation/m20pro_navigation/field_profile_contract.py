@@ -709,6 +709,20 @@ def web_teleoperation_field_parameters(profile: Mapping[str, Any]) -> Dict[str, 
     }
 
 
+def web_navigation_field_parameters(profile: Mapping[str, Any]) -> Dict[str, Any]:
+    """Expose task-layer navigation thresholds from the field profile.
+
+    The dashboard uses this value only for progress and Nav2-success evidence;
+    Nav2 itself receives the same value through the rendered goal checker.
+    Keeping both consumers on the profile prevents a hidden 0.3 m fallback from
+    disagreeing with the field 0.35 m configuration.
+    """
+    goal = profile["navigation"]["goal"]
+    return {
+        "goal_reached_tolerance_m": goal["xy_tolerance_m"],
+    }
+
+
 def edge_environment(profile: Mapping[str, Any]) -> Dict[str, Any]:
     scan = profile["scan"]
     stair = profile["stair"]

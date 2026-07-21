@@ -1,6 +1,15 @@
 # M20 Pro ROS 2 跨楼层巡检导航系统项目日志
 
-Last updated: 2026-07-21 15:02 CST
+Last updated: 2026-07-21 17:40 CST
+
+## 2026-07-21 17:40 CST - 根治任务启动时定位失效仍下发首目标与容差口径分裂
+
+- 根据 `rosbags_20260721_after_1600` 的 8 个测试包确认：定位丢失发生在遥控、充电和任务启动前后的无导航阶段，与到达任务点位置容差没有直接因果关系；另有普通点最终朝向未满足 Nav2 角度门限而停在 `accepted` 的独立问题。
+- 任务启动现在统一经过显式定位门禁：必须已经收到 `localization_ok=true`、地图位姿有效且不超过 `task_start_pose_timeout_s`，并且当前地图没有待完成的重定位锁；不满足时在创建运行任务和发布 `/m20pro/floor_goal` 前直接返回明确错误码。
+- `_dispatch_active_goal(force=True)` 增加同一门禁作为第二道保护，覆盖启动线程、跨点衔接和其他强制下发路径，避免定时器尚未处理定位失败时抢先发布首目标。
+- Web 任务层的 `goal_reached_tolerance_m` 由 `m20pro_field_profile.yaml` 的 `navigation.goal.xy_tolerance_m` 注入，默认回退值同步为 `0.35m`，与 Nav2 位置容差不再存在 `0.3m/0.35m` 两套隐式口径；未修改 `yaw_tolerance_rad=0.20` 和定位漂移过滤阈值。
+- 新增任务启动定位门禁、现场配置注入和 Web wiring 合同测试；全部 `scripts/test_*.py`、Python 编译、三包 `colcon build` 与 `git diff --check` 通过。
+- 本轮尚未部署 104/106，未执行导航、重定位、速度或地图操作；北京时间 21:00 前完成，暂不触发 GitHub/GitLab 强制推送。
 
 ## 2026-07-21 15:02 CST - 遥控布局收敛版部署 104
 
