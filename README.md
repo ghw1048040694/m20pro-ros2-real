@@ -125,7 +125,7 @@ src/m20pro_bringup/config/m20pro_field_profile.yaml
 
 应用入口会拒绝任务执行期间换参，先校验字段、范围和参数耦合，再按完整部署流程同时更新 106 和 104。106 的 `/etc/m20pro-edge-scan-106.env` 是自动生成物，不可手工编辑；Nav2 参数文件中的现场项也是不可直接运行的占位符，只能由该配置启动时重写。104 和 106 会携带并核对同一份配置的 SHA-256，不一致时拒绝进入楼梯模式，不提供旧参数回退或热更新。
 
-当前 schema v3 共开放 74 个现场参数，其中 `navigation` 28 个、`teleoperation` 7 个；导航按 `controller / goal / progress / local_planner / costmap / global_planner` 分组，遥控统一配置速度上限、指令租约和仲裁看门狗。另有 `scan`、`stair`、`stair_safety`、`stair_transition` 和 `localization`。插件类型、话题、坐标系、机器人 footprint、行为树结构和固定安全开关仍属于工程架构，不允许从现场配置改变。
+当前 schema v3 共开放 78 个现场参数，其中 `navigation` 28 个、`teleoperation` 7 个；导航按 `controller / goal / progress / local_planner / costmap / global_planner` 分组，遥控统一配置速度上限、指令租约和仲裁看门狗。`localization` 还统一配置原厂手柄运动证据和起立/趴下姿态过渡判定。另有 `scan`、`stair`、`stair_safety` 和 `stair_transition`。插件类型、话题、坐标系、机器人 footprint、行为树结构和固定安全开关仍属于工程架构，不允许从现场配置改变。
 
 导航减速度在统一配置中填写正数幅值，运行时自动转换成 DWB 要求的负值；同一最大线速度同时驱动 `max_vel_x/max_speed_xy`，同一障碍、清障和膨胀参数同时驱动局部与全局代价地图。校验器会拒绝停止阈值大于最大速度、发布频率高于刷新频率、清障范围小于障碍范围以及定位阈值相互冲突等组合。
 
