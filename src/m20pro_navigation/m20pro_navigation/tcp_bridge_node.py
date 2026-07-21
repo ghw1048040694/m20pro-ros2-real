@@ -20,6 +20,7 @@ except ImportError:
     VendorSteer = None
 
 from .geometry import quaternion_to_yaw, yaw_to_quaternion
+from .charge_command_contract import build_charge_command_items
 from .odom_alignment_contract import odom_alignment_update
 from .pose_stability_contract import stationary_pose_update, stable_jump_decision
 from .tcp_protocol import M20ProtocolError, M20TcpClient, patrol_items
@@ -477,31 +478,12 @@ class M20TcpBridge(Node):
         if not isinstance(payload, dict):
             self._publish_charge_result("", "failed", "charge command must be an object", -1)
             return
-        request_id = str(payload.get("request_id") or "").strip()
-        if not request_id:
-            self._publish_charge_result("", "failed", "charge command request_id is required", -1)
+        command = build_charge_command_items(payload)
+        request_id = str(command.get("request_id") or "")
+        if not command.get("ok"):
+            self._publish_charge_result(request_id, "failed", str(command.get("message") or "invalid charge command"), -1)
             return
-        try:
-            items = {
-                "Value": 1,
-                "MapID": int(payload.get("map_id", 0)),
-                "PosX": float(payload["x"]),
-                "PosY": float(payload["y"]),
-                "PosZ": float(payload.get("z", 0.0)),
-                "AngleYaw": float(payload["yaw"]),
-                "PointInfo": 3,
-                "Gait": int(payload.get("gait", 12)),
-                "Speed": int(payload.get("speed", 1)),
-                "Manner": 0,
-                "ObsMode": 0,
-                "NavMode": 1,
-            }
-        except (KeyError, TypeError, ValueError):
-            self._publish_charge_result(request_id, "failed", "invalid charge target", -1)
-            return
-        if not all(math.isfinite(float(items[key])) for key in ("PosX", "PosY", "PosZ", "AngleYaw")):
-            self._publish_charge_result(request_id, "failed", "charge target is not finite", -1)
-            return
+        items = dict(command["items"])
         if not self._charge_command_lock.acquire(blocking=False):
             self._publish_charge_result(request_id, "failed", "charge command busy", -1)
             return

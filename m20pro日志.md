@@ -8,6 +8,7 @@ Last updated: 2026-07-21 21:05 CST
 - 收口为单一控制链路：Nav2 负责到达充电点；到点后 Web 任务进入 `charging` 阶段，通过 `/m20pro/charge_command` 交给现有 TCP 桥；TCP 桥发送原厂 `Type=1003/Command=1`，强制 `PointInfo=3`，并等待 `ErrorCode=0` 回执；Web 只在 `/m20pro_tcp_bridge/charge_result` 返回同一 `request_id` 的 `accepted` 后结束任务。拒绝、超时、TCP 断开和桥未发现均失败，不再伪装成功。
 - 充电回执单独使用自己的状态字段，不再复用姿态动作回执序号，避免一键充电和起立/趴下请求相互串扰；启动时等待 DDS 订阅发现，消除服务刚启动时的一次性误报。TCP 桥保持单条充电命令忙锁，避免重复请求并发写入原厂协议连接。
 - 前端任务流增加独立的“已到达充电点，正在请求原厂充电”和“原厂已接受充电导航”状态，不再把充电阶段显示成普通“导航中”；静态资源版本更新为 `20260721-charge-1`。
+- 将 `Type=1003/Command=1` 的充电字段校验抽成无 ROS 依赖的 `charge_command_contract.py`，集中强制 `PointInfo=3`、固定安全字段和有限坐标；新增合同测试覆盖有效请求、缺失 `request_id`、非法坐标以及外部传入 `point_info` 被忽略的情况。
 - 录包脚本新增 `/m20pro/charge_command` 和 `/m20pro_tcp_bridge/charge_result`，后续可直接核验请求内容、`PointInfo=3` 和原厂错误码。补充 API/README 对“原厂已接受充电导航”与“正在充电”含义的区分；当前 103 固件不支持独立充电状态查询，电流方向仍只作辅助观察。
 - 本轮完成 Python 编译、全量合同测试、三包构建和差异检查后提交并推送 GitHub/GitLab；尚未向 104 部署或发送实际充电命令，现场需在有充电桩和手柄急停看护下验证。
 
