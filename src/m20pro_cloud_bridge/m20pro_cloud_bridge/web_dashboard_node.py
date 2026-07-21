@@ -793,6 +793,11 @@ class WebDashboardNode(Node):
             str(self.get_parameter("teleop_cmd_vel_topic").value),
             10,
         )
+        self.motion_state_cmd_pub = self.create_publisher(
+            String,
+            str(self.get_parameter("motion_state_command_topic").value),
+            10,
+        )
         self.command_mux_mode_pub = self.create_publisher(
             String,
             str(self.get_parameter("command_mux_mode_request_topic").value),
@@ -866,7 +871,9 @@ class WebDashboardNode(Node):
             "command_mux_status": None,
             "gait_command": None,
             "gait_result": None,
+            "motion_state_result": None,
             "usage_mode_result": None,
+            "basic_status": None,
             "localization_ok": None,
             "navigation_status": None,
             "navigation_status_parsed": None,
@@ -1004,7 +1011,10 @@ class WebDashboardNode(Node):
         self.declare_parameter("stair_perception_mode_topic", "/m20pro/stair_perception_mode")
         self.declare_parameter("gait_command_topic", "/m20pro/gait_command")
         self.declare_parameter("gait_result_topic", "/m20pro_tcp_bridge/gait_result")
+        self.declare_parameter("motion_state_command_topic", "/m20pro/motion_state_command")
+        self.declare_parameter("motion_state_result_topic", "/m20pro_tcp_bridge/motion_state_result")
         self.declare_parameter("usage_mode_result_topic", "/m20pro_tcp_bridge/usage_mode_result")
+        self.declare_parameter("basic_status_topic", "/m20pro_tcp_bridge/basic_status")
         self.declare_parameter("localization_ok_topic", "/m20pro_tcp_bridge/localization_ok")
         self.declare_parameter("navigation_status_topic", "/m20pro_tcp_bridge/navigation_status")
         self.declare_parameter("battery_topic", "/BATTERY_DATA")
@@ -1361,7 +1371,9 @@ class WebDashboardNode(Node):
         )
         self.create_subscription(String, self._topic("gait_command_topic"), self._on_gait_command, 10)
         self.create_subscription(String, self._topic("gait_result_topic"), self._on_gait_result, 10)
+        self.create_subscription(String, self._topic("motion_state_result_topic"), self._on_motion_state_result, 10)
         self.create_subscription(String, self._topic("usage_mode_result_topic"), self._on_usage_mode_result, 10)
+        self.create_subscription(String, self._topic("basic_status_topic"), self._on_basic_status, 10)
         self.create_subscription(Bool, self._topic("localization_ok_topic"), self._on_localization_ok, 10)
         self.create_subscription(String, self._topic("navigation_status_topic"), self._on_navigation_status, 10)
         if BatteryData is not None:
@@ -1462,6 +1474,20 @@ class WebDashboardNode(Node):
         with self._lock:
             self._state["gait_result"] = msg.data
             self._mark_topic("gait_result")
+
+    def _on_motion_state_result(self, msg: String) -> None:
+        with self._lock:
+            self._state["motion_state_result"] = msg.data
+            self._mark_topic("motion_state_result")
+
+    def _on_basic_status(self, msg: String) -> None:
+        with self._lock:
+            self._state["basic_status"] = {
+                "last_update": time.time(),
+                "raw": msg.data,
+                "parsed": parse_json_text(msg.data),
+            }
+            self._mark_topic("basic_status")
 
     def _on_usage_mode_result(self, msg: String) -> None:
         with self._lock:
@@ -5878,6 +5904,88 @@ class WebDashboardNode(Node):
             self._teleop_session["command"] = command
         return {"ok": True, "sequence": sequence, "command": command}
 
+    def _publish_motion_state_command(self, action: str) -> Dict[str, Any]:
+        if self.motion_state_cmd_pub.get_subscription_count() <= 0:
+            return self._error(
+                "运动状态控制接口未就绪，已禁止下发动作",
+                {"code": "motion_state_command_unavailable"},
+            )
+        message = String()
+        message.data = str(action)
+        self.motion_state_cmd_pub.publish(message)
+        return {"ok": True, "action": str(action), "pending": True}
+
+    def _teleop_motion(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        action = str(payload.get("action") or "").strip().lower().replace("-", "_")
+        aliases = {
+            "stand": "stand",
+            "standing": "stand",
+            "起立": "stand",
+            "lie": "lie",
+            "lying": "lie",
+            "趴下": "lie",
+            "soft_stop": "soft_stop",
+            "soft_emergency_stop": "soft_stop",
+            "软急停": "soft_stop",
+        }
+        action = aliases.get(action, action)
+        if action not in ("stand", "lie", "soft_stop"):
+            return self._error(
+                "未知运动状态动作",
+                {"code": "motion_state_action_invalid", "action": action},
+            )
+
+        if action == "soft_stop":
+            release = self._release_teleop(
+                payload,
+                force=True,
+                reason="web_soft_emergency_stop",
+            )
+            if not release.get("ok"):
+                return release
+            stop_result = self._stop_task({"reason": "web_soft_emergency_stop"})
+            motion = self._publish_motion_state_command("soft_stop")
+            if not motion.get("ok"):
+                return motion
+            self._append_event("网页软急停", {"source": "web_operator"})
+            return {
+                "ok": True,
+                "active_task": None,
+                "teleoperation": self._teleop_status_payload(),
+                "motion_state": motion,
+                "message": str(stop_result.get("message") or "已执行软急停，运动已锁定"),
+            }
+
+        session_id = str(payload.get("session_id") or "").strip()
+        with self._teleop_lock:
+            active = bool(self._teleop_session.get("active"))
+            expected = str(self._teleop_session.get("session_id") or "")
+        if not active:
+            return self._error("人工接管未启用，请先接管后执行运动状态动作", {"code": "teleop_inactive"})
+        if session_id != expected:
+            return self._error("遥控会话不匹配", {"code": "teleop_session_mismatch"})
+
+        self._publish_teleop_zero()
+        release = self._release_teleop(
+            {"session_id": session_id},
+            reason="web_motion_state_%s" % action,
+        )
+        if not release.get("ok"):
+            return release
+        motion = self._publish_motion_state_command(action)
+        if not motion.get("ok"):
+            return motion
+        self._append_event(
+            "网页运动状态动作",
+            {"action": action, "source": "web_operator"},
+        )
+        return {
+            "ok": True,
+            "teleoperation": self._teleop_status_payload(),
+            "motion_state": motion,
+            "message": "已停止遥控并下发%s动作；动作完成后请重新人工接管" % ("起立" if action == "stand" else "趴下"),
+        }
+
     def _release_teleop(
         self,
         payload: Dict[str, Any],
@@ -6665,6 +6773,71 @@ class WebDashboardNode(Node):
                 "ok": True,
                 "active_task": self._settings.get("active_task"),
             }
+
+    def _one_key_charge(self) -> Dict[str, Any]:
+        with self._teleop_lock:
+            if self._teleop_session.get("active") or self._teleop_acquiring:
+                return self._error(
+                    "人工遥控正在接管，请先结束接管后再启动充电",
+                    {"code": "charge_blocked_by_teleop"},
+                )
+        with self._data_lock:
+            active = dict(self._settings.get("active_task") or {})
+            if active.get("status") == "running":
+                return self._error(
+                    "当前任务正在执行，请先停止任务后再启动充电",
+                    {"code": "charge_blocked_by_task", "task_id": active.get("task_id")},
+                )
+            selected_map_id = self._effective_map_id()
+            charge_points = [
+                dict(item)
+                for item in self._annotations
+                if str(item.get("map_id") or "") == str(selected_map_id or "")
+                and str(item.get("manual_point_type") or item.get("point_type") or "").strip().lower()
+                in ("charge", "charging")
+            ]
+            generated = [
+                dict(task)
+                for task in self._tasks
+                if task.get("system_generated") == "one_key_charge"
+                and str(task.get("map_id") or "") == str(selected_map_id or "")
+            ]
+        if not selected_map_id:
+            return self._error("当前没有选中的地图，无法启动充电")
+        if len(charge_points) != 1:
+            return self._error(
+                "当前地图必须且只能有一个充电点，才能使用一键充电",
+                {"code": "charge_point_ambiguous", "count": len(charge_points)},
+            )
+        charge_id = str(charge_points[0].get("id") or "")
+        task = next(
+            (
+                item
+                for item in generated
+                if list(item.get("annotation_ids") or []) == [charge_id]
+            ),
+            None,
+        )
+        if task is None:
+            created = self._create_task(
+                {
+                    "name": "一键充电",
+                    "annotation_ids": [charge_id],
+                    "map_id": selected_map_id,
+                },
+                task_metadata={"system_generated": "one_key_charge"},
+            )
+            if not created.get("ok"):
+                return created
+            task = created.get("task")
+        task_id = str((task or {}).get("id") or "")
+        if not task_id:
+            return self._error("一键充电任务创建失败", {"code": "charge_task_invalid"})
+        result = self._start_task({"task_id": task_id})
+        if result.get("ok"):
+            result["message"] = "已按当前地图充电点启动一键充电任务"
+            result["charge_task_id"] = task_id
+        return result
 
     def _stop_task(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         stop_request = normalize_stop_task_request(payload)
@@ -8122,6 +8295,10 @@ class WebDashboardNode(Node):
                         self._send_api(node._release_teleop(payload))
                     elif parsed.path == "/api/teleop/emergency_stop":
                         self._send_api(node._emergency_stop_teleop())
+                    elif parsed.path == "/api/teleop/motion":
+                        self._send_api(node._teleop_motion(payload))
+                    elif parsed.path == "/api/charge/one_key":
+                        self._send_api(node._one_key_charge())
                     elif parsed.path == "/api/preflight/run":
                         self._send_api(node._run_preflight(payload))
                     elif parsed.path == "/api/inspection/toggle":

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>M20 Pro ROS 2 跨楼层巡检导航系统</title>
   <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="/static/dashboard.css?v=20260721-teleop-1" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=20260721-teleop-2" />
 
 </head>
 <body>
@@ -13,7 +13,7 @@
     <div class="top-brand"><strong>M20 Pro</strong><span>跨楼层巡检导航系统</span></div>
     <div class="top-status">
       <span class="status-chip"><span id="statusDot" class="dot"></span><strong id="statusText">连接中</strong></span>
-      <span class="status-chip"><span>电量</span><strong id="battery">-</strong></span>
+      <button id="batteryStatusBtn" class="status-chip status-action" type="button" aria-expanded="false" title="查看电池状态并启动一键充电"><span>电量</span><strong id="battery">-</strong></button>
       <span class="status-chip"><span>楼层</span><strong id="floor">-</strong></span>
       <button id="localizationStatusBtn" class="status-chip status-action" type="button" aria-expanded="false"><span>定位</span><strong id="localization">-</strong></button>
       <button id="preflightStatusBtn" class="status-chip status-action" type="button" aria-expanded="false" title="查看基础自检结果"><span>自检</span><strong id="preflightTopStatus">尚未自检</strong></button>
@@ -23,6 +23,14 @@
       <button id="recordingStatusBtn" class="status-chip status-action" type="button" aria-expanded="false"><span>录包</span><strong id="recordingTopStatus">未录制</strong></button>
     </div>
   </header>
+
+  <section id="batteryStatusPopover" class="status-popover" hidden>
+    <div class="status-popover-head"><strong>电池状态</strong><button id="closeBatteryStatusBtn" class="icon-button" type="button" title="关闭" aria-label="关闭">×</button></div>
+    <div id="batteryStatusSummary" class="compact-status">等待电池数据</div>
+    <div id="batteryStatusDetail" class="battery-detail">等待原厂充电状态</div>
+    <div class="actions"><button id="oneKeyChargeBtn" class="primary" type="button">一键充电</button><button id="refreshBatteryBtn" type="button">刷新</button></div>
+    <div class="small">一键充电会执行当前地图中的充电点任务，需先保存且只能有一个充电点。</div>
+  </section>
 
   <section id="mapStatusPopover" class="status-popover" hidden>
     <div class="status-popover-head"><strong>当前地图</strong><button id="closeMapStatusBtn" class="icon-button" type="button" title="关闭" aria-label="关闭">×</button></div>
@@ -87,7 +95,9 @@
       <span></span>
     </div>
     <div id="teleopLimits" class="small"></div>
-    <div class="actions"><button id="acquireTeleopBtn" class="primary" type="button">人工接管</button><button id="releaseTeleopBtn" type="button" disabled>结束接管</button><button id="teleopEmergencyStopBtn" class="danger" type="button">停止全部运动</button></div>
+    <div class="teleop-motion-actions"><button id="teleopStandBtn" type="button" disabled>起立</button><button id="teleopLieBtn" type="button" disabled>赶下</button></div>
+    <div class="actions"><button id="acquireTeleopBtn" class="primary" type="button">人工接管</button><button id="releaseTeleopBtn" type="button" disabled>结束接管</button></div>
+    <div class="actions"><button id="teleopSoftStopBtn" class="danger" type="button">软急停</button><button id="teleopEmergencyStopBtn" class="danger" type="button">停止全部运动</button></div>
   </section>
   <main>
     <section class="map-wrap">
@@ -388,7 +398,7 @@
   </dialog>
 
   <script src="http://10.21.31.104:8888/video1/hls.min.js"></script>
-  <script src="/static/dashboard.js?v=20260721-teleop-1"></script>
+  <script src="/static/dashboard.js?v=20260721-teleop-2"></script>
 
 </body>
 </html>

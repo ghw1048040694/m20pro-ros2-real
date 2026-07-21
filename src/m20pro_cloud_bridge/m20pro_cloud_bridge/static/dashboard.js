@@ -1044,6 +1044,7 @@
       if (id === "mapsLog") showOperationFeedback("地图操作", payload, Boolean(payload && payload.ok === false));
     }
     const statusPopoverIds = {
+      battery: "batteryStatusPopover",
       map: "mapStatusPopover",
       localization: "localizationStatusPopover",
       preflight: "preflightStatusPopover",
@@ -1053,6 +1054,7 @@
       teleop: "teleopStatusPopover"
     };
     const statusButtonIds = {
+      battery: "batteryStatusBtn",
       map: "mapStatusBtn",
       localization: "localizationStatusBtn",
       preflight: "preflightStatusBtn",
@@ -1391,10 +1393,55 @@
         $("teleopLimits").textContent = `限速：前进 ${fmtNumber(Number(limits.forward_mps), 2)} m/s / 后退 ${fmtNumber(Number(limits.reverse_mps), 2)} m/s / 横移 ${fmtNumber(Number(limits.lateral_mps), 2)} m/s / 旋转 ${fmtNumber(Number(limits.angular_radps), 2)} rad/s`;
       }
       for (const button of document.querySelectorAll(".teleop-control")) button.disabled = !owns;
+      if ($("teleopStandBtn")) $("teleopStandBtn").disabled = !owns;
+      if ($("teleopLieBtn")) $("teleopLieBtn").disabled = !owns;
       if ($("acquireTeleopBtn")) {
         $("acquireTeleopBtn").disabled = Boolean(payload.active || payload.acquiring || payload.stair_session_active || !payload.available);
       }
       if ($("releaseTeleopBtn")) $("releaseTeleopBtn").disabled = !owns;
+    }
+    function chargeStateText(value) {
+      const labels = {
+        0: "空闲",
+        1: "前往充电桩",
+        2: "充电中",
+        3: "退出充电桩",
+        4: "充电异常",
+        5: "在桩未充电"
+      };
+      const number = Number(value);
+      return Object.prototype.hasOwnProperty.call(labels, number) ? labels[number] : text(value);
+    }
+    function motionStateText(value) {
+      const labels = {0: "空闲", 1: "站立", 2: "软急停", 3: "开机阻尼", 4: "趴下", 6: "标准运动"};
+      const number = Number(value);
+      return Object.prototype.hasOwnProperty.call(labels, number) ? labels[number] : text(value);
+    }
+    function renderBatteryStatus(snapshot) {
+      const battery = snapshot && snapshot.battery ? snapshot.battery : {};
+      const packs = Array.isArray(battery.packs) ? battery.packs : [];
+      const primary = battery.primary || packs[0] || null;
+      const basic = snapshot && snapshot.basic_status && snapshot.basic_status.parsed
+        ? snapshot.basic_status.parsed : {};
+      const summary = $("batteryStatusSummary");
+      const detail = $("batteryStatusDetail");
+      if (!summary || !detail) return;
+      if (!primary) {
+        summary.textContent = "暂未收到电池数据";
+        detail.textContent = "等待原厂电池话题和运动状态反馈";
+        return;
+      }
+      const level = Number(primary.level);
+      summary.textContent = `主电池 ${Number.isFinite(level) ? `${level}%` : "-"} / ${packs.length || 1} 组电池`;
+      const temperature = Number(primary.temperature_c);
+      const charge = chargeStateText(basic.charge_state);
+      const age = battery.last_update ? `${fmtAge(Math.max(0, Number(snapshot.node_time || Date.now() / 1000) - Number(battery.last_update)))}前` : "-";
+      detail.innerHTML = [
+        `<div>电压 ${fmtNumber(Number(primary.voltage_v), 1)} V / 电流 ${fmtNumber(Number(primary.current_a), 1)} A</div>`,
+        `<div>温度 ${Number.isFinite(temperature) ? `${fmtNumber(temperature, 1)} ℃` : "-"} / 循环 ${text(primary.cycles)} 次</div>`,
+        `<div>原厂充电状态：${escapeHtml(charge)} / 运动状态：${escapeHtml(motionStateText(basic.motion_state))}</div>`,
+        `<div>电池数据更新时间：${escapeHtml(age)}</div>`
+      ].join("");
     }
     async function loadTeleopStatus() {
       const payload = await fetchJson("/api/teleop/state");
@@ -1519,6 +1566,62 @@
         showOperationFeedback("已停止全部运动", payload);
       } catch (err) {
         showOperationFeedback("停止指令失败", err, true);
+      }
+    }
+    async function sendTeleopMotionState(action) {
+      const labels = {stand: "起立", lie: "趴下"};
+      if (!state.teleop.sessionId && action !== "soft_stop") return;
+      const label = labels[action] || "软急停";
+      if (!window.confirm(`确认执行${label}？\n\n执行前会停止遥控，动作完成后需要重新人工接管。`)) return;
+      const button = action === "stand" ? $("teleopStandBtn") : $("teleopLieBtn");
+      if (button) button.disabled = true;
+      try {
+        const payload = await api("POST", "/api/teleop/motion", {
+          action,
+          session_id: state.teleop.sessionId || ""
+        });
+        clearLocalTeleop();
+        state.latest = {...(state.latest || {}), teleoperation: payload.teleoperation || {active: false}};
+        renderTeleoperation(payload.teleoperation || {active: false});
+        showOperationFeedback(label, payload);
+      } catch (err) {
+        showOperationFeedback(`${label}失败`, err, true);
+        loadTeleopStatus().catch(console.warn);
+      } finally {
+        if (button) button.disabled = false;
+      }
+    }
+    async function softEmergencyStopTeleop() {
+      if (!window.confirm("确认执行软急停？\n\n机器狗将切换到关节阻尼状态，网页遥控和自主任务都会锁定。")) return;
+      const button = $("teleopSoftStopBtn");
+      if (button) button.disabled = true;
+      try {
+        const payload = await api("POST", "/api/teleop/motion", {
+          action: "soft_stop",
+          session_id: state.teleop.sessionId || ""
+        });
+        clearLocalTeleop();
+        state.latest = {...(state.latest || {}), teleoperation: payload.teleoperation || {active: false}};
+        renderTeleoperation(payload.teleoperation || {active: false});
+        showOperationFeedback("软急停", payload);
+      } catch (err) {
+        showOperationFeedback("软急停失败", err, true);
+      } finally {
+        if (button) button.disabled = false;
+      }
+    }
+    async function oneKeyCharge() {
+      if (!window.confirm("确认启动一键充电？\n\n系统会执行当前地图的充电点任务；当前自主任务必须先停止。")) return;
+      const button = $("oneKeyChargeBtn");
+      if (button) button.disabled = true;
+      try {
+        const payload = await api("POST", "/api/charge/one_key", {});
+        showOperationFeedback("一键充电", payload);
+        updateState(await fetchJson("/api/state"));
+      } catch (err) {
+        showOperationFeedback("一键充电失败", err, true);
+      } finally {
+        if (button) button.disabled = false;
       }
     }
     function renderActiveTaskSummary(activeTask, waypoint) {
@@ -2780,6 +2883,7 @@
       } else {
         $("battery").textContent = "-";
       }
+      renderBatteryStatus(s);
       renderYoloWorkspace(s);
       if (
         s.relocalization_result
@@ -4568,6 +4672,7 @@
       resizeCanvas();
       positionOpenStatusPopover();
     });
+    $("batteryStatusBtn").addEventListener("click", () => toggleStatusPopover("battery"));
     $("mapStatusBtn").addEventListener("click", () => toggleStatusPopover("map"));
     $("localizationStatusBtn").addEventListener("click", () => toggleStatusPopover("localization"));
     $("preflightStatusBtn").addEventListener("click", () => toggleStatusPopover("preflight"));
@@ -4581,6 +4686,7 @@
       toggleStatusPopover("teleop");
       loadTeleopStatus().catch(console.warn);
     });
+    $("closeBatteryStatusBtn").addEventListener("click", () => setStatusPopover("", false));
     $("closeMapStatusBtn").addEventListener("click", () => setStatusPopover("", false));
     $("closeLocalizationStatusBtn").addEventListener("click", () => setStatusPopover("", false));
     $("closePreflightStatusBtn").addEventListener("click", () => setStatusPopover("", false));
@@ -4596,6 +4702,17 @@
     $("acquireTeleopBtn").addEventListener("click", acquireTeleop);
     $("releaseTeleopBtn").addEventListener("click", () => releaseTeleop());
     $("teleopEmergencyStopBtn").addEventListener("click", emergencyStopTeleop);
+    $("teleopSoftStopBtn").addEventListener("click", softEmergencyStopTeleop);
+    $("teleopStandBtn").addEventListener("click", () => sendTeleopMotionState("stand"));
+    $("teleopLieBtn").addEventListener("click", () => sendTeleopMotionState("lie"));
+    $("oneKeyChargeBtn").addEventListener("click", oneKeyCharge);
+    $("refreshBatteryBtn").addEventListener("click", async () => {
+      try {
+        updateState(await fetchJson("/api/state"));
+      } catch (err) {
+        showOperationFeedback("刷新电池状态失败", err, true);
+      }
+    });
     $("teleopZeroBtn").addEventListener("pointerdown", event => {
       if (!state.teleop.sessionId) return;
       event.preventDefault();

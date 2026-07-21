@@ -164,6 +164,20 @@
       border-color: #efb2b2;
       font-size: 17px;
     }
+    .teleop-motion-actions {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin: 8px 0;
+    }
+    .battery-detail {
+      display: grid;
+      gap: 4px;
+      margin: 8px 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
     .compact-status {
       margin-top: 8px;
       padding: 9px;

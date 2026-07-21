@@ -1,6 +1,6 @@
 # M20Pro 前端 API 对接契约
 
-更新时间：2026-07-21 11:28 CST
+更新时间：2026-07-21 13:05 CST
 
 本文档是“M20 Pro ROS 2 跨楼层巡检导航系统”正式经典前端、甲方前端和外部功能包对接 104 Web 后端的接口契约。接口实现位于 `m20pro_cloud_bridge.web_dashboard_node`。以后新增、删除或修改接口字段时，必须同步更新本文档。
 
@@ -100,6 +100,7 @@
 | `inspection_status` | YOLO 检测节点运行状态，来自 `/m20pro_yolov8_inspection/status` |
 | `camera_proxy` | 前后相机代理状态 |
 | `battery` | 电量显示信息，只用于展示，不作为软件阻断条件 |
+| `basic_status` | 原厂运动状态、充电状态和硬急停状态摘要 |
 | `preflight` | 最近一次自检结果 |
 
 定位成功判断：
@@ -593,6 +594,8 @@ local costmap 或 `/odom` 信息不完整。两种情况都应保持任务停止
 - 接管前后端先停止当前任务；结束接管后仲裁器进入 `locked`，旧任务不会自动恢复。
 - 同一时间只允许一个遥控会话；指令必须带会话 ID 和单调递增序号，迟到指令被忽略。
 - 浏览器必须在 `teleoperation.command_timeout_s` 内续租。松键、失焦、页面隐藏、断网或后端异常都会零速停车；仲裁器还有独立的第二道超时保护。
+- 起立、趴下和软急停都先发送零速度并锁定速度仲裁器；起立/趴下动作结束后必须重新申请人工接管。原厂动作分别对应 `Type=2/Command=22` 的 `MotionParam=1/4`，软急停为 `MotionParam=2`。
+- 原厂手柄不经过本项目的 ROS 仲裁器，不能与网页遥控同时操作；需要切换到手柄时先结束网页接管并确认状态锁定。
 - 本接口是运动控制面，在 VPN、身份认证和访问控制完成前不得经内网穿透直接暴露到公网。
 
 ### GET `/api/teleop/state`
@@ -665,6 +668,26 @@ local costmap 或 `/odom` 信息不完整。两种情况都应保持任务停止
 ### POST `/api/teleop/emergency_stop`
 
 无请求字段。停止当前任务、人工接管和所有网页运动指令，最终保持 `locked`。该接口可用于无法取得当前遥控会话 ID 时的安全停止。
+
+### POST `/api/teleop/motion`
+
+执行人工接管弹层中的运动状态动作。`stand`（起立）和 `lie`（趴下）必须携带当前遥控会话；两者执行前会结束遥控并锁定速度。`soft_stop`（软急停）不要求会话，可在无法取得会话 ID 时直接执行。
+
+```json
+{"action": "stand", "session_id": "teleop_xxx"}
+```
+
+```json
+{"action": "soft_stop"}
+```
+
+### POST `/api/charge/one_key`
+
+按当前有效地图的唯一 `manual_point_type=charge` 点位启动一键充电任务，复用原厂 `PointInfo=3` 充电导航语义。没有充电点、存在多个充电点、当前任务运行中或网页遥控接管中都会拒绝；不会猜测充电桩坐标。
+
+```json
+{"ok": true, "charge_task_id": "task_xxx", "message": "已按当前地图充电点启动一键充电任务"}
+```
 
 ### POST `/api/tasks/update`
 

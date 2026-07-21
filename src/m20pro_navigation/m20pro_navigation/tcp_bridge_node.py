@@ -1,3 +1,4 @@
+import json
 import math
 import time
 from typing import Optional
@@ -22,6 +23,8 @@ class M20TcpBridge(Node):
         self.declare_parameter("robot_ip", "10.21.31.103")
         self.declare_parameter("tcp_port", 30001)
         self.declare_parameter("poll_rate_hz", 5.0)
+        self.declare_parameter("basic_status_rate_hz", 1.0)
+        self.declare_parameter("basic_status_topic", "/m20pro_tcp_bridge/basic_status")
         self.declare_parameter("cmd_vel_rate_hz", 20.0)
         self.declare_parameter("cmd_vel_timeout_s", 0.5)
         self.declare_parameter("send_idle_zero_commands", False)
@@ -75,6 +78,9 @@ class M20TcpBridge(Node):
         self.declare_parameter("gait_flat_param", 1)
         self.declare_parameter("gait_assist_param", 12)
         self.declare_parameter("gait_stair_param", 14)
+        self.declare_parameter("enable_motion_state_command", True)
+        self.declare_parameter("motion_state_command_topic", "/m20pro/motion_state_command")
+        self.declare_parameter("motion_state_result_topic", "/m20pro_tcp_bridge/motion_state_result")
         self.declare_parameter("enable_usage_mode_command", False)
         self.declare_parameter("usage_mode_command_topic", "/m20pro/usage_mode_command")
         self.declare_parameter("enable_initialpose_relocalization", True)
@@ -146,8 +152,18 @@ class M20TcpBridge(Node):
         self.obs_pub = self.create_publisher(Bool, "~/obstacle_active", 10)
         self.status_pub = self.create_publisher(String, "~/navigation_status", 10)
         self.raw_pub = self.create_publisher(String, "~/raw_status_json", 10)
+        self.basic_status_pub = self.create_publisher(
+            String,
+            str(self.get_parameter("basic_status_topic").value),
+            10,
+        )
         self.relocalization_pub = self.create_publisher(String, "~/relocalization_result", 10)
         self.gait_result_pub = self.create_publisher(String, "~/gait_result", 10)
+        self.motion_state_result_pub = self.create_publisher(
+            String,
+            str(self.get_parameter("motion_state_result_topic").value),
+            10,
+        )
         self.usage_mode_result_pub = self.create_publisher(String, "~/usage_mode_result", 10)
 
         self.create_subscription(Twist, "/cmd_vel", self._on_cmd_vel, 10)
@@ -156,6 +172,13 @@ class M20TcpBridge(Node):
                 String,
                 str(self.get_parameter("gait_command_topic").value),
                 self._on_gait_command,
+                10,
+            )
+        if bool(self.get_parameter("enable_motion_state_command").value):
+            self.create_subscription(
+                String,
+                str(self.get_parameter("motion_state_command_topic").value),
+                self._on_motion_state_command,
                 10,
             )
         if bool(self.get_parameter("enable_usage_mode_command").value):
@@ -192,6 +215,8 @@ class M20TcpBridge(Node):
         poll_period = 1.0 / max(0.5, float(self.get_parameter("poll_rate_hz").value))
         cmd_period = 1.0 / max(1.0, float(self.get_parameter("cmd_vel_rate_hz").value))
         self.create_timer(poll_period, self._poll_robot)
+        basic_status_period = 1.0 / max(0.2, float(self.get_parameter("basic_status_rate_hz").value))
+        self.create_timer(basic_status_period, self._poll_basic_status)
         if bool(self.get_parameter("enable_axis_command").value):
             self.create_timer(cmd_period, self._send_axis_command)
             command_mode = "axis command enabled"
@@ -273,6 +298,32 @@ class M20TcpBridge(Node):
         msg = String()
         msg.data = text
         self.gait_result_pub.publish(msg)
+
+    def _on_motion_state_command(self, msg: String) -> None:
+        motion_state = self._resolve_motion_state(msg.data)
+        if motion_state is None:
+            self._publish_motion_state_result(
+                "failed: unknown motion state command '%s'" % msg.data
+            )
+            return
+        if not self._ensure_connected():
+            self._publish_motion_state_result("failed: tcp connection unavailable")
+            return
+        try:
+            self.client.request(2, 22, {"MotionParam": motion_state}, wait_response=False)
+        except OSError as exc:
+            text = "failed: %s" % exc
+            self.get_logger().warning("motion state command failed: %s" % exc)
+            self._publish_motion_state_result(text)
+            return
+        text = "sent: state=%s MotionParam=%d" % (msg.data.strip(), motion_state)
+        self.get_logger().info("vendor motion state command sent: %s" % text)
+        self._publish_motion_state_result(text)
+
+    def _publish_motion_state_result(self, text: str) -> None:
+        msg = String()
+        msg.data = text
+        self.motion_state_result_pub.publish(msg)
 
     def _on_usage_mode_command(self, msg: String) -> None:
         mode = self._resolve_usage_mode(msg.data)
@@ -524,6 +575,30 @@ class M20TcpBridge(Node):
                 return
         self._publish_navigation_status()
         self._publish_map_pose()
+
+    def _poll_basic_status(self) -> None:
+        if not self._ensure_connected():
+            return
+        try:
+            items = patrol_items(self.client.request(1002, 6, {}, response_timeout=1.0))
+        except Exception as exc:
+            self._warn_throttled("basic_status", "basic status query failed: %s" % exc, 5.0)
+            return
+        if not items:
+            return
+        basic = items.get("BasicStatus") if isinstance(items.get("BasicStatus"), dict) else items
+        payload = {
+            "motion_state": basic.get("MotionState"),
+            "gait": basic.get("Gait"),
+            "charge_state": basic.get("Charge"),
+            "hard_emergency_stop": basic.get("HES"),
+            "control_usage_mode": basic.get("ControlUsageMode"),
+            "ooa": basic.get("OOA"),
+            "last_update": time.time(),
+        }
+        message = String()
+        message.data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        self.basic_status_pub.publish(message)
 
     def _publish_map_pose(self) -> None:
         pose_source = self._pose_source()
@@ -1186,6 +1261,36 @@ class M20TcpBridge(Node):
             "downstairs": stair,
         }
         return mapping.get(normalized)
+
+    @staticmethod
+    def _resolve_motion_state(command: str) -> Optional[int]:
+        text = str(command or "").strip()
+        if not text:
+            return None
+        normalized = text.lower().replace("-", "_").replace(" ", "_")
+        if normalized.startswith("motionparam="):
+            normalized = normalized.split("=", 1)[1].strip()
+        try:
+            value = int(normalized, 0)
+        except ValueError:
+            value = {
+                "idle": 0,
+                "stand": 1,
+                "standing": 1,
+                "soft_stop": 2,
+                "soft_emergency_stop": 2,
+                "estop": 2,
+                "damping": 2,
+                "startup_damping": 3,
+                "lie": 4,
+                "lying": 4,
+                "sit": 4,
+                "standard_motion": 6,
+                "move": 6,
+            }.get(normalized)
+        if value is None or value not in (0, 1, 2, 3, 4, 6):
+            return None
+        return value
 
     def _resolve_usage_mode(self, command: str) -> Optional[int]:
         text = command.strip()
