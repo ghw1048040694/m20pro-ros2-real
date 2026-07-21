@@ -16,6 +16,9 @@ def main() -> None:
         ROOT / "src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py"
     ).read_text(encoding="utf-8")
 
+    assert "<title>M20 Pro ROS 2 跨楼层巡检导航系统</title>" in html
+    assert "<strong>M20 Pro</strong><span>跨楼层巡检导航系统</span>" in html
+
     for tab in ("mapping", "marks", "tasks", "detect"):
         assert f'data-tab="{tab}"' in html
         assert f'id="tab-{tab}"' in html
