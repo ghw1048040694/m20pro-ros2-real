@@ -23,6 +23,7 @@ m20pro_tcp_bridge:
     pose_source: "official_tf"
     enable_tf_pose_fallback: true
     tf_pose_fallback_topic: "/tf"
+    handle_steer_topic: "/HANDLE_STEER"
     tf_pose_fallback_map_frame: "map"
     tf_pose_fallback_base_frame: "base_link"
     tf_pose_fallback_max_age_s: __FIELD_PROFILE_TF_FALLBACK_MAX_AGE__
@@ -35,6 +36,10 @@ m20pro_tcp_bridge:
     pose_stationary_drift_reject_m: __FIELD_PROFILE_STATIONARY_DRIFT_REJECT__
     pose_stationary_drift_reject_yaw_rad: __FIELD_PROFILE_STATIONARY_DRIFT_REJECT_YAW__
     pose_motion_command_hold_s: __FIELD_PROFILE_MOTION_COMMAND_HOLD__
+    handle_steer_motion_hold_s: __FIELD_PROFILE_HANDLE_STEER_HOLD__
+    posture_transition_hold_s: __FIELD_PROFILE_POSTURE_HOLD__
+    posture_transition_z_delta_m: __FIELD_PROFILE_POSTURE_Z_DELTA__
+    posture_transition_tilt_delta_rad: __FIELD_PROFILE_POSTURE_TILT_DELTA__
     pose_command_linear_deadband_mps: __FIELD_PROFILE_LINEAR_DEADBAND__
     pose_command_angular_deadband_rad_s: __FIELD_PROFILE_ANGULAR_DEADBAND__
     pose_filter_hold_last_good_s: __FIELD_PROFILE_FILTER_HOLD_LAST_GOOD__

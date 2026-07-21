@@ -6,11 +6,17 @@ from typing import Optional
 
 import rclpy
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, TransformStamped, Twist
+from rclpy.duration import Duration
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from std_msgs.msg import Bool, String
 from tf2_msgs.msg import TFMessage
 from tf2_ros import TransformBroadcaster
+
+try:
+    from drdds.msg import Steer as VendorSteer
+except ImportError:
+    VendorSteer = None
 
 from .geometry import quaternion_to_yaw, yaw_to_quaternion
 from .odom_alignment_contract import odom_alignment_update
@@ -54,6 +60,10 @@ class M20TcpBridge(Node):
         self.declare_parameter("pose_stationary_drift_reject_m", 0.0)
         self.declare_parameter("pose_stationary_drift_reject_yaw_rad", 0.0)
         self.declare_parameter("pose_motion_command_hold_s", 0.0)
+        self.declare_parameter("handle_steer_motion_hold_s", 0.0)
+        self.declare_parameter("posture_transition_hold_s", 0.0)
+        self.declare_parameter("posture_transition_z_delta_m", 0.0)
+        self.declare_parameter("posture_transition_tilt_delta_rad", 0.0)
         self.declare_parameter("pose_command_linear_deadband_mps", 0.0)
         self.declare_parameter("pose_command_angular_deadband_rad_s", 0.0)
         self.declare_parameter("pose_filter_hold_last_good_s", 0.0)
@@ -63,6 +73,7 @@ class M20TcpBridge(Node):
         self.declare_parameter("odom_rebase_jump_yaw_rad", 0.0)
         self.declare_parameter("enable_tf_pose_fallback", True)
         self.declare_parameter("tf_pose_fallback_topic", "/tf")
+        self.declare_parameter("handle_steer_topic", "/HANDLE_STEER")
         self.declare_parameter("tf_pose_fallback_map_frame", "map")
         self.declare_parameter("tf_pose_fallback_base_frame", "base_link")
         self.declare_parameter("tf_pose_fallback_max_age_s", 0.0)
@@ -137,6 +148,10 @@ class M20TcpBridge(Node):
         self.last_relocalization_attempt_monotonic = 0.0
         self.last_relocalization_attempt_target = None
         self.last_tf_pose_fallback = None
+        self.last_handle_steer_motion_time = None
+        self.posture_transition_anchor = None
+        self.posture_transition_until = None
+        self.posture_reference = None
         self.last_navigation_location_ok = None
         self.last_navigation_status_time = None
         self.official_tf_pose_unlocked = False
@@ -163,6 +178,17 @@ class M20TcpBridge(Node):
         self.usage_mode_result_pub = self.create_publisher(String, "~/usage_mode_result", 10)
 
         self.create_subscription(Twist, "/cmd_vel", self._on_cmd_vel, 10)
+        if VendorSteer is not None:
+            self.create_subscription(
+                VendorSteer,
+                str(self.get_parameter("handle_steer_topic").value),
+                self._on_handle_steer,
+                20,
+            )
+        else:
+            self.get_logger().warning(
+                "drdds.msg.Steer is unavailable; native handle motion evidence is disabled"
+            )
         if bool(self.get_parameter("enable_gait_command").value):
             self.create_subscription(
                 String,
@@ -264,6 +290,55 @@ class M20TcpBridge(Node):
             # A new commanded motion gets a fresh stationary anchor when it
             # stops; retaining the old anchor would reject legitimate travel.
             self.stationary_anchor_pose = None
+            self.posture_transition_anchor = None
+            self.posture_transition_until = None
+            self.posture_reference = None
+
+    def _on_handle_steer(self, msg) -> None:
+        """Use the factory joystick stream as motion evidence for localization.
+
+        The handheld controller drives 103 directly and therefore does not
+        produce the project's final ``/cmd_vel``.  Without this evidence, a
+        joystick move after a task stop is indistinguishable from TF drift.
+        The generated drdds message is optional on the upper computer, so the
+        callback deliberately inspects only finite axis-like scalar values.
+        """
+        values = []
+        fields = getattr(msg, "get_fields_and_field_types", lambda: {})()
+        for name in fields:
+            lowered = str(name).lower()
+            if any(token in lowered for token in ("time", "stamp", "seq", "id", "mode", "state")):
+                continue
+            values.extend(self._finite_steer_values(getattr(msg, name, None)))
+        deadband = max(
+            float(self.get_parameter("pose_command_linear_deadband_mps").value),
+            float(self.get_parameter("pose_command_angular_deadband_rad_s").value),
+        )
+        if any(deadband < abs(value) <= 2.0 for value in values):
+            self.last_handle_steer_motion_time = self.get_clock().now()
+            self.stationary_anchor_pose = None
+            self.posture_transition_anchor = None
+            self.posture_transition_until = None
+            self.posture_reference = None
+
+    @classmethod
+    def _finite_steer_values(cls, value):
+        if isinstance(value, (bool, str, bytes)):
+            return []
+        if isinstance(value, (list, tuple)):
+            values = []
+            for item in value:
+                values.extend(cls._finite_steer_values(item))
+            return values
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            fields = getattr(value, "get_fields_and_field_types", lambda: {})()
+            values = []
+            for name in fields:
+                values.extend(cls._finite_steer_values(getattr(value, name, None)))
+            return values
+        return [numeric] if math.isfinite(numeric) else []
 
     def _on_gait_command(self, msg: String) -> None:
         gait_param = self._resolve_gait_param(msg.data)
@@ -420,15 +495,59 @@ class M20TcpBridge(Node):
             translation = transform.transform.translation
             rotation = transform.transform.rotation
             yaw = quaternion_to_yaw(rotation)
+            roll = math.atan2(
+                2.0 * (rotation.w * rotation.x + rotation.y * rotation.z),
+                1.0 - 2.0 * (rotation.x * rotation.x + rotation.y * rotation.y),
+            )
+            pitch_sin = 2.0 * (rotation.w * rotation.y - rotation.z * rotation.x)
+            pitch = math.asin(max(-1.0, min(1.0, pitch_sin)))
             values = (translation.x, translation.y, translation.z, yaw)
             if not all(math.isfinite(float(value)) for value in values):
                 continue
+            now = self.get_clock().now()
+            motion_active = self._handle_steer_motion_active(now) or self._motion_command_active(now)
+            if not motion_active and self.posture_transition_anchor is None:
+                if self.posture_reference is None:
+                    self.posture_reference = {
+                        "z": float(translation.z),
+                        "roll": float(roll),
+                        "pitch": float(pitch),
+                    }
+                z_delta = abs(float(translation.z) - float(self.posture_reference["z"]))
+                tilt_delta = max(
+                    abs(self._wrap_angle(roll - float(self.posture_reference["roll"]))),
+                    abs(self._wrap_angle(pitch - float(self.posture_reference["pitch"]))),
+                )
+                if (
+                    z_delta >= float(self.get_parameter("posture_transition_z_delta_m").value)
+                    or tilt_delta >= float(
+                        self.get_parameter("posture_transition_tilt_delta_rad").value
+                    )
+                ):
+                    if self.last_good_map_pose is not None:
+                        self.posture_transition_anchor = dict(self.last_good_map_pose)
+                        self.posture_transition_until = now + Duration(
+                            seconds=max(
+                                0.0,
+                                float(
+                                    self.get_parameter("posture_transition_hold_s").value
+                                ),
+                            )
+                        )
+            elif motion_active:
+                self.posture_reference = {
+                    "z": float(translation.z),
+                    "roll": float(roll),
+                    "pitch": float(pitch),
+                }
             self.last_tf_pose_fallback = {
                 "x": float(translation.x),
                 "y": float(translation.y),
                 "z": float(translation.z),
                 "yaw": float(yaw),
-                "stamp": self.get_clock().now(),
+                "roll": float(roll),
+                "pitch": float(pitch),
+                "stamp": now,
                 "source_frame": map_frame,
                 "source_child_frame": base_frame,
             }
@@ -482,6 +601,8 @@ class M20TcpBridge(Node):
         }
         self.pending_jump_pose = None
         self.pending_odom_rebase = True
+        self.posture_transition_anchor = None
+        self.posture_transition_until = None
         timeout_s = max(0.1, float(self.get_parameter("relocalization_response_timeout_s").value))
         try:
             response = self.client.request(2101, 1, items, response_timeout=timeout_s)
@@ -1046,7 +1167,37 @@ class M20TcpBridge(Node):
                 return False, "origin_placeholder_after_good_pose", None
 
         in_relocalization_grace = self._within_relocalization_jump_grace(now, x, y)
-        stationary = last is not None and not in_relocalization_grace and not self._motion_command_active(now)
+        motion_active = self._motion_command_active(now) or self._handle_steer_motion_active(now)
+        posture_transition_active = bool(
+            self.posture_transition_anchor is not None
+            and (
+                self.posture_transition_until is None
+                or now <= self.posture_transition_until
+            )
+        )
+        if posture_transition_active and not motion_active:
+            anchor = self.posture_transition_anchor
+            anchor_distance = math.hypot(
+                float(x) - float(anchor["x"]),
+                float(y) - float(anchor["y"]),
+            )
+            anchor_yaw_error = abs(self._wrap_angle(float(yaw) - float(anchor["yaw"])))
+            if (
+                anchor_distance <= float(self.get_parameter("stationary_drift_reject_m").value)
+                and anchor_yaw_error
+                <= float(self.get_parameter("stationary_drift_reject_yaw_rad").value)
+            ):
+                self.posture_transition_anchor = None
+                self.posture_transition_until = None
+            else:
+                # A stand/lie transition moves base_link in 3D while the
+                # robot remains at the same map footprint. Keep the last
+                # trusted planar anchor until the factory pose settles back.
+                return True, "posture_transition_anchor", dict(anchor)
+        elif self.posture_transition_anchor is not None:
+            self.posture_transition_anchor = None
+            self.posture_transition_until = None
+        stationary = last is not None and not in_relocalization_grace and not motion_active
         if stationary:
             if self.stationary_anchor_pose is None:
                 self.stationary_anchor_pose = dict(last)
@@ -1112,6 +1263,15 @@ class M20TcpBridge(Node):
         if stamp is None:
             return False
         hold_s = max(0.0, float(self.get_parameter("pose_motion_command_hold_s").value))
+        return (now - stamp).nanoseconds * 1e-9 <= hold_s
+
+    def _handle_steer_motion_active(self, now) -> bool:
+        stamp = self.last_handle_steer_motion_time
+        if stamp is None:
+            return False
+        hold_s = max(
+            0.0, float(self.get_parameter("handle_steer_motion_hold_s").value)
+        )
         return (now - stamp).nanoseconds * 1e-9 <= hold_s
 
     def _has_recent_good_map_pose(self) -> bool:

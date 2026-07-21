@@ -64,7 +64,7 @@ def main() -> None:
             "localization",
         )
     }
-    assert leaf_count(editable) == 74
+    assert leaf_count(editable) == 78
     assert leaf_count(editable["navigation"]) == 28
     assert leaf_count(editable["teleoperation"]) == 7
 

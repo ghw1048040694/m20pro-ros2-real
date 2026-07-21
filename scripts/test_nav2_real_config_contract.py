@@ -42,6 +42,8 @@ def main() -> None:
     assert float(bridge_config["pose_jump_accept_after_s"]) == 0.0
     assert bridge_config["pose_stationary_drift_reject_m"] == "__FIELD_PROFILE_STATIONARY_DRIFT_REJECT__"
     assert bridge_config["pose_motion_command_hold_s"] == "__FIELD_PROFILE_MOTION_COMMAND_HOLD__"
+    assert bridge_config["handle_steer_motion_hold_s"] == "__FIELD_PROFILE_HANDLE_STEER_HOLD__"
+    assert bridge_config["posture_transition_hold_s"] == "__FIELD_PROFILE_POSTURE_HOLD__"
     assert localization_profile["stationary_drift_reject_m"] > 0.0
     assert localization_profile["motion_command_hold_s"] > 0.0
     controller = config["controller_server"]["ros__parameters"]
@@ -97,7 +99,7 @@ def main() -> None:
     assert planner["expected_planner_frequency"] == "__FIELD_PROFILE_PLANNER_FREQUENCY__"
     assert planner["GridBased"]["tolerance"] == "__FIELD_PROFILE_PLANNER_GOAL_TOLERANCE__"
     assert planner_profile["goal_tolerance_m"] >= goal_profile["xy_tolerance_m"]
-    assert len(bridge_rewrites) == 14
+    assert len(bridge_rewrites) == 18
     assert len(floor_rewrites) == 10
     for parameter_name in bridge_rewrites:
         assert bridge_config[parameter_name].startswith("__FIELD_PROFILE_")

@@ -108,6 +108,10 @@ localization:
   stationary_drift_reject_m: 0.20 # 无运动命令时允许的位置漂移，单位 m；超过后定位失效
   stationary_drift_reject_yaw_rad: 0.30 # 无运动命令时允许的朝向漂移，单位 rad
   motion_command_hold_s: 1.0     # 最后一条运动命令后仍按“运动中”处理的保持时间，单位 s
+  handle_steer_motion_hold_s: 1.5 # 原厂手柄非零摇杆后仍按“手柄运动中”处理的保持时间，单位 s
+  posture_transition_hold_s: 1.5 # 起立/趴下造成 TF 身体姿态变化时保持地图锚点的时间，单位 s
+  posture_transition_z_delta_m: 0.15 # 判定身体起伏姿态变化的最小 Z 变化，单位 m
+  posture_transition_tilt_delta_rad: 0.20 # 判定身体姿态变化的最小横滚/俯仰变化，单位 rad
   command_linear_deadband_mps: 0.03 # 判断是否存在有效线速度命令的死区，单位 m/s
   command_angular_deadband_rad_s: 0.05 # 判断是否存在有效角速度命令的死区，单位 rad/s
   filter_hold_last_good_s: 1.0   # 异常位姿期间最多保留最近可信位姿的时间，单位 s

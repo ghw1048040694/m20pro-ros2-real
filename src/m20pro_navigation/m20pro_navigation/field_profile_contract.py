@@ -126,6 +126,10 @@ LOCALIZATION_SPEC = {
     "stationary_drift_reject_m": ("number", 0.05, 1.00),
     "stationary_drift_reject_yaw_rad": ("number", 0.05, 1.00),
     "motion_command_hold_s": ("number", 0.10, 5.00),
+    "handle_steer_motion_hold_s": ("number", 0.20, 5.00),
+    "posture_transition_hold_s": ("number", 0.20, 5.00),
+    "posture_transition_z_delta_m": ("number", 0.05, 1.00),
+    "posture_transition_tilt_delta_rad": ("number", 0.05, 1.50),
     "command_linear_deadband_mps": ("number", 0.005, 0.20),
     "command_angular_deadband_rad_s": ("number", 0.01, 0.50),
     "filter_hold_last_good_s": ("number", 0.10, 5.00),
@@ -612,6 +616,12 @@ def tcp_bridge_parameters(profile: Mapping[str, Any]) -> Dict[str, Any]:
             "stationary_drift_reject_yaw_rad"
         ],
         "pose_motion_command_hold_s": localization["motion_command_hold_s"],
+        "handle_steer_motion_hold_s": localization["handle_steer_motion_hold_s"],
+        "posture_transition_hold_s": localization["posture_transition_hold_s"],
+        "posture_transition_z_delta_m": localization["posture_transition_z_delta_m"],
+        "posture_transition_tilt_delta_rad": localization[
+            "posture_transition_tilt_delta_rad"
+        ],
         "pose_command_linear_deadband_mps": localization["command_linear_deadband_mps"],
         "pose_command_angular_deadband_rad_s": localization[
             "command_angular_deadband_rad_s"
@@ -644,6 +654,10 @@ def render_m20pro_parameters(
         "pose_stationary_drift_reject_m": "__FIELD_PROFILE_STATIONARY_DRIFT_REJECT__",
         "pose_stationary_drift_reject_yaw_rad": "__FIELD_PROFILE_STATIONARY_DRIFT_REJECT_YAW__",
         "pose_motion_command_hold_s": "__FIELD_PROFILE_MOTION_COMMAND_HOLD__",
+        "handle_steer_motion_hold_s": "__FIELD_PROFILE_HANDLE_STEER_HOLD__",
+        "posture_transition_hold_s": "__FIELD_PROFILE_POSTURE_HOLD__",
+        "posture_transition_z_delta_m": "__FIELD_PROFILE_POSTURE_Z_DELTA__",
+        "posture_transition_tilt_delta_rad": "__FIELD_PROFILE_POSTURE_TILT_DELTA__",
         "pose_command_linear_deadband_mps": "__FIELD_PROFILE_LINEAR_DEADBAND__",
         "pose_command_angular_deadband_rad_s": "__FIELD_PROFILE_ANGULAR_DEADBAND__",
         "pose_filter_hold_last_good_s": "__FIELD_PROFILE_FILTER_HOLD_LAST_GOOD__",
