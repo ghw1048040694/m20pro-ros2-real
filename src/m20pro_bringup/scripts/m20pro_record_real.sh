@@ -116,10 +116,12 @@ TOPICS=(
   /m20pro/stair_status
   /m20pro/floor_goal
   /m20pro/active_waypoint
+  /m20pro/charge_command
   /m20pro_tcp_bridge/map_pose
   /m20pro_tcp_bridge/localization_ok
   /m20pro_tcp_bridge/navigation_status
   /m20pro_tcp_bridge/relocalization_result
+  /m20pro_tcp_bridge/charge_result
   /NAV_STATUS
   /MOTION_STATE
   /MOTION_STATUS

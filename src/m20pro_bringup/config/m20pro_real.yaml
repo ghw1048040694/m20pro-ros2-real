@@ -61,6 +61,10 @@ m20pro_tcp_bridge:
     motion_state_command_topic: "/m20pro/motion_state_command"
     motion_state_result_topic: "/m20pro_tcp_bridge/motion_state_result"
     motion_state_response_timeout_s: 2.0
+    enable_charge_command: true
+    charge_command_topic: "/m20pro/charge_command"
+    charge_result_topic: "/m20pro_tcp_bridge/charge_result"
+    charge_response_timeout_s: 4.0
     enable_usage_mode_command: false
     usage_mode_command_topic: "/m20pro/usage_mode_command"
     enable_initialpose_relocalization: false

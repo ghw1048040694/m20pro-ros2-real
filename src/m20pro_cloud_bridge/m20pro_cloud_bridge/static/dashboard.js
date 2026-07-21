@@ -1335,6 +1335,13 @@
         return `雷达 ${status}`;
       }
       if (phase === "dwelling") return "停留/检测";
+      if (phase === "charging") {
+        const chargeStatus = String(
+          (activeTask && activeTask.charge_command_status) || "pending"
+        ).toLowerCase();
+        if (chargeStatus === "accepted") return "原厂已接受充电导航";
+        return "已到达充电点，正在请求原厂充电";
+      }
       if (phase === "cross_floor") return "跨楼层切换";
       if (phase === "completed") return "任务完成";
       if (activeTask && activeTask.status_message && activeTask.last_nav_goal_status === "idle") return activeTask.status_message;

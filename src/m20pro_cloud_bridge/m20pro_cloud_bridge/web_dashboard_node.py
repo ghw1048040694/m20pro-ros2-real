@@ -803,6 +803,11 @@ class WebDashboardNode(Node):
             str(self.get_parameter("motion_state_command_topic").value),
             10,
         )
+        self.charge_command_pub = self.create_publisher(
+            String,
+            str(self.get_parameter("charge_command_topic").value),
+            10,
+        )
         self.command_mux_mode_pub = self.create_publisher(
             String,
             str(self.get_parameter("command_mux_mode_request_topic").value),
@@ -877,6 +882,7 @@ class WebDashboardNode(Node):
             "gait_command": None,
             "gait_result": None,
             "motion_state_result": None,
+            "charge_command_result": None,
             "motion_state": None,
             "usage_mode_result": None,
             "localization_ok": None,
@@ -1022,6 +1028,10 @@ class WebDashboardNode(Node):
         self.declare_parameter("motion_state_result_topic", "/m20pro_tcp_bridge/motion_state_result")
         self.declare_parameter("motion_state_discovery_timeout_s", 2.0)
         self.declare_parameter("motion_state_result_timeout_s", 3.0)
+        self.declare_parameter("charge_command_topic", "/m20pro/charge_command")
+        self.declare_parameter("charge_result_topic", "/m20pro_tcp_bridge/charge_result")
+        self.declare_parameter("charge_command_discovery_timeout_s", 2.0)
+        self.declare_parameter("charge_command_timeout_s", 8.0)
         self.declare_parameter("usage_mode_result_topic", "/m20pro_tcp_bridge/usage_mode_result")
         self.declare_parameter("localization_ok_topic", "/m20pro_tcp_bridge/localization_ok")
         self.declare_parameter("navigation_status_topic", "/m20pro_tcp_bridge/navigation_status")
@@ -1381,6 +1391,7 @@ class WebDashboardNode(Node):
         self.create_subscription(String, self._topic("gait_command_topic"), self._on_gait_command, 10)
         self.create_subscription(String, self._topic("gait_result_topic"), self._on_gait_result, 10)
         self.create_subscription(String, self._topic("motion_state_result_topic"), self._on_motion_state_result, 10)
+        self.create_subscription(String, self._topic("charge_result_topic"), self._on_charge_result, 10)
         self.create_subscription(String, self._topic("usage_mode_result_topic"), self._on_usage_mode_result, 10)
         self.create_subscription(Bool, self._topic("localization_ok_topic"), self._on_localization_ok, 10)
         self.create_subscription(String, self._topic("navigation_status_topic"), self._on_navigation_status, 10)
@@ -1492,6 +1503,18 @@ class WebDashboardNode(Node):
         with self._motion_state_result_condition:
             self._motion_state_result_seq += 1
             self._motion_state_result_condition.notify_all()
+
+    def _on_charge_result(self, msg: String) -> None:
+        try:
+            result = json.loads(msg.data)
+        except (TypeError, ValueError):
+            result = {"status": "failed", "message": msg.data, "error_code": -1}
+        if not isinstance(result, dict):
+            result = {"status": "failed", "message": "invalid charge result", "error_code": -1}
+        with self._lock:
+            self._state["charge_command_result"] = dict(result)
+            self._state["charge_command_result"]["last_update"] = time.time()
+            self._mark_topic("charge_result")
 
     def _on_usage_mode_result(self, msg: String) -> None:
         with self._lock:
@@ -7190,6 +7213,9 @@ class WebDashboardNode(Node):
             failure = active_annotation_missing_failure(active)
             self._fail_active_task_from_payload(failure, task_id=active.get("task_id"))
             return
+        if active.get("phase") == "charging":
+            self._tick_charge_command(active, annotation)
+            return
         if active.get("phase") == "dwelling":
             decision = dwell_tick_decision(active, now_time=time.time())
             if decision.get("action") == "wait":
@@ -7556,6 +7582,9 @@ class WebDashboardNode(Node):
 
     def _begin_waypoint_dwell_or_advance(self, annotation: Dict[str, Any], reason: str) -> None:
         self._publish_zero_cmd(samples=3)
+        if str(annotation.get("manual_point_type") or "").strip().lower() == "charge":
+            self._start_charge_command(annotation, reason)
+            return
         dwell_s = annotation_dwell_s(annotation)
         if dwell_s > 0.0:
             active_snapshot = None
@@ -7736,6 +7765,124 @@ class WebDashboardNode(Node):
             self._reset_navigation_session("task_completed", clear_costmaps=True)
             self._append_event(str(result["operator_event"]), result["operator_payload"])
         self._dispatch_active_goal(force=True)
+
+    def _start_charge_command(self, annotation: Dict[str, Any], reason: str) -> None:
+        with self._data_lock:
+            active = dict(self._settings.get("active_task") or {})
+            if active.get("status") != "running":
+                return
+            if active.get("phase") == "charging":
+                return
+            semantics = annotation_semantics_payload(annotation)
+            vendor = dict(semantics.get("vendor_navigation") or {})
+            pose = dict(semantics.get("pose") or {})
+            request_id = new_id("charge")
+            updated = dict(active)
+            updated.update(
+                {
+                    "phase": "charging",
+                    "charge_command_id": request_id,
+                    "charge_command_status": "pending",
+                    "charge_command_started_at": now_text(),
+                    "charge_command_started_monotonic": time.monotonic(),
+                    "charge_command_message": "已到达充电点，正在请求原厂充电导航",
+                    "last_reached_at": now_text(),
+                    "last_reached_annotation_id": annotation.get("id"),
+                    "last_reached_reason": reason,
+                    "status_message": "已到达充电点，正在请求原厂进入充电",
+                }
+            )
+            self._append_active_task_timeline_event(
+                updated,
+                "charge_command_sent",
+                updated["status_message"],
+                {
+                    "annotation_id": annotation.get("id"),
+                    "request_id": request_id,
+                    "point_info": 3,
+                },
+            )
+            self._settings["active_task"] = updated
+            self._save_json("settings.json", self._settings)
+            active_snapshot = dict(updated)
+        discovery_timeout_s = max(
+            0.1, float(self.get_parameter("charge_command_discovery_timeout_s").value)
+        )
+        discovery_deadline = time.monotonic() + discovery_timeout_s
+        while rclpy.ok() and self.charge_command_pub.get_subscription_count() <= 0:
+            remaining = discovery_deadline - time.monotonic()
+            if remaining <= 0.0:
+                break
+            time.sleep(min(0.05, remaining))
+        if self.charge_command_pub.get_subscription_count() <= 0:
+            self._fail_active_task(
+                str(active_snapshot.get("task_id") or ""),
+                "充电命令桥未就绪，未下发原厂 PointInfo=3",
+                {
+                    "reason": "charge_command_unavailable",
+                    "request_id": active_snapshot.get("charge_command_id"),
+                    "discovery_timeout_s": discovery_timeout_s,
+                },
+            )
+            return
+        message = String()
+        message.data = json.dumps(
+            {
+                "request_id": active_snapshot.get("charge_command_id"),
+                "map_id": int(vendor.get("MapID", 0) or 0),
+                "x": float(pose.get("x", vendor.get("PosX", 0.0))),
+                "y": float(pose.get("y", vendor.get("PosY", 0.0))),
+                "z": float(pose.get("z", vendor.get("PosZ", 0.0))),
+                "yaw": float(pose.get("yaw", vendor.get("AngleYaw", 0.0))),
+                "gait": int(vendor.get("Gait", 12) or 12),
+                "speed": int(vendor.get("Speed", 1) or 1),
+                "point_info": 3,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        self.charge_command_pub.publish(message)
+        self._publish_active_waypoint(annotation, active_snapshot, "charging")
+
+    def _tick_charge_command(self, active: Dict[str, Any], annotation: Dict[str, Any]) -> None:
+        request_id = str(active.get("charge_command_id") or "")
+        with self._lock:
+            result = dict(self._state.get("charge_command_result") or {})
+        if request_id and str(result.get("request_id") or "") == request_id:
+            status = str(result.get("status") or "").strip().lower()
+            message = str(result.get("message") or "").strip()
+            if status == "accepted":
+                with self._data_lock:
+                    current = dict(self._settings.get("active_task") or active)
+                    current["charge_command_status"] = "accepted"
+                    current["charge_command_message"] = message or "原厂已接受充电导航 PointInfo=3"
+                    current["status_message"] = current["charge_command_message"]
+                    self._settings["active_task"] = current
+                    self._save_json("settings.json", self._settings)
+                self._publish_active_waypoint(annotation, current, "charging")
+                self._advance_active_task(annotation)
+                return
+            if status == "failed":
+                self._fail_active_task(
+                    str(active.get("task_id") or ""),
+                    message or "原厂充电命令被拒绝",
+                    {
+                        "reason": "charge_command_failed",
+                        "request_id": request_id,
+                        "error_code": result.get("error_code"),
+                    },
+                )
+                return
+        started = float(active.get("charge_command_started_monotonic") or 0.0)
+        timeout_s = max(2.0, float(self.get_parameter("charge_command_timeout_s").value))
+        if started > 0.0 and time.monotonic() - started > timeout_s:
+            self._fail_active_task(
+                str(active.get("task_id") or ""),
+                "等待原厂充电命令回执超时",
+                {"reason": "charge_command_timeout", "request_id": request_id, "timeout_s": timeout_s},
+            )
+            return
+        self._publish_active_waypoint(annotation, active, "charging")
 
     def _hold_active_task_for_radar_inspection(self, annotation: Dict[str, Any]) -> bool:
         if not bool(self.get_parameter("wait_for_radar_inspection").value):

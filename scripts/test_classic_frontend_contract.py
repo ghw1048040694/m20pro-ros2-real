@@ -192,8 +192,8 @@ def main() -> None:
     assert "function paintMapEditor" in script
     assert "button.textContent = item.label || item.id;" in script
     assert "button.textContent = `+ ${item.label || item.id}`" not in script
-    assert "20260721-teleop-4" in html
-    assert html.count("20260721-teleop-4") == 2
+    assert "20260721-charge-1" in html
+    assert html.count("20260721-charge-1") == 2
     for element_id in (
         "batteryStatusBtn",
         "batteryStatusPopover",

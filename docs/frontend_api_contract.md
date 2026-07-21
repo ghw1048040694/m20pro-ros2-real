@@ -1,6 +1,6 @@
 # M20Pro 前端 API 对接契约
 
-更新时间：2026-07-21 13:05 CST
+更新时间：2026-07-21 21:42 CST
 
 本文档是“M20 Pro ROS 2 跨楼层巡检导航系统”正式经典前端、甲方前端和外部功能包对接 104 Web 后端的接口契约。接口实现位于 `m20pro_cloud_bridge.web_dashboard_node`。以后新增、删除或修改接口字段时，必须同步更新本文档。
 
@@ -96,6 +96,7 @@
 | `path` | 当前规划路径，用于画导航线 |
 | `active_task` | 当前正在执行的任务状态，空闲时为 `null` |
 | `active_waypoint` | 当前任务点 JSON 字符串和解析结果 |
+| `charge_command_result` | 最近一次原厂充电导航请求的 JSON 回执；只在充电任务阶段使用 |
 | `detections` | YOLO 检测结果，来自 `/m20pro_yolov8_inspection/detections` |
 | `inspection_status` | YOLO 检测节点运行状态，来自 `/m20pro_yolov8_inspection/status` |
 | `camera_proxy` | 前后相机代理状态 |
@@ -682,7 +683,18 @@ local costmap 或 `/odom` 信息不完整。两种情况都应保持任务停止
 
 ### POST `/api/charge/one_key`
 
-按当前有效地图的唯一 `manual_point_type=charge` 点位启动一键充电任务，复用原厂 `PointInfo=3` 充电导航语义。没有充电点、存在多个充电点、当前任务运行中或网页遥控接管中都会拒绝；不会猜测充电桩坐标。
+按当前有效地图的唯一 `manual_point_type=charge` 点位启动一键充电任务。没有充电点、存在多个充电点、当前任务运行中或网页遥控接管中都会拒绝；不会猜测充电桩坐标。
+
+执行链路是固定的：先由 Nav2 导航到充电点；到点后任务进入 `phase=charging`，104 通过 `/m20pro/charge_command` 请求 TCP 桥下发原厂 `Type=1003/Command=1`，并强制使用 `PointInfo=3`；只有收到 `/m20pro_tcp_bridge/charge_result` 的 `status=accepted` 才将任务标记为完成。原厂拒绝、TCP 超时或桥未就绪都会将任务标记为失败，不会把“已到点”伪装成“已充电”。
+
+录包时应同时保留以下两个话题，用于核对请求和回执：
+
+```text
+/m20pro/charge_command
+/m20pro_tcp_bridge/charge_result
+```
+
+当前 103 固件不提供可用的独立充电状态查询接口，因此 `accepted` 的含义是“原厂已接受充电导航命令”，不是软件伪造的“正在充电”。如果原厂回执包含 `Status`/`Value`，会原样保存在回执的 `vendor_status`/`vendor_value` 字段；电流方向只能通过 `/BATTERY_DATA` 辅助观察。
 
 ```json
 {"ok": true, "charge_task_id": "task_xxx", "message": "已按当前地图充电点启动一键充电任务"}

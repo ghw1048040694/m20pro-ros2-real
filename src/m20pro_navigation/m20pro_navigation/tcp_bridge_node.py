@@ -1,8 +1,9 @@
 import math
+import json
 import socket
 import threading
 import time
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import rclpy
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, TransformStamped, Twist
@@ -92,6 +93,10 @@ class M20TcpBridge(Node):
         self.declare_parameter("motion_state_command_topic", "/m20pro/motion_state_command")
         self.declare_parameter("motion_state_result_topic", "/m20pro_tcp_bridge/motion_state_result")
         self.declare_parameter("motion_state_response_timeout_s", 2.0)
+        self.declare_parameter("enable_charge_command", True)
+        self.declare_parameter("charge_command_topic", "/m20pro/charge_command")
+        self.declare_parameter("charge_result_topic", "/m20pro_tcp_bridge/charge_result")
+        self.declare_parameter("charge_response_timeout_s", 4.0)
         self.declare_parameter("enable_usage_mode_command", False)
         self.declare_parameter("usage_mode_command_topic", "/m20pro/usage_mode_command")
         self.declare_parameter("enable_initialpose_relocalization", True)
@@ -141,6 +146,7 @@ class M20TcpBridge(Node):
         self.last_status_warning_time = None
         self.last_invalid_pose_warning_time = None
         self._motion_state_command_lock = threading.Lock()
+        self._charge_command_lock = threading.Lock()
         self.last_good_map_pose = None
         self.pending_jump_pose = None
         self.last_relocalization_request_time = None
@@ -175,6 +181,11 @@ class M20TcpBridge(Node):
             str(self.get_parameter("motion_state_result_topic").value),
             10,
         )
+        self.charge_result_pub = self.create_publisher(
+            String,
+            str(self.get_parameter("charge_result_topic").value),
+            10,
+        )
         self.usage_mode_result_pub = self.create_publisher(String, "~/usage_mode_result", 10)
 
         self.create_subscription(Twist, "/cmd_vel", self._on_cmd_vel, 10)
@@ -201,6 +212,13 @@ class M20TcpBridge(Node):
                 String,
                 str(self.get_parameter("motion_state_command_topic").value),
                 self._on_motion_state_command,
+                10,
+            )
+        if bool(self.get_parameter("enable_charge_command").value):
+            self.create_subscription(
+                String,
+                str(self.get_parameter("charge_command_topic").value),
+                self._on_charge_command,
                 10,
             )
         if bool(self.get_parameter("enable_usage_mode_command").value):
@@ -449,6 +467,125 @@ class M20TcpBridge(Node):
         msg = String()
         msg.data = text
         self.motion_state_result_pub.publish(msg)
+
+    def _on_charge_command(self, msg: String) -> None:
+        try:
+            payload = json.loads(msg.data)
+        except (TypeError, ValueError):
+            self._publish_charge_result("", "failed", "invalid JSON charge command", -1)
+            return
+        if not isinstance(payload, dict):
+            self._publish_charge_result("", "failed", "charge command must be an object", -1)
+            return
+        request_id = str(payload.get("request_id") or "").strip()
+        if not request_id:
+            self._publish_charge_result("", "failed", "charge command request_id is required", -1)
+            return
+        try:
+            items = {
+                "Value": 1,
+                "MapID": int(payload.get("map_id", 0)),
+                "PosX": float(payload["x"]),
+                "PosY": float(payload["y"]),
+                "PosZ": float(payload.get("z", 0.0)),
+                "AngleYaw": float(payload["yaw"]),
+                "PointInfo": 3,
+                "Gait": int(payload.get("gait", 12)),
+                "Speed": int(payload.get("speed", 1)),
+                "Manner": 0,
+                "ObsMode": 0,
+                "NavMode": 1,
+            }
+        except (KeyError, TypeError, ValueError):
+            self._publish_charge_result(request_id, "failed", "invalid charge target", -1)
+            return
+        if not all(math.isfinite(float(items[key])) for key in ("PosX", "PosY", "PosZ", "AngleYaw")):
+            self._publish_charge_result(request_id, "failed", "charge target is not finite", -1)
+            return
+        if not self._charge_command_lock.acquire(blocking=False):
+            self._publish_charge_result(request_id, "failed", "charge command busy", -1)
+            return
+        thread = threading.Thread(
+            target=self._send_charge_command,
+            args=(request_id, items),
+            name="m20pro-charge-command",
+            daemon=True,
+        )
+        thread.start()
+
+    def _send_charge_command(self, request_id: str, items: Dict[str, Any]) -> None:
+        try:
+            if not self._ensure_connected():
+                self._publish_charge_result(request_id, "failed", "tcp connection unavailable", -1)
+                return
+            response = self.client.request(
+                1003,
+                1,
+                items,
+                response_timeout=max(
+                    0.5,
+                    float(self.get_parameter("charge_response_timeout_s").value),
+                ),
+            )
+            response_items = patrol_items(response)
+            raw_error = response_items.get("ErrorCode")
+            try:
+                error_code = int(raw_error, 0) if isinstance(raw_error, str) else int(raw_error)
+            except (TypeError, ValueError):
+                error_code = -1
+            if error_code != 0:
+                self._publish_charge_result(
+                    request_id,
+                    "failed",
+                    "原厂拒绝充电导航 ErrorCode=0x%04X" % (error_code & 0xFFFF),
+                    error_code,
+                )
+                return
+            vendor_status = response_items.get("Status")
+            vendor_value = response_items.get("Value")
+            status_suffix = ""
+            if vendor_status is not None:
+                status_suffix = " Status=%s" % vendor_status
+            self._publish_charge_result(
+                request_id,
+                "accepted",
+                "原厂已接受充电导航 PointInfo=3%s" % status_suffix,
+                0,
+                vendor_status=vendor_status,
+                vendor_value=vendor_value,
+            )
+        except socket.timeout as exc:
+            self._publish_charge_result(request_id, "failed", "充电命令回执超时: %s" % exc, -1)
+        except (OSError, M20ProtocolError) as exc:
+            self._publish_charge_result(request_id, "failed", "充电命令发送失败: %s" % exc, -1)
+        finally:
+            self._charge_command_lock.release()
+
+    def _publish_charge_result(
+        self,
+        request_id: str,
+        status: str,
+        message: str,
+        error_code: int,
+        *,
+        vendor_status: Any = None,
+        vendor_value: Any = None,
+    ) -> None:
+        result = String()
+        payload = {
+            "request_id": request_id,
+            "status": status,
+            "message": message,
+            "error_code": int(error_code),
+            "point_info": 3,
+            "updated_at": time.time(),
+        }
+        if vendor_status is not None:
+            payload["vendor_status"] = vendor_status
+        if vendor_value is not None:
+            payload["vendor_value"] = vendor_value
+        result.data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        self.charge_result_pub.publish(result)
 
     def _on_usage_mode_command(self, msg: String) -> None:
         mode = self._resolve_usage_mode(msg.data)
