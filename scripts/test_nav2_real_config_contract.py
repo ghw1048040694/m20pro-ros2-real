@@ -277,6 +277,8 @@ def main() -> None:
     assert 'self.declare_parameter("output_cmd_vel_topic", "/cmd_vel")' in command_mux
     assert 'self.declare_parameter("initial_mode", "navigation")' in command_mux
     assert '"locked", "navigation", "teleop"' in command_mux
+    assert "self._watchdog_timer.cancel()" in command_mux
+    assert "self._watchdog_timer.reset()" in command_mux
 
     scan_selector = (
         ROOT

@@ -105,7 +105,8 @@ class CommandMuxNode(Node):
             lambda request, response: self._set_mode(response, "teleop", "operator_takeover"),
         )
         watchdog_hz = max(10.0, float(self.get_parameter("watchdog_rate_hz").value))
-        self.create_timer(1.0 / watchdog_hz, self._tick_watchdog)
+        self._watchdog_timer = self.create_timer(1.0 / watchdog_hz, self._tick_watchdog)
+        self._watchdog_timer.cancel()
         self._publish_zero()
         self._publish_status(self._last_status_reason)
 
@@ -136,6 +137,7 @@ class CommandMuxNode(Node):
         with self._lock:
             decision = self._arbiter.set_mode(mode, reason="mode_request_%s" % mode)
             self._last_status_reason = str(decision["reason"])
+            self._watchdog_timer.cancel()
         self._output_pub.publish(self._to_twist(decision["command"]))
         self._publish_status(self._last_status_reason)
 
@@ -143,6 +145,7 @@ class CommandMuxNode(Node):
         with self._lock:
             decision = self._arbiter.set_mode(mode, reason=reason)
             self._last_status_reason = reason
+            self._watchdog_timer.cancel()
         self._output_pub.publish(self._to_twist(decision["command"]))
         self._publish_status(reason)
         response.success = True
@@ -154,6 +157,12 @@ class CommandMuxNode(Node):
             decision = self._arbiter.accept(
                 source, self._twist_values(msg), now=time.monotonic()
             )
+            output_nonzero = bool(self._arbiter.output_nonzero)
+            if decision.get("publish"):
+                if output_nonzero:
+                    self._watchdog_timer.reset()
+                else:
+                    self._watchdog_timer.cancel()
         if decision.get("publish"):
             self._output_pub.publish(self._to_twist(decision["command"]))
 
@@ -164,6 +173,7 @@ class CommandMuxNode(Node):
             if reason:
                 self._last_status_reason = reason
         if decision.get("publish"):
+            self._watchdog_timer.cancel()
             self._output_pub.publish(self._to_twist(decision["command"]))
             self._publish_status(reason)
 
