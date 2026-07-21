@@ -1,6 +1,6 @@
 # M20Pro 前端 API 对接契约
 
-更新时间：2026-07-10 17:10 CST
+更新时间：2026-07-21 10:18 CST
 
 本文档是正式经典前端、甲方前端和外部功能包对接 104 Web 后端的接口契约。接口实现位于 `m20pro_cloud_bridge.web_dashboard_node`。以后新增、删除或修改接口字段时，必须同步更新本文档。
 
@@ -42,6 +42,8 @@
 3. 实时 `/map` 与某张固定地图一致时，`effective_map_id` 返回该固定地图 ID。
 4. 实时 `/map` 可用但匹配不上任何固定地图时，`effective_map_id = null`，前端不得显示旧点位。
 5. 切到“实时 /map”只是显示源变化，不会清除 `working_map_id`，也不会清除 `map_relocalization_required`。
+6. 项目 `floors` 是建图项目元数据，不是普通地图库白名单；普通地图只要自身楼层格式合法，就可以选择、绑定点位和重定位。
+7. 只有跨楼层路线与跨楼层任务使用严格路线楼层注册表。前端不得用项目楼层列表拒绝普通地图。
 
 甲方前端最推荐的做法：
 
@@ -255,6 +257,7 @@ DELETE /api/maps?id=<map_id>&cascade=true
 - 任务执行中不能删除地图；
 - `cascade=true` 会同步删除该地图的点位和依赖任务，并清除建图会话里的导入引用；
 - 只会物理删除 `map_archive_dir` 内由 104 管理且未被其他地图共用的目录，不会删除 106 原厂地图或工程目录外文件；
+- 删除地图不会删除项目的楼层元数据；项目楼层元数据也不能影响其他普通地图的选择和重定位；
 - 雷达历史结果是独立的交付证据，不随地图删除。
 
 选择固定地图：
@@ -313,6 +316,20 @@ DELETE /api/maps?id=<map_id>&cascade=true
 - Web 修饰只改变 104/Nav2 使用的二维占据栅格，不伪造 106 原厂地图路径；切换新版本时不会把 106 错误切回未修饰地图；
 - 保存接口不自动切图，调用方需要在操作者确认后再调用 `/api/maps/select`。
 
+响应核心字段：
+
+```json
+{
+  "ok": true,
+  "map": {"id": "map_new", "parent_map_id": "map_old", "source": "web_map_editor"},
+  "parent_map_id": "map_old",
+  "changed_cells": 42,
+  "cloned_annotations": 5,
+  "cloned_tasks": 2,
+  "message": "地图修饰已保存为新版本；原地图未覆盖"
+}
+```
+
 ### GET `/api/map`
 
 读取实时 Nav2 `/map`。返回 `OccupancyGrid` 派生 JSON，包含 `data`，体积较大，只在需要绘制实时地图时请求。
@@ -320,6 +337,12 @@ DELETE /api/maps?id=<map_id>&cascade=true
 ### GET `/api/map_file?map_id=<id>`
 
 读取固定地图文件，返回 `available`、`map_id`、`name`、`floor`、`width`、`height`、`resolution`、`origin`、`data` 等。体积较大，只在地图画布需要加载固定图时请求。
+
+### GET `/api/multi_floor`
+
+读取普通地图工作区、项目楼层元数据和跨楼层路线摘要。核心字段包括 `current_floor`、`selected_map_id`、`floors[]`、`routes[]`、`latest_mapping_session` 和 `identity_issues`。
+
+`floors[].route_configured=true` 才表示该楼层属于严格跨楼层路线配置；`registry_source=project` 仅表示建图项目登记，不能作为地图选择白名单。没有显式跨楼层路线注册表时，普通地图楼层会进入工作区；存在路线注册表时，跨楼层工作区只暴露路线已注册数据，但这不影响普通地图通过 `/api/maps/select` 选择和重定位。
 
 ## 点位接口
 
@@ -630,10 +653,11 @@ ROS 2 功能包也可以订阅：
   "x": 1.0,
   "y": 2.0,
   "z": 0.0,
-  "yaw": 1.57,
-  "floor": "F20"
+  "yaw": 1.57
 }
 ```
+
+正式前端不显示也不提交重定位楼层。后端从当前选中的固定地图取得楼层，并校验请求与地图身份一致。`floor` 仅为跨楼层内部事务和兼容调用保留；外部前端不得让操作者在重定位弹层中另选楼层。
 
 成功判据：
 
@@ -708,6 +732,8 @@ ROS 2 功能包也可以订阅：
 
 `mode` 取 `single` 或 `multi`。楼层可写数字、`F` 编号或地下层编号，例如 `7`、`F7`、`B1`；接口会统一保存为 `F7`、`B1`。`floors` 在多楼层模式下表示本次项目要建立的全部现场楼层，不表示机器狗当前实时楼层。正式前端不提交 `active_floor`，后端按 `floors` 顺序选择第一层作为初始步骤；API 自动化工具可以显式传入 `active_floor`，但必须属于 `floors`。后续步骤切换使用建图会话的逐层状态，不在创建表单重复选择。
 
+`map_name` 可留空，后端会生成 `<active_floor>_<时间>` 形式的唯一名称。每次新的建图操作都必须创建新会话；正式前端只允许复用当前页面尚未结束的 `created/ready/pending/waiting_manual` 会话，不会从 `latest_mapping_session` 恢复已保存、已拉取或已取消的历史会话。
+
 创建建图会话是登记新项目楼层的唯一入口，历史地图和点位不会反向创建楼层。登记楼层不会创建跨楼层路线，跨层任务仍要求显式路线配置（历史 F19/F20/F21 示例位于 `docs/archived_route_profiles/legacy_inspection_waypoints_f19_f20_f21.yaml`，默认运行时不加载）。
 
 ### POST `/api/mapping/start`
@@ -718,6 +744,13 @@ ROS 2 功能包也可以订阅：
 {"session_id": "session_xxx"}
 ```
 
+启动前置条件：
+
+- `created/ready/pending/waiting_manual` 会话可以启动；
+- `mapping` 返回 `code=mapping_session_busy`，防止重复启动；
+- `saved/imported/cancelled` 返回 `code=mapping_session_terminal`，调用方必须重新创建会话；
+- 进度 UI 只能根据本次接口响应和本次会话状态推进，不能把历史会话终态渲染成新任务进度。
+
 ### POST `/api/mapping/finish`
 
 保存/结束 106 建图。
@@ -725,6 +758,16 @@ ROS 2 功能包也可以订阅：
 ```json
 {"session_id": "session_xxx"}
 ```
+
+### POST `/api/mapping/select_floor`
+
+多楼层建图完成当前层后，切换会话的下一建图步骤。目标楼层必须属于会话 `floors`；会话处于 `mapping` 时拒绝切换。
+
+```json
+{"session_id": "session_xxx", "floor": "F8"}
+```
+
+响应返回更新后的 `session` 和当前 `step`。切换步骤不会自动启动建图，也不会自动拉取地图；调用方仍需依次调用 `/api/mapping/start`、`/api/mapping/finish` 和 `/api/mapping/import_active_map`。
 
 ### POST `/api/mapping/cancel`
 
@@ -747,6 +790,8 @@ ROS 2 功能包也可以订阅：
 ```
 
 导入只归档，不自动启用。启用地图仍需调用 `/api/maps/select`。
+
+存在建图会话时，后端按该会话的 `map_name` 查找 106 上最新的同名时间戳目录；不会因为 104 删除过同名地图就把旧会话重新当成新任务。`/api/maps` 删除只负责 104 业务地图库，如需清理 106 原厂包，必须另行确认 `/var/opt/robot/data/maps/active` 不指向目标目录后再精确删除。
 
 ## 跨楼层路线接口
 
