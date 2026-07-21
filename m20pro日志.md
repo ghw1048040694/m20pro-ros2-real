@@ -1,6 +1,12 @@
 # M20 Pro ROS 2 跨楼层巡检导航系统项目日志
 
-Last updated: 2026-07-21 14:55 CST
+Last updated: 2026-07-21 15:02 CST
+
+## 2026-07-21 15:02 CST - 遥控布局收敛版部署 104
+
+- 提交 `ba1d5b2` 已以 104-only 原子方式部署，104 五包构建成功，`m20pro-real.service=active`、`NRestarts=0`，未访问或重启 106，两端参数哈希仍一致。
+- 静态资源版本已为 `20260721-teleop-3`；前端布局收敛为“趴下/起立动态姿态按钮 + 软急停”、“人工接管 + 结束接管”两行，删除重复的“停止全部运动”，文案修正为“趴下”。
+- 104 只读验收：遥控状态 `available=true/active=false/mux_mode=navigation`，`/m20pro/motion_state_command` 已由 `m20pro_tcp_bridge` 订阅，电量 `/BATTERY_DATA` 正常返回电池电量、电压、电流和温度。本轮未发送任何姿态、软急停、充电、导航或速度指令。
 
 ## 2026-07-21 14:55 CST - 收敛遥控动作布局与姿态切换
 
@@ -14,7 +20,7 @@ Last updated: 2026-07-21 14:55 CST
 - 首次部署版 `ceaf187` 在 104 构建成功，前端资源 `20260721-teleop-2`、电池数据、遥控接口和运动状态 ROS 话题均已上线；`m20pro-real.service=active`、`NRestarts=0`，当前无活动任务。
 - 只读真机查询发现，开发手册中的 `Type=1002/Command=6` 在当前 103 固件上明确返回 `ErrorCode=57347 / Unsupported protocol type`，无法作为充电状态来源。
 - 从根因上移除每秒 `1002/6` 无效轮询及其 ROS/Web 状态链，避免空字段、额外 TCP 开销和日志噪声。电量下拉窗只展示 `/BATTERY_DATA` 真实提供的电量、电压、电流、温度、MOS/保护状态，并明确标注电流方向只是充放电判断，不伪造原厂状态。
-- 起立/赴下/软急停控制话题经 `ros2 node info /m20pro_tcp_bridge` 确认已有 `/m20pro/motion_state_command` 订阅；本轮只做图和接口发现验证，未实际发送任何运动状态或充电指令。
+- 起立/趴下/软急停控制话题经 `ros2 node info /m20pro_tcp_bridge` 确认已有 `/m20pro/motion_state_command` 订阅；本轮只做图和接口发现验证，未实际发送任何运动状态或充电指令。
 
 ## 2026-07-21 13:05 CST - 遥控动作与电池一键充电界面
 
