@@ -18,7 +18,7 @@ from m20pro_navigation.command_mux_contract import (  # noqa: E402
 LIMITS = {
     "max_forward_speed_mps": 0.18,
     "max_reverse_speed_mps": 0.12,
-    "max_lateral_speed_mps": 0.12,
+    "max_lateral_speed_mps": 0.18,
     "max_angular_speed_radps": 0.45,
 }
 
@@ -50,7 +50,7 @@ def main() -> None:
     )
     assert clamped["command"] == {
         "linear_x": 0.18,
-        "linear_y": -0.12,
+        "linear_y": -0.18,
         "angular_z": 0.45,
     }
     assert arbiter.watchdog(now=3.36)["publish"]
@@ -64,7 +64,7 @@ def main() -> None:
     diagonal = normalized_teleop_command(
         {"linear_x": 1, "linear_y": 1, "angular_z": 0}, **LIMITS
     )
-    assert diagonal["linear_x"] < 0.18 and diagonal["linear_y"] < 0.12
+    assert diagonal["linear_x"] < 0.18 and diagonal["linear_y"] < 0.18
     try:
         normalized_teleop_command(
             {"linear_x": 1.1, "linear_y": 0, "angular_z": 0}, **LIMITS

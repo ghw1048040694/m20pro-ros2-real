@@ -1000,7 +1000,7 @@ class WebDashboardNode(Node):
         self.declare_parameter("teleop_command_timeout_s", 0.35)
         self.declare_parameter("teleop_max_forward_speed_mps", 0.18)
         self.declare_parameter("teleop_max_reverse_speed_mps", 0.12)
-        self.declare_parameter("teleop_max_lateral_speed_mps", 0.12)
+        self.declare_parameter("teleop_max_lateral_speed_mps", 0.18)
         self.declare_parameter("teleop_max_angular_speed_radps", 0.45)
         self.declare_parameter("initialpose_topic", "/initialpose")
         self.declare_parameter("initialpose_covariance_xy", 0.25)

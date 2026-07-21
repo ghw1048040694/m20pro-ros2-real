@@ -615,7 +615,7 @@ local costmap 或 `/odom` 信息不完整。两种情况都应保持任务停止
     "limits": {
       "forward_mps": 0.18,
       "reverse_mps": 0.12,
-      "lateral_mps": 0.12,
+      "lateral_mps": 0.18,
       "angular_radps": 0.45
     }
   }
