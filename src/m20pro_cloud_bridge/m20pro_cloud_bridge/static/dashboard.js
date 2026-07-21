@@ -70,6 +70,17 @@
       loadingRadarResults: false,
       yoloControlBusy: false,
       yoloLiveRequestInFlight: false,
+      teleop: {
+        sessionId: null,
+        sequence: 0,
+        axes: {linear_x: 0, linear_y: 0, angular_z: 0},
+        pointers: new Map(),
+        keys: new Map(),
+        heartbeatTimer: null,
+        requestInFlight: false,
+        pendingCommand: false,
+        releasing: false
+      },
       floorControlsInitialized: false,
       lastMultiFloorRefreshAt: 0,
     };
@@ -1038,7 +1049,8 @@
       preflight: "preflightStatusPopover",
       radar: "radarStatusPopover",
       recording: "recordingStatusPopover",
-      task: "taskStatusPopover"
+      task: "taskStatusPopover",
+      teleop: "teleopStatusPopover"
     };
     const statusButtonIds = {
       map: "mapStatusBtn",
@@ -1046,7 +1058,8 @@
       preflight: "preflightStatusBtn",
       radar: "radarStatusBtn",
       recording: "recordingStatusBtn",
-      task: "taskStatusBtn"
+      task: "taskStatusBtn",
+      teleop: "teleopStatusBtn"
     };
     function positionStatusPopover(name) {
       const popover = $(statusPopoverIds[name]);
@@ -1080,6 +1093,7 @@
       }
     }
     function setStatusPopover(name, open) {
+      if (state.teleop.sessionId && (name !== "teleop" || !open)) return;
       if (open && name && state.mapEditorActive && !setMapEditorActive(false)) return;
       for (const [key, id] of Object.entries(statusPopoverIds)) {
         const popover = $(id);
@@ -1312,6 +1326,200 @@
       const index = Math.max(0, Number(activeTask.index) || 0);
       const phase = taskPhaseText(activeTask, waypoint);
       return total ? `第 ${Math.min(index + 1, total)} / ${total} 点 · ${phase}` : phase;
+    }
+    const teleopDirectionAxes = {
+      forward: {linear_x: 1, linear_y: 0, angular_z: 0},
+      backward: {linear_x: -1, linear_y: 0, angular_z: 0},
+      left: {linear_x: 0, linear_y: 1, angular_z: 0},
+      right: {linear_x: 0, linear_y: -1, angular_z: 0},
+      rotate_left: {linear_x: 0, linear_y: 0, angular_z: 1},
+      rotate_right: {linear_x: 0, linear_y: 0, angular_z: -1}
+    };
+    const teleopKeyDirections = {
+      w: "forward",
+      ArrowUp: "forward",
+      s: "backward",
+      ArrowDown: "backward",
+      a: "left",
+      ArrowLeft: "left",
+      d: "right",
+      ArrowRight: "right",
+      q: "rotate_left",
+      e: "rotate_right"
+    };
+    function teleopOwnsSession(serverState = null) {
+      const teleop = serverState || (state.latest && state.latest.teleoperation) || {};
+      return Boolean(state.teleop.sessionId && teleop.active);
+    }
+    function clearLocalTeleop() {
+      if (state.teleop.heartbeatTimer !== null) {
+        clearInterval(state.teleop.heartbeatTimer);
+        state.teleop.heartbeatTimer = null;
+      }
+      state.teleop.sessionId = null;
+      state.teleop.axes = {linear_x: 0, linear_y: 0, angular_z: 0};
+      state.teleop.pointers.clear();
+      state.teleop.keys.clear();
+      state.teleop.pendingCommand = false;
+      state.teleop.requestInFlight = false;
+      state.teleop.releasing = false;
+      for (const button of document.querySelectorAll("[data-teleop-direction]")) {
+        button.classList.remove("is-active");
+      }
+    }
+    function renderTeleoperation(teleop) {
+      const payload = teleop || {};
+      if (state.teleop.sessionId && payload.active === false) clearLocalTeleop();
+      const owns = teleopOwnsSession(payload);
+      const occupied = Boolean(payload.active && !owns);
+      const top = $("teleopTopStatus");
+      if (top) top.textContent = owns ? "接管中" : (occupied ? "已被接管" : "未接管");
+      const summary = $("teleopStatusSummary");
+      if (summary) {
+        const muxMode = String(payload.mux_mode || "unknown");
+        const heartbeat = Number(payload.heartbeat_age_s);
+        const heartbeatText = Number.isFinite(heartbeat) ? ` / 心跳 ${heartbeat.toFixed(2)}s` : "";
+        summary.className = `compact-status${payload.stair_session_active || (payload.active && muxMode !== "teleop") ? " fail" : ""}`;
+        if (payload.stair_session_active) summary.textContent = "楼梯感知会话进行中，禁止网页遥控";
+        else if (owns) summary.textContent = `人工接管中 / 仲裁 ${muxMode}${heartbeatText}`;
+        else if (occupied) summary.textContent = `其他操作端已接管 / 仲裁 ${muxMode}${heartbeatText}`;
+        else if (!payload.available) summary.textContent = "速度仲裁器未就绪，遥控不可用";
+        else summary.textContent = `自主导航 / 仲裁 ${muxMode}`;
+      }
+      const limits = payload.limits || {};
+      if ($("teleopLimits")) {
+        $("teleopLimits").textContent = `限速：前进 ${fmtNumber(Number(limits.forward_mps), 2)} m/s / 后退 ${fmtNumber(Number(limits.reverse_mps), 2)} m/s / 横移 ${fmtNumber(Number(limits.lateral_mps), 2)} m/s / 旋转 ${fmtNumber(Number(limits.angular_radps), 2)} rad/s`;
+      }
+      for (const button of document.querySelectorAll(".teleop-control")) button.disabled = !owns;
+      if ($("acquireTeleopBtn")) {
+        $("acquireTeleopBtn").disabled = Boolean(payload.active || payload.acquiring || payload.stair_session_active || !payload.available);
+      }
+      if ($("releaseTeleopBtn")) $("releaseTeleopBtn").disabled = !owns;
+    }
+    async function loadTeleopStatus() {
+      const payload = await fetchJson("/api/teleop/state");
+      state.latest = {...(state.latest || {}), teleoperation: payload.teleoperation || {}};
+      renderTeleoperation(payload.teleoperation || {});
+      return payload.teleoperation || {};
+    }
+    function recomputeTeleopAxes() {
+      const directions = [...state.teleop.pointers.values(), ...state.teleop.keys.values()];
+      const axes = {linear_x: 0, linear_y: 0, angular_z: 0};
+      for (const direction of directions) {
+        const value = teleopDirectionAxes[direction];
+        if (!value) continue;
+        axes.linear_x += value.linear_x;
+        axes.linear_y += value.linear_y;
+        axes.angular_z += value.angular_z;
+      }
+      axes.linear_x = Math.max(-1, Math.min(1, axes.linear_x));
+      axes.linear_y = Math.max(-1, Math.min(1, axes.linear_y));
+      axes.angular_z = Math.max(-1, Math.min(1, axes.angular_z));
+      state.teleop.axes = axes;
+      const activeDirections = new Set(directions);
+      for (const button of document.querySelectorAll("[data-teleop-direction]")) {
+        button.classList.toggle("is-active", activeDirections.has(button.dataset.teleopDirection));
+      }
+    }
+    async function sendTeleopCommand() {
+      const sessionId = state.teleop.sessionId;
+      if (!sessionId || state.teleop.releasing) return;
+      if (state.teleop.requestInFlight) {
+        state.teleop.pendingCommand = true;
+        return;
+      }
+      state.teleop.requestInFlight = true;
+      state.teleop.pendingCommand = false;
+      const sequence = state.teleop.sequence++;
+      const axes = {...state.teleop.axes};
+      try {
+        await api("POST", "/api/teleop/command", {
+          session_id: sessionId,
+          sequence,
+          ...axes
+        });
+      } catch (err) {
+        if (state.teleop.sessionId === sessionId) {
+          clearLocalTeleop();
+          renderTeleoperation({
+            active: false,
+            available: Boolean(state.latest && state.latest.teleoperation && state.latest.teleoperation.available),
+            last_stop_reason: "command_failed",
+            limits: (state.latest && state.latest.teleoperation && state.latest.teleoperation.limits) || {}
+          });
+          showOperationFeedback("遥控已停止", err, true);
+        }
+      } finally {
+        state.teleop.requestInFlight = false;
+        if (state.teleop.pendingCommand && state.teleop.sessionId === sessionId) {
+          state.teleop.pendingCommand = false;
+          sendTeleopCommand();
+        }
+      }
+    }
+    function startTeleopHeartbeat(timeoutSeconds) {
+      if (state.teleop.heartbeatTimer !== null) clearInterval(state.teleop.heartbeatTimer);
+      const timeoutMs = Number(timeoutSeconds) * 1000;
+      const intervalMs = Math.max(75, Math.min(120, Number.isFinite(timeoutMs) ? timeoutMs / 3 : 100));
+      state.teleop.heartbeatTimer = setInterval(sendTeleopCommand, intervalMs);
+      sendTeleopCommand();
+    }
+    function zeroTeleopMotion() {
+      state.teleop.pointers.clear();
+      state.teleop.keys.clear();
+      recomputeTeleopAxes();
+      sendTeleopCommand();
+    }
+    async function acquireTeleop() {
+      if (!window.confirm("确认人工接管？\n\n当前自主任务会立即终止，结束接管后不会自动恢复。")) return;
+      const button = $("acquireTeleopBtn");
+      button.disabled = true;
+      try {
+        const payload = await api("POST", "/api/teleop/acquire", {confirm: true});
+        state.teleop.sessionId = payload.session_id;
+        state.teleop.sequence = 0;
+        state.teleop.axes = {linear_x: 0, linear_y: 0, angular_z: 0};
+        state.latest = {...(state.latest || {}), teleoperation: payload.teleoperation || {active: true}};
+        renderTeleoperation(payload.teleoperation || {active: true, available: true});
+        startTeleopHeartbeat((payload.teleoperation || {}).command_timeout_s);
+      } catch (err) {
+        showOperationFeedback("人工接管失败", err, true);
+        loadTeleopStatus().catch(console.warn);
+      } finally {
+        button.disabled = false;
+      }
+    }
+    async function releaseTeleop({silent = false, closePopover = false} = {}) {
+      const sessionId = state.teleop.sessionId;
+      if (!sessionId || state.teleop.releasing) {
+        if (closePopover) setStatusPopover("", false);
+        return;
+      }
+      state.teleop.releasing = true;
+      zeroTeleopMotion();
+      try {
+        const payload = await api("POST", "/api/teleop/release", {session_id: sessionId});
+        state.latest = {...(state.latest || {}), teleoperation: payload.teleoperation || {active: false}};
+        if (!silent) showOperationFeedback("人工接管已结束", payload);
+      } catch (err) {
+        if (!silent) showOperationFeedback("结束接管异常", err, true);
+      } finally {
+        clearLocalTeleop();
+        renderTeleoperation((state.latest && state.latest.teleoperation) || {active: false});
+        if (closePopover) setStatusPopover("", false);
+      }
+    }
+    async function emergencyStopTeleop() {
+      clearLocalTeleop();
+      renderTeleoperation({active: false, available: true, limits: (state.latest && state.latest.teleoperation && state.latest.teleoperation.limits) || {}});
+      try {
+        const payload = await api("POST", "/api/teleop/emergency_stop", {});
+        state.latest = {...(state.latest || {}), teleoperation: payload.teleoperation || {active: false}};
+        renderTeleoperation(payload.teleoperation || {active: false});
+        showOperationFeedback("已停止全部运动", payload);
+      } catch (err) {
+        showOperationFeedback("停止指令失败", err, true);
+      }
     }
     function renderActiveTaskSummary(activeTask, waypoint) {
       const box = $("activeTaskSummary");
@@ -2537,6 +2745,7 @@
       const taskTop = $("taskTopStatus");
       const activeWaypoint = s.active_waypoint && s.active_waypoint.parsed ? s.active_waypoint.parsed : null;
       if (taskTop) taskTop.textContent = taskTopStatusText(s.active_task || null, activeWaypoint);
+      renderTeleoperation(s.teleoperation || {});
       const radarTop = $("radarTopStatus");
       if (radarTop) {
         const radarParsed = s.active_task && s.active_task.status === "running"
@@ -4368,14 +4577,93 @@
     });
     $("recordingStatusBtn").addEventListener("click", () => toggleStatusPopover("recording"));
     $("taskStatusBtn").addEventListener("click", () => toggleStatusPopover("task"));
+    $("teleopStatusBtn").addEventListener("click", () => {
+      toggleStatusPopover("teleop");
+      loadTeleopStatus().catch(console.warn);
+    });
     $("closeMapStatusBtn").addEventListener("click", () => setStatusPopover("", false));
     $("closeLocalizationStatusBtn").addEventListener("click", () => setStatusPopover("", false));
     $("closePreflightStatusBtn").addEventListener("click", () => setStatusPopover("", false));
     $("closeRadarStatusBtn").addEventListener("click", () => setStatusPopover("", false));
     $("closeRecordingStatusBtn").addEventListener("click", () => setStatusPopover("", false));
     $("closeTaskStatusBtn").addEventListener("click", () => setStatusPopover("", false));
+    $("closeTeleopStatusBtn").addEventListener("click", () => {
+      if (state.teleop.sessionId) releaseTeleop({silent: true, closePopover: true});
+      else setStatusPopover("", false);
+    });
     $("radarManualScanBtn").addEventListener("click", startManualRadarScan);
     $("refreshRadarStatusBtn").addEventListener("click", () => loadRadarStatus().catch(console.warn));
+    $("acquireTeleopBtn").addEventListener("click", acquireTeleop);
+    $("releaseTeleopBtn").addEventListener("click", () => releaseTeleop());
+    $("teleopEmergencyStopBtn").addEventListener("click", emergencyStopTeleop);
+    $("teleopZeroBtn").addEventListener("pointerdown", event => {
+      if (!state.teleop.sessionId) return;
+      event.preventDefault();
+      zeroTeleopMotion();
+    });
+    for (const button of document.querySelectorAll("[data-teleop-direction]")) {
+      const finishPointer = event => {
+        if (!state.teleop.pointers.has(event.pointerId)) return;
+        state.teleop.pointers.delete(event.pointerId);
+        recomputeTeleopAxes();
+        sendTeleopCommand();
+      };
+      button.addEventListener("pointerdown", event => {
+        if (!state.teleop.sessionId) return;
+        event.preventDefault();
+        button.setPointerCapture(event.pointerId);
+        state.teleop.pointers.set(event.pointerId, button.dataset.teleopDirection);
+        recomputeTeleopAxes();
+        sendTeleopCommand();
+      });
+      button.addEventListener("pointerup", finishPointer);
+      button.addEventListener("pointercancel", finishPointer);
+      button.addEventListener("lostpointercapture", finishPointer);
+    }
+    document.addEventListener("keydown", event => {
+      const popover = $("teleopStatusPopover");
+      if (!state.teleop.sessionId || !popover || popover.hidden) return;
+      const target = event.target;
+      if (target && target.matches && target.matches("input, textarea, select")) return;
+      if (event.key === " ") {
+        event.preventDefault();
+        zeroTeleopMotion();
+        return;
+      }
+      const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+      const direction = teleopKeyDirections[key];
+      if (!direction) return;
+      event.preventDefault();
+      state.teleop.keys.set(key, direction);
+      recomputeTeleopAxes();
+      sendTeleopCommand();
+    });
+    document.addEventListener("keyup", event => {
+      if (!state.teleop.sessionId) return;
+      const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+      if (!state.teleop.keys.has(key)) return;
+      event.preventDefault();
+      state.teleop.keys.delete(key);
+      recomputeTeleopAxes();
+      sendTeleopCommand();
+    });
+    window.addEventListener("blur", () => {
+      if (state.teleop.sessionId) releaseTeleop({silent: true});
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden && state.teleop.sessionId) releaseTeleop({silent: true});
+    });
+    window.addEventListener("pagehide", () => {
+      const sessionId = state.teleop.sessionId;
+      if (!sessionId) return;
+      clearLocalTeleop();
+      fetch("/api/teleop/release", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({session_id: sessionId}),
+        keepalive: true
+      }).catch(() => {});
+    });
     document.addEventListener("pointerdown", event => {
       const target = event.target;
       if (isLocalizationMapInteraction(target)) return;

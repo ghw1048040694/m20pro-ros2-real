@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>M20 Pro ROS 2 跨楼层巡检导航系统</title>
   <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="/static/dashboard.css?v=20260720-mapping-session-1" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=20260721-teleop-1" />
 
 </head>
 <body>
@@ -18,6 +18,7 @@
       <button id="localizationStatusBtn" class="status-chip status-action" type="button" aria-expanded="false"><span>定位</span><strong id="localization">-</strong></button>
       <button id="preflightStatusBtn" class="status-chip status-action" type="button" aria-expanded="false" title="查看基础自检结果"><span>自检</span><strong id="preflightTopStatus">尚未自检</strong></button>
       <button id="taskStatusBtn" class="status-chip status-action" type="button" aria-expanded="false"><span>任务</span><strong id="taskTopStatus">空闲</strong></button>
+      <button id="teleopStatusBtn" class="status-chip status-action" type="button" aria-expanded="false" title="人工接管机器狗"><span>遥控</span><strong id="teleopTopStatus">未接管</strong></button>
       <button id="radarStatusBtn" class="status-chip status-action" type="button" aria-expanded="false" title="查看雷达状态并手动启动扫描"><span>雷达</span><strong id="radarTopStatus">等待</strong></button>
       <button id="recordingStatusBtn" class="status-chip status-action" type="button" aria-expanded="false"><span>录包</span><strong id="recordingTopStatus">未录制</strong></button>
     </div>
@@ -70,6 +71,23 @@
       <button class="danger" id="stopTaskBtn">停止当前任务</button>
       <button class="danger" id="resetTaskSessionBtn" title="停止残留目标、发送零速度并清理导航会话和代价地图">清理导航会话</button>
     </div>
+  </section>
+  <section id="teleopStatusPopover" class="status-popover" hidden>
+    <div class="status-popover-head"><strong>人工遥控</strong><button id="closeTeleopStatusBtn" class="icon-button" type="button" title="关闭" aria-label="关闭">×</button></div>
+    <div id="teleopStatusSummary" class="compact-status">等待速度仲裁器</div>
+    <div class="teleop-pad" aria-label="机器狗遥控方向键">
+      <button class="teleop-control" type="button" data-teleop-direction="rotate_left" title="向左旋转" aria-label="向左旋转" disabled>↶</button>
+      <button class="teleop-control" type="button" data-teleop-direction="forward" title="向前" aria-label="向前" disabled>↑</button>
+      <button class="teleop-control" type="button" data-teleop-direction="rotate_right" title="向右旋转" aria-label="向右旋转" disabled>↷</button>
+      <button class="teleop-control" type="button" data-teleop-direction="left" title="向左横移" aria-label="向左横移" disabled>←</button>
+      <button id="teleopZeroBtn" class="teleop-control teleop-stop" type="button" title="零速停止" aria-label="零速停止" disabled>■</button>
+      <button class="teleop-control" type="button" data-teleop-direction="right" title="向右横移" aria-label="向右横移" disabled>→</button>
+      <span></span>
+      <button class="teleop-control" type="button" data-teleop-direction="backward" title="后退" aria-label="后退" disabled>↓</button>
+      <span></span>
+    </div>
+    <div id="teleopLimits" class="small"></div>
+    <div class="actions"><button id="acquireTeleopBtn" class="primary" type="button">人工接管</button><button id="releaseTeleopBtn" type="button" disabled>结束接管</button><button id="teleopEmergencyStopBtn" class="danger" type="button">停止全部运动</button></div>
   </section>
   <main>
     <section class="map-wrap">
@@ -370,7 +388,7 @@
   </dialog>
 
   <script src="http://10.21.31.104:8888/video1/hls.min.js"></script>
-  <script src="/static/dashboard.js?v=20260720-mapping-session-1"></script>
+  <script src="/static/dashboard.js?v=20260721-teleop-1"></script>
 
 </body>
 </html>

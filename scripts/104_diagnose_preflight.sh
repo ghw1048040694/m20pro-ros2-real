@@ -289,7 +289,7 @@ PY
 if command -v ros2 >/dev/null 2>&1; then
   echo "[topics]"
   ros2 topic list 2>/dev/null \
-    | grep -E '^/(scan|ODOM|map|tf|local_costmap/costmap|global_costmap/costmap|m20pro_tcp_bridge/(navigation_status|localization_ok|map_pose|usage_mode_result))$' \
+    | grep -E '^/(scan|ODOM|map|tf|local_costmap/costmap|global_costmap/costmap|m20pro/cmd_vel_mux/status|m20pro_tcp_bridge/(navigation_status|localization_ok|map_pose|usage_mode_result))$' \
     | sort || true
   echo
   echo "[edge scan topic info]"
@@ -297,7 +297,7 @@ if command -v ros2 >/dev/null 2>&1; then
   echo
   echo "[nodes]"
   ros2 node list 2>/dev/null \
-    | grep -E '^/(m20pro_nav2_startup_gate|m20pro_tcp_bridge|m20pro_web_dashboard|controller_server|planner_server|bt_navigator|map_server|m20pro_floor_manager)$' \
+    | grep -E '^/(m20pro_nav2_startup_gate|m20pro_tcp_bridge|m20pro_command_mux|m20pro_web_dashboard|controller_server|planner_server|bt_navigator|map_server|m20pro_floor_manager)$' \
     | sort || true
 else
   echo "ros2 command not available in this shell"

@@ -6,7 +6,7 @@
 #
 # 不要直接修改 104/106 上自动生成的 /etc 配置文件。
 # 感知阈值只能改变软件判定，不能提高机器狗真实的爬楼、关节或附着能力。
-schema_version: 2                 # 配置结构版本，程序使用，禁止自行修改
+schema_version: 3                 # 配置结构版本，程序使用，禁止自行修改
 profile_name: default_field       # 配置名称，仅允许 ASCII 字母、数字、点、下划线和短横线
 
 # 点云转二维激光参数（运行在 106）
@@ -88,6 +88,16 @@ navigation:
   global_planner:
     expected_frequency_hz: 1.0    # 期望全局规划频率，单位 Hz
     goal_tolerance_m: 0.50        # 目标被占用时搜索附近可达点的容差，单位 m；不得小于到点位置容差
+
+# 网页人工接管参数；遥控与 Nav2 经速度仲裁后才能进入 103 运动链路。
+teleoperation:
+  watchdog_rate_hz: 20.0          # 速度仲裁器检查指令超时的频率，单位 Hz
+  command_timeout_s: 0.35         # 网页遥控心跳超过该时间立即零速停车，单位 s
+  navigation_timeout_s: 0.60      # Nav2 速度样本超过该时间立即零速停车，单位 s
+  max_forward_speed_mps: 0.18     # 遥控最大前进速度，单位 m/s
+  max_reverse_speed_mps: 0.12     # 遥控最大后退速度，单位 m/s
+  max_lateral_speed_mps: 0.12     # 遥控最大横移速度，单位 m/s
+  max_angular_speed_radps: 0.45   # 遥控最大旋转角速度，单位 rad/s
 
 # 定位稳定性高级参数；现场调整时一次只改一组，并结合 rosbag 验证。
 localization:

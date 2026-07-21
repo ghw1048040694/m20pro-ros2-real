@@ -59,11 +59,13 @@ def main() -> None:
             "stair_safety",
             "stair_transition",
             "navigation",
+            "teleoperation",
             "localization",
         )
     }
-    assert leaf_count(editable) == 67
+    assert leaf_count(editable) == 74
     assert leaf_count(editable["navigation"]) == 28
+    assert leaf_count(editable["teleoperation"]) == 7
 
     typo = raw_profile()
     typo["stair"]["max_step_heigth_m"] = typo["stair"].pop("max_step_height_m")
@@ -87,6 +89,15 @@ def main() -> None:
     unsafe_speed["navigation"]["controller"]["stopped_linear_speed_mps"] = 0.50
     assert rejected(unsafe_speed)
 
+    unsafe_teleop = raw_profile()
+    unsafe_teleop["teleoperation"]["max_forward_speed_mps"] = 0.60
+    assert rejected(unsafe_teleop)
+
+    weak_teleop_watchdog = raw_profile()
+    weak_teleop_watchdog["teleoperation"]["watchdog_rate_hz"] = 10.0
+    weak_teleop_watchdog["teleoperation"]["command_timeout_s"] = 0.20
+    assert rejected(weak_teleop_watchdog)
+
     impossible_costmap_rate = raw_profile()
     impossible_costmap_rate["navigation"]["costmap"]["local_publish_frequency_hz"] = 10.0
     impossible_costmap_rate["navigation"]["costmap"]["local_update_frequency_hz"] = 8.0
@@ -103,7 +114,7 @@ def main() -> None:
     assert rejected(unsafe_localization)
 
     legacy_schema = raw_profile()
-    legacy_schema["schema_version"] = 1
+    legacy_schema["schema_version"] = 2
     assert rejected(legacy_schema)
 
     changed = deepcopy(raw_profile())

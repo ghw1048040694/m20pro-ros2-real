@@ -16,6 +16,7 @@ def generate_launch_description():
     params_file = LaunchConfiguration("params_file")
     default_bt_xml_filename = LaunchConfiguration("default_bt_xml_filename")
     map_subscribe_transient_local = LaunchConfiguration("map_subscribe_transient_local")
+    cmd_vel_topic = LaunchConfiguration("cmd_vel_topic")
 
     # Real tasks sequence NavigateToPose actions in the project task manager.
     # Keeping waypoint_follower in this lifecycle makes an unused component a
@@ -26,7 +27,7 @@ def generate_launch_description():
         "recoveries_server",
         "bt_navigator",
     ]
-    remappings = [("/tf", "tf"), ("/tf_static", "tf_static")]
+    remappings = [("/tf", "tf"), ("/tf_static", "tf_static"), ("cmd_vel", cmd_vel_topic)]
     configured_params = RewrittenYaml(
         source_file=params_file,
         root_key=namespace,
@@ -58,6 +59,7 @@ def generate_launch_description():
                 ),
             ),
             DeclareLaunchArgument("map_subscribe_transient_local", default_value="true"),
+            DeclareLaunchArgument("cmd_vel_topic", default_value="/cmd_vel_nav"),
             Node(
                 package="nav2_controller",
                 executable="controller_server",

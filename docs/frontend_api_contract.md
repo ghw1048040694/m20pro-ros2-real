@@ -1,6 +1,6 @@
 # M20Pro 前端 API 对接契约
 
-更新时间：2026-07-21 10:29 CST
+更新时间：2026-07-21 11:28 CST
 
 本文档是“M20 Pro ROS 2 跨楼层巡检导航系统”正式经典前端、甲方前端和外部功能包对接 104 Web 后端的接口契约。接口实现位于 `m20pro_cloud_bridge.web_dashboard_node`。以后新增、删除或修改接口字段时，必须同步更新本文档。
 
@@ -582,6 +582,89 @@ local costmap 或 `/odom` 信息不完整。两种情况都应保持任务停止
 | --- | --- |
 | `web_manual_stop` | 操作员停止任务 |
 | `web_manual_reset` | 操作员复位导航会话，会发送停止/零速度并清理导航显示状态 |
+
+## 人工遥控接管
+
+遥控不直接抢占 Nav2 的 `/cmd_vel`。Nav2 发布 `/cmd_vel_nav`，网页发布 `/cmd_vel_teleop`，`m20pro_command_mux` 以 `navigation / teleop / locked` 三态仲裁后才向 TCP bridge 的 `/cmd_vel` 输出。任何模式切换、指令超时或异常值都先输出零速度。
+
+安全规则：
+
+- 只有 104 以 `move` 模式运行、速度仲裁器就绪且楼梯感知会话未激活时可以接管。
+- 接管前后端先停止当前任务；结束接管后仲裁器进入 `locked`，旧任务不会自动恢复。
+- 同一时间只允许一个遥控会话；指令必须带会话 ID 和单调递增序号，迟到指令被忽略。
+- 浏览器必须在 `teleoperation.command_timeout_s` 内续租。松键、失焦、页面隐藏、断网或后端异常都会零速停车；仲裁器还有独立的第二道超时保护。
+- 本接口是运动控制面，在 VPN、身份认证和访问控制完成前不得经内网穿透直接暴露到公网。
+
+### GET `/api/teleop/state`
+
+读取遥控可用性、接管状态、仲裁模式、心跳年龄和限速。不返回当前会话 ID。`GET /api/state` 的 `teleoperation` 字段与此结构一致。
+
+```json
+{
+  "ok": true,
+  "teleoperation": {
+    "available": true,
+    "active": false,
+    "acquiring": false,
+    "status": "inactive",
+    "mux_mode": "locked",
+    "stair_session_active": false,
+    "command_timeout_s": 0.35,
+    "limits": {
+      "forward_mps": 0.18,
+      "reverse_mps": 0.12,
+      "lateral_mps": 0.12,
+      "angular_radps": 0.45
+    }
+  }
+}
+```
+
+### POST `/api/teleop/acquire`
+
+显式确认并申请人工接管。
+
+```json
+{"confirm": true}
+```
+
+成功后返回本操作端专用的 `session_id`。调用方必须立即开始发送指令心跳，不得将该 ID 持久化或转发给其他操作端。
+
+```json
+{
+  "ok": true,
+  "session_id": "teleop_xxx",
+  "message": "已终止自主任务并进入人工接管"
+}
+```
+
+### POST `/api/teleop/command`
+
+三个轴都是 `[-1, 1]` 的归一化值，后端再按统一现场参数换算为实际速度。`sequence` 从 `0` 开始严格递增。
+
+```json
+{
+  "session_id": "teleop_xxx",
+  "sequence": 12,
+  "linear_x": 1.0,
+  "linear_y": 0.0,
+  "angular_z": 0.0
+}
+```
+
+停止但保持接管时发三轴全 `0`。不允许超范围、非有限数、无会话或无序号指令。
+
+### POST `/api/teleop/release`
+
+```json
+{"session_id": "teleop_xxx"}
+```
+
+发布多个零速样本、结束会话并把仲裁器切到 `locked`。返回成功不代表恢复自主任务。
+
+### POST `/api/teleop/emergency_stop`
+
+无请求字段。停止当前任务、人工接管和所有网页运动指令，最终保持 `locked`。该接口可用于无法取得当前遥控会话 ID 时的安全停止。
 
 ### POST `/api/tasks/update`
 

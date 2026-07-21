@@ -26,6 +26,12 @@ from m20pro_navigation.field_profile_contract import (  # noqa: E402
 DEFAULT_PROFILE = ROOT / "src/m20pro_bringup/config/m20pro_field_profile.yaml"
 
 
+def leaf_count(value: object) -> int:
+    if isinstance(value, dict):
+        return sum(leaf_count(item) for item in value.values())
+    return 1
+
+
 def profile_summary(profile: dict) -> dict:
     return {
         "profile_name": profile["profile_name"],
@@ -36,6 +42,7 @@ def profile_summary(profile: dict) -> dict:
         "stair_safety": profile["stair_safety"],
         "stair_transition": profile["stair_transition"],
         "navigation": profile["navigation"],
+        "teleoperation": profile["teleoperation"],
         "localization": profile["localization"],
     }
 
@@ -148,7 +155,34 @@ def main() -> int:
             summary["navigation"]["costmap"]["inflation_radius_m"],
         )
     )
-    print("editable field parameters: 67 (navigation: 28)")
+    print(
+        "teleop forward/reverse/lateral/yaw: %.2f / %.2f / %.2f m/s / %.2f rad/s"
+        % (
+            summary["teleoperation"]["max_forward_speed_mps"],
+            summary["teleoperation"]["max_reverse_speed_mps"],
+            summary["teleoperation"]["max_lateral_speed_mps"],
+            summary["teleoperation"]["max_angular_speed_radps"],
+        )
+    )
+    editable_stair = dict(summary["stair"])
+    editable_stair.pop("obstacle_height_m", None)
+    editable_groups = [
+        summary["scan"],
+        editable_stair,
+        summary["stair_safety"],
+        summary["stair_transition"],
+        summary["navigation"],
+        summary["teleoperation"],
+        summary["localization"],
+    ]
+    print(
+        "editable field parameters: %d (navigation: %d, teleoperation: %d)"
+        % (
+            sum(leaf_count(group) for group in editable_groups),
+            leaf_count(summary["navigation"]),
+            leaf_count(summary["teleoperation"]),
+        )
+    )
     return 0
 
 

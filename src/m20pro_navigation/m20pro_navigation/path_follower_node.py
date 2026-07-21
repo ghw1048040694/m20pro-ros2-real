@@ -18,7 +18,7 @@ class PathFollower(Node):
         super().__init__("m20pro_path_follower")
         self.declare_parameter("pose_topic", "/m20pro_tcp_bridge/map_pose")
         self.declare_parameter("path_topic", "/planned_path")
-        self.declare_parameter("cmd_vel_topic", "/cmd_vel")
+        self.declare_parameter("cmd_vel_topic", "/cmd_vel_nav")
         self.declare_parameter("obstacle_topic", "/m20pro_tcp_bridge/obstacle_active")
         self.declare_parameter("scan_topic", "/scan")
         self.declare_parameter("lookahead_m", 0.8)

@@ -192,8 +192,29 @@ def main() -> None:
     assert "function paintMapEditor" in script
     assert "button.textContent = item.label || item.id;" in script
     assert "button.textContent = `+ ${item.label || item.id}`" not in script
-    assert "20260720-mapping-session-1" in html
-    assert html.count("20260720-mapping-session-1") == 2
+    assert "20260721-teleop-1" in html
+    assert html.count("20260721-teleop-1") == 2
+    for element_id in (
+        "teleopStatusBtn",
+        "teleopStatusPopover",
+        "acquireTeleopBtn",
+        "releaseTeleopBtn",
+        "teleopEmergencyStopBtn",
+        "teleopZeroBtn",
+    ):
+        assert f'id="{element_id}"' in html
+    for endpoint in (
+        "/api/teleop/state",
+        "/api/teleop/acquire",
+        "/api/teleop/command",
+        "/api/teleop/release",
+        "/api/teleop/emergency_stop",
+    ):
+        assert endpoint in script or endpoint in backend
+    assert "function startTeleopHeartbeat" in script
+    assert "window.addEventListener(\"blur\"" in script
+    assert "document.addEventListener(\"visibilitychange\"" in script
+    assert "teleop-pad" in css
     assert 'id="locFloor"' not in html
     assert '$("locFloor")' not in script
     assert "mappingMapNameTouched" in script

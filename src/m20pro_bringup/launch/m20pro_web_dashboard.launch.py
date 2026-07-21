@@ -6,10 +6,18 @@ from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
+from m20pro_navigation.field_profile_contract import (
+    load_field_profile,
+    web_teleoperation_field_parameters,
+)
 
 
 def generate_launch_description():
     bringup_share = get_package_share_directory("m20pro_bringup")
+    field_profile = load_field_profile(
+        os.path.join(bringup_share, "config", "m20pro_field_profile.yaml")
+    )
+    web_teleoperation_parameters = web_teleoperation_field_parameters(field_profile)
 
     host = LaunchConfiguration("host")
     port = LaunchConfiguration("port")
@@ -156,6 +164,9 @@ def generate_launch_description():
                         value_type=float,
                     ),
                     "radar_results_dir": radar_results_dir,
+                    "cmd_vel_topic": "/cmd_vel_nav",
+                    "teleop_cmd_vel_topic": "/cmd_vel_teleop",
+                    **web_teleoperation_parameters,
                 }
             ],
         ),

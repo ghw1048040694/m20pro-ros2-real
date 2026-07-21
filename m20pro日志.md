@@ -1,6 +1,16 @@
 # M20 Pro ROS 2 跨楼层巡检导航系统项目日志
 
-Last updated: 2026-07-21 10:29 CST
+Last updated: 2026-07-21 11:28 CST
+
+## 2026-07-21 11:28 CST - 新增网页人工遥控与速度仲裁安全链路
+
+- 根因架构：旧系统的 Nav2、`floor_manager` 和 Web 零速指令共用 `/cmd_vel`，若直接增加遥控按钮会产生自主/人工指令争抢。新增 `m20pro_command_mux`，Nav2/备用跟随器/Web 导航零速统一走 `/cmd_vel_nav`，网页遥控走 `/cmd_vel_teleop`，只有仲裁器可向 TCP bridge 的最终 `/cmd_vel` 输出。
+- 仲裁合同：建立 `navigation / teleop / locked` 三态状态机；任何切换均先零速，非当前源指令直接丢弃，Nav2 和遥控均有独立指令超时。结束人工接管后进入 `locked`，不会重放旧 Nav2 速度；只有操作员重新开始任务才恢复 `navigation`。
+- Web 安全会话：接管前先确认 104 为 `move` 模式并终止当前任务；同时只允许一个临时会话，指令带会话 ID 和单调序号。松键、浏览器失焦/隐藏、断网或 0.35s 心跳超时均零速并锁定。楼梯三维感知会话活跃时禁止网页接管，台阶上仍必须使用原厂手柄。
+- 前端/API：状态栏新增紧凑“遥控”弹层，包含前后/横移/旋转、零速、结束接管和停止全部运动；新增 `GET /api/teleop/state` 及 `acquire/command/release/emergency_stop` 接口。未完成 VPN、身份认证和 ACL 前，这组运动 API 不得直接暴露到公网。
+- 唯一参数源：`m20pro_field_profile.yaml` 升级为 schema v3，新增 7 个 `teleoperation` 限速/超时参数，现场参数总数由 67 增至 74；校验器拒绝遥控限速超过 Nav2 上限或看门狗样本不足的配置。录包增加 `/cmd_vel_nav`、`/cmd_vel_teleop` 和仲裁状态，可直接追溯三段速度。
+- 性能边界：遥控未启用时前端不发心跳；仲裁器空闲时只执行 20Hz 时间比较。上位机 Humble 本地实测仲裁子进程 RSS 约 56MB、约占单核 1.4%，新增本机 ROS 转发远小于 Nav2 10Hz 控制周期；104 真实数据需部署后复核。
+- 验证：全量 `scripts/test_*.py`、JavaScript/Python 语法、`git diff --check` 和 Humble 三包构建全部通过；本地独立节点验证了 `navigation -> teleop -> locked` 切换和非 `move` 模式拒绝接管。桌面/390px 窄屏布局截图无重叠。本轮未访问 103/104/106，未更改网络，未发布任何非零速、导航、重定位或建图指令，尚未部署真机。
 
 ## 2026-07-21 10:29 CST - 统一系统对外名称
 

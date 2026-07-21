@@ -27,8 +27,12 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, String
-from std_srvs.srv import SetBool
+from std_srvs.srv import SetBool, Trigger
 from visualization_msgs.msg import Marker, MarkerArray
+from m20pro_navigation.command_mux_contract import (
+    normalized_teleop_command,
+    teleop_release_decision,
+)
 
 from .active_task_contract import (
     advance_active_task_state,
@@ -757,6 +761,17 @@ class WebDashboardNode(Node):
         self._startup_map_sync_inflight = False
         self._floor_switch_lock = threading.Lock()
         self._floor_switch_inflight: Optional[str] = None
+        self._teleop_lock = threading.RLock()
+        self._teleop_acquiring = False
+        self._teleop_session: Dict[str, Any] = {
+            "active": False,
+            "session_id": None,
+            "started_at": None,
+            "last_heartbeat_monotonic": None,
+            "last_sequence": -1,
+            "command": {"linear_x": 0.0, "linear_y": 0.0, "angular_z": 0.0},
+            "last_stop_reason": "not_started",
+        }
 
         self.floor_goal_pub = self.create_publisher(
             PoseStamped,
@@ -771,6 +786,16 @@ class WebDashboardNode(Node):
         self.cmd_vel_pub = self.create_publisher(
             Twist,
             str(self.get_parameter("cmd_vel_topic").value),
+            10,
+        )
+        self.teleop_cmd_vel_pub = self.create_publisher(
+            Twist,
+            str(self.get_parameter("teleop_cmd_vel_topic").value),
+            10,
+        )
+        self.command_mux_mode_pub = self.create_publisher(
+            String,
+            str(self.get_parameter("command_mux_mode_request_topic").value),
             10,
         )
         self.active_waypoint_pub = self.create_publisher(
@@ -822,10 +847,23 @@ class WebDashboardNode(Node):
             SetBool,
             str(self.get_parameter("inspection_control_service").value),
         )
+        self.command_mux_clients = {
+            "locked": self.create_client(
+                Trigger, str(self.get_parameter("command_mux_lock_service").value)
+            ),
+            "navigation": self.create_client(
+                Trigger, str(self.get_parameter("command_mux_navigation_service").value)
+            ),
+            "teleop": self.create_client(
+                Trigger, str(self.get_parameter("command_mux_teleop_service").value)
+            ),
+        }
 
         self._state: Dict[str, Any] = {
             "floor": None,
             "stair_status": None,
+            "stair_perception_mode": None,
+            "command_mux_status": None,
             "gait_command": None,
             "gait_result": None,
             "usage_mode_result": None,
@@ -855,6 +893,11 @@ class WebDashboardNode(Node):
         self._create_subscriptions()
         self._publish_runtime_floor_config()
         self.create_timer(1.0, self._tick_active_task)
+        teleop_watchdog_period = max(
+            0.05,
+            min(0.15, float(self.get_parameter("teleop_command_timeout_s").value) / 3.0),
+        )
+        self.create_timer(teleop_watchdog_period, self._tick_teleop_lease)
         self.create_timer(2.0, self._publish_selected_stair_zones)
         self._server = self._start_http_server()
         if bool(self.get_parameter("auto_preflight_enabled").value):
@@ -934,7 +977,20 @@ class WebDashboardNode(Node):
         self.declare_parameter("floor_goal_topic", "/m20pro/floor_goal")
         self.declare_parameter("stop_task_topic", "/m20pro/stop_task")
         self.declare_parameter("active_waypoint_topic", "/m20pro/active_waypoint")
-        self.declare_parameter("cmd_vel_topic", "/cmd_vel")
+        self.declare_parameter("cmd_vel_topic", "/cmd_vel_nav")
+        self.declare_parameter("teleop_cmd_vel_topic", "/cmd_vel_teleop")
+        self.declare_parameter("command_mux_mode_request_topic", "/m20pro/cmd_vel_mux/mode_request")
+        self.declare_parameter("command_mux_status_topic", "/m20pro/cmd_vel_mux/status")
+        self.declare_parameter("command_mux_lock_service", "/m20pro/cmd_vel_mux/lock")
+        self.declare_parameter(
+            "command_mux_navigation_service", "/m20pro/cmd_vel_mux/enable_navigation"
+        )
+        self.declare_parameter("command_mux_teleop_service", "/m20pro/cmd_vel_mux/enable_teleop")
+        self.declare_parameter("teleop_command_timeout_s", 0.35)
+        self.declare_parameter("teleop_max_forward_speed_mps", 0.18)
+        self.declare_parameter("teleop_max_reverse_speed_mps", 0.12)
+        self.declare_parameter("teleop_max_lateral_speed_mps", 0.12)
+        self.declare_parameter("teleop_max_angular_speed_radps", 0.45)
         self.declare_parameter("initialpose_topic", "/initialpose")
         self.declare_parameter("initialpose_covariance_xy", 0.25)
         self.declare_parameter("initialpose_covariance_yaw", 0.0685)
@@ -945,6 +1001,7 @@ class WebDashboardNode(Node):
         self.declare_parameter("robot_pose_display_yaw_offset_rad", 0.0)
         self.declare_parameter("current_floor_topic", "/m20pro/current_floor")
         self.declare_parameter("stair_status_topic", "/m20pro/stair_status")
+        self.declare_parameter("stair_perception_mode_topic", "/m20pro/stair_perception_mode")
         self.declare_parameter("gait_command_topic", "/m20pro/gait_command")
         self.declare_parameter("gait_result_topic", "/m20pro_tcp_bridge/gait_result")
         self.declare_parameter("usage_mode_result_topic", "/m20pro_tcp_bridge/usage_mode_result")
@@ -1287,6 +1344,21 @@ class WebDashboardNode(Node):
             10,
         )
         self.create_subscription(String, self._topic("stair_status_topic"), self._on_stair_status, 10)
+        self.create_subscription(
+            String,
+            self._topic("stair_perception_mode_topic"),
+            self._on_stair_perception_mode,
+            10,
+        )
+        mux_status_qos = QoSProfile(depth=1)
+        mux_status_qos.reliability = ReliabilityPolicy.RELIABLE
+        mux_status_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        self.create_subscription(
+            String,
+            self._topic("command_mux_status_topic"),
+            self._on_command_mux_status,
+            mux_status_qos,
+        )
         self.create_subscription(String, self._topic("gait_command_topic"), self._on_gait_command, 10)
         self.create_subscription(String, self._topic("gait_result_topic"), self._on_gait_result, 10)
         self.create_subscription(String, self._topic("usage_mode_result_topic"), self._on_usage_mode_result, 10)
@@ -1362,6 +1434,24 @@ class WebDashboardNode(Node):
             self._state["stair_status"] = msg.data
             self._mark_topic("stair_status")
         self._handle_navigation_status_for_task(msg.data)
+
+    def _on_stair_perception_mode(self, msg: String) -> None:
+        with self._lock:
+            self._state["stair_perception_mode"] = {
+                "last_update": time.time(),
+                "raw": msg.data,
+                "parsed": parse_json_text(msg.data),
+            }
+            self._mark_topic("stair_perception_mode")
+
+    def _on_command_mux_status(self, msg: String) -> None:
+        with self._lock:
+            self._state["command_mux_status"] = {
+                "last_update": time.time(),
+                "raw": msg.data,
+                "parsed": parse_json_text(msg.data),
+            }
+            self._mark_topic("command_mux_status")
 
     def _on_gait_command(self, msg: String) -> None:
         with self._lock:
@@ -1829,6 +1919,8 @@ class WebDashboardNode(Node):
                 "active_waypoint",
                 "inspection_status",
                 "radar_inspection",
+                "stair_perception_mode",
+                "command_mux_status",
             ):
                 if isinstance(self._state.get(key), dict):
                     snapshot[key] = dict(self._state[key])
@@ -1914,6 +2006,7 @@ class WebDashboardNode(Node):
         }
         snapshot["camera_proxy"] = self._camera_proxy_status_payload()
         snapshot["inspection_control"] = self._inspection_control_status_payload(snapshot)
+        snapshot["teleoperation"] = self._teleop_status_payload()
         for value in snapshot["topics"].values():
             last_update = value.get("last_update")
             value["age_sec"] = None if last_update is None else max(0.0, now - float(last_update))
@@ -2969,6 +3062,7 @@ class WebDashboardNode(Node):
         node_names = set(self.get_node_names())
         required_nodes = [
             "m20pro_tcp_bridge",
+            "m20pro_command_mux",
             "m20pro_web_dashboard",
             "map_server",
             "controller_server",
@@ -2982,6 +3076,7 @@ class WebDashboardNode(Node):
         topic_names = {name for name, _types in self.get_topic_names_and_types()}
         base_topics = [
             self._topic("navigation_status_topic"),
+            self._topic("command_mux_status_topic"),
             self._topic("map_topic"),
         ]
         navigation_topics = [
@@ -5587,12 +5682,292 @@ class WebDashboardNode(Node):
         self._append_event("删除任务", {"task_id": task_id})
         return {"ok": True, "deleted": task_id}
 
+    def _request_command_mux_mode(self, mode: str) -> None:
+        message = String()
+        message.data = str(mode)
+        self.command_mux_mode_pub.publish(message)
+
+    def _set_command_mux_mode(self, mode: str, timeout_s: float = 1.0) -> Dict[str, Any]:
+        client = self.command_mux_clients.get(str(mode))
+        if client is None:
+            return self._error("未知速度仲裁模式", {"code": "command_mux_mode_invalid"})
+        timeout_s = max(0.1, min(2.0, float(timeout_s)))
+        if not client.wait_for_service(timeout_sec=min(0.5, timeout_s)):
+            return self._error(
+                "速度仲裁器未就绪，已禁止下发运动指令",
+                {"code": "command_mux_unavailable", "mode": mode},
+            )
+        future = client.call_async(Trigger.Request())
+        deadline = time.monotonic() + timeout_s
+        while rclpy.ok() and not future.done() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if not future.done():
+            return self._error(
+                "速度仲裁器切换超时，已禁止下发运动指令",
+                {"code": "command_mux_timeout", "mode": mode},
+            )
+        try:
+            response = future.result()
+        except Exception as exc:
+            return self._error(
+                "速度仲裁器切换失败：%s" % exc,
+                {"code": "command_mux_failed", "mode": mode},
+            )
+        if response is None or not bool(response.success):
+            return self._error(
+                str(getattr(response, "message", "") or "速度仲裁器拒绝切换"),
+                {"code": "command_mux_rejected", "mode": mode},
+            )
+        return {"ok": True, "mode": mode, "message": str(response.message or "")}
+
+    def _stair_teleop_block(self) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            mode = dict(self._state.get("stair_perception_mode") or {})
+        parsed = mode.get("parsed") if isinstance(mode.get("parsed"), dict) else {}
+        if parsed.get("active") is True:
+            return {
+                "code": "teleop_blocked_on_stairs",
+                "message": "楼梯感知会话进行中，网页遥控不能在台阶上接管；请先停止任务并使用原厂手柄处理",
+                "stair_phase": parsed.get("phase"),
+                "stair_session_id": parsed.get("session_id"),
+            }
+        return None
+
+    def _teleop_status_payload(self) -> Dict[str, Any]:
+        now_monotonic = time.monotonic()
+        with self._teleop_lock:
+            session = dict(self._teleop_session)
+            active = bool(session.get("active"))
+            last_heartbeat = session.get("last_heartbeat_monotonic")
+            command = dict(session.get("command") or {})
+            acquiring = bool(self._teleop_acquiring)
+        with self._lock:
+            mux_status = dict(self._state.get("command_mux_status") or {})
+            stair_mode = dict(self._state.get("stair_perception_mode") or {})
+        mux_parsed = mux_status.get("parsed") if isinstance(mux_status.get("parsed"), dict) else {}
+        stair_parsed = stair_mode.get("parsed") if isinstance(stair_mode.get("parsed"), dict) else {}
+        heartbeat_age = None
+        if last_heartbeat is not None:
+            heartbeat_age = max(0.0, now_monotonic - float(last_heartbeat))
+        return {
+            "available": bool(mux_parsed),
+            "active": active,
+            "acquiring": acquiring,
+            "status": "active" if active else ("acquiring" if acquiring else "inactive"),
+            "mux_mode": str(mux_parsed.get("mode") or "unknown"),
+            "mux_reason": mux_parsed.get("reason"),
+            "stair_session_active": stair_parsed.get("active") is True,
+            "heartbeat_age_s": heartbeat_age,
+            "command_timeout_s": float(self.get_parameter("teleop_command_timeout_s").value),
+            "command": command,
+            "last_stop_reason": session.get("last_stop_reason"),
+            "limits": {
+                "forward_mps": float(self.get_parameter("teleop_max_forward_speed_mps").value),
+                "reverse_mps": float(self.get_parameter("teleop_max_reverse_speed_mps").value),
+                "lateral_mps": float(self.get_parameter("teleop_max_lateral_speed_mps").value),
+                "angular_radps": float(self.get_parameter("teleop_max_angular_speed_radps").value),
+            },
+        }
+
+    def _publish_teleop_zero(self, samples: int = 3) -> None:
+        for index in range(max(1, int(samples))):
+            self.teleop_cmd_vel_pub.publish(Twist())
+            if index + 1 < samples:
+                time.sleep(0.02)
+
+    def _acquire_teleop(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if payload.get("confirm") is not True:
+            return self._error(
+                "人工接管会终止当前自主任务，请显式确认",
+                {"code": "teleop_confirmation_required"},
+            )
+        with self._teleop_lock:
+            if self._teleop_session.get("active") or self._teleop_acquiring:
+                return self._error(
+                    "已有操作端正在接管机器狗",
+                    {"code": "teleop_busy"},
+                )
+            self._teleop_acquiring = True
+        try:
+            motion = self._detect_motion_mode()
+            if motion.get("mode") != "move":
+                return self._error(
+                    "当前不是 move 运动模式，不能启用网页遥控",
+                    {"code": "teleop_motion_mode_blocked", "motion": motion},
+                )
+            stair_block = self._stair_teleop_block()
+            if stair_block:
+                return self._error(str(stair_block["message"]), stair_block)
+            stop_result = self._stop_task({"reason": "web_teleop_takeover"})
+            if not stop_result.get("ok"):
+                return stop_result
+            lock_result = self._set_command_mux_mode("locked")
+            if not lock_result.get("ok"):
+                self._request_command_mux_mode("locked")
+                return lock_result
+            mux_result = self._set_command_mux_mode("teleop")
+            if not mux_result.get("ok"):
+                self._request_command_mux_mode("locked")
+                return mux_result
+            session_id = new_id("teleop")
+            with self._teleop_lock:
+                self._teleop_session = {
+                    "active": True,
+                    "session_id": session_id,
+                    "started_at": now_text(),
+                    "last_heartbeat_monotonic": time.monotonic(),
+                    "last_sequence": -1,
+                    "command": {"linear_x": 0.0, "linear_y": 0.0, "angular_z": 0.0},
+                    "last_stop_reason": None,
+                }
+            self._append_event("网页人工接管", {"source": "web_operator"})
+            return {
+                "ok": True,
+                "session_id": session_id,
+                "teleoperation": self._teleop_status_payload(),
+                "message": "已终止自主任务并进入人工接管",
+            }
+        finally:
+            with self._teleop_lock:
+                self._teleop_acquiring = False
+
+    def _teleop_command(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        session_id = str(payload.get("session_id") or "").strip()
+        sequence = payload.get("sequence")
+        if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 0:
+            return self._error("遥控指令缺少有效序号", {"code": "teleop_sequence_invalid"})
+        try:
+            command = normalized_teleop_command(
+                payload,
+                max_forward_speed_mps=float(
+                    self.get_parameter("teleop_max_forward_speed_mps").value
+                ),
+                max_reverse_speed_mps=float(
+                    self.get_parameter("teleop_max_reverse_speed_mps").value
+                ),
+                max_lateral_speed_mps=float(
+                    self.get_parameter("teleop_max_lateral_speed_mps").value
+                ),
+                max_angular_speed_radps=float(
+                    self.get_parameter("teleop_max_angular_speed_radps").value
+                ),
+            )
+        except (TypeError, ValueError, OverflowError) as exc:
+            return self._error(str(exc), {"code": "teleop_command_invalid"})
+        with self._teleop_lock:
+            if not self._teleop_session.get("active"):
+                return self._error("人工接管未启用或已超时", {"code": "teleop_inactive"})
+            if session_id != str(self._teleop_session.get("session_id") or ""):
+                return self._error("遥控会话不匹配", {"code": "teleop_session_mismatch"})
+            last_sequence_value = self._teleop_session.get("last_sequence")
+            last_sequence = -1 if last_sequence_value is None else int(last_sequence_value)
+            if sequence <= last_sequence:
+                return {
+                    "ok": True,
+                    "ignored": True,
+                    "reason": "stale_sequence",
+                    "last_sequence": last_sequence,
+                }
+            msg = Twist()
+            msg.linear.x = float(command["linear_x"])
+            msg.linear.y = float(command["linear_y"])
+            msg.angular.z = float(command["angular_z"])
+            self.teleop_cmd_vel_pub.publish(msg)
+            self._teleop_session["last_heartbeat_monotonic"] = time.monotonic()
+            self._teleop_session["last_sequence"] = sequence
+            self._teleop_session["command"] = command
+        return {"ok": True, "sequence": sequence, "command": command}
+
+    def _release_teleop(
+        self,
+        payload: Dict[str, Any],
+        *,
+        force: bool = False,
+        reason: str = "operator_release",
+    ) -> Dict[str, Any]:
+        session_id = str(payload.get("session_id") or "").strip()
+        with self._teleop_lock:
+            active = bool(self._teleop_session.get("active"))
+            expected_session_id = str(self._teleop_session.get("session_id") or "")
+            decision = teleop_release_decision(
+                active=active,
+                force=force,
+                request_session_id=session_id,
+                active_session_id=expected_session_id,
+            )
+            if not decision.get("ok"):
+                return self._error("遥控会话不匹配", {"code": decision["code"]})
+            if not decision.get("lock_mux"):
+                return {
+                    "ok": True,
+                    "released": False,
+                    "command_mux_confirmed": False,
+                    "teleoperation": self._teleop_status_payload(),
+                    "message": "人工接管已结束",
+                }
+            self._teleop_session["active"] = False
+            self._teleop_session["last_stop_reason"] = reason
+            self._teleop_session["command"] = {
+                "linear_x": 0.0,
+                "linear_y": 0.0,
+                "angular_z": 0.0,
+            }
+            self._publish_teleop_zero()
+        self._request_command_mux_mode("locked")
+        mux_result = self._set_command_mux_mode("locked")
+        if active:
+            self._append_event("结束网页人工接管", {"reason": reason})
+        return {
+            "ok": True,
+            "released": active,
+            "command_mux_confirmed": bool(mux_result.get("ok")),
+            "teleoperation": self._teleop_status_payload(),
+            "message": "人工接管已结束，自主导航保持锁定；需重新开始任务才会恢复",
+        }
+
+    def _emergency_stop_teleop(self) -> Dict[str, Any]:
+        self._release_teleop({}, force=True, reason="web_emergency_stop")
+        result = self._stop_task({"reason": "web_emergency_stop"})
+        return {
+            "ok": True,
+            "active_task": None,
+            "teleoperation": self._teleop_status_payload(),
+            "message": str(result.get("message") or "已停止任务和所有网页运动指令"),
+        }
+
+    def _tick_teleop_lease(self) -> None:
+        timeout_s = max(0.1, float(self.get_parameter("teleop_command_timeout_s").value))
+        expired = False
+        with self._teleop_lock:
+            last_heartbeat = self._teleop_session.get("last_heartbeat_monotonic")
+            if (
+                self._teleop_session.get("active")
+                and last_heartbeat is not None
+                and time.monotonic() - float(last_heartbeat) > timeout_s
+            ):
+                self._teleop_session["active"] = False
+                self._teleop_session["last_stop_reason"] = "browser_lease_timeout"
+                self._teleop_session["command"] = {
+                    "linear_x": 0.0,
+                    "linear_y": 0.0,
+                    "angular_z": 0.0,
+                }
+                self._publish_teleop_zero()
+                expired = True
+        if expired:
+            self._request_command_mux_mode("locked")
+            self._append_event(
+                "网页遥控心跳超时自动停车",
+                {"timeout_s": timeout_s},
+            )
+
     def _reset_navigation_session(
         self,
         reason: str,
         clear_costmaps: bool = True,
         publish_idle: bool = True,
     ) -> None:
+        self._request_command_mux_mode("locked")
         msg = String()
         msg.data = reason
         for _ in range(3):
@@ -6230,6 +6605,12 @@ class WebDashboardNode(Node):
             }
 
     def _start_task(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        with self._teleop_lock:
+            if self._teleop_session.get("active") or self._teleop_acquiring:
+                return self._error(
+                    "人工遥控正在接管，请先结束接管再开始任务",
+                    {"code": "task_blocked_by_teleop"},
+                )
         context = self._task_start_pre_runtime_context(payload)
         if not context.get("ok"):
             return context
@@ -6251,23 +6632,32 @@ class WebDashboardNode(Node):
             task_for_start,
             context.get("annotations") or [],
         )
-        with self._data_lock:
-            created = create_active_task_state(
-                task_for_start,
-                task_map_id=task_map_id,
-                now_text=now_text(),
-            )
-            active = created["active"]
-            self._append_active_task_timeline_event(
-                active,
-                str(created["event"]),
-                str(created["message"]),
-                created.get("event_extra") if isinstance(created.get("event_extra"), dict) else {},
-            )
-            self._settings["active_task"] = active
-            task["status"] = "running"
-            self._save_json("settings.json", self._settings)
-            self._save_json("tasks.json", self._tasks)
+        with self._teleop_lock:
+            if self._teleop_session.get("active") or self._teleop_acquiring:
+                return self._error(
+                    "人工遥控已开始接管，本次任务未启动",
+                    {"code": "task_blocked_by_teleop"},
+                )
+            mux_result = self._set_command_mux_mode("navigation")
+            if not mux_result.get("ok"):
+                return mux_result
+            with self._data_lock:
+                created = create_active_task_state(
+                    task_for_start,
+                    task_map_id=task_map_id,
+                    now_text=now_text(),
+                )
+                active = created["active"]
+                self._append_active_task_timeline_event(
+                    active,
+                    str(created["event"]),
+                    str(created["message"]),
+                    created.get("event_extra") if isinstance(created.get("event_extra"), dict) else {},
+                )
+                self._settings["active_task"] = active
+                task["status"] = "running"
+                self._save_json("settings.json", self._settings)
+                self._save_json("tasks.json", self._tasks)
         self._dispatch_active_goal(force=True)
         self._append_event(str(created["operator_event"]), created["operator_payload"])
         with self._data_lock:
@@ -7620,6 +8010,8 @@ class WebDashboardNode(Node):
                         )
                     elif parsed.path == "/api/inspection/state":
                         self._send_json(node._inspection_live_payload())
+                    elif parsed.path == "/api/teleop/state":
+                        self._send_json({"ok": True, "teleoperation": node._teleop_status_payload()})
                     elif parsed.path == "/api/map":
                         self._send_json(node._map_snapshot())
                     elif parsed.path == "/api/map_file":
@@ -7722,6 +8114,14 @@ class WebDashboardNode(Node):
                         self._send_api(node._start_task(payload))
                     elif parsed.path == "/api/tasks/stop":
                         self._send_api(node._stop_task(payload))
+                    elif parsed.path == "/api/teleop/acquire":
+                        self._send_api(node._acquire_teleop(payload))
+                    elif parsed.path == "/api/teleop/command":
+                        self._send_api(node._teleop_command(payload))
+                    elif parsed.path == "/api/teleop/release":
+                        self._send_api(node._release_teleop(payload))
+                    elif parsed.path == "/api/teleop/emergency_stop":
+                        self._send_api(node._emergency_stop_teleop())
                     elif parsed.path == "/api/preflight/run":
                         self._send_api(node._run_preflight(payload))
                     elif parsed.path == "/api/inspection/toggle":

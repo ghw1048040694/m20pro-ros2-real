@@ -259,6 +259,24 @@ def main() -> None:
     assert 'LaunchConfiguration("controller_frequency")' not in nav_launch
     assert "localization_parameters" not in real_launch
     assert "**floor_manager_parameters" in real_launch
+    assert 'executable="command_mux"' in real_launch
+    assert real_launch.count('"cmd_vel_topic": "/cmd_vel_nav"') >= 2
+    assert '"teleop_cmd_vel_topic": "/cmd_vel_teleop"' in real_launch
+    assert 'LaunchConfiguration("cmd_vel_topic")' in nav_launch
+    assert '("cmd_vel", cmd_vel_topic)' in nav_launch
+
+    command_mux = (
+        ROOT
+        / "src"
+        / "m20pro_navigation"
+        / "m20pro_navigation"
+        / "command_mux_node.py"
+    ).read_text(encoding="utf-8")
+    assert 'self.declare_parameter("navigation_cmd_vel_topic", "/cmd_vel_nav")' in command_mux
+    assert 'self.declare_parameter("teleop_cmd_vel_topic", "/cmd_vel_teleop")' in command_mux
+    assert 'self.declare_parameter("output_cmd_vel_topic", "/cmd_vel")' in command_mux
+    assert 'self.declare_parameter("initial_mode", "navigation")' in command_mux
+    assert '"locked", "navigation", "teleop"' in command_mux
 
     scan_selector = (
         ROOT
@@ -282,6 +300,7 @@ def main() -> None:
     assert 'label in ("stair_traverse", "stair_exit")' in floor_manager
     assert "goal.behavior_tree = behavior_tree" in floor_manager
     assert "stair_clearance_gate_decision(" in floor_manager
+    assert 'self.declare_parameter("cmd_vel_topic", "/cmd_vel_nav")' in floor_manager
 
     fastdds_profile = (
         ROOT

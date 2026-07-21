@@ -236,6 +236,7 @@ wait_for_cmd "ROS graph available" timeout 5 ros2 node list || true
 
 required_nodes=(
   m20pro_tcp_bridge
+  m20pro_command_mux
   m20pro_web_dashboard
   map_server
   controller_server

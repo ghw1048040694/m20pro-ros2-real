@@ -10,8 +10,10 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from m20pro_navigation.field_profile_contract import (
+    command_mux_field_parameters,
     floor_manager_field_parameters,
     load_field_profile,
+    web_teleoperation_field_parameters,
 )
 
 
@@ -40,6 +42,8 @@ def generate_launch_description():
     field_profile = load_field_profile(default_field_profile)
     profile_stair = field_profile["stair"]
     floor_manager_parameters = floor_manager_field_parameters(field_profile)
+    command_mux_parameters = command_mux_field_parameters(field_profile)
+    web_teleoperation_parameters = web_teleoperation_field_parameters(field_profile)
     default_floor_config = os.path.join(bringup_share, "config", "runtime_navigation.yaml")
     default_map_manifest = os.path.join(bringup_share, "config", "map_manifest.yaml")
     default_map = os.path.join(bringup_share, "maps", "F20", "occ_grid.yaml")
@@ -264,6 +268,13 @@ def generate_launch_description():
         ),
         Node(
             package="m20pro_navigation",
+            executable="command_mux",
+            name="m20pro_command_mux",
+            output="screen",
+            parameters=[command_mux_parameters],
+        ),
+        Node(
+            package="m20pro_navigation",
             executable="tcp_bridge",
             name="m20pro_tcp_bridge",
             output="screen",
@@ -374,6 +385,7 @@ def generate_launch_description():
                     "stair_zones_topic": stair_zones_topic,
                     "flat_gait_label": "flat",
                     "stair_behavior_tree": "package://m20pro_bringup/behavior_trees/m20pro_stair_traverse_foxy.xml",
+                    "cmd_vel_topic": "/cmd_vel_nav",
                     **floor_manager_parameters,
                 }
             ],
@@ -419,6 +431,7 @@ def generate_launch_description():
                         "use_composition": "False",
                         "map_subscribe_transient_local": "True",
                         "autostart": "False",
+                        "cmd_vel_topic": "/cmd_vel_nav",
                     }.items(),
                     condition=IfCondition(enable_nav2),
                 )
@@ -536,6 +549,9 @@ def generate_launch_description():
                         value_type=float,
                     ),
                     "radar_results_dir": radar_output_dir,
+                    "cmd_vel_topic": "/cmd_vel_nav",
+                    "teleop_cmd_vel_topic": "/cmd_vel_teleop",
+                    **web_teleoperation_parameters,
                 }
             ],
             condition=IfCondition(enable_web_dashboard),

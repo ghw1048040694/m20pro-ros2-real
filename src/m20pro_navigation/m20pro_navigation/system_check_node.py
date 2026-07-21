@@ -251,6 +251,7 @@ class SystemCheckNode(Node):
 
         expected = [
             "m20pro_tcp_bridge",
+            "m20pro_command_mux",
             "map_server",
             "controller_server",
             "planner_server",

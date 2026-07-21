@@ -125,7 +125,7 @@ src/m20pro_bringup/config/m20pro_field_profile.yaml
 
 应用入口会拒绝任务执行期间换参，先校验字段、范围和参数耦合，再按完整部署流程同时更新 106 和 104。106 的 `/etc/m20pro-edge-scan-106.env` 是自动生成物，不可手工编辑；Nav2 参数文件中的现场项也是不可直接运行的占位符，只能由该配置启动时重写。104 和 106 会携带并核对同一份配置的 SHA-256，不一致时拒绝进入楼梯模式，不提供旧参数回退或热更新。
 
-当前 schema v2 共开放 67 个现场参数，其中 `navigation` 28 个，按 `controller / goal / progress / local_planner / costmap / global_planner` 分组；另有 `scan`、`stair`、`stair_safety`、`stair_transition` 和 `localization`。插件类型、话题、坐标系、机器人 footprint、行为树结构和固定安全开关仍属于工程架构，不允许从现场配置改变。
+当前 schema v3 共开放 74 个现场参数，其中 `navigation` 28 个、`teleoperation` 7 个；导航按 `controller / goal / progress / local_planner / costmap / global_planner` 分组，遥控统一配置速度上限、指令租约和仲裁看门狗。另有 `scan`、`stair`、`stair_safety`、`stair_transition` 和 `localization`。插件类型、话题、坐标系、机器人 footprint、行为树结构和固定安全开关仍属于工程架构，不允许从现场配置改变。
 
 导航减速度在统一配置中填写正数幅值，运行时自动转换成 DWB 要求的负值；同一最大线速度同时驱动 `max_vel_x/max_speed_xy`，同一障碍、清障和膨胀参数同时驱动局部与全局代价地图。校验器会拒绝停止阈值大于最大速度、发布频率高于刷新频率、清障范围小于障碍范围以及定位阈值相互冲突等组合。
 
@@ -373,6 +373,14 @@ NavMode=1    自主导航
 ```
 
 `/m20pro/active_waypoint` 是轻量 JSON，包含当前任务阶段、目标位姿、剩余停留时间和 `waypoint` 点位语义。昂锐雷达检测节点应优先使用这里的 `waypoint.result_file_prefix`、`waypoint.room`、`waypoint.scan_point` 和 `waypoint.radar.scans` 命名并区分扫描结果。
+
+## 网页人工接管
+
+状态栏“遥控”用于自主任务无法继续时的低速脱困。点击“人工接管”会先终止当前任务，再将速度仲裁器从自主导航切到遥控；结束接管后保持运动锁定，旧任务不会自动恢复，只有重新开始任务才会再次放行 Nav2。
+
+遥控指令只在 `move` 模式且速度仲裁器就绪时生效。按键松开立即发零速度；浏览器失焦、页面隐藏、网络中断或心跳超过 `teleoperation.command_timeout_s` 时自动停车并锁定导航。楼梯三维感知会话活跃时禁止网页遥控，台阶上脱困必须使用原厂手柄并由现场人员看护。
+
+Nav2、遥控和最终执行速度分别使用 `/cmd_vel_nav`、`/cmd_vel_teleop` 和 `/cmd_vel`；只有 `m20pro_command_mux` 可以向最终 `/cmd_vel` 输出。未部署 VPN、身份认证和访问控制前，不得将这组运动 API 直接暴露到公网。
 
 雷达扫描计划示例：
 

@@ -13,7 +13,7 @@ from typing import Any, Dict, Iterable, Mapping
 import yaml
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 PROFILE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 TOP_LEVEL_KEYS = {
@@ -24,6 +24,7 @@ TOP_LEVEL_KEYS = {
     "stair_safety",
     "stair_transition",
     "navigation",
+    "teleoperation",
     "localization",
 }
 SCAN_KEYS = {
@@ -107,6 +108,15 @@ COSTMAP_SPEC = {
 GLOBAL_PLANNER_SPEC = {
     "expected_frequency_hz": ("number", 0.10, 10.0),
     "goal_tolerance_m": ("number", 0.10, 2.00),
+}
+TELEOPERATION_SPEC = {
+    "watchdog_rate_hz": ("number", 10.0, 50.0),
+    "command_timeout_s": ("number", 0.15, 1.0),
+    "navigation_timeout_s": ("number", 0.20, 2.0),
+    "max_forward_speed_mps": ("number", 0.05, 0.40),
+    "max_reverse_speed_mps": ("number", 0.05, 0.30),
+    "max_lateral_speed_mps": ("number", 0.05, 0.30),
+    "max_angular_speed_radps": ("number", 0.10, 0.80),
 }
 LOCALIZATION_SPEC = {
     "tf_fallback_max_age_s": ("number", 0.20, 5.00),
@@ -221,6 +231,7 @@ def validate_field_profile(raw: Any) -> Dict[str, Any]:
     safety_raw = _mapping(source["stair_safety"], "stair_safety")
     transition_raw = _mapping(source["stair_transition"], "stair_transition")
     navigation_raw = _mapping(source["navigation"], "navigation")
+    teleoperation_raw = _mapping(source["teleoperation"], "teleoperation")
     localization_raw = _mapping(source["localization"], "localization")
     _exact_keys(scan_raw, SCAN_KEYS, "scan")
     _exact_keys(stair_raw, STAIR_KEYS, "stair")
@@ -399,6 +410,28 @@ def validate_field_profile(raw: Any) -> Dict[str, Any]:
         "global_planner": global_planner,
     }
 
+    teleoperation = _validated_group(
+        teleoperation_raw, "teleoperation", TELEOPERATION_SPEC
+    )
+    for speed_key in (
+        "max_forward_speed_mps",
+        "max_reverse_speed_mps",
+        "max_lateral_speed_mps",
+    ):
+        if teleoperation[speed_key] > controller["max_linear_speed_mps"]:
+            raise FieldProfileError(
+                "teleoperation.%s must not exceed navigation.controller.max_linear_speed_mps"
+                % speed_key
+            )
+    if teleoperation["max_angular_speed_radps"] > controller["max_angular_speed_radps"]:
+        raise FieldProfileError(
+            "teleoperation.max_angular_speed_radps must not exceed navigation.controller.max_angular_speed_radps"
+        )
+    if teleoperation["watchdog_rate_hz"] * teleoperation["command_timeout_s"] < 3.0:
+        raise FieldProfileError(
+            "teleoperation watchdog must provide at least three checks per command timeout"
+        )
+
     localization = _validated_group(
         localization_raw, "localization", LOCALIZATION_SPEC
     )
@@ -427,6 +460,7 @@ def validate_field_profile(raw: Any) -> Dict[str, Any]:
         "stair_safety": stair_safety,
         "stair_transition": stair_transition,
         "navigation": navigation,
+        "teleoperation": teleoperation,
         "localization": localization,
     }
     canonical = json.dumps(
@@ -648,6 +682,30 @@ def floor_manager_field_parameters(profile: Mapping[str, Any]) -> Dict[str, Any]
         "duplicate_goal_yaw_tolerance_rad": transition[
             "duplicate_goal_yaw_tolerance_rad"
         ],
+    }
+
+
+def command_mux_field_parameters(profile: Mapping[str, Any]) -> Dict[str, Any]:
+    teleoperation = profile["teleoperation"]
+    return {
+        "watchdog_rate_hz": teleoperation["watchdog_rate_hz"],
+        "teleop_command_timeout_s": teleoperation["command_timeout_s"],
+        "navigation_command_timeout_s": teleoperation["navigation_timeout_s"],
+        "teleop_max_forward_speed_mps": teleoperation["max_forward_speed_mps"],
+        "teleop_max_reverse_speed_mps": teleoperation["max_reverse_speed_mps"],
+        "teleop_max_lateral_speed_mps": teleoperation["max_lateral_speed_mps"],
+        "teleop_max_angular_speed_radps": teleoperation["max_angular_speed_radps"],
+    }
+
+
+def web_teleoperation_field_parameters(profile: Mapping[str, Any]) -> Dict[str, Any]:
+    teleoperation = profile["teleoperation"]
+    return {
+        "teleop_command_timeout_s": teleoperation["command_timeout_s"],
+        "teleop_max_forward_speed_mps": teleoperation["max_forward_speed_mps"],
+        "teleop_max_reverse_speed_mps": teleoperation["max_reverse_speed_mps"],
+        "teleop_max_lateral_speed_mps": teleoperation["max_lateral_speed_mps"],
+        "teleop_max_angular_speed_radps": teleoperation["max_angular_speed_radps"],
     }
 
 

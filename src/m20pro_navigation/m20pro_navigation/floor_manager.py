@@ -70,7 +70,7 @@ class FloorManager(Node):
         self.declare_parameter("robot_pose_topic", "/m20pro_tcp_bridge/map_pose")
         self.declare_parameter("initialpose_topic", "/initialpose")
         self.declare_parameter("navigate_to_pose_action", "/navigate_to_pose")
-        self.declare_parameter("cmd_vel_topic", "/cmd_vel")
+        self.declare_parameter("cmd_vel_topic", "/cmd_vel_nav")
         self.declare_parameter("map_server_load_map_service", "/map_server/load_map")
         self.declare_parameter(
             "clear_costmap_services",
