@@ -192,8 +192,8 @@ def main() -> None:
     assert "function paintMapEditor" in script
     assert "button.textContent = item.label || item.id;" in script
     assert "button.textContent = `+ ${item.label || item.id}`" not in script
-    assert "20260721-teleop-2" in html
-    assert html.count("20260721-teleop-2") == 2
+    assert "20260721-teleop-3" in html
+    assert html.count("20260721-teleop-3") == 2
     for element_id in (
         "batteryStatusBtn",
         "batteryStatusPopover",
@@ -202,10 +202,8 @@ def main() -> None:
         "teleopStatusPopover",
         "acquireTeleopBtn",
         "releaseTeleopBtn",
-        "teleopStandBtn",
-        "teleopLieBtn",
+        "teleopPostureBtn",
         "teleopSoftStopBtn",
-        "teleopEmergencyStopBtn",
         "teleopZeroBtn",
     ):
         assert f'id="{element_id}"' in html
@@ -219,6 +217,10 @@ def main() -> None:
         "/api/charge/one_key",
     ):
         assert endpoint in script or endpoint in backend
+    assert 'id="teleopEmergencyStopBtn"' not in html
+    assert "停止全部运动" not in html
+    assert '>趴下</button>' in html
+    assert "targetPostureAction" in script
     assert "function startTeleopHeartbeat" in script
     assert "window.addEventListener(\"blur\"" in script
     assert "document.addEventListener(\"visibilitychange\"" in script

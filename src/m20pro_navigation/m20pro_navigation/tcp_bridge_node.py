@@ -1,4 +1,3 @@
-import json
 import math
 import time
 from typing import Optional
@@ -23,8 +22,6 @@ class M20TcpBridge(Node):
         self.declare_parameter("robot_ip", "10.21.31.103")
         self.declare_parameter("tcp_port", 30001)
         self.declare_parameter("poll_rate_hz", 5.0)
-        self.declare_parameter("basic_status_rate_hz", 1.0)
-        self.declare_parameter("basic_status_topic", "/m20pro_tcp_bridge/basic_status")
         self.declare_parameter("cmd_vel_rate_hz", 20.0)
         self.declare_parameter("cmd_vel_timeout_s", 0.5)
         self.declare_parameter("send_idle_zero_commands", False)
@@ -152,11 +149,6 @@ class M20TcpBridge(Node):
         self.obs_pub = self.create_publisher(Bool, "~/obstacle_active", 10)
         self.status_pub = self.create_publisher(String, "~/navigation_status", 10)
         self.raw_pub = self.create_publisher(String, "~/raw_status_json", 10)
-        self.basic_status_pub = self.create_publisher(
-            String,
-            str(self.get_parameter("basic_status_topic").value),
-            10,
-        )
         self.relocalization_pub = self.create_publisher(String, "~/relocalization_result", 10)
         self.gait_result_pub = self.create_publisher(String, "~/gait_result", 10)
         self.motion_state_result_pub = self.create_publisher(
@@ -215,8 +207,6 @@ class M20TcpBridge(Node):
         poll_period = 1.0 / max(0.5, float(self.get_parameter("poll_rate_hz").value))
         cmd_period = 1.0 / max(1.0, float(self.get_parameter("cmd_vel_rate_hz").value))
         self.create_timer(poll_period, self._poll_robot)
-        basic_status_period = 1.0 / max(0.2, float(self.get_parameter("basic_status_rate_hz").value))
-        self.create_timer(basic_status_period, self._poll_basic_status)
         if bool(self.get_parameter("enable_axis_command").value):
             self.create_timer(cmd_period, self._send_axis_command)
             command_mode = "axis command enabled"
@@ -575,30 +565,6 @@ class M20TcpBridge(Node):
                 return
         self._publish_navigation_status()
         self._publish_map_pose()
-
-    def _poll_basic_status(self) -> None:
-        if not self._ensure_connected():
-            return
-        try:
-            items = patrol_items(self.client.request(1002, 6, {}, response_timeout=1.0))
-        except Exception as exc:
-            self._warn_throttled("basic_status", "basic status query failed: %s" % exc, 5.0)
-            return
-        if not items:
-            return
-        basic = items.get("BasicStatus") if isinstance(items.get("BasicStatus"), dict) else items
-        payload = {
-            "motion_state": basic.get("MotionState"),
-            "gait": basic.get("Gait"),
-            "charge_state": basic.get("Charge"),
-            "hard_emergency_stop": basic.get("HES"),
-            "control_usage_mode": basic.get("ControlUsageMode"),
-            "ooa": basic.get("OOA"),
-            "last_update": time.time(),
-        }
-        message = String()
-        message.data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        self.basic_status_pub.publish(message)
 
     def _publish_map_pose(self) -> None:
         pose_source = self._pose_source()

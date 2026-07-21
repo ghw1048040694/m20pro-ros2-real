@@ -1369,6 +1369,10 @@
         button.classList.remove("is-active");
       }
     }
+    function targetPostureAction(snapshot = state.latest) {
+      const motionState = snapshot && snapshot.motion_state ? Number(snapshot.motion_state.state) : NaN;
+      return motionState === 4 ? "stand" : "lie";
+    }
     function renderTeleoperation(teleop) {
       const payload = teleop || {};
       if (state.teleop.sessionId && payload.active === false) clearLocalTeleop();
@@ -1393,36 +1397,21 @@
         $("teleopLimits").textContent = `限速：前进 ${fmtNumber(Number(limits.forward_mps), 2)} m/s / 后退 ${fmtNumber(Number(limits.reverse_mps), 2)} m/s / 横移 ${fmtNumber(Number(limits.lateral_mps), 2)} m/s / 旋转 ${fmtNumber(Number(limits.angular_radps), 2)} rad/s`;
       }
       for (const button of document.querySelectorAll(".teleop-control")) button.disabled = !owns;
-      if ($("teleopStandBtn")) $("teleopStandBtn").disabled = !owns;
-      if ($("teleopLieBtn")) $("teleopLieBtn").disabled = !owns;
+      if ($("teleopPostureBtn")) {
+        const postureAction = targetPostureAction();
+        $("teleopPostureBtn").textContent = postureAction === "stand" ? "起立" : "趴下";
+        $("teleopPostureBtn").dataset.teleopPostureAction = postureAction;
+        $("teleopPostureBtn").disabled = !owns;
+      }
       if ($("acquireTeleopBtn")) {
         $("acquireTeleopBtn").disabled = Boolean(payload.active || payload.acquiring || payload.stair_session_active || !payload.available);
       }
       if ($("releaseTeleopBtn")) $("releaseTeleopBtn").disabled = !owns;
     }
-    function chargeStateText(value) {
-      const labels = {
-        0: "空闲",
-        1: "前往充电桩",
-        2: "充电中",
-        3: "退出充电桩",
-        4: "充电异常",
-        5: "在桩未充电"
-      };
-      const number = Number(value);
-      return Object.prototype.hasOwnProperty.call(labels, number) ? labels[number] : text(value);
-    }
-    function motionStateText(value) {
-      const labels = {0: "空闲", 1: "站立", 2: "软急停", 3: "开机阻尼", 4: "趴下", 6: "标准运动"};
-      const number = Number(value);
-      return Object.prototype.hasOwnProperty.call(labels, number) ? labels[number] : text(value);
-    }
     function renderBatteryStatus(snapshot) {
       const battery = snapshot && snapshot.battery ? snapshot.battery : {};
       const packs = Array.isArray(battery.packs) ? battery.packs : [];
       const primary = battery.primary || packs[0] || null;
-      const basic = snapshot && snapshot.basic_status && snapshot.basic_status.parsed
-        ? snapshot.basic_status.parsed : {};
       const summary = $("batteryStatusSummary");
       const detail = $("batteryStatusDetail");
       if (!summary || !detail) return;
@@ -1434,12 +1423,16 @@
       const level = Number(primary.level);
       summary.textContent = `主电池 ${Number.isFinite(level) ? `${level}%` : "-"} / ${packs.length || 1} 组电池`;
       const temperature = Number(primary.temperature_c);
-      const charge = chargeStateText(basic.charge_state);
       const age = battery.last_update ? `${fmtAge(Math.max(0, Number(snapshot.node_time || Date.now() / 1000) - Number(battery.last_update)))}前` : "-";
+      const current = Number(primary.current_a);
+      const currentText = Number.isFinite(current)
+        ? (current > 0.1 ? "疑似充电电流" : (current < -0.1 ? "放电电流" : "电流接近零"))
+        : "充电状态未知";
       detail.innerHTML = [
         `<div>电压 ${fmtNumber(Number(primary.voltage_v), 1)} V / 电流 ${fmtNumber(Number(primary.current_a), 1)} A</div>`,
         `<div>温度 ${Number.isFinite(temperature) ? `${fmtNumber(temperature, 1)} ℃` : "-"} / 循环 ${text(primary.cycles)} 次</div>`,
-        `<div>原厂充电状态：${escapeHtml(charge)} / 运动状态：${escapeHtml(motionStateText(basic.motion_state))}</div>`,
+        `<div>电池 MOS 状态：${text(primary.mos_state)} / 保护状态：${text(primary.protected_state)}</div>`,
+        `<div>充电判断：${escapeHtml(currentText)}（原厂未提供独立充电状态字段）</div>`,
         `<div>电池数据更新时间：${escapeHtml(age)}</div>`
       ].join("");
     }
@@ -1556,24 +1549,12 @@
         if (closePopover) setStatusPopover("", false);
       }
     }
-    async function emergencyStopTeleop() {
-      clearLocalTeleop();
-      renderTeleoperation({active: false, available: true, limits: (state.latest && state.latest.teleoperation && state.latest.teleoperation.limits) || {}});
-      try {
-        const payload = await api("POST", "/api/teleop/emergency_stop", {});
-        state.latest = {...(state.latest || {}), teleoperation: payload.teleoperation || {active: false}};
-        renderTeleoperation(payload.teleoperation || {active: false});
-        showOperationFeedback("已停止全部运动", payload);
-      } catch (err) {
-        showOperationFeedback("停止指令失败", err, true);
-      }
-    }
     async function sendTeleopMotionState(action) {
       const labels = {stand: "起立", lie: "趴下"};
       if (!state.teleop.sessionId && action !== "soft_stop") return;
       const label = labels[action] || "软急停";
       if (!window.confirm(`确认执行${label}？\n\n执行前会停止遥控，动作完成后需要重新人工接管。`)) return;
-      const button = action === "stand" ? $("teleopStandBtn") : $("teleopLieBtn");
+      const button = $("teleopPostureBtn");
       if (button) button.disabled = true;
       try {
         const payload = await api("POST", "/api/teleop/motion", {
@@ -4701,10 +4682,10 @@
     $("refreshRadarStatusBtn").addEventListener("click", () => loadRadarStatus().catch(console.warn));
     $("acquireTeleopBtn").addEventListener("click", acquireTeleop);
     $("releaseTeleopBtn").addEventListener("click", () => releaseTeleop());
-    $("teleopEmergencyStopBtn").addEventListener("click", emergencyStopTeleop);
     $("teleopSoftStopBtn").addEventListener("click", softEmergencyStopTeleop);
-    $("teleopStandBtn").addEventListener("click", () => sendTeleopMotionState("stand"));
-    $("teleopLieBtn").addEventListener("click", () => sendTeleopMotionState("lie"));
+    $("teleopPostureBtn").addEventListener("click", event => {
+      sendTeleopMotionState(event.currentTarget.dataset.teleopPostureAction || targetPostureAction());
+    });
     $("oneKeyChargeBtn").addEventListener("click", oneKeyCharge);
     $("refreshBatteryBtn").addEventListener("click", async () => {
       try {

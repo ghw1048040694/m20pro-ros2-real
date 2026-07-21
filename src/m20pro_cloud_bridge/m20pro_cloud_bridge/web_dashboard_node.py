@@ -261,9 +261,10 @@ except ImportError:  # pragma: no cover - Nav2 package should exist on robot.
     LoadMap = None
 
 try:
-    from drdds.msg import BatteryData
+    from drdds.msg import BatteryData, MotionState
 except ImportError:  # Only available on the robot's factory ROS environment.
     BatteryData = None
+    MotionState = None
 
 try:
     from rclpy._rclpy_pybind11 import RCLError
@@ -872,8 +873,8 @@ class WebDashboardNode(Node):
             "gait_command": None,
             "gait_result": None,
             "motion_state_result": None,
+            "motion_state": None,
             "usage_mode_result": None,
-            "basic_status": None,
             "localization_ok": None,
             "navigation_status": None,
             "navigation_status_parsed": None,
@@ -1014,10 +1015,10 @@ class WebDashboardNode(Node):
         self.declare_parameter("motion_state_command_topic", "/m20pro/motion_state_command")
         self.declare_parameter("motion_state_result_topic", "/m20pro_tcp_bridge/motion_state_result")
         self.declare_parameter("usage_mode_result_topic", "/m20pro_tcp_bridge/usage_mode_result")
-        self.declare_parameter("basic_status_topic", "/m20pro_tcp_bridge/basic_status")
         self.declare_parameter("localization_ok_topic", "/m20pro_tcp_bridge/localization_ok")
         self.declare_parameter("navigation_status_topic", "/m20pro_tcp_bridge/navigation_status")
         self.declare_parameter("battery_topic", "/BATTERY_DATA")
+        self.declare_parameter("motion_state_topic", "/MOTION_STATE")
         self.declare_parameter("scan_topic", "/scan")
         self.declare_parameter("scan_overlay_max_points", 720)
         self.declare_parameter("scan_overlay_update_min_interval_s", 0.1)
@@ -1373,13 +1374,14 @@ class WebDashboardNode(Node):
         self.create_subscription(String, self._topic("gait_result_topic"), self._on_gait_result, 10)
         self.create_subscription(String, self._topic("motion_state_result_topic"), self._on_motion_state_result, 10)
         self.create_subscription(String, self._topic("usage_mode_result_topic"), self._on_usage_mode_result, 10)
-        self.create_subscription(String, self._topic("basic_status_topic"), self._on_basic_status, 10)
         self.create_subscription(Bool, self._topic("localization_ok_topic"), self._on_localization_ok, 10)
         self.create_subscription(String, self._topic("navigation_status_topic"), self._on_navigation_status, 10)
         if BatteryData is not None:
             self.create_subscription(BatteryData, self._topic("battery_topic"), self._on_battery, 10)
         else:
             self.get_logger().warning("drdds.msg.BatteryData is unavailable; battery display is disabled")
+        if MotionState is not None:
+            self.create_subscription(MotionState, self._topic("motion_state_topic"), self._on_motion_state, 10)
         self.create_subscription(LaserScan, self._topic("scan_topic"), self._on_scan, scan_qos)
         self.create_subscription(Odometry, self._topic("odom_topic"), self._on_odom, 10)
         self.create_subscription(PoseStamped, self._topic("pose_topic"), self._on_pose, 20)
@@ -1480,15 +1482,6 @@ class WebDashboardNode(Node):
             self._state["motion_state_result"] = msg.data
             self._mark_topic("motion_state_result")
 
-    def _on_basic_status(self, msg: String) -> None:
-        with self._lock:
-            self._state["basic_status"] = {
-                "last_update": time.time(),
-                "raw": msg.data,
-                "parsed": parse_json_text(msg.data),
-            }
-            self._mark_topic("basic_status")
-
     def _on_usage_mode_result(self, msg: String) -> None:
         with self._lock:
             self._state["usage_mode_result"] = msg.data
@@ -1561,6 +1554,20 @@ class WebDashboardNode(Node):
         with self._lock:
             self._state["battery"] = battery
             self._mark_topic("battery")
+
+    def _on_motion_state(self, msg: Any) -> None:
+        data = getattr(msg, "data", None)
+        state_value = getattr(data, "state", None)
+        try:
+            state_value = int(state_value)
+        except (TypeError, ValueError):
+            state_value = None
+        with self._lock:
+            self._state["motion_state"] = {
+                "state": state_value,
+                "last_update": time.time(),
+            }
+            self._mark_topic("motion_state")
 
     def _on_scan(self, msg: LaserScan) -> None:
         now = time.time()

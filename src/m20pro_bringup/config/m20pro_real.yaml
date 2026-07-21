@@ -3,8 +3,6 @@ m20pro_tcp_bridge:
     robot_ip: "10.21.31.103"
     tcp_port: 30001
     poll_rate_hz: 5.0
-    basic_status_rate_hz: 1.0 #原厂运动/充电状态刷新频率
-    basic_status_topic: "/m20pro_tcp_bridge/basic_status"
     cmd_vel_rate_hz: 20.0
     cmd_vel_timeout_s: 0.5
     send_idle_zero_commands: false
