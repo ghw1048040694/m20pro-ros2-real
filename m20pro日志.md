@@ -24129,4 +24129,4 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 
 - 复核扫描统一改动后发现，Nav2 启动门和系统自检仍默认监听原始 `/scan`；这会在 `/m20pro/navigation_scan` 没有样本时错误放行导航，造成“自检通过但避障失效”的假 ready。
 - 修正：启动门、系统自检和仍可手动启动的旧路径跟随器统一以 `/m20pro/navigation_scan` 为默认扫描话题；real launch 显式传入同一话题。原始 `/scan` 只保留为选择器输入和 AMCL 定位输入，不再作为导航感知 readiness 证据。
-- 验证：更新导航契约断言；本轮仍需重新执行全量契约测试、Python 编译、两个 ROS 包构建和 `git diff --check`，尚未部署或重启 104/106。
+- 验证：导航契约断言、全量 `scripts/test_*.py`、Python 编译、`m20pro_navigation`/`m20pro_bringup` 构建和 `git diff --check` 均通过；尚未部署或重启 104/106。
