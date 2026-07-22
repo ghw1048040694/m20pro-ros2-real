@@ -100,7 +100,7 @@
 | `detections` | YOLO 检测结果，来自 `/m20pro_yolov8_inspection/detections` |
 | `inspection_status` | YOLO 检测节点运行状态，来自 `/m20pro_yolov8_inspection/status` |
 | `camera_proxy` | 前后相机代理状态 |
-| `battery` | 电量显示信息，只用于展示，不作为软件阻断条件 |
+| `battery` | 电量显示信息，只用于展示，不作为软件阻断条件；`count` 和 `packs` 只统计原厂电池数组中存在有效遥测的电池，断开的全零占位槽位不会计入 |
 | `motion_state` | 原厂基础状态中的当前运动姿态和 `last_update`；前端仅使用 3 秒内的新鲜值切换起立/趴下 |
 | `preflight` | 最近一次自检结果 |
 

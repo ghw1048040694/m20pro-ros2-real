@@ -192,10 +192,12 @@ def main() -> None:
     assert "function paintMapEditor" in script
     assert "button.textContent = item.label || item.id;" in script
     assert "button.textContent = `+ ${item.label || item.id}`" not in script
-    assert "20260722-floor-chip-1" in html
-    assert html.count("20260722-floor-chip-1") == 2
+    assert "20260722-battery-pack-count-1" in html
+    assert html.count("20260722-battery-pack-count-1") == 2
     assert 'id="floor"' not in html
     assert '$("floor")' not in script
+    assert "const reportedCount = Number(battery.count);" in script
+    assert "packs.length || 1" not in script
     for stale_default in (
         'value="testfield"',
         'value="M20Pro 工地巡检"',

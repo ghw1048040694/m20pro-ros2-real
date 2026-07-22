@@ -1474,7 +1474,9 @@
         return;
       }
       const level = Number(primary.level);
-      summary.textContent = `主电池 ${Number.isFinite(level) ? `${level}%` : "-"} / ${packs.length || 1} 组电池`;
+      const reportedCount = Number(battery.count);
+      const packCount = Number.isFinite(reportedCount) ? Math.max(0, Math.round(reportedCount)) : packs.length;
+      summary.textContent = `主电池 ${Number.isFinite(level) ? `${level}%` : "-"} / ${packCount} 组电池`;
       const temperature = Number(primary.temperature_c);
       const age = battery.last_update ? `${fmtAge(Math.max(0, Number(snapshot.node_time || Date.now() / 1000) - Number(battery.last_update)))}前` : "-";
       const current = Number(primary.current_a);

@@ -35,6 +35,7 @@ from m20pro_navigation.command_mux_contract import (
     teleop_release_decision,
 )
 
+from .battery_contract import battery_pack_present
 from .active_task_contract import (
     advance_active_task_state,
     active_annotation_from_list,
@@ -1534,6 +1535,8 @@ class WebDashboardNode(Node):
     def _on_battery(self, msg: Any) -> None:
         batteries = []
         for index, item in enumerate(getattr(msg, "data", []) or []):
+            if not battery_pack_present(item):
+                continue
             temperatures = [
                 float(value)
                 for value in (getattr(item, "battery_temperature", []) or [])
