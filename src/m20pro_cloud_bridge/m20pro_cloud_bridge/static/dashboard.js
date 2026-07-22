@@ -2083,6 +2083,91 @@
       $("startRecordingBtn").disabled = !!recording.running;
       $("stopRecordingBtn").disabled = !recording.running;
     }
+    function formatRecordingBytes(value) {
+      const bytes = Number(value);
+      if (!Number.isFinite(bytes) || bytes < 0) return "大小未知";
+      if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+      if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+      return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+    }
+    function formatRecordingDuration(value) {
+      const seconds = Number(value);
+      if (!Number.isFinite(seconds) || seconds < 0) return "时长未知";
+      if (seconds < 60) return `${seconds.toFixed(0)}s`;
+      return `${Math.floor(seconds / 60)}分${Math.round(seconds % 60)}s`;
+    }
+    function renderRecordingList(payload) {
+      const box = $("recordingList");
+      if (!box) return;
+      const recordings = payload && Array.isArray(payload.recordings) ? payload.recordings : [];
+      if (!recordings.length) {
+        box.innerHTML = '<div class="small">暂无已保存录包</div>';
+        return;
+      }
+      box.innerHTML = recordings.map(item => {
+        const id = escapeHtml(item.id || "");
+        const name = escapeHtml(item.name || item.id || "未命名录包");
+        const metadata = [
+          formatRecordingBytes(item.size_bytes),
+          item.duration_s === null || item.duration_s === undefined ? "时长未知" : formatRecordingDuration(item.duration_s),
+          item.message_count === null || item.message_count === undefined ? "消息数未知" : `${item.message_count} 条消息`,
+          item.modified_at || "时间未知"
+        ].join(" / ");
+        return `<article class="recording-item">
+          <div class="recording-item-head"><strong class="recording-item-name" title="${name}">${name}</strong></div>
+          <div class="recording-item-meta">${escapeHtml(metadata)}</div>
+          <div class="recording-item-actions">
+            <button type="button" data-recording-download="${id}" title="下载此录包">下载</button>
+            <button type="button" data-recording-rename="${id}">改名</button>
+            <button type="button" class="danger" data-recording-delete="${id}">删除</button>
+          </div>
+        </article>`;
+      }).join("");
+      box.querySelectorAll("[data-recording-download]").forEach(button => {
+        button.addEventListener("click", () => {
+          const id = button.dataset.recordingDownload || "";
+          window.location.href = `/api/recording/download?id=${encodeURIComponent(id)}`;
+        });
+      });
+      box.querySelectorAll("[data-recording-rename]").forEach(button => {
+        button.addEventListener("click", async () => {
+          const id = button.dataset.recordingRename || "";
+          const current = recordings.find(item => String(item.id) === id);
+          const name = window.prompt("输入新的录包名称", current ? current.name : id);
+          if (name === null) return;
+          button.disabled = true;
+          try {
+            await api("POST", "/api/recording/rename", {id, name});
+            await loadRecordingList();
+          } catch (err) {
+            showOperationFeedback("录包改名失败", err, true);
+          } finally {
+            button.disabled = false;
+          }
+        });
+      });
+      box.querySelectorAll("[data-recording-delete]").forEach(button => {
+        button.addEventListener("click", async () => {
+          const id = button.dataset.recordingDelete || "";
+          const current = recordings.find(item => String(item.id) === id);
+          if (!window.confirm(`确认删除录包“${current ? current.name : id}”？此操作不可恢复。`)) return;
+          button.disabled = true;
+          try {
+            await api("DELETE", `/api/recording?id=${encodeURIComponent(id)}`);
+            await loadRecordingList();
+          } catch (err) {
+            showOperationFeedback("删除录包失败", err, true);
+          } finally {
+            button.disabled = false;
+          }
+        });
+      });
+    }
+    async function loadRecordingList() {
+      const payload = await fetchJson("/api/recording/list");
+      renderRecordingList(payload);
+      return payload;
+    }
     async function loadRecordingStatus() {
       if (!$("recordingStatus")) return;
       const payload = await fetchJson("/api/recording/status");
@@ -4645,12 +4730,13 @@
           prefix: $("recordingPrefix").value.trim() || "testfield"
         });
         renderRecordingStatus(payload);
+        await loadRecordingList();
       } catch (err) { setLog("recordingStatus", err); }
     });
     $("stopRecordingBtn").addEventListener("click", async () => {
       try {
         setLog("recordingStatus", await api("POST", "/api/recording/stop", {}));
-        setTimeout(() => loadRecordingStatus().catch(console.warn), 800);
+        setTimeout(() => Promise.all([loadRecordingStatus(), loadRecordingList()]).catch(console.warn), 800);
       } catch (err) { setLog("recordingStatus", err); }
     });
     if ($("taskRunPreflightBtn")) $("taskRunPreflightBtn").addEventListener("click", runPreflight);
@@ -4703,7 +4789,10 @@
       toggleStatusPopover("radar");
       loadRadarStatus().catch(console.warn);
     });
-    $("recordingStatusBtn").addEventListener("click", () => toggleStatusPopover("recording"));
+    $("recordingStatusBtn").addEventListener("click", () => {
+      toggleStatusPopover("recording");
+      loadRecordingList().catch(err => showOperationFeedback("读取录包列表失败", err, true));
+    });
     $("taskStatusBtn").addEventListener("click", () => toggleStatusPopover("task"));
     $("teleopStatusBtn").addEventListener("click", () => {
       toggleStatusPopover("teleop");
@@ -4715,6 +4804,7 @@
     $("closePreflightStatusBtn").addEventListener("click", () => setStatusPopover("", false));
     $("closeRadarStatusBtn").addEventListener("click", () => setStatusPopover("", false));
     $("closeRecordingStatusBtn").addEventListener("click", () => setStatusPopover("", false));
+    $("refreshRecordingsBtn").addEventListener("click", () => loadRecordingList().catch(err => showOperationFeedback("读取录包列表失败", err, true)));
     $("closeTaskStatusBtn").addEventListener("click", () => setStatusPopover("", false));
     $("closeTeleopStatusBtn").addEventListener("click", () => {
       if (state.teleop.sessionId) releaseTeleop({silent: true, closePopover: true});

@@ -11,12 +11,13 @@ import socket
 import subprocess
 import threading
 import time
+import tarfile
 import yaml
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path as FsPath
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 import rclpy
 from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
@@ -4825,12 +4826,160 @@ class WebDashboardNode(Node):
                     self._recording_state = dict(state)
             state.setdefault("running", False)
             prefix = str(state.get("prefix") or "")
-            bag_dir = FsPath(str(state.get("bag_dir") or "/home/user/bags"))
+            bag_dir = FsPath(str(state.get("bag_dir") or self._recording_bag_root()))
             if prefix and bag_dir.exists():
                 matches = sorted(bag_dir.glob(prefix + "_*"), key=lambda item: item.stat().st_mtime, reverse=True)
                 if matches:
                     state["bag_path"] = str(matches[0])
             return {"ok": True, "recording": state}
+
+    @staticmethod
+    def _recording_bag_root() -> FsPath:
+        return FsPath("/home/user/bags")
+
+    def _resolve_recording_path(self, bag_id: Any) -> Optional[FsPath]:
+        """Resolve one direct child of the recording root; never accept traversal."""
+        raw_id = str(bag_id or "").strip()
+        if not raw_id or raw_id in (".", "..") or FsPath(raw_id).name != raw_id:
+            return None
+        root = self._recording_bag_root().resolve()
+        raw_candidate = root / raw_id
+        if raw_candidate.is_symlink():
+            return None
+        candidate = raw_candidate.resolve()
+        if candidate == root or candidate.parent != root or not candidate.is_dir():
+            return None
+        return candidate
+
+    @staticmethod
+    def _recording_size_bytes(path: FsPath) -> int:
+        total = 0
+        try:
+            for item in path.rglob("*"):
+                if item.is_file():
+                    total += int(item.stat().st_size)
+        except OSError:
+            return total
+        return total
+
+    def _recording_item_payload(self, path: FsPath) -> Dict[str, Any]:
+        metadata_path = path / "metadata.yaml"
+        metadata: Dict[str, Any] = {}
+        if metadata_path.is_file():
+            try:
+                loaded = yaml.safe_load(metadata_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    metadata = loaded.get("rosbag2_bagfile_information") or loaded
+            except (OSError, UnicodeError, yaml.YAMLError):
+                metadata = {}
+        try:
+            modified_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(path.stat().st_mtime))
+        except OSError:
+            modified_at = None
+        duration_ns = metadata.get("duration", {}).get("nanoseconds") if isinstance(metadata.get("duration"), dict) else None
+        try:
+            duration_s = float(duration_ns) / 1_000_000_000.0 if duration_ns is not None else None
+        except (TypeError, ValueError):
+            duration_s = None
+        return {
+            "id": path.name,
+            "name": path.name,
+            "size_bytes": self._recording_size_bytes(path),
+            "modified_at": modified_at,
+            "message_count": metadata.get("message_count"),
+            "duration_s": duration_s,
+            "storage_id": metadata.get("storage_identifier"),
+        }
+
+    def _recording_list_payload(self) -> Dict[str, Any]:
+        root = self._recording_bag_root()
+        items: List[Dict[str, Any]] = []
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            candidates = [item for item in root.iterdir() if item.is_dir() and not item.is_symlink()]
+        except OSError as exc:
+            return self._error("读取录包目录失败：%s" % exc)
+        for item in candidates:
+            try:
+                has_bag_files = (item / "metadata.yaml").is_file() or any(
+                    child.is_file() and child.suffix.lower() in (".db3", ".mcap")
+                    for child in item.iterdir()
+                )
+            except OSError:
+                has_bag_files = False
+            if has_bag_files:
+                items.append(self._recording_item_payload(item))
+        items.sort(key=lambda entry: str(entry.get("modified_at") or ""), reverse=True)
+        return {"ok": True, "recordings": items}
+
+    def _recording_is_active(self, path: FsPath) -> bool:
+        with self._recording_lock:
+            process = self._recording_process
+            state = dict(self._recording_state or {})
+            if process is None or process.poll() is not None:
+                return False
+            active_path = str(state.get("bag_path") or "").strip()
+            if active_path and FsPath(active_path).resolve() == path.resolve():
+                return True
+            prefix = str(state.get("prefix") or "").strip()
+            return bool(prefix and path.name.startswith(prefix + "_"))
+
+    def _rename_recording(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        source = self._resolve_recording_path(payload.get("id"))
+        if source is None:
+            return self._error("录包不存在或名称无效")
+        new_name = sanitize_name(str(payload.get("name") or ""), "")
+        if not new_name:
+            return self._error("新名称不能为空")
+        if new_name == source.name:
+            return {"ok": True, "recording": self._recording_item_payload(source)}
+        if self._recording_is_active(source):
+            return self._error("录包正在写入，停止后才能改名")
+        target = self._resolve_recording_path(new_name)
+        if target is not None or (self._recording_bag_root() / new_name).exists():
+            return self._error("目标名称已存在")
+        target = self._recording_bag_root().resolve() / new_name
+        try:
+            source.rename(target)
+        except OSError as exc:
+            return self._error("录包改名失败：%s" % exc)
+        return {"ok": True, "recording": self._recording_item_payload(target), "message": "录包已改名"}
+
+    def _delete_recording(self, bag_id: Any) -> Dict[str, Any]:
+        path = self._resolve_recording_path(bag_id)
+        if path is None:
+            return self._error("录包不存在或名称无效")
+        if self._recording_is_active(path):
+            return self._error("录包正在写入，停止后才能删除")
+        try:
+            shutil.rmtree(path)
+        except OSError as exc:
+            return self._error("删除录包失败：%s" % exc)
+        return {"ok": True, "deleted_id": path.name, "message": "录包已删除"}
+
+    def _send_recording_download(self, bag_id: Any, handler: BaseHTTPRequestHandler) -> None:
+        path = self._resolve_recording_path(bag_id)
+        if path is None:
+            handler.send_error(HTTPStatus.NOT_FOUND, "录包不存在或名称无效")
+            return
+        archive_name = "%s.tar.gz" % sanitize_name(path.name, "rosbag")
+        ascii_name = archive_name.encode("ascii", "ignore").decode("ascii") or "rosbag.tar.gz"
+        handler.send_response(HTTPStatus.OK)
+        handler.send_header("Content-Type", "application/gzip")
+        handler.send_header(
+            "Content-Disposition",
+            "attachment; filename=\"%s\"; filename*=UTF-8''%s" % (ascii_name, quote(archive_name)),
+        )
+        handler.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        handler.send_header("Pragma", "no-cache")
+        handler.send_header("Expires", "0")
+        handler.send_header("Access-Control-Allow-Origin", "*")
+        handler.end_headers()
+        try:
+            with tarfile.open(fileobj=handler.wfile, mode="w|gz") as archive:
+                archive.add(str(path), arcname=path.name, recursive=True)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def _start_recording(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         try:
@@ -4844,7 +4993,7 @@ class WebDashboardNode(Node):
         scan_age_s = max(0.0, time.time() - float(scan.get("last_update") or 0.0))
         if int(scan.get("finite_ranges") or 0) < 20 or scan_age_s > 3.0:
             return self._error("/scan 不新鲜或有效点不足，为避免空包已拒绝开始录制")
-        bag_dir = FsPath("/home/user/bags")
+        bag_dir = self._recording_bag_root()
         bag_dir.mkdir(parents=True, exist_ok=True)
         with self._recording_lock:
             if self._recording_process is not None and self._recording_process.poll() is None:
@@ -8478,6 +8627,10 @@ class WebDashboardNode(Node):
                         self._send_json(node._preflight_payload())
                     elif parsed.path == "/api/recording/status":
                         self._send_json(node._recording_status_payload())
+                    elif parsed.path == "/api/recording/list":
+                        self._send_json(node._recording_list_payload())
+                    elif parsed.path == "/api/recording/download":
+                        node._send_recording_download((query.get("id") or [""])[0], self)
                     elif parsed.path == "/api/radar/status":
                         self._send_json(node._radar_status_payload())
                     elif parsed.path == "/api/radar/results":
@@ -8579,6 +8732,8 @@ class WebDashboardNode(Node):
                         self._send_api(node._start_recording(payload))
                     elif parsed.path == "/api/recording/stop":
                         self._send_api(node._stop_recording())
+                    elif parsed.path == "/api/recording/rename":
+                        self._send_api(node._rename_recording(payload))
                     elif parsed.path == "/api/localization/initialpose":
                         self._send_api(node._publish_initialpose(payload))
                     elif parsed.path == "/api/radar/artifact":
@@ -8607,6 +8762,9 @@ class WebDashboardNode(Node):
                         map_id = (query.get("id") or query.get("map_id") or [""])[0]
                         cascade = node._as_bool((query.get("cascade") or ["false"])[0])
                         self._send_api(node._delete_map(map_id, cascade=cascade))
+                    elif parsed.path == "/api/recording":
+                        bag_id = (query.get("id") or [""])[0]
+                        self._send_api(node._delete_recording(bag_id))
                     else:
                         self.send_error(HTTPStatus.NOT_FOUND)
                 finally:

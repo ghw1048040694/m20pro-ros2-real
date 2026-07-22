@@ -1,6 +1,14 @@
 # M20 Pro ROS 2 跨楼层巡检导航系统项目日志
 
-Last updated: 2026-07-22 11:16 CST
+Last updated: 2026-07-22 11:35 CST
+
+## 2026-07-22 11:35 CST - 完善前端 ROS 录包管理
+
+- 根因：原前端只有开始/停止和当前一次录包状态，无法查看 104 `/home/user/bags` 中的历史包，也无法安全处理大包文件。
+- 后端新增统一录包目录接口：`GET /api/recording/list` 列出有效 rosbag 的名称、大小、时长和消息数；`POST /api/recording/rename` 改名；`DELETE /api/recording?id=...` 删除；`GET /api/recording/download?id=...` 以流式 `tar.gz` 下载。
+- 文件操作只允许 `/home/user/bags` 的直接子目录，拒绝路径穿越和符号链接；正在写入的录包禁止改名/删除；下载不会把整个包读入 Web 进程内存。
+- 顶部“录包”状态栏改为管理弹窗，支持刷新、改名、删除和下载，保留原有录包启动/停止流程。README 和前端 API 契约已同步更新。
+- 已通过全量 `scripts/test_*.py`、Python 编译、JavaScript 语法检查和 `git diff --check`；本条提交后部署当前开发狗验证 Web API 和界面。
 
 ## 2026-07-22 11:16 CST - 回溯工地包并重构稳定定位主链路
 

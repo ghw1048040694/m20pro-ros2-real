@@ -192,8 +192,8 @@ def main() -> None:
     assert "function paintMapEditor" in script
     assert "button.textContent = item.label || item.id;" in script
     assert "button.textContent = `+ ${item.label || item.id}`" not in script
-    assert "20260721-charge-1" in html
-    assert html.count("20260721-charge-1") == 2
+    assert "20260722-recordings-1" in html
+    assert html.count("20260722-recordings-1") == 2
     for element_id in (
         "batteryStatusBtn",
         "batteryStatusPopover",
@@ -208,6 +208,8 @@ def main() -> None:
         "teleopConfirmDialog",
         "confirmTeleopConfirmBtn",
         "cancelTeleopConfirmBtn",
+        "recordingList",
+        "refreshRecordingsBtn",
     ):
         assert f'id="{element_id}"' in html
     for endpoint in (
@@ -263,6 +265,23 @@ def main() -> None:
     assert '"source": "web_map_editor"' in backend
     assert 'elif parsed.path == "/api/radar/manual_start":' in backend
     assert "def _radar_manual_start" in backend
+    for endpoint in (
+        "/api/recording/list",
+        "/api/recording/download",
+        "/api/recording/rename",
+        "/api/recording?id=",
+    ):
+        assert endpoint in script or endpoint in backend
+    assert "function renderRecordingList" in script
+    assert "function loadRecordingList" in script
+    assert "data-recording-download" in script
+    assert "data-recording-rename" in script
+    assert "data-recording-delete" in script
+    assert "def _recording_list_payload" in backend
+    assert "def _rename_recording" in backend
+    assert "def _delete_recording" in backend
+    assert "def _send_recording_download" in backend
+    assert 'tarfile.open(fileobj=handler.wfile, mode="w|gz")' in backend
 
     print("classic frontend contract tests passed")
 

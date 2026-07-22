@@ -190,6 +190,61 @@
       overflow-wrap: anywhere;
     }
     .compact-status.fail { border-color: #fecaca; background: #fef2f2; color: var(--bad); }
+    .recording-list-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin: 12px 0 6px;
+      color: var(--text);
+      font-size: 13px;
+    }
+    .recording-list-head button { min-height: 28px; padding: 0 9px; font-size: 12px; }
+    .recording-list {
+      display: grid;
+      gap: 6px;
+      max-height: min(44vh, 360px);
+      overflow: auto;
+      padding-right: 2px;
+    }
+    .recording-item {
+      display: grid;
+      gap: 5px;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--soft);
+    }
+    .recording-item-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .recording-item-name {
+      min-width: 0;
+      overflow: hidden;
+      font-size: 13px;
+      font-weight: 650;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .recording-item-meta {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+    .recording-item-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .recording-item-actions button {
+      min-height: 28px;
+      padding: 0 8px;
+      font-size: 12px;
+    }
     .pose-readout {
       display: flex;
       align-items: center;

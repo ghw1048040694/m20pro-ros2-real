@@ -1,6 +1,6 @@
 # M20Pro 前端 API 对接契约
 
-更新时间：2026-07-21 21:42 CST
+更新时间：2026-07-22 11:30 CST
 
 本文档是“M20 Pro ROS 2 跨楼层巡检导航系统”正式经典前端、甲方前端和外部功能包对接 104 Web 后端的接口契约。接口实现位于 `m20pro_cloud_bridge.web_dashboard_node`。以后新增、删除或修改接口字段时，必须同步更新本文档。
 
@@ -824,6 +824,28 @@ ROS 2 功能包也可以订阅：
 ### POST `/api/recording/stop`
 
 向当前录包进程发送 `SIGINT`，等待 rosbag 完成落盘。
+
+### GET `/api/recording/list`
+
+读取 104 `/home/user/bags` 下的已保存录包。只列出直接子目录中的有效 rosbag 目录，按最近修改时间倒序返回；`size_bytes`、`message_count` 和 `duration_s` 用于前端展示。
+
+### POST `/api/recording/rename`
+
+修改录包目录名称，不改动包内 `metadata.yaml` 和数据文件。
+
+```json
+{"id": "testfield_20260722_113000", "name": "工地长距离测试"}
+```
+
+录包正在写入时不能改名；名称会经过路径安全清洗，不能包含目录分隔符。
+
+### DELETE `/api/recording?id=<id>`
+
+删除一个已保存录包目录。录包正在写入时拒绝删除，删除不可恢复。
+
+### GET `/api/recording/download?id=<id>`
+
+以流式 `tar.gz` 附件下载一个录包目录，避免将大包完整加载到 Web 进程内存。下载后解压得到以录包名称命名的目录，可直接交给 `ros2 bag info` 或 `ros2 bag play`。
 
 ## 建图和地图导入接口
 

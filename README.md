@@ -208,6 +208,8 @@ M20PRO_INSPECTION_CLASS_NAMES_PATH=/home/user/m20pro_real_ros2_ws/install/m20pro
 ./scripts/local_pull_bags.sh
 ```
 
+网页顶部“录包”状态栏也可以直接管理 104 上的历史录包：打开后可刷新列表、查看大小/时长/消息数、改名、删除或下载。下载得到的 `tar.gz` 解压后仍是标准 rosbag 目录；正在写入的当前录包不能改名或删除。
+
 `m20pro_real_full.sh move` 会在 `/tmp` 生成运行时参数文件，把 `m20pro_tcp_bridge.enable_axis_command` 明确覆盖为 `true`；`shadow` 会覆盖为 `false`。这样不会改动原始 `m20pro_real.yaml`，也能避免 Foxy 中节点专属参数压过 launch 参数的问题。
 
 ## 启动方式
