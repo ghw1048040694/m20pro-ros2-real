@@ -4871,7 +4871,12 @@ class WebDashboardNode(Node):
         metadata: Dict[str, Any] = {}
         if metadata_path.is_file():
             try:
-                loaded = yaml.safe_load(metadata_path.read_text(encoding="utf-8"))
+                metadata_text = metadata_path.read_text(encoding="utf-8")
+                # Standard rosbag metadata puts the large topic/QoS section
+                # after these summary fields. Parse only the valid summary
+                # document prefix so opening the list stays lightweight.
+                summary_text, marker, _ = metadata_text.partition("\ntopics_with_message_count:")
+                loaded = yaml.safe_load(summary_text if marker else metadata_text)
                 if isinstance(loaded, dict):
                     metadata = loaded.get("rosbag2_bagfile_information") or loaded
             except (OSError, UnicodeError, yaml.YAMLError):
