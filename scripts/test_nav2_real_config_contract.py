@@ -255,8 +255,10 @@ def main() -> None:
     assert '"waypoint_follower"' not in startup_gate
     assert '"/waypoint_follower"' not in system_check
     assert '"/waypoint_follower"' not in dashboard
-    assert 'default_value="/m20pro/recording_scan"' in real_launch
-    assert '"scan_topic": web_scan_topic' in real_launch
+    assert '"scan_topic": "/m20pro/navigation_scan"' in real_launch
+    assert '"scan_timeout_s": 3.0' in real_launch
+    assert '"check_scan_content": True' in real_launch
+    assert '"web_scan_topic"' not in real_launch
     assert 'executable="navigation_scan_selector"' in real_launch
     assert '"input_topic": "/m20pro/navigation_scan"' in real_launch
     assert '"scan_topic": "/m20pro/navigation_scan"' in real_launch
@@ -323,6 +325,9 @@ def main() -> None:
     ).read_text(encoding="utf-8")
     assert 'self.declare_parameter("scan_topic", "/m20pro/navigation_scan")' in startup_gate_source
     assert 'self.declare_parameter("scan_topic", "/m20pro/navigation_scan")' in system_check_source
+    assert 'self.declare_parameter("scan_timeout_s", 3.0)' in system_check_source
+    assert 'self.scan_received_monotonic = 0.0' in system_check_source
+    assert 'scan_stale=age:' in system_check_source
     assert 'self.create_subscription(LaserScan, self.scan_topic' in system_check_source
     assert "def _expire_stair_mode" in scan_selector
     assert "if self.stair_active:" in scan_selector

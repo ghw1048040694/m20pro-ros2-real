@@ -1,6 +1,7 @@
 import math
 import os
 import shutil
+import time
 from typing import Any, Dict, List, Optional, Set
 
 import rclpy
@@ -32,6 +33,7 @@ class SystemCheckNode(Node):
         self.declare_parameter("require_floor_manager", True)
         self.declare_parameter("require_topic_messages", True)
         self.declare_parameter("scan_topic", "/m20pro/navigation_scan")
+        self.declare_parameter("scan_timeout_s", 3.0)
         self.declare_parameter("check_scan_content", False)
         self.declare_parameter("check_local_costmap_content", False)
         self.declare_parameter("check_tf_height", False)
@@ -63,6 +65,7 @@ class SystemCheckNode(Node):
         self.lifecycle_states: Dict[str, str] = {}
         self.lifecycle_last_error: Dict[str, str] = {}
         self.scan_stats: Optional[Dict[str, Any]] = None
+        self.scan_received_monotonic = 0.0
         self.local_costmap_stats: Optional[Dict[str, int]] = None
         self.tf_buffer = None
         self.tf_listener = None
@@ -83,7 +86,6 @@ class SystemCheckNode(Node):
 
     def _subscribe_required_topics(self) -> None:
         require_messages = self._bool("require_topic_messages")
-        need_scan_stats = self._bool("check_scan_content") or self._bool("check_local_costmap_content")
         need_local_costmap_stats = self._bool("check_local_costmap_content")
 
         latched_qos = QoSProfile(depth=1)
@@ -92,7 +94,10 @@ class SystemCheckNode(Node):
 
         if require_messages and self._bool("require_map"):
             self.create_subscription(OccupancyGrid, "/map", self._mark("/map"), latched_qos)
-        if self._bool("require_scan") and (require_messages or need_scan_stats):
+        # The canonical navigation scan is a hard runtime input.  Its sample
+        # freshness must be checked even when map/costmap topic checks are
+        # intentionally deferred before localization.
+        if self._bool("require_scan"):
             scan_qos = QoSProfile(depth=10)
             scan_qos.reliability = ReliabilityPolicy.BEST_EFFORT
             scan_qos.durability = DurabilityPolicy.VOLATILE
@@ -143,8 +148,7 @@ class SystemCheckNode(Node):
 
     def _on_scan(self, msg: LaserScan) -> None:
         self.seen_topics.add(self.scan_topic)
-        if not self._bool("check_scan_content") and not self._bool("check_local_costmap_content"):
-            return
+        self.scan_received_monotonic = time.monotonic()
         finite = [
             value
             for value in msg.ranges
@@ -285,7 +289,7 @@ class SystemCheckNode(Node):
 
     def _content_problems(self) -> List[str]:
         problems: List[str] = []
-        if self._bool("check_scan_content"):
+        if self._bool("require_scan"):
             if not self.scan_stats:
                 problems.append("scan_content=no_scan_stats")
             else:
@@ -301,6 +305,17 @@ class SystemCheckNode(Node):
                             self.scan_stats.get("min"),
                             self.scan_stats.get("frame_id"),
                         )
+                    )
+                timeout_s = max(0.5, float(self.get_parameter("scan_timeout_s").value))
+                age_s = (
+                    time.monotonic() - self.scan_received_monotonic
+                    if self.scan_received_monotonic > 0.0
+                    else None
+                )
+                if age_s is None or age_s > timeout_s:
+                    problems.append(
+                        "scan_stale=age:%s/timeout:%.1fs"
+                        % ("none" if age_s is None else "%.2f" % age_s, timeout_s)
                     )
 
         if self._bool("check_local_costmap_content"):

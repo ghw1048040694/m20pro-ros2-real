@@ -1037,7 +1037,7 @@ class WebDashboardNode(Node):
         self.declare_parameter("navigation_status_topic", "/m20pro_tcp_bridge/navigation_status")
         self.declare_parameter("battery_topic", "/BATTERY_DATA")
         self.declare_parameter("motion_state_topic", "/MOTION_STATE")
-        self.declare_parameter("scan_topic", "/scan")
+        self.declare_parameter("scan_topic", "/m20pro/navigation_scan")
         self.declare_parameter("scan_overlay_max_points", 720)
         self.declare_parameter("scan_overlay_update_min_interval_s", 0.1)
         self.declare_parameter("scan_overlay_hold_s", 0.5)
