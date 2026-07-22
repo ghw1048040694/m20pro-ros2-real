@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>M20 Pro ROS 2 跨楼层巡检导航系统</title>
   <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="/static/dashboard.css?v=20260722-posture-state-1" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=20260722-floor-chip-1" />
 
 </head>
 <body>
@@ -14,7 +14,6 @@
     <div class="top-status">
       <span class="status-chip"><span id="statusDot" class="dot"></span><strong id="statusText">连接中</strong></span>
       <button id="batteryStatusBtn" class="status-chip status-action" type="button" aria-expanded="false" title="查看电池状态并启动一键充电"><span>电量</span><strong id="battery">-</strong></button>
-      <span class="status-chip"><span>楼层</span><strong id="floor">-</strong></span>
       <button id="localizationStatusBtn" class="status-chip status-action" type="button" aria-expanded="false"><span>定位</span><strong id="localization">-</strong></button>
       <button id="preflightStatusBtn" class="status-chip status-action" type="button" aria-expanded="false" title="查看基础自检结果"><span>自检</span><strong id="preflightTopStatus">尚未自检</strong></button>
       <button id="taskStatusBtn" class="status-chip status-action" type="button" aria-expanded="false"><span>任务</span><strong id="taskTopStatus">空闲</strong></button>
@@ -405,7 +404,7 @@
   </dialog>
 
   <script src="http://10.21.31.104:8888/video1/hls.min.js"></script>
-  <script src="/static/dashboard.js?v=20260722-posture-state-1"></script>
+  <script src="/static/dashboard.js?v=20260722-floor-chip-1"></script>
 
 </body>
 </html>

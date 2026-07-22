@@ -2944,7 +2944,6 @@
       renderLocalizationStatus(s);
       renderPreflight(s.preflight || state.preflight);
       updateMarkControls(s);
-      $("floor").textContent = text(s.floor);
       if ($("stair")) $("stair").textContent = text(s.stair_status);
       const gaitParts = [];
       if (s.usage_mode_result) gaitParts.push(text(s.usage_mode_result));
