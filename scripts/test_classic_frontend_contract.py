@@ -192,8 +192,23 @@ def main() -> None:
     assert "function paintMapEditor" in script
     assert "button.textContent = item.label || item.id;" in script
     assert "button.textContent = `+ ${item.label || item.id}`" not in script
-    assert "20260722-recordings-1" in html
-    assert html.count("20260722-recordings-1") == 2
+    assert "20260722-name-inputs-1" in html
+    assert html.count("20260722-name-inputs-1") == 2
+    for stale_default in (
+        'value="testfield"',
+        'value="M20Pro 工地巡检"',
+        'value="主楼"',
+        'value="日常巡检任务"',
+    ):
+        assert stale_default not in html
+    for element_id in ("recordingPrefix", "projectName", "buildingName", "taskName"):
+        element_start = html.index(f'id="{element_id}"')
+        element_end = html.index(">", element_start)
+        assert 'autocomplete="off"' in html[element_start:element_end]
+    assert 'prefix: $("recordingPrefix").value.trim()' in script
+    assert 'prefix: $("recordingPrefix").value.trim() || "testfield"' not in script
+    assert '$("recordingPrefix").value = "";' in script
+    assert '$("taskName").value = "";' in script
     for element_id in (
         "batteryStatusBtn",
         "batteryStatusPopover",

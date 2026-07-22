@@ -4660,6 +4660,7 @@
           map_id: currentAnnotationMapId(),
           annotation_ids: ids
         });
+        $("taskName").value = "";
         state.taskDraftIds = [];
         renderTaskPoints();
         await loadTasks();
@@ -4672,6 +4673,7 @@
           name: $("taskName").value.trim() || "跨楼层巡检任务",
           annotation_ids: state.crossFloorDraftIds.slice()
         });
+        $("taskName").value = "";
         state.crossFloorDraftIds = [];
         renderCrossFloorComposer();
         await loadTasks();
@@ -4727,8 +4729,9 @@
         const duration = Number.parseInt($("recordingDuration").value, 10);
         const payload = await api("POST", "/api/recording/start", {
           duration_s: Number.isFinite(duration) ? duration : 300,
-          prefix: $("recordingPrefix").value.trim() || "testfield"
+          prefix: $("recordingPrefix").value.trim()
         });
+        $("recordingPrefix").value = "";
         renderRecordingStatus(payload);
         await loadRecordingList();
       } catch (err) { setLog("recordingStatus", err); }

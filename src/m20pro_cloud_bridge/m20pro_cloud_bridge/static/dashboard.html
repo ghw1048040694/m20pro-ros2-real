@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>M20 Pro ROS 2 跨楼层巡检导航系统</title>
   <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="/static/dashboard.css?v=20260722-recordings-1" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=20260722-name-inputs-1" />
 
 </head>
 <body>
@@ -68,7 +68,7 @@
   <section id="recordingStatusPopover" class="status-popover status-popover-wide" hidden>
     <div class="status-popover-head"><strong>ROS 录包管理</strong><button id="closeRecordingStatusBtn" class="icon-button" type="button" title="关闭" aria-label="关闭">×</button></div>
     <div class="row"><label>最长时间(s)</label><input id="recordingDuration" value="300" /></div>
-    <div class="row"><label>名称</label><input id="recordingPrefix" value="testfield" /></div>
+    <div class="row"><label>名称</label><input id="recordingPrefix" placeholder="留空自动命名" autocomplete="off" /></div>
     <div class="actions"><button class="primary" id="startRecordingBtn">开始录包</button><button id="stopRecordingBtn">停止录包</button></div>
     <div id="recordingStatus" class="compact-status">未开始</div>
     <div class="recording-list-head"><strong>已保存录包</strong><button id="refreshRecordingsBtn" type="button">刷新</button></div>
@@ -123,7 +123,7 @@
           <button type="button" data-map-editor-mode="unknown" title="把区域恢复为未知栅格">设为未知</button>
         </span>
         <label class="map-editor-brush">笔刷 <input id="mapEditorBrush" type="range" min="1" max="20" step="1" value="3" /><output id="mapEditorBrushValue">3</output></label>
-        <input id="mapEditorName" class="map-editor-name" placeholder="新地图名称（可留空）" aria-label="修饰后新地图名称" />
+        <input id="mapEditorName" class="map-editor-name" placeholder="新地图名称（可留空）" aria-label="修饰后新地图名称" autocomplete="off" />
         <span id="mapEditorCount" class="map-editor-count">0 处修改</span>
         <button id="mapEditorUndoBtn" type="button" title="撤销上一笔" disabled>撤销</button>
         <button id="mapEditorResetBtn" type="button" title="清除本次全部修改" disabled>清除</button>
@@ -147,15 +147,15 @@
             <h2>建图向导</h2>
             <div class="row">
               <label>项目名称</label>
-              <input id="projectName" value="M20Pro 工地巡检" />
+              <input id="projectName" placeholder="输入项目名称" autocomplete="off" />
             </div>
             <div class="row">
               <label>建筑/区域</label>
-              <input id="buildingName" value="主楼" />
+              <input id="buildingName" placeholder="输入建筑或区域" autocomplete="off" />
             </div>
             <div class="row">
               <label>地图名称</label>
-              <input id="mappingMapName" placeholder="留空自动按楼层和时间生成" />
+              <input id="mappingMapName" placeholder="留空自动按楼层和时间生成" autocomplete="off" />
             </div>
             <div class="row">
               <label>建图模式</label>
@@ -182,7 +182,7 @@
             </div>
             <div class="row">
               <label>地图名称</label>
-              <input id="importName" placeholder="留空自动生成" />
+              <input id="importName" placeholder="留空自动生成" autocomplete="off" />
             </div>
             <div class="actions">
               <button class="primary" id="importMapBtn">从 106 拉到 104</button>
@@ -192,7 +192,7 @@
             <h2>跨楼层路线</h2>
             <div class="row">
               <label>路线名称</label>
-              <input id="floorRouteName" placeholder="例如 1层到2层东楼梯" />
+              <input id="floorRouteName" placeholder="例如 1层到2层东楼梯" autocomplete="off" />
             </div>
             <div class="row">
               <label>起始层入口</label>
@@ -239,35 +239,35 @@
             </div>
             <div class="row">
               <label>名称</label>
-              <input id="markLabel" placeholder="例如 20层东区2008房间" />
+              <input id="markLabel" placeholder="例如 20层东区2008房间" autocomplete="off" />
             </div>
             <div class="row">
               <label>楼栋</label>
-              <input id="markBuilding" placeholder="例如 3栋" />
+              <input id="markBuilding" placeholder="例如 3栋" autocomplete="off" />
             </div>
             <div class="row">
               <label>单元</label>
-              <input id="markUnit" placeholder="例如 1单元" />
+              <input id="markUnit" placeholder="例如 1单元" autocomplete="off" />
             </div>
             <div class="row">
               <label>户号</label>
-              <input id="markHouse" placeholder="例如 2008户" />
+              <input id="markHouse" placeholder="例如 2008户" autocomplete="off" />
             </div>
             <div class="row">
               <label>区域</label>
-              <input id="markArea" placeholder="例如 东区、核心筒、样板段" />
+              <input id="markArea" placeholder="例如 东区、核心筒、样板段" autocomplete="off" />
             </div>
             <div class="row">
               <label>房间/部位</label>
-              <input id="markRoom" placeholder="例如 2008房间、西侧走廊" />
+              <input id="markRoom" placeholder="例如 2008房间、西侧走廊" autocomplete="off" />
             </div>
             <div class="row">
               <label>结果前缀</label>
-              <input id="markResultPrefix" placeholder="留空自动生成昂锐雷达结果文件名前缀" />
+              <input id="markResultPrefix" placeholder="留空自动生成昂锐雷达结果文件名前缀" autocomplete="off" />
             </div>
             <div class="row">
               <label>扫描点</label>
-              <input id="markScanPoint" placeholder="例如 P01、客厅东侧点" />
+              <input id="markScanPoint" placeholder="例如 P01、客厅东侧点" autocomplete="off" />
             </div>
             <div class="row">
               <label>雷达扫描</label>
@@ -322,7 +322,7 @@
             <h2>任务编排</h2>
             <div class="row">
               <label>任务名称</label>
-              <input id="taskName" value="日常巡检任务" />
+              <input id="taskName" placeholder="留空自动命名" autocomplete="off" />
             </div>
             <div class="collection-toolbar">
               <input id="taskPointSearch" type="search" placeholder="搜索可选点位" aria-label="搜索可选点位" />
@@ -405,7 +405,7 @@
   </dialog>
 
   <script src="http://10.21.31.104:8888/video1/hls.min.js"></script>
-  <script src="/static/dashboard.js?v=20260722-recordings-1"></script>
+  <script src="/static/dashboard.js?v=20260722-name-inputs-1"></script>
 
 </body>
 </html>
