@@ -38,8 +38,6 @@ def profile_summary(profile: dict) -> dict:
         "profile_hash": profile["profile_hash"],
         "source_path": profile["source_path"],
         "scan": profile["scan"],
-        "stair": profile["stair"],
-        "stair_safety": profile["stair_safety"],
         "stair_transition": profile["stair_transition"],
         "navigation": profile["navigation"],
         "teleoperation": profile["teleoperation"],
@@ -122,30 +120,6 @@ def main() -> int:
     print(f"field profile OK: {summary['profile_name']}")
     print(f"profile hash: {summary['profile_hash']}")
     print(
-        "stair max/obstacle height: %.3f / %.3f m"
-        % (
-            summary["stair"]["max_step_height_m"],
-            summary["stair"]["obstacle_height_m"],
-        )
-    )
-    print(
-        "stair corridor: %.2f..%.2f m, half width %.2f m"
-        % (
-            summary["stair"]["forward_min_m"],
-            summary["stair"]["forward_max_m"],
-            summary["stair"]["corridor_half_width_m"],
-        )
-    )
-    print(
-        "clear samples/startup/stale/mode timeout: %d / %.2f / %.2f / %.2f s"
-        % (
-            summary["stair_safety"]["required_clear_samples"],
-            summary["stair_safety"]["startup_timeout_s"],
-            summary["stair_safety"]["stale_timeout_s"],
-            summary["stair"]["mode_timeout_s"],
-        )
-    )
-    print(
         "navigation speed/goal/costmap: %.2f m/s / %.2f rad/s / %.2f m / %.2f rad / %.2f m"
         % (
             summary["navigation"]["controller"]["max_linear_speed_mps"],
@@ -164,12 +138,8 @@ def main() -> int:
             summary["teleoperation"]["max_angular_speed_radps"],
         )
     )
-    editable_stair = dict(summary["stair"])
-    editable_stair.pop("obstacle_height_m", None)
     editable_groups = [
         summary["scan"],
-        editable_stair,
-        summary["stair_safety"],
         summary["stair_transition"],
         summary["navigation"],
         summary["teleoperation"],

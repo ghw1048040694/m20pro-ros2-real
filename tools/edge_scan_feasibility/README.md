@@ -3,9 +3,7 @@
 The only production perception chain is:
 
 ```text
-106 DrDDS /LIDAR/POINTS -> m20pro_edge_scan -> /scan -> 104 AMCL/Web/recording
-                                      \-> stair 3D envelope -> stair obstacle scan
-                                                               -> 104 Nav2 selector
+106 DrDDS /LIDAR/POINTS -> m20pro_edge_scan -> /scan -> 104 Nav2/AMCL/Web/recording
 ```
 
 104 must not subscribe to raw point clouds or run a lidar relay/fusion node.
@@ -50,29 +48,8 @@ TF conversion disabled. The edge node preserves that field interpretation and
 publishes the resulting scan as `m20pro_base_link`. Any future lidar firmware or
 mounting change requires a static alignment test before navigation.
 
-## Stair-safe output
-
-The normal `/scan` contract never changes. During a leased stair session the
-same 106 process additionally merges 0.50 seconds of forward-corridor 3D points,
-estimates the local tread envelope, and publishes:
-
-- `/m20pro/stair_obstacle_scan`: only residual obstacle geometry;
-- `/m20pro/stair_clearance`: `clear`, `blocked`, or `unknown` plus evidence;
-- `/m20pro/stair_perception_mode`: consumed as the 104 session heartbeat.
-
-With the default field profile, regular adjacent steps up to `0.24 m` are terrain. Stable
-geometry at least `0.26 m` above the local tread, or a larger
-height discontinuity, blocks motion. Sparse or malformed profiles are `unknown`
-and must never be treated as clear. The mode lease expires after 1.50 seconds so
-a dead 104 controller cannot leave 106 in stair mode indefinitely.
-
-The mode request and clearance result carry the canonical profile name and
-SHA-256. 106 rejects a stair request from a 104 running a different profile;
-104 also rejects a clearance result with a different hash. There is no legacy
-env fallback and the edge binary cannot be started with a partial argument set.
-
-The geometry threshold has a physical limit: a low object that is no taller
-than a valid step and is continuous with the stair profile cannot be reliably
-distinguished from the stair by this lidar alone. Stairways must still be
-cleared before a real run, and mounting/posture changes require a new recorded
-calibration test.
+The 2026-07-19 stair-envelope experiment and its scan selector were removed on
+2026-07-22 after field bags showed that dynamic obstacles no longer formed a
+usable Nav2 silhouette. The production converter has one output and one mode:
+the complete rolling `/scan`. Existing stair execution fails closed until its
+replacement is implemented.

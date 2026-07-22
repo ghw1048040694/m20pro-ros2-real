@@ -32,7 +32,7 @@ class SystemCheckNode(Node):
         self.declare_parameter("require_nodes", True)
         self.declare_parameter("require_floor_manager", True)
         self.declare_parameter("require_topic_messages", True)
-        self.declare_parameter("scan_topic", "/m20pro/navigation_scan")
+        self.declare_parameter("scan_topic", "/scan")
         self.declare_parameter("scan_timeout_s", 3.0)
         self.declare_parameter("check_scan_content", False)
         self.declare_parameter("check_local_costmap_content", False)
@@ -58,7 +58,7 @@ class SystemCheckNode(Node):
         )
 
         self.mode = str(self.get_parameter("mode").value).strip() or "real"
-        self.scan_topic = str(self.get_parameter("scan_topic").value).strip() or "/m20pro/navigation_scan"
+        self.scan_topic = str(self.get_parameter("scan_topic").value).strip() or "/scan"
         self.start_time = self.get_clock().now()
         self.reported_ok = False
         self.seen_topics: Set[str] = set()

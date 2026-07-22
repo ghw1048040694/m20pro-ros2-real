@@ -318,29 +318,9 @@ def test_friendly_nav_status() -> None:
         "coordinated switch confirmed text",
     )
     assert_equal(
-        friendly_nav_status("checking_stair_clearance session_id=s1 source_floor=F20 target_floor=F21"),
-        "跨楼层：正在确认楼梯通道净空",
-        "stair clearance checking text",
-    )
-    assert_equal(
-        friendly_nav_status("stair_clearance_confirmed session_id=s1 source_floor=F20 target_floor=F21"),
-        "跨楼层：楼梯净空已确认，正在切换楼梯步态",
-        "stair clearance confirmed text",
-    )
-    assert_equal(
-        friendly_nav_status("checking_stair_exit_clearance session_id=s1 target_floor=F21"),
-        "跨楼层：目标层已定位，正在确认楼梯出口净空",
-        "stair exit clearance checking text",
-    )
-    assert_equal(
-        friendly_nav_status("error reason=stair_clearance_blocked session_id=s1 state=blocked"),
-        "楼梯通道检测到异常障碍，任务已停止",
-        "stair obstacle error text",
-    )
-    assert_equal(
-        friendly_nav_status("error reason=stair_clearance_stale session_id=s1 state=clear"),
-        "楼梯净空数据已过期，任务已停止",
-        "stair clearance stale text",
+        friendly_nav_status("error reason=stair_execution_retired current=F20 target=F21"),
+        "旧爬楼链路已停用，新方案未接入前禁止执行跨楼层任务",
+        "retired stair execution text",
     )
     assert_equal(
         friendly_nav_status("blocked reason=not_at_entry distance=1.2 tolerance=0.8"),

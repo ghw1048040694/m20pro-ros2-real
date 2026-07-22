@@ -10,7 +10,7 @@ from sensor_msgs.msg import LaserScan
 class ScanRecordingRelay(Node):
     def __init__(self) -> None:
         super().__init__("m20pro_scan_recording_relay")
-        self.declare_parameter("input_topic", "/m20pro/navigation_scan")
+        self.declare_parameter("input_topic", "/scan")
         self.declare_parameter("output_topic", "/m20pro/recording_scan")
         output_qos = QoSProfile(
             depth=10,

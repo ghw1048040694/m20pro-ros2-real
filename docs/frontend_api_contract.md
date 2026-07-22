@@ -591,7 +591,7 @@ local costmap 或 `/odom` 信息不完整。两种情况都应保持任务停止
 
 安全规则：
 
-- 只有 104 以 `move` 模式运行、速度仲裁器就绪且楼梯感知会话未激活时可以接管。
+- 只有 104 以 `move` 模式运行且速度仲裁器就绪时可以接管。
 - 接管前后端先停止当前任务；结束接管后仲裁器进入 `locked`，旧任务不会自动恢复。
 - 同一时间只允许一个遥控会话；指令必须带会话 ID 和单调递增序号，迟到指令被忽略。
 - 浏览器必须在 `teleoperation.command_timeout_s` 内续租。松键、失焦、页面隐藏、断网或后端异常都会零速停车；仲裁器还有独立的第二道超时保护。
@@ -612,7 +612,6 @@ local costmap 或 `/odom` 信息不完整。两种情况都应保持任务停止
     "acquiring": false,
     "status": "inactive",
     "mux_mode": "locked",
-    "stair_session_active": false,
     "command_timeout_s": 0.35,
     "limits": {
       "forward_mps": 0.18,
@@ -937,6 +936,8 @@ ROS 2 功能包也可以订阅：
 
 跨楼层路线不是由项目楼层或地图名称自动推导的。每条路线必须绑定两张正式地图和四个实测语义点，并按方向保存；`F1 -> F2` 不会隐式生成 `F2 -> F1`。
 
+当前只保留路线和任务编排接口。旧楼梯感知与爬楼执行链已停用；新方案接入前，向其他楼层发送 `/m20pro/floor_goal` 或 `/m20pro/use_stairs` 会在任何跨层运动开始前返回 `error reason=stair_execution_retired`。
+
 ### GET `/api/floor_routes`
 
 返回已保存的有向路线、可用于路线配置的楼梯语义点和地图摘要。只有 `stair_entry`、`stair_switch`、`stair_exit` 且位姿有效的点会进入候选列表。
@@ -965,7 +966,7 @@ ROS 2 功能包也可以订阅：
 
 ### 内部切层协议
 
-`floor_manager` 到达起始层共享平台后发布 `/m20pro/floor_switch_request`；Web 校验当前任务、路线、起始地图和目标身份后，依次切换 104 Nav2 地图、执行 106 `drmap apply`、发布目标层初始位姿并等待 2101/定位/位姿证据。只有全部确认才通过 `/m20pro/floor_switch_result` 返回成功。地图切换、重定位、任务取消或异常失败时执行 104/106 回滚；回滚不完整会返回 `state_uncertain=true`，`floor_manager` 清空当前楼层并停止任务。
+该切层协议作为后续新爬楼方案的地图事务基础保留，当前不会由旧爬楼链路触发。新方案接入后，Web 仍应校验当前任务、路线、起始地图和目标身份，依次切换 104 Nav2 地图、执行 106 `drmap apply`、发布目标层初始位姿并等待 2101/定位/位姿证据；失败时保持 104/106 事务回滚和 `state_uncertain=true` 失效保护。
 
 ## YOLO 和视频接口
 

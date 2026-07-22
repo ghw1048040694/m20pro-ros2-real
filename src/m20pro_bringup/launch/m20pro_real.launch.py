@@ -41,7 +41,6 @@ def generate_launch_description():
         bringup_share, "config", "m20pro_field_profile.yaml"
     )
     field_profile = load_field_profile(default_field_profile)
-    profile_stair = field_profile["stair"]
     floor_manager_parameters = floor_manager_field_parameters(field_profile)
     command_mux_parameters = command_mux_field_parameters(field_profile)
     web_navigation_parameters = web_navigation_field_parameters(field_profile)
@@ -350,30 +349,11 @@ def generate_launch_description():
             output="screen",
             parameters=[
                 {
-                    # Keep rosbag and the web display on the exact scan stream
-                    # consumed by Nav2, including stair-mode selection.
-                    "input_topic": "/m20pro/navigation_scan",
+                    # Mirror the same canonical /scan stream consumed by Nav2.
+                    "input_topic": scan_topic,
                     "output_topic": "/m20pro/recording_scan",
                 }
             ],
-        ),
-        Node(
-            package="m20pro_navigation",
-            executable="navigation_scan_selector",
-            name="m20pro_navigation_scan_selector",
-            output="screen",
-            parameters=[
-                {
-                    "normal_scan_topic": scan_topic,
-                    "stair_scan_topic": "/m20pro/stair_obstacle_scan",
-                    "mode_topic": "/m20pro/stair_perception_mode",
-                    "output_topic": "/m20pro/navigation_scan",
-                    "mode_timeout_s": profile_stair["mode_timeout_s"],
-                    "field_profile_name": field_profile["profile_name"],
-                    "field_profile_hash": field_profile["profile_hash"],
-                }
-            ],
-            condition=IfCondition(enable_nav2 if nav2_stack_available else "false"),
         ),
         Node(
             package="m20pro_navigation",
@@ -450,7 +430,7 @@ def generate_launch_description():
             parameters=[
                 {
                     "enabled": ParameterValue(enable_nav2_startup_gate, value_type=bool),
-                    "scan_topic": "/m20pro/navigation_scan",
+                    "scan_topic": scan_topic,
                     "required_fresh_age_s": 3.0,
                     "startup_retry_s": 10.0,
                     "startup_timeout_s": 20.0,
@@ -524,9 +504,8 @@ def generate_launch_description():
                         value_type=bool,
                     ),
                     "stair_zones_topic": stair_zones_topic,
-                    # The Web node must observe the exact scan stream consumed by Nav2.
-                    # /m20pro/recording_scan is a rosbag-only mirror for late readers.
-                    "scan_topic": "/m20pro/navigation_scan",
+                    # The Web node observes the exact /scan stream consumed by Nav2.
+                    "scan_topic": scan_topic,
                     "startup_sync_selected_map_delay_s": 6.0,
                     "enable_camera_proxy": ParameterValue(enable_camera_proxy, value_type=bool),
                     "front_camera_url": front_camera_url,
@@ -571,7 +550,7 @@ def generate_launch_description():
             parameters=[
                 {
                     "mode": "real",
-                    "scan_topic": "/m20pro/navigation_scan",
+                    "scan_topic": scan_topic,
                     "scan_timeout_s": 3.0,
                     "check_period_s": 5.0,
                     "require_topic_messages": False,

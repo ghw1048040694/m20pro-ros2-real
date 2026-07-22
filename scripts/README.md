@@ -69,7 +69,7 @@ source install/setup.bash
 ./scripts/apply_field_profile.sh          # 空闲时原子更新 106 和 104
 ```
 
-schema v3 共 74 个现场参数，其中 `navigation` 28 个、`teleoperation` 7 个，覆盖速度/加速度、到点、卡住判定、DWB 采样、局部/全局代价地图、全局规划、遥控限速和失联停车；楼梯过渡与定位稳定性也由同一文件驱动。不要直接编辑 106 的 `/etc/m20pro-edge-scan-106.env`、Nav2 参数占位符或定位参数占位符。整狗部署会比较上位机、104 和 106 的配置哈希，不一致即失败；任务运行中不支持热更新。
+schema v4 共 66 个现场参数，其中 `navigation` 29 个、`teleoperation` 7 个，覆盖速度/加速度、到点、卡住判定、DWB 采样、局部/全局代价地图、全局规划、遥控限速、失联停车、跨层路线元数据与定位稳定性。旧楼梯感知参数已删除。不要直接编辑 106 的 `/etc/m20pro-edge-scan-106.env`、Nav2 参数占位符或定位参数占位符。整狗部署会比较上位机、104 和 106 的配置哈希，不一致即失败；任务运行中不支持热更新。
 
 说明：
 - 真机现场测试只用 `104_start_real_shadow.sh` 或 `104_start_real_move.sh` 全量启动。

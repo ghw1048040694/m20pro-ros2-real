@@ -23,7 +23,7 @@ class Nav2StartupGate(Node):
         self.declare_parameter("enabled", True)
         self.declare_parameter("localization_topic", "/m20pro_tcp_bridge/localization_ok")
         self.declare_parameter("pose_topic", "/m20pro_tcp_bridge/map_pose")
-        self.declare_parameter("scan_topic", "/m20pro/navigation_scan")
+        self.declare_parameter("scan_topic", "/scan")
         self.declare_parameter("map_topic", "/map")
         self.declare_parameter(
             "lifecycle_manager_service",

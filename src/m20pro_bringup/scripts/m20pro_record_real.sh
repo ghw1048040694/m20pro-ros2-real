@@ -93,11 +93,7 @@ fi
 
 TOPICS=(
   /m20pro/recording_scan
-  /m20pro/navigation_scan
-  /m20pro/stair_obstacle_scan
-  /m20pro/stair_clearance
-  /m20pro/stair_perception_mode
-  /m20pro/navigation_scan_status
+  /scan
   /tf
   /tf_static
   /odom

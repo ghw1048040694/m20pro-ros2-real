@@ -1437,9 +1437,8 @@
         const heartbeatText = Number.isFinite(heartbeat) ? ` / 心跳 ${heartbeat.toFixed(2)}s` : "";
         const motion = currentMotionState();
         const postureText = motion.fresh ? ` / 姿态 ${motion.label}` : " / 姿态状态未知";
-        summary.className = `compact-status${payload.stair_session_active || (payload.active && muxMode !== "teleop") ? " fail" : ""}`;
-        if (payload.stair_session_active) summary.textContent = "楼梯感知会话进行中，禁止网页遥控";
-        else if (owns) summary.textContent = `人工接管中 / 仲裁 ${muxMode}${heartbeatText}${postureText}`;
+        summary.className = `compact-status${payload.active && muxMode !== "teleop" ? " fail" : ""}`;
+        if (owns) summary.textContent = `人工接管中 / 仲裁 ${muxMode}${heartbeatText}${postureText}`;
         else if (occupied) summary.textContent = `其他操作端已接管 / 仲裁 ${muxMode}${heartbeatText}${postureText}`;
         else if (!payload.available) summary.textContent = "速度仲裁器未就绪，遥控不可用";
         else summary.textContent = `自主导航 / 仲裁 ${muxMode}${postureText}`;
@@ -1457,7 +1456,7 @@
         $("teleopPostureBtn").disabled = !owns || !postureAction;
       }
       if ($("acquireTeleopBtn")) {
-        $("acquireTeleopBtn").disabled = Boolean(payload.active || payload.acquiring || payload.stair_session_active || !payload.available);
+        $("acquireTeleopBtn").disabled = Boolean(payload.active || payload.acquiring || !payload.available);
       }
       if ($("releaseTeleopBtn")) $("releaseTeleopBtn").disabled = !owns;
     }

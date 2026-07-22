@@ -878,7 +878,6 @@ class WebDashboardNode(Node):
         self._state: Dict[str, Any] = {
             "floor": None,
             "stair_status": None,
-            "stair_perception_mode": None,
             "command_mux_status": None,
             "gait_command": None,
             "gait_result": None,
@@ -1022,7 +1021,6 @@ class WebDashboardNode(Node):
         self.declare_parameter("robot_pose_display_yaw_offset_rad", 0.0)
         self.declare_parameter("current_floor_topic", "/m20pro/current_floor")
         self.declare_parameter("stair_status_topic", "/m20pro/stair_status")
-        self.declare_parameter("stair_perception_mode_topic", "/m20pro/stair_perception_mode")
         self.declare_parameter("gait_command_topic", "/m20pro/gait_command")
         self.declare_parameter("gait_result_topic", "/m20pro_tcp_bridge/gait_result")
         self.declare_parameter("motion_state_command_topic", "/m20pro/motion_state_command")
@@ -1038,7 +1036,7 @@ class WebDashboardNode(Node):
         self.declare_parameter("navigation_status_topic", "/m20pro_tcp_bridge/navigation_status")
         self.declare_parameter("battery_topic", "/BATTERY_DATA")
         self.declare_parameter("motion_state_topic", "/m20pro_tcp_bridge/motion_state")
-        self.declare_parameter("scan_topic", "/m20pro/navigation_scan")
+        self.declare_parameter("scan_topic", "/scan")
         self.declare_parameter("scan_overlay_max_points", 720)
         self.declare_parameter("scan_overlay_update_min_interval_s", 0.1)
         self.declare_parameter("scan_overlay_hold_s", 0.5)
@@ -1374,12 +1372,6 @@ class WebDashboardNode(Node):
             10,
         )
         self.create_subscription(String, self._topic("stair_status_topic"), self._on_stair_status, 10)
-        self.create_subscription(
-            String,
-            self._topic("stair_perception_mode_topic"),
-            self._on_stair_perception_mode,
-            10,
-        )
         mux_status_qos = QoSProfile(depth=1)
         mux_status_qos.reliability = ReliabilityPolicy.RELIABLE
         mux_status_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
@@ -1467,15 +1459,6 @@ class WebDashboardNode(Node):
             self._state["stair_status"] = msg.data
             self._mark_topic("stair_status")
         self._handle_navigation_status_for_task(msg.data)
-
-    def _on_stair_perception_mode(self, msg: String) -> None:
-        with self._lock:
-            self._state["stair_perception_mode"] = {
-                "last_update": time.time(),
-                "raw": msg.data,
-                "parsed": parse_json_text(msg.data),
-            }
-            self._mark_topic("stair_perception_mode")
 
     def _on_command_mux_status(self, msg: String) -> None:
         with self._lock:
@@ -1988,7 +1971,6 @@ class WebDashboardNode(Node):
                 "active_waypoint",
                 "inspection_status",
                 "radar_inspection",
-                "stair_perception_mode",
                 "command_mux_status",
             ):
                 if isinstance(self._state.get(key), dict):
@@ -3150,9 +3132,6 @@ class WebDashboardNode(Node):
         ]
         navigation_topics = [
             self._topic("scan_topic"),
-            "/m20pro/navigation_scan",
-            "/m20pro/stair_obstacle_scan",
-            "/m20pro/stair_clearance",
             self._topic("odom_topic"),
             self._topic("pose_topic"),
             self._topic("localization_ok_topic"),
@@ -5946,19 +5925,6 @@ class WebDashboardNode(Node):
             )
         return {"ok": True, "mode": mode, "message": str(response.message or "")}
 
-    def _stair_teleop_block(self) -> Optional[Dict[str, Any]]:
-        with self._lock:
-            mode = dict(self._state.get("stair_perception_mode") or {})
-        parsed = mode.get("parsed") if isinstance(mode.get("parsed"), dict) else {}
-        if parsed.get("active") is True:
-            return {
-                "code": "teleop_blocked_on_stairs",
-                "message": "楼梯感知会话进行中，网页遥控不能在台阶上接管；请先停止任务并使用原厂手柄处理",
-                "stair_phase": parsed.get("phase"),
-                "stair_session_id": parsed.get("session_id"),
-            }
-        return None
-
     def _teleop_status_payload(self) -> Dict[str, Any]:
         now_monotonic = time.monotonic()
         with self._teleop_lock:
@@ -5969,9 +5935,7 @@ class WebDashboardNode(Node):
             acquiring = bool(self._teleop_acquiring)
         with self._lock:
             mux_status = dict(self._state.get("command_mux_status") or {})
-            stair_mode = dict(self._state.get("stair_perception_mode") or {})
         mux_parsed = mux_status.get("parsed") if isinstance(mux_status.get("parsed"), dict) else {}
-        stair_parsed = stair_mode.get("parsed") if isinstance(stair_mode.get("parsed"), dict) else {}
         heartbeat_age = None
         if last_heartbeat is not None:
             heartbeat_age = max(0.0, now_monotonic - float(last_heartbeat))
@@ -5982,7 +5946,6 @@ class WebDashboardNode(Node):
             "status": "active" if active else ("acquiring" if acquiring else "inactive"),
             "mux_mode": str(mux_parsed.get("mode") or "unknown"),
             "mux_reason": mux_parsed.get("reason"),
-            "stair_session_active": stair_parsed.get("active") is True,
             "heartbeat_age_s": heartbeat_age,
             "command_timeout_s": float(self.get_parameter("teleop_command_timeout_s").value),
             "command": command,
@@ -6021,9 +5984,6 @@ class WebDashboardNode(Node):
                     "当前不是 move 运动模式，不能启用网页遥控",
                     {"code": "teleop_motion_mode_blocked", "motion": motion},
                 )
-            stair_block = self._stair_teleop_block()
-            if stair_block:
-                return self._error(str(stair_block["message"]), stair_block)
             stop_result = self._stop_task({"reason": "web_teleop_takeover"})
             if not stop_result.get("ok"):
                 return stop_result

@@ -18,17 +18,13 @@ def main() -> None:
         "/m20pro/floor_switch_request",
         "/m20pro/floor_switch_result",
         "/m20pro/set_current_floor",
-        "/m20pro/stair_perception_mode",
-        "/m20pro/stair_clearance",
     ):
         assert topic in floor_manager
-        if topic in (
-            "/m20pro/floor_route_config",
-            "/m20pro/floor_switch_request",
-            "/m20pro/floor_switch_result",
-            "/m20pro/set_current_floor",
-        ):
-            assert topic in web
+        assert topic in web
+
+    for retired_topic in ("/m20pro/stair_perception_mode", "/m20pro/stair_clearance"):
+        assert retired_topic not in floor_manager
+        assert retired_topic not in web
 
     assert "DurabilityPolicy.TRANSIENT_LOCAL" in web
     assert "DurabilityPolicy.TRANSIENT_LOCAL" in floor_manager
@@ -51,12 +47,14 @@ def main() -> None:
     assert 'self.current_floor = ""' in floor_manager
     assert "self.pending_floor_switch = None" in floor_manager
     assert "floor_switch_timeout_s" in floor_manager, "coordinated switch must have a bounded wait"
-    assert "_start_stair_clearance_session(self.pending_stair_transition)" in floor_manager
-    assert "_prepare_stair_exit_clearance()" in floor_manager
-    assert "_deactivate_stair_perception()" in floor_manager
-    assert '"profile_hash": session.get("profile_hash")' in floor_manager
-    assert "profile_hash=self.field_profile_hash" in floor_manager
-    assert 'session["phase"] = "platform"' in floor_manager
+    goal_start = floor_manager.index("def _on_floor_goal")
+    goal_end = floor_manager.index("def _on_rviz_floor_goal", goal_start)
+    goal_body = floor_manager[goal_start:goal_end]
+    assert "stair_execution_retired" in goal_body
+    assert "_resolve_next_stair_route" not in goal_body
+    assert "stair_clearance" not in floor_manager
+    assert "stair_perception" not in floor_manager
+    assert "stair_execution_retired" in floor_manager
     assert 'label in ("stair_traverse", "stair_exit")' in floor_manager
     assert "self._cancel_active_nav_goal(reason)" in floor_manager
 

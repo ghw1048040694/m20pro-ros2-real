@@ -5,8 +5,8 @@
 #   ./scripts/apply_field_profile.sh
 #
 # 不要直接修改 104/106 上自动生成的 /etc 配置文件。
-# 感知阈值只能改变软件判定，不能提高机器狗真实的爬楼、关节或附着能力。
-schema_version: 3                 # 配置结构版本，程序使用，禁止自行修改
+# 配置只管理当前正式运行链路；新爬楼方案未落地前不保留旧感知参数。
+schema_version: 4                 # 配置结构版本，程序使用，禁止自行修改
 profile_name: default_field       # 配置名称，仅允许 ASCII 字母、数字、点、下划线和短横线
 
 # 点云转二维激光参数（运行在 106）
@@ -19,26 +19,7 @@ scan:
   range_min_m: 0.20               # 最小有效测距，单位 m
   range_max_m: 10.0               # 最大有效测距，单位 m，必须大于最小测距
 
-# 楼梯三维感知参数（只在楼梯会话期间启用）
-stair:
-  max_step_height_m: 0.24         # 允许识别为台阶的最大单级高度，单位 m；不得超过厂家实测物理上限
-  obstacle_height_margin_m: 0.02 # 台阶上限之外的障碍余量，单位 m；实际障碍阈值由两者相加派生
-  forward_min_m: 0.30             # 楼梯感知走廊起始距离，单位 m
-  forward_max_m: 2.20             # 楼梯感知走廊最远距离，单位 m
-  corridor_half_width_m: 0.55    # 楼梯感知走廊半宽，单位 m，即左右各取该宽度
-  min_corridor_points: 80         # 建立楼梯剖面所需的最少走廊点数
-  min_profile_bins: 5             # 判定楼梯剖面有效所需的最少高度栅格数
-  min_obstacle_points: 10         # 判定稳定障碍物所需的最少点数
-  profile_hold_s: 0.50            # 三维楼梯剖面短时保留时间，单位 s
-  mode_timeout_s: 1.50            # 楼梯模式心跳超时，单位 s；超时自动恢复平地感知
-
-# 楼梯运动安全门：只有连续收到足够的新鲜 clear 结果才允许继续
-stair_safety:
-  required_clear_samples: 3       # 放行前要求连续 clear 的样本数
-  startup_timeout_s: 4.0          # 等待首批楼梯净空结果的最长时间，单位 s
-  stale_timeout_s: 1.0            # 净空结果最大允许年龄，单位 s；不得大于楼梯模式超时
-
-# 跨楼层交接、切图和重复目标保护
+# 跨楼层路线与切图元数据。当前爬楼执行入口已停用，供后续新方案复用。
 stair_transition:
   entry_tolerance_m: 0.80         # 到达爬楼入口点的允许位置误差，单位 m
   floor_switch_timeout_s: 110.0   # 104/106 切图并完成目标层重定位的总超时，单位 s
@@ -63,7 +44,7 @@ navigation:
   # 到点精度；位置和朝向分别判断，收紧朝向不会同步收紧位置。
   goal:
     xy_tolerance_m: 0.35          # 目标点平面位置容差，单位 m
-    yaw_tolerance_rad: 0.20       # 目标点最终朝向容差，单位 rad，当前约 11.5 度
+    yaw_tolerance_rad: 0.35       # 目标点最终朝向容差，单位 rad，恢复现场稳定口径，约 20 度
   # 卡住判断；Foxy 只按平移距离判断进度，原地修正朝向时不要把半径设得过大。
   progress:
     required_movement_radius_m: 0.10 # 在允许时间内至少应移动的距离，单位 m；不得大于到点位置容差
