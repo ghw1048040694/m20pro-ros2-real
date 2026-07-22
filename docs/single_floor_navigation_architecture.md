@@ -67,6 +67,18 @@ dashboard.html/css/js
 
 如果任务页显示导航中，但 rosbag 里没有 `/m20pro/floor_goal`，断点在 Web 发布目标前；如果已经发布但 Nav2 没有 accepted/feedback，断点在 `/m20pro/floor_goal` 到 floor manager / Nav2；如果 Nav2 接收了但 `path_goal_error_m` 大或 `plan_goal_verified=false`，断点是路径目标不匹配；如果路径正确但机器人不动或漂移，再看定位、避障和底盘状态。
 
+## 定位主链路
+
+生产定位只输出一套 `/m20pro_tcp_bridge/map_pose`、`/odom` 和 `map -> odom -> m20pro_base_link`：
+
+1. 网页 `/initialpose` 由 TCP 桥转换为开发手册 `2101/1`，原厂成功回执才建立新的地图锚点。
+2. `2002/1 Location=0` 与位姿源新鲜度共同决定 `localization_ok`；前端状态本身不能反向证明定位成功。
+3. 原厂 TCP `1007/2` 坐标完整时作为绝对地图锚。它在工位静止采样比官方身体 TF 稳定，但部分固件在导航期间会返回空坐标。
+4. 1007 缺字段或查询短时失败时，使用官方连续 `map -> base_link` TF；切换瞬间先把 TF 对齐到最后可信锚点，之后只使用其相对运动，避免来源切换造成地图位姿跳变。
+5. 没有 ROS 或原厂手柄运动证据时，机器狗地图位姿固定在最后可信锚点。身体姿态变化和静止 TF 漂移只形成诊断告警，不再单独清除定位；运动期间超过大跳阈值、原厂 Location 失败或所有位姿源过期仍然失败闭锁。
+
+这是一条混合观测、单一输出的定位链路，不允许前端、Nav2 或任务层各自选择不同位姿源。
+
 ## 模块边界
 
 ### 前端静态文件

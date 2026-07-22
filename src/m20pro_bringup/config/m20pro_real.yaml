@@ -20,7 +20,7 @@ m20pro_tcp_bridge:
     vendor_position_offset_y: 0.0
     vendor_position_offset_z: 0.0
     max_abs_map_position_m: 1000.0
-    pose_source: "official_tf"
+    pose_source: "auto"
     enable_tf_pose_fallback: true
     tf_pose_fallback_topic: "/tf"
     handle_steer_topic: "/HANDLE_STEER"

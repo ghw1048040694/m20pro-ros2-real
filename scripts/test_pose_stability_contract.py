@@ -97,14 +97,15 @@ def main() -> None:
     assert anchored["pose"]["x"] == anchor["x"]
     assert anchored["pose"]["yaw"] == anchor["yaw"]
 
-    rejected_update = stationary_pose_update(
+    held_update = stationary_pose_update(
         anchor_pose=anchor,
         candidate={"x": 1.3, "y": 1.0, "z": 0.0, "yaw": 0.0},
         position_tolerance_m=0.2,
         yaw_tolerance_rad=0.3,
     )
-    assert not rejected_update["accept"]
-    assert rejected_update["pose"] is None
+    assert held_update["accept"]
+    assert held_update["reason"].startswith("stationary_drift_requires_relocalization")
+    assert held_update["pose"]["x"] == anchor["x"]
 
     print("pose stability contract tests passed")
 

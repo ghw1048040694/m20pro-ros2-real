@@ -50,6 +50,27 @@ def inverse_pose(pose: Dict[str, Any]) -> Dict[str, float]:
     }
 
 
+def pose_source_alignment_update(
+    *,
+    source_pose: Dict[str, Any],
+    reference_pose: Optional[Dict[str, Any]],
+    alignment: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Align a continuous fallback source to the last trusted map pose."""
+    source = _pose(source_pose)
+    initialized = alignment is None
+    if alignment is None:
+        reference = source if reference_pose is None else _pose(reference_pose)
+        alignment = compose_pose(reference, inverse_pose(source))
+    else:
+        alignment = _pose(alignment)
+    return {
+        "pose": compose_pose(alignment, source),
+        "alignment": alignment,
+        "initialized": initialized,
+    }
+
+
 def odom_alignment_update(
     *,
     map_pose: Dict[str, Any],

@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT / "src" / "m20pro_navigation"))
 from m20pro_navigation.odom_alignment_contract import (  # noqa: E402
     compose_pose,
     odom_alignment_update,
+    pose_source_alignment_update,
 )
 
 
@@ -100,12 +101,33 @@ def test_uncommanded_accepted_jump_also_rebases():
     assert_pose(result["odom_pose"], {"x": 0.0, "y": 0.0, "yaw": 0.0})
 
 
+def test_fallback_pose_source_is_aligned_without_switch_jump():
+    reference = {"x": -11.12, "y": -3.32, "yaw": -1.65}
+    raw_start = {"x": -10.96, "y": -3.57, "yaw": -1.51}
+    started = pose_source_alignment_update(
+        source_pose=raw_start,
+        reference_pose=reference,
+        alignment=None,
+    )
+    assert_pose(started["pose"], reference)
+
+    raw_next = compose_pose(raw_start, {"x": 0.4, "y": 0.0, "yaw": 0.1})
+    continued = pose_source_alignment_update(
+        source_pose=raw_next,
+        reference_pose=None,
+        alignment=started["alignment"],
+    )
+    expected = compose_pose(reference, {"x": 0.4, "y": 0.0, "yaw": 0.1})
+    assert_pose(continued["pose"], expected)
+
+
 def main():
     for test in (
         test_initial_identity_and_continuous_motion,
         test_commanded_relocalization_preserves_odom,
         test_motion_after_relocalization_uses_new_map_to_odom,
         test_uncommanded_accepted_jump_also_rebases,
+        test_fallback_pose_source_is_aligned_without_switch_jump,
     ):
         test()
         print(f"[OK] {test.__name__}")

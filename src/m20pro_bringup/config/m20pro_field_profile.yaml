@@ -106,8 +106,8 @@ localization:
   pose_jump_reject_m: 0.60       # 非重定位状态下单次位置跳变拒绝阈值，单位 m
   pose_jump_candidate_radius_m: 0.30 # 连续跳变候选之间允许的位置差，单位 m
   pose_jump_candidate_yaw_tolerance_rad: 0.35 # 连续跳变候选之间允许的朝向差，单位 rad
-  stationary_drift_reject_m: 0.20 # 无运动命令时允许的位置漂移，单位 m；超过后定位失效
-  stationary_drift_reject_yaw_rad: 0.30 # 无运动命令时允许的朝向漂移，单位 rad
+  stationary_drift_reject_m: 0.20 # 静止 TF 超过此位置偏差时保持可信锚点并告警，单位 m
+  stationary_drift_reject_yaw_rad: 0.30 # 静止 TF 超过此朝向偏差时保持可信锚点并告警，单位 rad
   motion_command_hold_s: 1.0     # 最后一条运动命令后仍按“运动中”处理的保持时间，单位 s
   handle_steer_motion_hold_s: 1.5 # 原厂手柄非零摇杆后仍按“手柄运动中”处理的保持时间，单位 s
   posture_transition_hold_s: 1.5 # 起立/趴下造成 TF 身体姿态变化时保持地图锚点的时间，单位 s

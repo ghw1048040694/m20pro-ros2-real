@@ -39,6 +39,7 @@ def main() -> None:
     real_config_path = ROOT / "src" / "m20pro_bringup" / "config" / "m20pro_real.yaml"
     real_config = yaml.safe_load(real_config_path.read_text(encoding="utf-8"))
     bridge_config = real_config["m20pro_tcp_bridge"]["ros__parameters"]
+    assert bridge_config["pose_source"] == "auto"
     assert float(bridge_config["pose_jump_accept_after_s"]) == 0.0
     assert bridge_config["pose_stationary_drift_reject_m"] == "__FIELD_PROFILE_STATIONARY_DRIFT_REJECT__"
     assert bridge_config["pose_motion_command_hold_s"] == "__FIELD_PROFILE_MOTION_COMMAND_HOLD__"
@@ -212,6 +213,9 @@ def main() -> None:
     assert 'get_parameter("stationary_drift_reject_yaw_rad")' not in tcp_bridge
     assert 'get_parameter("pose_stationary_drift_reject_m")' in tcp_bridge
     assert 'get_parameter("pose_stationary_drift_reject_yaw_rad")' in tcp_bridge
+    assert "fallback = self._aligned_tf_fallback_pose(fallback)" in tcp_bridge
+    assert 'self.active_pose_source = "tcp_1007"' in tcp_bridge
+    assert 'self.active_pose_source = "official_tf_fallback"' in tcp_bridge
     assert "OccupancyGridUpdate" in dashboard
     assert '"local_costmap_updates_topic"' in dashboard
     assert '"global_costmap_updates_topic"' in dashboard

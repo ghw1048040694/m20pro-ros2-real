@@ -21,7 +21,7 @@ except ImportError:
 
 from .geometry import quaternion_to_yaw, yaw_to_quaternion
 from .charge_command_contract import build_charge_command_items
-from .odom_alignment_contract import odom_alignment_update
+from .odom_alignment_contract import odom_alignment_update, pose_source_alignment_update
 from .pose_stability_contract import stationary_pose_update, stable_jump_decision
 from .tcp_protocol import M20ProtocolError, M20TcpClient, patrol_items
 
@@ -155,6 +155,8 @@ class M20TcpBridge(Node):
         self.last_relocalization_attempt_monotonic = 0.0
         self.last_relocalization_attempt_target = None
         self.last_tf_pose_fallback = None
+        self.tf_fallback_alignment = None
+        self.active_pose_source = None
         self.last_handle_steer_motion_time = None
         self.posture_transition_anchor = None
         self.posture_transition_until = None
@@ -720,6 +722,8 @@ class M20TcpBridge(Node):
         }
         self.pending_jump_pose = None
         self.pending_odom_rebase = True
+        self.tf_fallback_alignment = None
+        self.active_pose_source = None
         self.posture_transition_anchor = None
         self.posture_transition_until = None
         timeout_s = max(0.1, float(self.get_parameter("relocalization_response_timeout_s").value))
@@ -963,6 +967,8 @@ class M20TcpBridge(Node):
             effective_pose["z"],
             effective_pose["yaw"],
         )
+        self.active_pose_source = "tcp_1007"
+        self.tf_fallback_alignment = None
 
     def _pose_source(self) -> str:
         value = str(self.get_parameter("pose_source").value or "").strip().lower()
@@ -999,9 +1005,33 @@ class M20TcpBridge(Node):
         fallback = self._tf_pose_fallback_payload(vendor_items)
         if fallback is None:
             return False
+        fallback = self._aligned_tf_fallback_pose(fallback)
+        valid_by_filter, filter_reason, effective_pose = self._map_pose_passes_stability_filter(
+            fallback["x"],
+            fallback["y"],
+            fallback["z"],
+            fallback["yaw"],
+            allow_stable_recovery=False,
+        )
+        if not valid_by_filter:
+            self._warn_throttled(
+                "pose_fallback",
+                "ignored unstable aligned TF fallback: %s x=%.3f y=%.3f z=%.3f yaw=%.3f"
+                % (
+                    filter_reason,
+                    fallback["x"],
+                    fallback["y"],
+                    fallback["z"],
+                    fallback["yaw"],
+                ),
+                2.0,
+            )
+            self._publish_localization_ok(self._has_recent_good_map_pose())
+            return False
+        fallback = {**fallback, **dict(effective_pose)}
         self._warn_throttled(
             "pose_fallback",
-            "using TF pose fallback %s->%s because %s; x=%.3f y=%.3f z=%.3f yaw=%.3f"
+            "using aligned TF pose fallback %s->%s because %s; x=%.3f y=%.3f z=%.3f yaw=%.3f"
             % (
                 fallback["source_frame"],
                 fallback["source_child_frame"],
@@ -1026,8 +1056,54 @@ class M20TcpBridge(Node):
             fallback["y"],
             fallback["z"],
             fallback["yaw"],
+            localization_ok=self._recent_navigation_location_ok(),
         )
+        self.active_pose_source = "official_tf_fallback"
         return True
+
+    def _aligned_tf_fallback_pose(self, fallback: dict) -> dict:
+        raw_pose = {
+            "x": float(fallback["x"]),
+            "y": float(fallback["y"]),
+            "yaw": float(fallback["yaw"]),
+        }
+        if self.tf_fallback_alignment is None:
+            reference = self.last_good_map_pose
+            update = pose_source_alignment_update(
+                source_pose=raw_pose,
+                reference_pose=reference,
+                alignment=None,
+            )
+            planar = dict(update["alignment"])
+            z_offset = (
+                0.0
+                if reference is None
+                else float(reference.get("z", 0.0)) - float(fallback["z"])
+            )
+            self.tf_fallback_alignment = {**planar, "z_offset": z_offset}
+            self.get_logger().info(
+                "aligned official TF fallback to last trusted pose; source=%s offset=(%.3f,%.3f,%.3f) yaw=%.3f"
+                % (
+                    self.active_pose_source or "startup",
+                    float(planar["x"]),
+                    float(planar["y"]),
+                    float(z_offset),
+                    float(planar["yaw"]),
+                )
+            )
+        aligned = pose_source_alignment_update(
+            source_pose=raw_pose,
+            reference_pose=None,
+            alignment=self.tf_fallback_alignment,
+        )["pose"]
+        return {
+            **fallback,
+            "x": float(aligned["x"]),
+            "y": float(aligned["y"]),
+            "z": float(fallback["z"])
+            + float(self.tf_fallback_alignment.get("z_offset", 0.0)),
+            "yaw": float(aligned["yaw"]),
+        }
 
     def _publish_official_tf_pose(self, reason: str) -> bool:
         fallback = self._tf_pose_fallback_payload({}, require_location_ok=False)
@@ -1345,6 +1421,13 @@ class M20TcpBridge(Node):
                 # Do not republish the old anchor with a new timestamp. The
                 # bridge must make the task layer observe localization loss.
                 return False, str(stationary_update["reason"]), None
+            if stationary_update.get("reason"):
+                self._warn_throttled(
+                    "stationary_drift",
+                    "holding trusted stationary map pose; ignored factory pose drift: %s"
+                    % str(stationary_update["reason"]),
+                    5.0,
+                )
             candidate = dict(stationary_update["pose"] or candidate)
         jump_limit = max(0.0, float(self.get_parameter("pose_jump_reject_m").value))
         if last is not None and jump_limit > 0.0 and not in_relocalization_grace and not stationary:

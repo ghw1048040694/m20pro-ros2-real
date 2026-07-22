@@ -42,11 +42,12 @@ def stationary_pose_update(
     position_tolerance_m: float,
     yaw_tolerance_rad: float,
 ) -> Dict[str, Any]:
-    """Return an anchored pose only when a stationary candidate is trustworthy.
+    """Keep an idle robot at its last trusted planar map anchor.
 
-    A rejected candidate must not be republished with a fresh timestamp. Keeping
-    the last pose visible is useful, but treating it as fresh would allow the
-    navigation/task layers to continue after the localization source drifted.
+    The factory body TF changes with posture and local scan-matching hypotheses
+    even when the feet have not moved. Localization health is therefore owned
+    by the factory Location state and source freshness; an idle TF displacement
+    is diagnostic evidence, not sufficient evidence to invalidate localization.
     """
 
     decision = stationary_drift_decision(
@@ -55,8 +56,6 @@ def stationary_pose_update(
         position_tolerance_m=position_tolerance_m,
         yaw_tolerance_rad=yaw_tolerance_rad,
     )
-    if not decision["accept"]:
-        return {"accept": False, "reason": decision["reason"], "pose": None}
     effective = dict(candidate)
     if anchor_pose is not None:
         effective.update(
@@ -67,7 +66,11 @@ def stationary_pose_update(
                 "yaw": float(anchor_pose["yaw"]),
             }
         )
-    return {"accept": True, "reason": decision["reason"], "pose": effective}
+    return {
+        "accept": True,
+        "reason": "" if decision["accept"] else decision["reason"],
+        "pose": effective,
+    }
 
 
 def stable_jump_decision(
