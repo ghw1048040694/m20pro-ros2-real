@@ -4853,11 +4853,15 @@ class WebDashboardNode(Node):
 
     @staticmethod
     def _recording_size_bytes(path: FsPath) -> int:
+        # rosbag2 stores metadata and db3/mcap files directly in the bag
+        # directory. Avoid recursively stat-ing potentially huge split bags
+        # on every status-popover refresh.
         total = 0
         try:
-            for item in path.rglob("*"):
-                if item.is_file():
-                    total += int(item.stat().st_size)
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    if entry.is_file(follow_symlinks=False):
+                        total += int(entry.stat(follow_symlinks=False).st_size)
         except OSError:
             return total
         return total
