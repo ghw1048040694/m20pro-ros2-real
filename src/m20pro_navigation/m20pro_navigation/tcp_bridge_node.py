@@ -1302,9 +1302,12 @@ class M20TcpBridge(Node):
             )
             anchor_yaw_error = abs(self._wrap_angle(float(yaw) - float(anchor["yaw"])))
             if (
-                anchor_distance <= float(self.get_parameter("stationary_drift_reject_m").value)
+                anchor_distance
+                <= float(self.get_parameter("pose_stationary_drift_reject_m").value)
                 and anchor_yaw_error
-                <= float(self.get_parameter("stationary_drift_reject_yaw_rad").value)
+                <= float(
+                    self.get_parameter("pose_stationary_drift_reject_yaw_rad").value
+                )
             ):
                 self.posture_transition_anchor = None
                 self.posture_transition_until = None

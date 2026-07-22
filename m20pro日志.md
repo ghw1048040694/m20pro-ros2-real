@@ -24156,3 +24156,11 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 只读验收显示：`/m20pro/navigation_scan` 持续输出 `m20pro_base_link` 激光数据（约 261 个有效距离，最近更新时间约 0.2 秒），网页感知状态为 `edge_scan/ready`；无活动任务、无导航或速度指令。
 - 开发狗当前位于工位且尚未重定位，Nav2 由启动门保持等待定位，这是预期安全状态；完成重定位后再进行导航和避障实测。
 - 发现运行时历史 `mapping_sessions.json` 存在 JSON 多余数据的解析警告，本次未擅自修改用户历史数据；不影响本轮服务和扫描链路验收，后续单独清理。
+
+## 2026-07-22 10:49 CST - 修复开发狗定位核心节点退出
+
+- 根因确认：`m20pro_tcp_bridge` 的姿态过渡回调读取了未声明的旧参数名 `stationary_drift_reject_m` / `stationary_drift_reject_yaw_rad`，触发 `ParameterNotDeclaredException`，节点退出后前端才显示“核心节点失败”，重定位回执和地图位姿也随之中断。
+- 根治修正：姿态过渡分支统一读取节点声明并由现场参数契约生成的 `pose_stationary_drift_reject_m` / `pose_stationary_drift_reject_yaw_rad`；增加回归断言，防止未声明参数名再次进入该节点。
+- 验证：契约测试、姿态稳定性测试、Python 编译和 `git diff --check` 通过；开发狗 104/106 已按包含本修复的当前主线重新构建部署，现场参数哈希仍一致，106 扫描验收通过。
+- 部署后只读观察：`m20pro_tcp_bridge` 持续在线，前端核心节点全部在线，`localization_ok=true`、`preflight_ok=true`，原厂导航状态 `location=0`，扫描数据持续新鲜；未发送导航、速度或重定位指令。
+- 另记录一个独立稳定性现象：开发狗静止时原厂 TF 偶尔出现约 0.20--0.25 m 的位置抖动，桥接节点按现场阈值拒绝异常候选位姿但保持节点运行；后续需单独分析原厂 TF 抖动来源，不能通过盲目放宽阈值掩盖真实漂移。

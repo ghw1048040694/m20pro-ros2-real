@@ -206,6 +206,12 @@ def main() -> None:
     ).read_text(encoding="utf-8")
     assert "accept_after_s=0.0" in tcp_bridge
     assert "allow_stable_recovery=location_ok" not in tcp_bridge
+    # The posture-transition branch must use the declared canonical parameter
+    # names; a legacy unprefixed lookup kills the bridge during TF callbacks.
+    assert 'get_parameter("stationary_drift_reject_m")' not in tcp_bridge
+    assert 'get_parameter("stationary_drift_reject_yaw_rad")' not in tcp_bridge
+    assert 'get_parameter("pose_stationary_drift_reject_m")' in tcp_bridge
+    assert 'get_parameter("pose_stationary_drift_reject_yaw_rad")' in tcp_bridge
     assert "OccupancyGridUpdate" in dashboard
     assert '"local_costmap_updates_topic"' in dashboard
     assert '"global_costmap_updates_topic"' in dashboard
