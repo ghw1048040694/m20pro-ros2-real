@@ -192,8 +192,8 @@ def main() -> None:
     assert "function paintMapEditor" in script
     assert "button.textContent = item.label || item.id;" in script
     assert "button.textContent = `+ ${item.label || item.id}`" not in script
-    assert "20260722-name-inputs-1" in html
-    assert html.count("20260722-name-inputs-1") == 2
+    assert "20260722-posture-state-1" in html
+    assert html.count("20260722-posture-state-1") == 2
     for stale_default in (
         'value="testfield"',
         'value="M20Pro 工地巡检"',
@@ -239,7 +239,6 @@ def main() -> None:
         assert endpoint in script or endpoint in backend
     assert 'id="teleopEmergencyStopBtn"' not in html
     assert "停止全部运动" not in html
-    assert '>趴下</button>' in html
     assert "targetPostureAction" in script
     assert "function startTeleopHeartbeat" in script
     assert "function requestTeleopConfirmation" in script
@@ -249,6 +248,12 @@ def main() -> None:
     assert "window.addEventListener(\"blur\"" in script
     assert "document.addEventListener(\"visibilitychange\"" in script
     assert "teleop-pad" in css
+    assert "function currentMotionState" in script
+    assert "if (!motion.fresh) return null;" in script
+    assert 'return [1, 6, 8].includes(motion.state) ? "lie" : "stand";' in script
+    assert '$("teleopPostureBtn").disabled = !owns || !postureAction;' in script
+    assert '>姿态未知</button>' in html
+    assert 'self.declare_parameter("motion_state_topic", "/m20pro_tcp_bridge/motion_state")' in backend
     assert 'id="locFloor"' not in html
     assert '$("locFloor")' not in script
     assert "mappingMapNameTouched" in script

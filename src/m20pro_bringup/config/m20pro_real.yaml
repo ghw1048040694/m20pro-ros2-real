@@ -72,7 +72,8 @@ m20pro_tcp_bridge:
     initialpose_topic: "/initialpose"
     initialpose_3d_topic: "/m20pro/initialpose_3d"
     relocalization_response_timeout_s: 2.0
-    send_heartbeat: false
+    # 手册规定 1002/6 基础状态只向发送心跳的客户端主动上报。
+    send_heartbeat: true
 
 m20pro_grid_planner:
   ros__parameters:

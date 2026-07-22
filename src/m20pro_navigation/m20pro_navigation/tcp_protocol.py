@@ -3,7 +3,7 @@ import socket
 import struct
 import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 
 SYNC = b"\xeb\x91\xeb\x90"
@@ -25,6 +25,13 @@ class M20TcpClient:
         self._msg_id = 0
         self._lock = threading.Lock()
         self._discarded_response_count = 0
+        self._unsolicited_response_handler: Optional[Callable[[Dict[str, Any]], None]] = None
+
+    def set_unsolicited_response_handler(
+        self,
+        handler: Optional[Callable[[Dict[str, Any]], None]],
+    ) -> None:
+        self._unsolicited_response_handler = handler
 
     def connect(self) -> None:
         self.close()
@@ -110,6 +117,14 @@ class M20TcpClient:
                 body = self._read_exact(length)
                 if response_msg_id != expected_msg_id:
                     self._discarded_response_count += 1
+                    handler = self._unsolicited_response_handler
+                    if handler is not None:
+                        try:
+                            payload = json.loads(body.decode("utf-8"))
+                            if isinstance(payload, dict):
+                                handler(payload)
+                        except Exception:
+                            pass
                     continue
                 try:
                     return json.loads(body.decode("utf-8"))
@@ -138,3 +153,26 @@ def patrol_items(response: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if not response:
         return {}
     return response.get("PatrolDevice", {}).get("Items", {})
+
+
+def basic_motion_state(response: Optional[Dict[str, Any]]) -> Optional[int]:
+    """Extract the vendor 1002/6 BasicStatus.MotionState report."""
+    if not isinstance(response, dict):
+        return None
+    device = response.get("PatrolDevice")
+    if not isinstance(device, dict):
+        return None
+    try:
+        if int(device.get("Type")) != 1002 or int(device.get("Command")) != 6:
+            return None
+    except (TypeError, ValueError):
+        return None
+    items = device.get("Items")
+    basic = items.get("BasicStatus") if isinstance(items, dict) else None
+    if not isinstance(basic, dict):
+        return None
+    try:
+        state = int(basic.get("MotionState"))
+    except (TypeError, ValueError):
+        return None
+    return state if state in (0, 1, 2, 3, 4, 6, 8) else None

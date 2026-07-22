@@ -27,7 +27,7 @@ from nav_msgs.msg import OccupancyGrid, Odometry, Path as RosPath
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, Int32, String
 from std_srvs.srv import SetBool, Trigger
 from visualization_msgs.msg import Marker, MarkerArray
 from m20pro_navigation.command_mux_contract import (
@@ -263,10 +263,9 @@ except ImportError:  # pragma: no cover - Nav2 package should exist on robot.
     LoadMap = None
 
 try:
-    from drdds.msg import BatteryData, MotionState
+    from drdds.msg import BatteryData
 except ImportError:  # Only available on the robot's factory ROS environment.
     BatteryData = None
-    MotionState = None
 
 try:
     from rclpy._rclpy_pybind11 import RCLError
@@ -1037,7 +1036,7 @@ class WebDashboardNode(Node):
         self.declare_parameter("localization_ok_topic", "/m20pro_tcp_bridge/localization_ok")
         self.declare_parameter("navigation_status_topic", "/m20pro_tcp_bridge/navigation_status")
         self.declare_parameter("battery_topic", "/BATTERY_DATA")
-        self.declare_parameter("motion_state_topic", "/MOTION_STATE")
+        self.declare_parameter("motion_state_topic", "/m20pro_tcp_bridge/motion_state")
         self.declare_parameter("scan_topic", "/m20pro/navigation_scan")
         self.declare_parameter("scan_overlay_max_points", 720)
         self.declare_parameter("scan_overlay_update_min_interval_s", 0.1)
@@ -1400,8 +1399,7 @@ class WebDashboardNode(Node):
             self.create_subscription(BatteryData, self._topic("battery_topic"), self._on_battery, 10)
         else:
             self.get_logger().warning("drdds.msg.BatteryData is unavailable; battery display is disabled")
-        if MotionState is not None:
-            self.create_subscription(MotionState, self._topic("motion_state_topic"), self._on_motion_state, 10)
+        self.create_subscription(Int32, self._topic("motion_state_topic"), self._on_motion_state, 10)
         self.create_subscription(LaserScan, self._topic("scan_topic"), self._on_scan, scan_qos)
         self.create_subscription(Odometry, self._topic("odom_topic"), self._on_odom, 10)
         self.create_subscription(PoseStamped, self._topic("pose_topic"), self._on_pose, 20)
@@ -1592,7 +1590,7 @@ class WebDashboardNode(Node):
 
     def _on_motion_state(self, msg: Any) -> None:
         data = getattr(msg, "data", None)
-        state_value = getattr(data, "state", None)
+        state_value = getattr(data, "state", data)
         try:
             state_value = int(state_value)
         except (TypeError, ValueError):

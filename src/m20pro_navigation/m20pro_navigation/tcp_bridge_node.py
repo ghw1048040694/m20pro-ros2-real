@@ -10,7 +10,7 @@ from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, TransformS
 from rclpy.duration import Duration
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, Int32, String
 from tf2_msgs.msg import TFMessage
 from tf2_ros import TransformBroadcaster
 
@@ -23,7 +23,7 @@ from .geometry import quaternion_to_yaw, yaw_to_quaternion
 from .charge_command_contract import build_charge_command_items
 from .odom_alignment_contract import odom_alignment_update, pose_source_alignment_update
 from .pose_stability_contract import stationary_pose_update, stable_jump_decision
-from .tcp_protocol import M20ProtocolError, M20TcpClient, patrol_items
+from .tcp_protocol import M20ProtocolError, M20TcpClient, basic_motion_state, patrol_items
 
 
 class M20TcpBridge(Node):
@@ -165,6 +165,7 @@ class M20TcpBridge(Node):
         self.last_navigation_status_time = None
         self.official_tf_pose_unlocked = False
         self.last_motion_command_time = None
+        self.last_heartbeat_monotonic = None
         self.stationary_anchor_pose = None
         self.last_published_map_pose = None
         self.last_published_odom_pose = None
@@ -184,6 +185,8 @@ class M20TcpBridge(Node):
             str(self.get_parameter("motion_state_result_topic").value),
             10,
         )
+        self.motion_state_pub = self.create_publisher(Int32, "~/motion_state", 10)
+        self.client.set_unsolicited_response_handler(self._on_unsolicited_tcp_response)
         self.charge_result_pub = self.create_publisher(
             String,
             str(self.get_parameter("charge_result_topic").value),
@@ -314,6 +317,14 @@ class M20TcpBridge(Node):
             self.posture_transition_anchor = None
             self.posture_transition_until = None
             self.posture_reference = None
+
+    def _on_unsolicited_tcp_response(self, response: dict) -> None:
+        state = basic_motion_state(response)
+        if state is None:
+            return
+        message = Int32()
+        message.data = state
+        self.motion_state_pub.publish(message)
 
     def _on_handle_steer(self, msg) -> None:
         """Use the factory joystick stream as motion evidence for localization.
@@ -863,10 +874,13 @@ class M20TcpBridge(Node):
         if not self._ensure_connected():
             return
         if bool(self.get_parameter("send_heartbeat").value):
-            try:
-                self.client.request(100, 100, {}, wait_response=False)
-            except OSError:
-                return
+            now = time.monotonic()
+            if self.last_heartbeat_monotonic is None or now - self.last_heartbeat_monotonic >= 1.0:
+                try:
+                    self.client.request(100, 100, {}, wait_response=False)
+                    self.last_heartbeat_monotonic = now
+                except OSError:
+                    return
         self._publish_navigation_status()
         self._publish_map_pose()
 

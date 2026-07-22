@@ -1394,9 +1394,34 @@
         button.classList.remove("is-active");
       }
     }
+    const motionStateLabels = {
+      0: "空闲",
+      1: "站立",
+      2: "关节阻尼",
+      3: "开机阻尼",
+      4: "趴下",
+      6: "标准运动",
+      8: "敏捷运动"
+    };
+    function currentMotionState(snapshot = state.latest) {
+      const sample = snapshot && snapshot.motion_state;
+      const motionState = sample ? Number(sample.state) : NaN;
+      const lastUpdate = sample ? Number(sample.last_update) : NaN;
+      const now = snapshot && Number.isFinite(Number(snapshot.node_time))
+        ? Number(snapshot.node_time)
+        : Date.now() / 1000;
+      const age = Number.isFinite(lastUpdate) ? Math.max(0, now - lastUpdate) : Infinity;
+      return {
+        state: motionState,
+        age,
+        fresh: Object.prototype.hasOwnProperty.call(motionStateLabels, motionState) && age <= 3.0,
+        label: Object.prototype.hasOwnProperty.call(motionStateLabels, motionState) ? motionStateLabels[motionState] : "未知"
+      };
+    }
     function targetPostureAction(snapshot = state.latest) {
-      const motionState = snapshot && snapshot.motion_state ? Number(snapshot.motion_state.state) : NaN;
-      return motionState === 4 ? "stand" : "lie";
+      const motion = currentMotionState(snapshot);
+      if (!motion.fresh) return null;
+      return [1, 6, 8].includes(motion.state) ? "lie" : "stand";
     }
     function renderTeleoperation(teleop) {
       const payload = teleop || {};
@@ -1410,12 +1435,14 @@
         const muxMode = String(payload.mux_mode || "unknown");
         const heartbeat = Number(payload.heartbeat_age_s);
         const heartbeatText = Number.isFinite(heartbeat) ? ` / 心跳 ${heartbeat.toFixed(2)}s` : "";
+        const motion = currentMotionState();
+        const postureText = motion.fresh ? ` / 姿态 ${motion.label}` : " / 姿态状态未知";
         summary.className = `compact-status${payload.stair_session_active || (payload.active && muxMode !== "teleop") ? " fail" : ""}`;
         if (payload.stair_session_active) summary.textContent = "楼梯感知会话进行中，禁止网页遥控";
-        else if (owns) summary.textContent = `人工接管中 / 仲裁 ${muxMode}${heartbeatText}`;
-        else if (occupied) summary.textContent = `其他操作端已接管 / 仲裁 ${muxMode}${heartbeatText}`;
+        else if (owns) summary.textContent = `人工接管中 / 仲裁 ${muxMode}${heartbeatText}${postureText}`;
+        else if (occupied) summary.textContent = `其他操作端已接管 / 仲裁 ${muxMode}${heartbeatText}${postureText}`;
         else if (!payload.available) summary.textContent = "速度仲裁器未就绪，遥控不可用";
-        else summary.textContent = `自主导航 / 仲裁 ${muxMode}`;
+        else summary.textContent = `自主导航 / 仲裁 ${muxMode}${postureText}`;
       }
       const limits = payload.limits || {};
       if ($("teleopLimits")) {
@@ -1424,9 +1451,10 @@
       for (const button of document.querySelectorAll(".teleop-control")) button.disabled = !owns;
       if ($("teleopPostureBtn")) {
         const postureAction = targetPostureAction();
-        $("teleopPostureBtn").textContent = postureAction === "stand" ? "起立" : "趴下";
-        $("teleopPostureBtn").dataset.teleopPostureAction = postureAction;
-        $("teleopPostureBtn").disabled = !owns;
+        $("teleopPostureBtn").textContent = postureAction === "stand" ? "起立" : (postureAction === "lie" ? "趴下" : "姿态未知");
+        if (postureAction) $("teleopPostureBtn").dataset.teleopPostureAction = postureAction;
+        else delete $("teleopPostureBtn").dataset.teleopPostureAction;
+        $("teleopPostureBtn").disabled = !owns || !postureAction;
       }
       if ($("acquireTeleopBtn")) {
         $("acquireTeleopBtn").disabled = Boolean(payload.active || payload.acquiring || payload.stair_session_active || !payload.available);
@@ -1576,6 +1604,10 @@
     }
     async function sendTeleopMotionState(action) {
       const labels = {stand: "起立", lie: "趴下"};
+      if (!Object.prototype.hasOwnProperty.call(labels, action)) {
+        showOperationFeedback("姿态状态未知", "尚未收到机器狗新鲜姿态状态，已禁止下发起立或趴下动作。", true);
+        return;
+      }
       if (!state.teleop.sessionId && action !== "soft_stop") return;
       const label = labels[action] || "软急停";
       if (!await requestTeleopConfirmation(`确认${label}`, `执行前会停止遥控，动作完成后需要重新人工接管。\n\n确认执行${label}？`)) return;

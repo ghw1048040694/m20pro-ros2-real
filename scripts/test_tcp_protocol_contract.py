@@ -14,6 +14,7 @@ from m20pro_navigation.tcp_protocol import (  # noqa: E402
     HEADER_LEN,
     M20TcpClient,
     SYNC,
+    basic_motion_state,
     patrol_items,
 )
 
@@ -56,6 +57,8 @@ def test_async_response_is_not_used_as_status() -> None:
     client = M20TcpClient(timeout=0.5)
     client._sock = client_sock
     client._msg_id = 100
+    unsolicited = []
+    client.set_unsolicited_response_handler(unsolicited.append)
 
     def server() -> None:
         axis_id, axis = read_request(server_sock)
@@ -67,6 +70,14 @@ def test_async_response_is_not_used_as_status() -> None:
         assert status["PatrolDevice"]["Type"] == 2002
         assert status["PatrolDevice"]["Command"] == 1
         server_sock.sendall(
+            response_frame(
+                900,
+                1002,
+                6,
+                {"BasicStatus": {"MotionState": 4, "Gait": 12}},
+            )
+        )
+        server_sock.sendall(
             response_frame(status_id, 2002, 1, {"Location": 0, "ObsState": 0})
         )
 
@@ -76,7 +87,8 @@ def test_async_response_is_not_used_as_status() -> None:
         assert client.request(2, 21, {"X": 0.25}, wait_response=False) is None
         response = client.request(2002, 1, {}, response_timeout=0.5)
         assert patrol_items(response) == {"Location": 0, "ObsState": 0}
-        assert client.discarded_response_count == 1
+        assert client.discarded_response_count == 2
+        assert [basic_motion_state(item) for item in unsolicited] == [None, 4]
     finally:
         worker.join(timeout=1.0)
         client.close()
@@ -116,9 +128,40 @@ def test_matching_response_does_not_increment_discard_count() -> None:
     assert not worker.is_alive()
 
 
+def test_basic_motion_state_is_strict() -> None:
+    assert basic_motion_state(
+        {
+            "PatrolDevice": {
+                "Type": 1002,
+                "Command": 6,
+                "Items": {"BasicStatus": {"MotionState": 8}},
+            }
+        }
+    ) == 8
+    assert basic_motion_state(
+        {
+            "PatrolDevice": {
+                "Type": 2002,
+                "Command": 1,
+                "Items": {"BasicStatus": {"MotionState": 4}},
+            }
+        }
+    ) is None
+    assert basic_motion_state(
+        {
+            "PatrolDevice": {
+                "Type": 1002,
+                "Command": 6,
+                "Items": {"BasicStatus": {"MotionState": 99}},
+            }
+        }
+    ) is None
+
+
 def main() -> None:
     test_async_response_is_not_used_as_status()
     test_matching_response_does_not_increment_discard_count()
+    test_basic_motion_state_is_strict()
     print("TCP protocol response correlation tests passed")
 
 

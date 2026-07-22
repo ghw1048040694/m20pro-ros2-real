@@ -40,6 +40,7 @@ def main() -> None:
     real_config = yaml.safe_load(real_config_path.read_text(encoding="utf-8"))
     bridge_config = real_config["m20pro_tcp_bridge"]["ros__parameters"]
     assert bridge_config["pose_source"] == "auto"
+    assert bridge_config["send_heartbeat"] is True
     assert float(bridge_config["pose_jump_accept_after_s"]) == 0.0
     assert bridge_config["pose_stationary_drift_reject_m"] == "__FIELD_PROFILE_STATIONARY_DRIFT_REJECT__"
     assert bridge_config["pose_motion_command_hold_s"] == "__FIELD_PROFILE_MOTION_COMMAND_HOLD__"
@@ -216,6 +217,9 @@ def main() -> None:
     assert "fallback = self._aligned_tf_fallback_pose(fallback)" in tcp_bridge
     assert 'self.active_pose_source = "tcp_1007"' in tcp_bridge
     assert 'self.active_pose_source = "official_tf_fallback"' in tcp_bridge
+    assert "set_unsolicited_response_handler" in tcp_bridge
+    assert 'self.create_publisher(Int32, "~/motion_state", 10)' in tcp_bridge
+    assert 'now - self.last_heartbeat_monotonic >= 1.0' in tcp_bridge
     assert "OccupancyGridUpdate" in dashboard
     assert '"local_costmap_updates_topic"' in dashboard
     assert '"global_costmap_updates_topic"' in dashboard
