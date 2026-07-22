@@ -1,6 +1,6 @@
 # M20 Pro ROS 2 跨楼层巡检导航系统项目日志
 
-Last updated: 2026-07-22 14:18 CST
+Last updated: 2026-07-22 14:22 CST
 
 ## 2026-07-22 14:18 CST - 根治遥控姿态按钮误判
 
@@ -8,6 +8,7 @@ Last updated: 2026-07-22 14:18 CST
 - 根治修正：TCP 客户端不再丢弃与当前请求 ID 不匹配的主动上报；`m20pro_tcp_bridge` 按手册启用心跳（内部 1Hz 节流），解析主动 `1002/6` 并发布唯一项目话题 `/m20pro_tcp_bridge/motion_state`。Web 只订阅该标准 `Int32` 状态，不再直接依赖原厂 `/MOTION_STATE`。
 - 前端映射：`0/2/3/4` 显示下一步“起立”，`1/6/8` 显示下一步“趴下”；状态缺失或超过 3 秒显示“姿态未知”并禁用按钮，避免未知状态下误下发动作。保持原有“结束接管 -> 姿态指令 -> 动作后重新接管”安全流程。
 - 新增 TCP 主动上报解析/回调回归测试、前端未知状态合同和心跳配置合同；全量 `scripts/test_*.py`、Python/JavaScript 语法、`git diff --check` 均通过。上位机无 Foxy 环境未做本地 colcon 构建，需在 104 部署构建验收；本轮未发送姿态、速度、导航或急停命令。
+- 提交 `1ba6b69` 已用 104-only 模式部署并完成五包构建；104 现场 `/m20pro_tcp_bridge/motion_state` 为 `std_msgs/Int32`，发布/订阅各 1 个，连续只读 API 样本均为新鲜 `state=0`，`send_heartbeat=true`，服务 `active` 且 `NRestarts=0`。新前端资源版本已生效；未发送姿态、速度、导航或急停命令。
 
 ## 2026-07-22 11:57 CST - 清理前端名称输入残留
 
