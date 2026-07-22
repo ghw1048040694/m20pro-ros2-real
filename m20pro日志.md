@@ -24205,3 +24205,10 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 验证：契约测试、姿态稳定性测试、Python 编译和 `git diff --check` 通过；开发狗 104/106 已按包含本修复的当前主线重新构建部署，现场参数哈希仍一致，106 扫描验收通过。
 - 部署后只读观察：`m20pro_tcp_bridge` 持续在线，前端核心节点全部在线，`localization_ok=true`、`preflight_ok=true`，原厂导航状态 `location=0`，扫描数据持续新鲜；未发送导航、速度或重定位指令。
 - 另记录一个独立稳定性现象：开发狗静止时原厂 TF 偶尔出现约 0.20--0.25 m 的位置抖动，桥接节点按现场阈值拒绝异常候选位姿但保持节点运行；后续需单独分析原厂 TF 抖动来源，不能通过盲目放宽阈值掩盖真实漂移。
+
+## 2026-07-22 14:30 CST - 删除状态栏重复楼层显示
+
+- 用户反馈：地图工具栏和地图画布已经显示当前地图/楼层，状态栏再显示一个“楼层 Fxx”属于重复信息。
+- 根因修正：从经典前端状态栏删除独立楼层芯片，并同步删除 `dashboard.js` 中对应的死更新逻辑；地图数据、地图切换入口、地图画布内的楼层信息和后端楼层能力均不受影响。
+- 静态资源版本更新为 `20260722-floor-chip-1`，避免浏览器继续使用旧缓存；前端合同测试增加 `id="floor"` 不得回归的断言。
+- 验证：`python3 scripts/test_classic_frontend_contract.py`、`node --check dashboard.js` 和 `git diff --check` 通过；104-only 原子部署完成，`m20pro-real.service=active`、`NRestarts=0`，页面资源版本已生效，未访问或修改 106，未下发导航、速度、重定位或地图操作命令。
