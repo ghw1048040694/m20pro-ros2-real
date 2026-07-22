@@ -24148,3 +24148,11 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 复核扫描统一改动后发现，Nav2 启动门和系统自检仍默认监听原始 `/scan`；这会在 `/m20pro/navigation_scan` 没有样本时错误放行导航，造成“自检通过但避障失效”的假 ready。
 - 修正：启动门、系统自检和仍可手动启动的旧路径跟随器统一以 `/m20pro/navigation_scan` 为默认扫描话题；real launch 显式传入同一话题。原始 `/scan` 只保留为选择器输入和 AMCL 定位输入，不再作为导航感知 readiness 证据。
 - 验证：导航契约断言、全量 `scripts/test_*.py`、Python 编译、`m20pro_navigation`/`m20pro_bringup` 构建和 `git diff --check` 均通过；尚未部署或重启 104/106。
+
+## 2026-07-22 10:28 CST - 开发狗整狗同步验收
+
+- 以主线提交 `206bfe7` 执行整狗原子部署，104 上位机五包构建成功并重启 `m20pro-real.service`，106 边缘扫描组件重新构建、安装并重启 `m20pro-edge-scan-106.service`。
+- 104 与 106 的现场参数哈希均为 `fa2a26da68a90ce83fc7acd1687b27ee024a068e7ea0311a970ed567e999027b`，确认参数版本一致；部署入口验收通过 `API=http://10.21.31.104:8080 edge_scan=ready`。
+- 只读验收显示：`/m20pro/navigation_scan` 持续输出 `m20pro_base_link` 激光数据（约 261 个有效距离，最近更新时间约 0.2 秒），网页感知状态为 `edge_scan/ready`；无活动任务、无导航或速度指令。
+- 开发狗当前位于工位且尚未重定位，Nav2 由启动门保持等待定位，这是预期安全状态；完成重定位后再进行导航和避障实测。
+- 发现运行时历史 `mapping_sessions.json` 存在 JSON 多余数据的解析警告，本次未擅自修改用户历史数据；不影响本轮服务和扫描链路验收，后续单独清理。
