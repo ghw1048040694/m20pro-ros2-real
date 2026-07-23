@@ -33,6 +33,13 @@ def test_connector_plan_carries_terrain_identity() -> None:
     assert '"terrain_guard": connector_terrain_guard_profile(' in contract
 
 
+def test_floor_switch_requires_fresh_terrain_status() -> None:
+    assert '"terrain_guard_status_topic"' in WEB_SOURCE
+    assert "def _on_terrain_guard_status(" in WEB_SOURCE
+    assert "terrain_guard_status=terrain_status" in WEB_SOURCE
+    assert "terrain_guard_timeout_s" in WEB_SOURCE
+
+
 def test_compatibility_fields_are_plan_projections() -> None:
     marker = 'task["navigation_plan"] = navigation_plan_record(unified_plan)'
     start = WEB_SOURCE.index(marker)

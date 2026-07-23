@@ -4,7 +4,11 @@ import math
 import re
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
-from .connector_contract import terrain_guard_profile_for_route
+from .connector_contract import (
+    connector_terrain_status_decision,
+    connector_terrain_guard_profile,
+    terrain_guard_profile_for_route,
+)
 
 
 ResolveMapYaml = Callable[[Dict[str, Any]], str]
@@ -220,6 +224,9 @@ def resolve_floor_switch_request(
     routes: Iterable[Dict[str, Any]],
     active_task: Dict[str, Any],
     selected_map_id: Any,
+    terrain_guard_status: Any = None,
+    now_unix_s: Any = None,
+    terrain_guard_timeout_s: float = 1.0,
 ) -> Dict[str, Any]:
     request_id = str(request.get("request_id") or "").strip()
     if not request_id:
@@ -278,12 +285,28 @@ def resolve_floor_switch_request(
             route_target_floor=expected["target_floor"],
         )
 
+    terrain_profile = connector_terrain_guard_profile(route)
+    terrain_decision = connector_terrain_status_decision(
+        terrain_profile,
+        terrain_guard_status,
+        now_unix_s=now_unix_s,
+        timeout_s=terrain_guard_timeout_s,
+    )
+    if not terrain_decision.get("ok"):
+        return _error(
+            str(terrain_decision.get("code") or "terrain_guard_not_ready"),
+            str(terrain_decision.get("message") or "106 terrain_guard 未准备好"),
+            terrain_guard=terrain_decision,
+        )
+
     return {
         "ok": True,
         "request_id": request_id,
         "task_id": str(active_task.get("task_id") or ""),
         "route": route,
         "source_map_id": source_map_id,
+        "terrain_guard": terrain_profile,
+        "terrain_guard_decision": terrain_decision,
         **expected,
     }
 

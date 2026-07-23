@@ -884,6 +884,7 @@ class WebDashboardNode(Node):
         self._state: Dict[str, Any] = {
             "floor": None,
             "stair_status": None,
+            "terrain_guard": None,
             "command_mux_status": None,
             "gait_command": None,
             "gait_result": None,
@@ -1027,6 +1028,8 @@ class WebDashboardNode(Node):
         self.declare_parameter("robot_pose_display_yaw_offset_rad", 0.0)
         self.declare_parameter("current_floor_topic", "/m20pro/current_floor")
         self.declare_parameter("stair_status_topic", "/m20pro/stair_status")
+        self.declare_parameter("terrain_guard_status_topic", "/m20pro/terrain_guard/status")
+        self.declare_parameter("terrain_guard_status_timeout_s", 1.0)
         self.declare_parameter("gait_command_topic", "/m20pro/gait_command")
         self.declare_parameter("gait_result_topic", "/m20pro_tcp_bridge/gait_result")
         self.declare_parameter("motion_state_command_topic", "/m20pro/motion_state_command")
@@ -1378,6 +1381,12 @@ class WebDashboardNode(Node):
             10,
         )
         self.create_subscription(String, self._topic("stair_status_topic"), self._on_stair_status, 10)
+        self.create_subscription(
+            String,
+            self._topic("terrain_guard_status_topic"),
+            self._on_terrain_guard_status,
+            10,
+        )
         mux_status_qos = QoSProfile(depth=1)
         mux_status_qos.reliability = ReliabilityPolicy.RELIABLE
         mux_status_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
@@ -1465,6 +1474,16 @@ class WebDashboardNode(Node):
             self._state["stair_status"] = msg.data
             self._mark_topic("stair_status")
         self._handle_navigation_status_for_task(msg.data)
+
+    def _on_terrain_guard_status(self, msg: String) -> None:
+        parsed = parse_json_text(msg.data)
+        with self._lock:
+            self._state["terrain_guard"] = {
+                "last_update": time.time(),
+                "raw": msg.data,
+                "parsed": parsed,
+            }
+            self._mark_topic("terrain_guard_status")
 
     def _on_command_mux_status(self, msg: String) -> None:
         with self._lock:
@@ -2745,11 +2764,23 @@ class WebDashboardNode(Node):
                 active = dict(self._settings.get("active_task") or {})
                 routes = [dict(item) for item in self._floor_routes]
                 selected_map_id = self._settings.get("selected_map_id")
+            with self._lock:
+                terrain_record = dict(self._state.get("terrain_guard") or {})
+            terrain_status = (
+                terrain_record.get("parsed")
+                if isinstance(terrain_record.get("parsed"), dict)
+                else None
+            )
             context = resolve_floor_switch_request(
                 request,
                 routes=routes,
                 active_task=active,
                 selected_map_id=selected_map_id,
+                terrain_guard_status=terrain_status,
+                now_unix_s=time.time(),
+                terrain_guard_timeout_s=float(
+                    self.get_parameter("terrain_guard_status_timeout_s").value
+                ),
             )
             if not context.get("ok"):
                 self._publish_floor_switch_result(

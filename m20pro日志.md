@@ -1,5 +1,13 @@
 # M20 Pro ROS 2 跨楼层巡检导航系统项目日志
 
+## 2026-07-23 18:52 CST - 将 106 terrain_guard 新鲜状态接入切层前置门
+
+- 104 Web 现在订阅 `/m20pro/terrain_guard/status`，切层事务在执行 104/106 地图切换前，必须校验状态与路线的 `profile_id/corridor_version` 匹配、状态为 `traversable`、状态时间和点云年龄均未过期；缺失、阻塞、未知、profile 不一致或过期均直接拒绝，不进入地图切换。
+- 新增 `connector_terrain_status_decision` 纯合同；它只证明楼梯连接边当前具备地图事务所需的通行证据，不授予速度/步态权限，`certified_motion` 仍由未来现场验收单独决定。平地任务不订阅或使用该状态作为导航感知，`/scan` 和 Nav2 链路未改变。
+- 补充切层状态缺失、阻塞、过期、profile 匹配和 Web wiring 测试；全量 `scripts/test_*.py`、Python 编译、`git diff --check` 和三包构建通过。本轮未部署或操作 103/104/106，未发送运动、导航、重定位、切图或网络命令；当前时间早于 21:00，不推送 GitHub/GitLab。
+
+Last updated: 2026-07-23 18:52 CST
+
 ## 2026-07-23 18:44 CST - 将楼梯 terrain_guard 身份并入统一导航计划
 
 - 统一计划的每条有向连接边现在绑定唯一 `terrain_guard` 身份：`profile_id`、`corridor_version`、`motion_policy`、`certified_motion` 和来源；多跳路线、反向路线及 `F1 -> F2 -> F1` 均按各自连接边保存，不再让路线配置和 106 三维感知 profile 脱节。
