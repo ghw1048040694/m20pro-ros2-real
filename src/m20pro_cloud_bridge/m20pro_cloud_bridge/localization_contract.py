@@ -178,6 +178,131 @@ def wrap_angle(angle: float) -> float:
     return angle
 
 
+def relocalization_stability_step(
+    *,
+    evidence: Dict[str, Any],
+    current_pose: Any,
+    previous_pose: Optional[Dict[str, Any]],
+    stable_since: Optional[float],
+    now_time: float,
+    stability_window_s: float,
+    pose_tolerance_m: float,
+    yaw_tolerance_rad: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Advance the pure state machine used by relocalization verification.
+
+    ``relocalization_sample_evidence`` decides whether one observation is
+    eligible.  This helper decides whether eligible observations have stayed
+    within the configured platform envelope for the required continuous
+    window.  Keeping the state transition here makes the Web wait loop
+    deterministic and testable without ROS or wall-clock sleeps.
+    """
+
+    try:
+        now = float(now_time)
+    except (TypeError, ValueError):
+        now = float("nan")
+    if not math.isfinite(now):
+        return {
+            "stable": False,
+            "stable_since": None,
+            "previous_stable_pose": None,
+            "position_delta_m": None,
+            "yaw_delta_rad": None,
+            "window_elapsed_s": 0.0,
+            "code": "stability_clock_invalid",
+        }
+
+    try:
+        window = max(0.0, float(stability_window_s))
+    except (TypeError, ValueError):
+        window = 0.0
+    try:
+        position_tolerance = max(0.1, float(pose_tolerance_m))
+    except (TypeError, ValueError):
+        position_tolerance = 0.1
+    position_threshold = max(0.05, position_tolerance * 0.25)
+    yaw_threshold: Optional[float] = None
+    if yaw_tolerance_rad is not None:
+        try:
+            yaw_threshold = max(0.02, float(yaw_tolerance_rad) * 0.25)
+        except (TypeError, ValueError):
+            yaw_threshold = 0.02
+
+    if not isinstance(evidence, dict) or not bool(evidence.get("ready_to_finish_wait")):
+        return {
+            "stable": False,
+            "stable_since": None,
+            "previous_stable_pose": None,
+            "position_delta_m": None,
+            "yaw_delta_rad": None,
+            "window_elapsed_s": 0.0,
+            "code": "stability_evidence_not_ready",
+        }
+
+    if not pose_is_plausible(current_pose):
+        return {
+            "stable": False,
+            "stable_since": None,
+            "previous_stable_pose": None,
+            "position_delta_m": None,
+            "yaw_delta_rad": None,
+            "window_elapsed_s": 0.0,
+            "code": "stability_pose_invalid",
+        }
+
+    current = dict(current_pose)
+    position_delta: Optional[float] = None
+    yaw_delta: Optional[float] = None
+    moved = False
+    if isinstance(previous_pose, dict) and pose_is_plausible(previous_pose):
+        try:
+            position_delta = math.hypot(
+                float(current["x"]) - float(previous_pose["x"]),
+                float(current["y"]) - float(previous_pose["y"]),
+            )
+            yaw_delta = abs(wrap_angle(float(current["yaw"]) - float(previous_pose["yaw"])))
+            moved = position_delta > position_threshold or (
+                yaw_threshold is not None and yaw_delta > yaw_threshold
+            )
+        except (KeyError, TypeError, ValueError):
+            moved = True
+    elif previous_pose is not None:
+        # Never carry a stability window across an invalid prior anchor.
+        moved = True
+
+    # A changed pose starts a new continuous window.  The current sample is
+    # still retained as the anchor for the next observation.
+    if moved or stable_since is None:
+        effective_since = now
+    else:
+        try:
+            effective_since = float(stable_since)
+        except (TypeError, ValueError):
+            effective_since = now
+        if not math.isfinite(effective_since) or effective_since > now:
+            effective_since = now
+
+    elapsed = max(0.0, now - effective_since)
+    stable = window <= 0.0 or elapsed >= window
+    return {
+        "stable": stable,
+        "stable_since": effective_since,
+        "previous_stable_pose": current,
+        "position_delta_m": position_delta,
+        "yaw_delta_rad": yaw_delta,
+        "window_elapsed_s": elapsed,
+        "window_s": window,
+        "position_threshold_m": position_threshold,
+        "yaw_threshold_rad": yaw_threshold,
+        "code": (
+            "stability_window_disabled"
+            if window <= 0.0
+            else ("stability_window_satisfied" if stable else "stability_window_waiting")
+        ),
+    }
+
+
 def map_relocalization_clearance_payload(
     *,
     map_relocalization_required: Optional[Dict[str, Any]],
@@ -308,6 +433,7 @@ def relocalization_sample_evidence(
     local_costmap: Dict[str, Any],
     global_costmap: Dict[str, Any],
     pose_tolerance_m: float,
+    yaw_tolerance_rad: Optional[float] = None,
 ) -> Dict[str, Any]:
     result_age_ok = float(relocalization.get("last_update", 0.0) or 0.0) >= request_started_at
     result_text = str(relocalization.get("raw") or "") if result_age_ok else ""
@@ -331,6 +457,10 @@ def relocalization_sample_evidence(
                 wrap_angle(float(pose.get("yaw", 0.0)) - float(requested_pose.get("yaw", 0.0)))
             )
             pose_near_request = pose_error_m <= max(0.1, float(pose_tolerance_m))
+            if yaw_tolerance_rad is not None:
+                pose_near_request = pose_near_request and yaw_error_rad <= max(
+                    0.02, float(yaw_tolerance_rad)
+                )
         except (TypeError, ValueError):
             pose_near_request = False
 
@@ -350,6 +480,10 @@ def relocalization_sample_evidence(
                 wrap_angle(float(tcp_pose.get("yaw", 0.0)) - float(requested_pose.get("yaw", 0.0)))
             )
             tcp_pose_near_request = tcp_pose_error_m <= max(0.1, float(pose_tolerance_m))
+            if yaw_tolerance_rad is not None:
+                tcp_pose_near_request = tcp_pose_near_request and tcp_yaw_error_rad <= max(
+                    0.02, float(yaw_tolerance_rad)
+                )
         except (TypeError, ValueError):
             tcp_pose_near_request = False
 
@@ -383,6 +517,7 @@ def relocalization_sample_evidence(
         "tcp_pose_near_request": tcp_pose_near_request,
         "tcp_pose_error_m": tcp_pose_error_m,
         "tcp_yaw_error_rad": tcp_yaw_error_rad,
+        "yaw_tolerance_rad": yaw_tolerance_rad,
         "ready_to_finish_wait": bool(
             result_age_ok
             and (reply_accepted or reply_ambiguous)
@@ -411,6 +546,7 @@ def manual_relocalization_verification_payload(
     tcp_pose_error_m: Optional[float] = None,
     tcp_yaw_error_rad: Optional[float] = None,
     pose_tolerance_m: Optional[float] = None,
+    stability_confirmed: Optional[bool] = None,
     navigation_readiness: Optional[Dict[str, Any]] = None,
     timeout_s: Optional[float] = None,
 ) -> Dict[str, Any]:
@@ -427,12 +563,14 @@ def manual_relocalization_verification_payload(
     ambiguous_verified = bool(
         tcp_2101_ambiguous and localization_ok and pose_ok and pose_near_request
     )
+    stability_ok = stability_confirmed is not False
     factory_pose_accepted = bool(
         (manual_ok or ambiguous_verified)
         and localization_ok
         and pose_ok
         and pose_near_request
         and tcp_pose_near_request is not False
+        and stability_ok
     )
     navigation_ready = bool(
         factory_pose_accepted and scan_ok and local_costmap_ok and global_costmap_ok
@@ -444,6 +582,11 @@ def manual_relocalization_verification_payload(
         "map_pose": "ok" if pose_ok else "warn",
         "pose_near_request": "ok" if pose_near_request else "warn",
         "tcp_pose_near_request": "ok" if tcp_pose_near_request is not False else "fail",
+        "stability_window": (
+            "ok"
+            if stability_confirmed is True or stability_confirmed is None
+            else "fail"
+        ),
         "scan": "ok" if scan_ok else "warn",
         "local_costmap": "ok" if local_costmap_ok else "warn",
         "global_costmap": "ok" if global_costmap_ok else "warn",
@@ -456,6 +599,15 @@ def manual_relocalization_verification_payload(
         message = "2101/1 回执异常，但原厂定位位姿已更新到请求位置；导航链路尚未全部恢复"
     elif factory_pose_accepted:
         message = "开发手册 2101/1 已成功，原厂定位位姿已更新，但导航链路尚未全部恢复"
+    elif (
+        stability_confirmed is False
+        and (manual_ok or ambiguous_verified)
+        and localization_ok
+        and pose_ok
+        and pose_near_request
+        and tcp_pose_near_request is not False
+    ):
+        message = "开发手册 2101/1 已返回成功，但连续稳定窗口未满足，重定位未确认"
     elif manual_ok:
         message = "开发手册 2101/1 已返回成功，但还未看到原厂定位位姿更新到请求位置"
     elif result_text.startswith("failed:"):
@@ -482,6 +634,7 @@ def manual_relocalization_verification_payload(
         "tcp_pose_error_m": tcp_pose_error_m,
         "tcp_yaw_error_rad": tcp_yaw_error_rad,
         "pose_tolerance_m": pose_tolerance_m,
+        "stability_confirmed": stability_confirmed,
         "checks": checks,
         "navigation_readiness": navigation_readiness,
         "timeout_s": timeout_s,

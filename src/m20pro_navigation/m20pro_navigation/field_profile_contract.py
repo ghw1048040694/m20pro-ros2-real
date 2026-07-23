@@ -46,6 +46,9 @@ NAVIGATION_KEYS = {
 STAIR_TRANSITION_SPEC = {
     "entry_tolerance_m": ("number", 0.30, 2.00),
     "floor_switch_timeout_s": ("number", 30.0, 300.0),
+    "platform_position_tolerance_m": ("number", 0.10, 1.00),
+    "platform_yaw_tolerance_rad": ("number", 0.05, 1.20),
+    "platform_stability_window_s": ("number", 0.50, 10.00),
     "post_switch_goal_delay_s": ("number", 0.10, 10.0),
     "duplicate_goal_tolerance_m": ("number", 0.01, 0.50),
     "duplicate_goal_yaw_tolerance_rad": ("number", 0.02, 0.80),
@@ -632,8 +635,18 @@ def web_navigation_field_parameters(profile: Mapping[str, Any]) -> Dict[str, Any
     disagreeing with the field 0.35 m configuration.
     """
     goal = profile["navigation"]["goal"]
+    transition = profile["stair_transition"]
     return {
         "goal_reached_tolerance_m": goal["xy_tolerance_m"],
+        "cross_floor_platform_position_tolerance_m": transition[
+            "platform_position_tolerance_m"
+        ],
+        "cross_floor_platform_yaw_tolerance_rad": transition[
+            "platform_yaw_tolerance_rad"
+        ],
+        "cross_floor_platform_stability_window_s": transition[
+            "platform_stability_window_s"
+        ],
     }
 
 

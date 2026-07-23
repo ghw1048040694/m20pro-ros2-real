@@ -6,6 +6,7 @@ import time
 from typing import Any, Callable, Dict, Iterable, Optional
 
 from .task_contract import map_metadata_mismatch_error, readiness_failure, readiness_success
+from .map_identity_contract import map_content_match
 
 
 NowText = Callable[[], str]
@@ -23,6 +24,8 @@ def _map_summary(map_payload: Dict[str, Any], *, include_map_id: bool) -> Dict[s
         "resolution": map_payload.get("resolution"),
         "origin": map_payload.get("origin"),
     }
+    if map_payload.get("content_digest"):
+        summary["content_digest"] = map_payload.get("content_digest")
     if include_map_id:
         summary = {
             "map_id": map_payload.get("map_id"),
@@ -38,6 +41,7 @@ def selected_map_status_payload(
     selected_map_id: Optional[str],
     live_map: Dict[str, Any],
     selected_map: Dict[str, Any],
+    min_update_time: Optional[float] = None,
     now_text: Optional[NowText] = None,
 ) -> Dict[str, Any]:
     selected_id = str(selected_map_id or "").strip()
@@ -64,9 +68,49 @@ def selected_map_status_payload(
             {**detail, "detail": metadata_error},
             now_text=now_text or default_now_text,
         )
+    # Full map snapshots carry a normalized occupancy digest.  Lightweight
+    # summaries do not, so existing display-only callers keep metadata-only
+    # behavior while map-switch postconditions become content-strict.
+    if selected_payload.get("content_digest"):
+        content = map_content_match(selected_payload, live_payload, require_digest=True)
+        if not content.get("ok"):
+            return readiness_failure(
+                "selected_map_content_mismatch",
+                str(content.get("message") or "网页选择地图与 Nav2 当前 /map 内容不一致"),
+                {**detail, "content": content},
+                now_text=now_text or default_now_text,
+            )
+    if min_update_time is not None:
+        try:
+            live_update = float(live_payload.get("last_update", 0.0) or 0.0)
+            update_barrier = float(min_update_time)
+        except (TypeError, ValueError):
+            live_update = 0.0
+            update_barrier = float("inf")
+        if live_update < update_barrier:
+            return readiness_failure(
+                "selected_map_sample_before_transaction",
+                "Nav2 /map 内容正确，但尚未收到本次切图后的新样本",
+                {
+                    **detail,
+                    "map_update_time": live_update,
+                    "map_min_update_time": update_barrier,
+                },
+                now_text=now_text or default_now_text,
+            )
     return readiness_success(
         "网页选择地图与 Nav2 当前 /map 一致",
-        detail,
+        {
+            **detail,
+            **(
+                {
+                    "map_update_time": float(live_payload.get("last_update", 0.0) or 0.0),
+                    "map_min_update_time": float(min_update_time),
+                }
+                if min_update_time is not None
+                else {}
+            ),
+        },
         now_text=now_text or default_now_text,
     )
 

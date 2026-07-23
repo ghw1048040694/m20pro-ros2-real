@@ -10,6 +10,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import yaml
 
+from .map_identity_contract import occupancy_grid_content_digest
+
 
 def resolve_map_yaml_image_path(yaml_path: Path, image_value: str) -> Path:
     image_path = Path(os.path.expandvars(os.path.expanduser(str(image_value or "").strip())))
@@ -707,4 +709,14 @@ def load_map_file_payload(record: Dict[str, Any], yaml_path: Path) -> Dict[str, 
         "resolution": resolution,
         "origin": origin,
         "data": data,
+        "content_digest": occupancy_grid_content_digest(
+            {
+                "available": True,
+                "width": width,
+                "height": height,
+                "resolution": resolution,
+                "origin": origin,
+                "data": data,
+            }
+        ),
     }

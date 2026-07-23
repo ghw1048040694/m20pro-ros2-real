@@ -90,6 +90,17 @@ from .floor_route_contract import (
     validate_floor_route,
     validate_floor_route_set,
 )
+from .floor_switch_transaction_contract import (
+    advance_transaction,
+    begin_transaction,
+    commit_decision,
+    mark_uncertain_transaction,
+    next_map_epoch,
+    recover_interrupted_transaction,
+    recover_uncertain_transaction,
+    request_admission,
+    rollback_decision,
+)
 from .localization_contract import (
     factory_localization_ok_from_sources,
     initialpose_api_response_payload,
@@ -99,6 +110,7 @@ from .localization_contract import (
     parse_initialpose_request,
     relocalization_sample_evidence,
     relocalization_response_payload,
+    relocalization_stability_step,
 )
 from .map_derived_contract import (
     builtin_map_derived_payload,
@@ -125,6 +137,7 @@ from .map_contract import (
     map_file_metadata_payload,
     removable_map_archive_directory,
 )
+from .map_identity_contract import factory_identity_match, occupancy_grid_content_digest
 from .map_selection_contract import (
     apply_selected_map_choice_state,
     effective_map_id_for_display,
@@ -742,7 +755,13 @@ class WebDashboardNode(Node):
         self._route_config_floor_ids = self._configured_route_floor_ids()
         self._settings = self._load_json(
             "settings.json",
-            {"selected_map_id": None, "working_map_id": None, "active_task": None},
+            {
+                "selected_map_id": None,
+                "working_map_id": None,
+                "active_task": None,
+                "floor_switch_map_epoch": 0,
+                "floor_switch_transaction": None,
+            },
         )
         self._normalize_runtime_state_on_startup()
         self._mapping_processes: Dict[str, Dict[str, Any]] = {}
@@ -973,6 +992,9 @@ class WebDashboardNode(Node):
         self.declare_parameter("floor_switch_result_topic", "/m20pro/floor_switch_result")
         self.declare_parameter("floor_context_topic", "/m20pro/set_current_floor")
         self.declare_parameter("cross_floor_factory_apply_timeout_s", 30.0)
+        self.declare_parameter("cross_floor_platform_position_tolerance_m", 0.50)
+        self.declare_parameter("cross_floor_platform_yaw_tolerance_rad", 0.45)
+        self.declare_parameter("cross_floor_platform_stability_window_s", 2.0)
         # Production launches override this from navigation.goal.xy_tolerance_m;
         # keep the fallback aligned with the checked-in field profile.
         self.declare_parameter("goal_reached_tolerance_m", 0.35)
@@ -1192,6 +1214,29 @@ class WebDashboardNode(Node):
 
     def _normalize_runtime_state_on_startup(self) -> None:
         changed = False
+        recovered_transaction = recover_interrupted_transaction(
+            self._settings.get("floor_switch_transaction"),
+            now_text=now_text(),
+        )
+        if recovered_transaction.get("changed"):
+            self._settings["floor_switch_transaction"] = recovered_transaction["transaction"]
+            active_after_restart = self._settings.get("active_task")
+            if (
+                isinstance(active_after_restart, dict)
+                and str(active_after_restart.get("status") or "") == "running"
+                and bool(active_after_restart.get("multi_floor"))
+            ):
+                failed_task = dict(active_after_restart)
+                failed_task.update(
+                    {
+                        "status": "failed",
+                        "status_message": "跨楼层事务在进程重启后状态不确定，任务已停止",
+                        "failure_code": "floor_switch_interrupted_restart",
+                        "updated_at": now_text(),
+                    }
+                )
+                self._settings["active_task"] = failed_task
+            changed = True
         selected_map_id = str(self._settings.get("selected_map_id") or "").strip()
         working_map_id = str(self._settings.get("working_map_id") or "").strip()
         if selected_map_id and not self._find_map_record_unlocked(selected_map_id):
@@ -1797,6 +1842,7 @@ class WebDashboardNode(Node):
             "origin": origin,
             "data": list(msg.data),
         }
+        map_payload["content_digest"] = occupancy_grid_content_digest(map_payload)
         with self._lock:
             self._state["map"] = map_payload
             self._state["map_version"] = map_payload["version"]
@@ -2017,6 +2063,10 @@ class WebDashboardNode(Node):
             snapshot["selected_map_id"] = self._settings.get("selected_map_id")
             snapshot["working_map_id"] = self._settings.get("working_map_id")
             snapshot["active_task"] = self._settings.get("active_task")
+            transaction = self._settings.get("floor_switch_transaction")
+            snapshot["floor_switch_transaction"] = (
+                dict(transaction) if isinstance(transaction, dict) else None
+            )
             snapshot["map_relocalization_required"] = self._settings.get("map_relocalization_required")
             snapshot["startup_map_sync"] = self._settings.get("startup_map_sync")
         reported_floor = snapshot.get("floor")
@@ -2116,6 +2166,11 @@ class WebDashboardNode(Node):
                 "active_waypoint": active_waypoint or None,
                 "map_version": self._state.get("map_version", 0),
             }
+        with self._data_lock:
+            transaction = self._settings.get("floor_switch_transaction")
+            payload["floor_switch_transaction"] = (
+                dict(transaction) if isinstance(transaction, dict) else None
+            )
         if path_version != int(path.get("version", 0) or 0):
             payload["path"] = path
         if local_path_version != int(local_path.get("version", 0) or 0):
@@ -2715,6 +2770,372 @@ class WebDashboardNode(Node):
         self.floor_switch_result_pub.publish(message)
         self._append_event("跨楼层地图事务", payload)
 
+    def _persist_floor_switch_transaction(self, transaction: Dict[str, Any]) -> None:
+        with self._data_lock:
+            self._settings["floor_switch_transaction"] = dict(transaction)
+            self._save_json("settings.json", self._settings)
+
+    def _advance_floor_switch_transaction(
+        self,
+        transaction: Dict[str, Any],
+        state: str,
+        *,
+        message: str,
+        **evidence: Any,
+    ) -> Dict[str, Any]:
+        result = advance_transaction(
+            transaction,
+            state,
+            message=message,
+            now_text=now_text(),
+            **evidence,
+        )
+        if result.get("ok"):
+            transaction.clear()
+            transaction.update(result["transaction"])
+            self._persist_floor_switch_transaction(transaction)
+        return result
+
+    def _mark_floor_switch_uncertain(
+        self,
+        transaction: Optional[Dict[str, Any]],
+        *,
+        message: str,
+        **evidence: Any,
+    ) -> Dict[str, Any]:
+        """Persist one fail-closed terminal state for every unsafe exception."""
+        if not isinstance(transaction, dict):
+            return {
+                "ok": False,
+                "code": "floor_switch_transaction_missing",
+                "message": message,
+                "state_uncertain": True,
+            }
+        try:
+            result = mark_uncertain_transaction(
+                transaction,
+                message=message,
+                now_text=now_text(),
+                **evidence,
+            )
+            if result.get("ok"):
+                transaction.clear()
+                transaction.update(result["transaction"])
+                self._persist_floor_switch_transaction(transaction)
+                return {
+                    "ok": False,
+                    "code": "floor_switch_state_uncertain",
+                    "message": message,
+                    "state_uncertain": True,
+                    "transaction": transaction,
+                }
+            return {
+                **result,
+                "ok": False,
+                "state_uncertain": True,
+                "transaction": transaction,
+            }
+        except Exception as exc:
+            self.get_logger().exception("failed to persist uncertain floor-switch state")
+            return {
+                "ok": False,
+                "code": "floor_switch_uncertain_persist_failed",
+                "message": f"{message}；不确定状态持久化失败: {exc}",
+                "state_uncertain": True,
+                "transaction": transaction,
+            }
+
+    def _current_map_content_digest(self) -> Optional[str]:
+        with self._lock:
+            live_map = dict(self._state.get("map") or {})
+        return str(
+            live_map.get("content_digest") or occupancy_grid_content_digest(live_map) or ""
+        ).strip() or None
+
+    def _recover_floor_switch_transaction(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Close UNCERTAIN only after an operator has rebuilt every runtime proof."""
+        requested_map_id = str(payload.get("map_id") or "").strip()
+        requested_transaction_id = str(payload.get("request_id") or "").strip()
+        recovery_token = "recover:%s" % (requested_transaction_id or "unknown")
+        with self._floor_switch_lock:
+            if self._floor_switch_inflight:
+                return self._error(
+                    "跨楼层地图事务正在执行，请等待当前操作结束",
+                    {
+                        "code": "floor_switch_busy",
+                        "active_request_id": self._floor_switch_inflight,
+                    },
+                )
+            self._floor_switch_inflight = recovery_token
+
+        try:
+            with self._data_lock:
+                stored = self._settings.get("floor_switch_transaction")
+                transaction = dict(stored) if isinstance(stored, dict) else None
+                active_task = dict(self._settings.get("active_task") or {})
+                selected_map_id = str(self._settings.get("selected_map_id") or "").strip()
+                selected_record = (
+                    dict(self._find_map_record_unlocked(selected_map_id) or {})
+                    if selected_map_id
+                    else {}
+                )
+
+            if not isinstance(transaction, dict) or str(transaction.get("state") or "") != "UNCERTAIN":
+                return self._error(
+                    "当前没有需要人工恢复的不确定跨楼层事务",
+                    {
+                        "code": "floor_switch_recovery_state_invalid",
+                        "state": (transaction or {}).get("state") if isinstance(transaction, dict) else None,
+                    },
+                )
+            if requested_transaction_id != str(transaction.get("request_id") or "").strip():
+                return self._error(
+                    "页面中的跨楼层事务已经过期，请刷新后重试",
+                    {
+                        "code": "floor_switch_recovery_request_mismatch",
+                        "request_id": transaction.get("request_id"),
+                    },
+                )
+            if active_task.get("status") == "running":
+                return self._error(
+                    "任务仍在执行，必须先停止任务再恢复地图状态",
+                    {"code": "floor_switch_recovery_task_active"},
+                )
+            if not requested_map_id or requested_map_id != selected_map_id or not selected_record:
+                return self._error(
+                    "必须先在地图菜单中明确选择当前所在的固定地图",
+                    {
+                        "code": "floor_switch_recovery_map_not_selected",
+                        "requested_map_id": requested_map_id or None,
+                        "selected_map_id": selected_map_id or None,
+                    },
+                )
+
+            selected_snapshot = self._map_file_snapshot(selected_map_id)
+            expected_digest = str(selected_snapshot.get("content_digest") or "").strip()
+            observed_digest = self._current_map_content_digest()
+            factory_source_path = str(
+                selected_record.get("factory_apply_path")
+                or selected_record.get("source_path")
+                or ""
+            ).strip()
+            factory_active_alias = str(self.get_parameter("factory_active_map").value).strip()
+            if (
+                not selected_snapshot.get("available")
+                or not expected_digest
+                or not factory_source_path.startswith("/var/opt/robot/data/maps/")
+                or factory_source_path == factory_active_alias
+            ):
+                return self._error(
+                    "当前固定地图缺少可验证的 104/106 地图资产，不能解除不确定状态",
+                    {
+                        "code": "floor_switch_recovery_map_identity_missing",
+                        "map_id": selected_map_id,
+                        "map_snapshot": selected_snapshot,
+                        "factory_source_path": factory_source_path or None,
+                    },
+                )
+
+            factory_timeout_s = min(
+                120.0,
+                max(10.0, float(self.get_parameter("cross_floor_factory_apply_timeout_s").value)),
+            )
+            factory_confirmation = self._confirm_factory_active_map(
+                factory_source_path,
+                timeout_s=factory_timeout_s,
+            )
+            runtime = self._snapshot(include_debug=False)
+            localization_status = dict(runtime.get("localization_status") or {})
+            with self._lock:
+                relocalization_result = dict(self._state.get("relocalization_result") or {})
+            try:
+                relocalization_time = float(relocalization_result.get("last_update") or 0.0)
+            except (TypeError, ValueError):
+                relocalization_time = 0.0
+            navigation_readiness = self._navigation_readiness_payload(
+                check_lifecycle=True,
+                min_update_time=relocalization_time if relocalization_time > 0.0 else None,
+            )
+            recovered = recover_uncertain_transaction(
+                transaction,
+                map_id=selected_map_id,
+                expected_map_digest=expected_digest,
+                observed_map_digest=observed_digest,
+                factory_active_confirmed=bool(factory_confirmation.get("ok")),
+                localization_status=localization_status,
+                navigation_readiness=navigation_readiness,
+                relocalization_time=relocalization_time,
+                now_text=now_text(),
+            )
+            if not recovered.get("ok"):
+                return {
+                    **recovered,
+                    "map_id": selected_map_id,
+                    "factory_confirmation": factory_confirmation,
+                    "localization_status": localization_status,
+                    "navigation_readiness": navigation_readiness,
+                }
+
+            updated = dict(recovered["transaction"])
+            self._persist_floor_switch_transaction(updated)
+            response = {
+                "ok": True,
+                "code": recovered.get("code") or "floor_switch_recovered_manually",
+                "message": updated.get("message"),
+                "map_id": selected_map_id,
+                "transaction": updated,
+                "factory_confirmation": factory_confirmation,
+                "localization_status": localization_status,
+                "navigation_readiness": navigation_readiness,
+            }
+            self._publish_floor_switch_result(response)
+            return response
+        finally:
+            with self._floor_switch_lock:
+                if self._floor_switch_inflight == recovery_token:
+                    self._floor_switch_inflight = None
+
+    def _rollback_floor_switch_transaction(
+        self,
+        transaction: Dict[str, Any],
+        *,
+        source_pose: Dict[str, Any],
+        factory_timeout_s: float,
+    ) -> Dict[str, Any]:
+        """Restore source map and prove source-layer navigation before success."""
+        current_state = str(transaction.get("state") or "").strip()
+        if current_state in {"COMMITTED", "ROLLED_BACK"}:
+            return {
+                "ok": False,
+                "code": "floor_switch_transaction_terminal",
+                "message": f"事务已经处于 {current_state}，不再重复回滚",
+                "state_uncertain": False,
+                "transaction": transaction,
+            }
+        if current_state == "UNCERTAIN":
+            return {
+                "ok": False,
+                "code": "floor_switch_recovery_required",
+                "message": "事务已经是不确定状态，必须人工确认后才能恢复",
+                "state_uncertain": True,
+                "transaction": transaction,
+            }
+        rollback_map_started_at = time.time()
+        if not source_pose:
+            source_pose = dict(transaction.get("source_platform") or {})
+        source_factory_identity = {
+            "resolved_path": transaction.get("source_factory_active_path"),
+            "content_digest": transaction.get("source_factory_active_digest"),
+            "identity_mode": transaction.get("source_factory_identity_mode"),
+        }
+        if not source_factory_identity.get("resolved_path") or not source_factory_identity.get("content_digest"):
+            return self._mark_floor_switch_uncertain(
+                transaction,
+                message="事务缺少开始前捕获的 106 active 地图身份，拒绝盲目回滚",
+            )
+        phase = self._advance_floor_switch_transaction(
+            transaction,
+            "ROLLING_BACK",
+            message="目标层事务未完成，恢复起始层地图",
+        )
+        if not phase.get("ok"):
+            return self._mark_floor_switch_uncertain(
+                transaction,
+                message="无法进入回滚阶段，物理地图状态不确定",
+                phase=phase,
+            )
+        source_map_id = str(transaction.get("source_map_id") or "")
+        restored = self._select_map(
+            {"map_id": source_map_id},
+            allow_active_task=True,
+            reason="cross_floor_rollback",
+            factory_timeout_s=factory_timeout_s,
+            source_factory_identity=source_factory_identity,
+            map_min_update_time=rollback_map_started_at,
+        )
+        if not restored.get("ok"):
+            uncertain = self._mark_floor_switch_uncertain(
+                transaction,
+                message="源地图恢复失败，当前物理地图状态不确定",
+                restore=restored,
+            )
+            return {**uncertain, "restore": restored}
+
+        source_relocalization = self._publish_initialpose(
+            {
+                "floor": transaction.get("source_floor"),
+                "frame_id": "map",
+                "x": source_pose.get("x"),
+                "y": source_pose.get("y"),
+                "z": source_pose.get("z", 0.0),
+                "yaw": source_pose.get("yaw"),
+            },
+            allow_active_task=True,
+            event_text="跨楼层事务回滚源层重定位",
+            pose_tolerance_m=float(self.get_parameter("cross_floor_platform_position_tolerance_m").value),
+            yaw_tolerance_rad=float(self.get_parameter("cross_floor_platform_yaw_tolerance_rad").value),
+            require_lifecycle=True,
+            stability_window_s=float(self.get_parameter("cross_floor_platform_stability_window_s").value),
+        )
+        source_readiness = self._navigation_readiness_payload(
+            check_lifecycle=True,
+            min_update_time=rollback_map_started_at,
+        )
+        source_factory = dict(restored.get("factory_apply_map") or {})
+        rollback = rollback_decision(
+            transaction,
+            source_map_id=source_map_id,
+            observed_map_digest=self._current_map_content_digest(),
+            factory_active_confirmed=bool(source_factory.get("factory_active_confirmed")),
+            relocalization=source_relocalization,
+            navigation_readiness=source_readiness,
+        )
+        if rollback.get("ok"):
+            phase = self._advance_floor_switch_transaction(
+                transaction,
+                "ROLLED_BACK",
+                message="源地图、源平台重定位和源层导航已恢复",
+                restore=restored,
+                relocalization=source_relocalization,
+                navigation_readiness=source_readiness,
+            )
+            if not phase.get("ok"):
+                uncertain = self._mark_floor_switch_uncertain(
+                    transaction,
+                    message="源地图证据已恢复，但回滚终态写入失败",
+                    restore=restored,
+                    relocalization=source_relocalization,
+                    navigation_readiness=source_readiness,
+                    rollback=rollback,
+                )
+                return {**uncertain, "restore": restored, "rollback": rollback}
+            return {
+                "ok": bool(phase.get("ok")),
+                "code": rollback.get("code"),
+                "message": rollback.get("message"),
+                "restore": restored,
+                "relocalization": source_relocalization,
+                "navigation_readiness": source_readiness,
+                "state_uncertain": not bool(phase.get("ok")),
+            }
+        uncertain = self._mark_floor_switch_uncertain(
+            transaction,
+            message="源地图已尝试恢复，但源层定位或导航证据不足",
+            restore=restored,
+            relocalization=source_relocalization,
+            navigation_readiness=source_readiness,
+            rollback=rollback,
+        )
+        return {
+            **uncertain,
+            "code": rollback.get("code") or uncertain.get("code"),
+            "message": rollback.get("message") or uncertain.get("message"),
+            "restore": restored,
+            "relocalization": source_relocalization,
+            "navigation_readiness": source_readiness,
+            "rollback": rollback,
+        }
+
     def _on_floor_switch_request(self, msg: String) -> None:
         try:
             request = json.loads(msg.data)
@@ -2732,6 +3153,16 @@ class WebDashboardNode(Node):
         if not request_id:
             self._publish_floor_switch_result(
                 {"ok": False, "code": "floor_switch_request_id_missing", "message": "切层请求缺少 request_id"}
+            )
+            return
+        with self._data_lock:
+            admission = request_admission(
+                self._settings.get("floor_switch_transaction"),
+                request_id,
+            )
+        if not admission.get("ok"):
+            self._publish_floor_switch_result(
+                {**admission, "request_id": request_id}
             )
             return
         with self._floor_switch_lock:
@@ -2757,8 +3188,10 @@ class WebDashboardNode(Node):
     def _run_floor_switch_transaction(self, request: Dict[str, Any]) -> None:
         request_id = str(request.get("request_id") or "")
         source_map_id = ""
+        source_pose: Dict[str, Any] = {}
+        source_factory_identity: Optional[Dict[str, Any]] = None
         factory_timeout_s: Optional[float] = None
-        activation_succeeded = False
+        transaction: Optional[Dict[str, Any]] = None
         try:
             with self._data_lock:
                 active = dict(self._settings.get("active_task") or {})
@@ -2797,17 +3230,97 @@ class WebDashboardNode(Node):
             task_id = str(context["task_id"])
             target_map_id = str(route.get("target_map_id") or "").strip()
             target_pose = dict(route.get("target_platform") or {})
+            source_pose = dict(route.get("source_platform") or {})
+            source_snapshot = self._map_file_snapshot(source_map_id)
+            target_snapshot = self._map_file_snapshot(target_map_id)
+            source_digest = str(source_snapshot.get("content_digest") or "").strip()
+            target_digest = str(target_snapshot.get("content_digest") or "").strip()
+            if not source_digest or not target_digest:
+                self._publish_floor_switch_result(
+                    {
+                        "ok": False,
+                        "request_id": request_id,
+                        "route_id": route.get("id"),
+                        "code": "floor_switch_map_content_digest_missing",
+                        "message": "源地图或目标地图缺少不可变内容摘要，拒绝切层",
+                        "source_map": source_snapshot,
+                        "target_map": target_snapshot,
+                    }
+                )
+                return
             factory_timeout_s = max(
                 10.0,
                 min(60.0, float(self.get_parameter("cross_floor_factory_apply_timeout_s").value)),
             )
+            source_factory_identity = self._capture_factory_active_identity(
+                timeout_s=factory_timeout_s,
+            )
+            with self._data_lock:
+                epoch = next_map_epoch(self._settings)
+            started = begin_transaction(
+                request=request,
+                context=context,
+                source_map_digest=source_digest,
+                target_map_digest=target_digest,
+                map_epoch=epoch,
+                now_text=now_text(),
+                source_factory_identity=source_factory_identity,
+            )
+            if not started.get("ok"):
+                self._publish_floor_switch_result({**started, "request_id": request_id})
+                return
+            transaction = dict(started["transaction"])
+            with self._data_lock:
+                self._settings["floor_switch_map_epoch"] = epoch
+            self._persist_floor_switch_transaction(transaction)
+            if not source_factory_identity.get("ok"):
+                uncertain = self._mark_floor_switch_uncertain(
+                    transaction,
+                    message="事务开始前无法确认 106 active 地图身份，拒绝执行跨层切换",
+                    source_factory_identity=source_factory_identity,
+                )
+                self._publish_floor_switch_result(
+                    {
+                        **uncertain,
+                        "request_id": request_id,
+                        "route_id": route.get("id"),
+                        "source_floor": source_floor,
+                        "target_floor": target_floor,
+                        "target_map_id": target_map_id,
+                        "code": "floor_switch_source_active_identity_unavailable",
+                        "message": "事务开始前无法确认 106 active 地图身份，未执行切层；请人工确认后恢复",
+                        "transaction": transaction,
+                    }
+                )
+                return
+            phase = self._advance_floor_switch_transaction(
+                transaction,
+                "APPLYING",
+                message="正在原子切换 104/106 目标地图",
+            )
+            if not phase.get("ok"):
+                uncertain = self._mark_floor_switch_uncertain(
+                    transaction,
+                    message="无法进入地图切换阶段，跨楼层事务状态不确定",
+                    phase=phase,
+                )
+                self._publish_floor_switch_result({**uncertain, "request_id": request_id})
+                return
+            target_map_started_at = time.time()
             activation = self._select_map(
                 {"map_id": target_map_id},
                 allow_active_task=True,
                 reason="cross_floor_transition",
                 factory_timeout_s=factory_timeout_s,
+                source_factory_identity=source_factory_identity,
+                map_min_update_time=target_map_started_at,
             )
             if not activation.get("ok"):
+                rollback = self._rollback_floor_switch_transaction(
+                    transaction,
+                    source_pose=source_pose,
+                    factory_timeout_s=factory_timeout_s,
+                )
                 self._publish_floor_switch_result(
                     {
                         "ok": False,
@@ -2817,16 +3330,20 @@ class WebDashboardNode(Node):
                         "target_floor": target_floor,
                         "target_map_id": target_map_id,
                         "code": str(activation.get("code") or "floor_switch_map_failed"),
-                        "message": str(activation.get("message") or "106/104 地图切换失败"),
+                        "message": str(activation.get("message") or "106/104 地图切换失败；已尝试恢复起始层"),
                         "map_transaction": activation,
-                        "state_uncertain": bool(activation.get("state_uncertain")),
+                        "rollback": rollback,
+                        "state_uncertain": bool(rollback.get("state_uncertain", not bool(rollback.get("ok")))),
+                        "transaction": transaction,
                     }
                 )
                 return
-            activation_succeeded = True
             if not self._floor_switch_task_is_active(task_id):
-                rollback = self._rollback_floor_switch_map(source_map_id, factory_timeout_s)
-                activation_succeeded = False
+                rollback = self._rollback_floor_switch_transaction(
+                    transaction,
+                    source_pose=source_pose,
+                    factory_timeout_s=factory_timeout_s,
+                )
                 self._publish_floor_switch_result(
                     {
                         "ok": False,
@@ -2839,7 +3356,81 @@ class WebDashboardNode(Node):
                         "message": "跨楼层任务已停止，地图事务已回滚",
                         "map_transaction": activation,
                         "rollback": rollback,
-                        "state_uncertain": not bool(rollback.get("ok")),
+                        "state_uncertain": bool(rollback.get("state_uncertain", not bool(rollback.get("ok")))),
+                        "transaction": transaction,
+                    }
+                )
+                return
+            factory_activation = dict(activation.get("factory_apply_map") or {})
+            if not bool(factory_activation.get("factory_active_confirmed")):
+                rollback = self._rollback_floor_switch_transaction(
+                    transaction,
+                    source_pose=source_pose,
+                    factory_timeout_s=factory_timeout_s,
+                )
+                self._publish_floor_switch_result(
+                    {
+                        "ok": False,
+                        "request_id": request_id,
+                        "route_id": route.get("id"),
+                        "source_floor": source_floor,
+                        "target_floor": target_floor,
+                        "target_map_id": target_map_id,
+                        "code": "floor_switch_factory_map_unconfirmed",
+                        "message": "106 active 地图未完成后验确认",
+                        "map_transaction": activation,
+                        "rollback": rollback,
+                        "state_uncertain": bool(rollback.get("state_uncertain", not bool(rollback.get("ok")))),
+                        "transaction": transaction,
+                    }
+                )
+                return
+            observed_target_digest = self._current_map_content_digest()
+            if observed_target_digest != target_digest:
+                rollback = self._rollback_floor_switch_transaction(
+                    transaction,
+                    source_pose=source_pose,
+                    factory_timeout_s=factory_timeout_s,
+                )
+                self._publish_floor_switch_result(
+                    {
+                        "ok": False,
+                        "request_id": request_id,
+                        "route_id": route.get("id"),
+                        "source_floor": source_floor,
+                        "target_floor": target_floor,
+                        "target_map_id": target_map_id,
+                        "code": "floor_switch_nav2_map_content_mismatch",
+                        "message": "104 当前 /map 内容摘要与目标地图不一致",
+                        "expected_digest": target_digest,
+                        "observed_digest": observed_target_digest,
+                        "map_transaction": activation,
+                        "rollback": rollback,
+                        "state_uncertain": bool(rollback.get("state_uncertain", not bool(rollback.get("ok")))),
+                        "transaction": transaction,
+                    }
+                )
+                return
+            phase = self._advance_floor_switch_transaction(
+                transaction,
+                "RELOCALIZING",
+                message="目标地图已确认，正在执行目标层 2101 重定位",
+                map_transaction=activation,
+                target_factory_identity=factory_activation,
+            )
+            if not phase.get("ok"):
+                rollback = self._rollback_floor_switch_transaction(
+                    transaction,
+                    source_pose=source_pose,
+                    factory_timeout_s=factory_timeout_s,
+                )
+                self._publish_floor_switch_result(
+                    {
+                        **phase,
+                        "request_id": request_id,
+                        "rollback": rollback,
+                        "state_uncertain": bool(rollback.get("state_uncertain", not bool(rollback.get("ok")))),
+                        "transaction": transaction,
                     }
                 )
                 return
@@ -2854,12 +3445,33 @@ class WebDashboardNode(Node):
                 },
                 allow_active_task=True,
                 event_text="跨楼层自动重定位",
+                pose_tolerance_m=float(self.get_parameter("cross_floor_platform_position_tolerance_m").value),
+                yaw_tolerance_rad=float(self.get_parameter("cross_floor_platform_yaw_tolerance_rad").value),
+                require_lifecycle=True,
+                stability_window_s=float(self.get_parameter("cross_floor_platform_stability_window_s").value),
             )
             task_still_active = self._floor_switch_task_is_active(task_id)
-            if not relocalization.get("confirmed") or not task_still_active:
-                rollback = self._rollback_floor_switch_map(source_map_id, factory_timeout_s)
-                activation_succeeded = False
-                state_uncertain = not bool(rollback.get("ok"))
+            navigation_readiness = self._navigation_readiness_payload(
+                check_lifecycle=True,
+                min_update_time=target_map_started_at,
+            )
+            commit = commit_decision(
+                transaction,
+                task_active=task_still_active,
+                target_map_id=target_map_id,
+                observed_map_digest=self._current_map_content_digest(),
+                factory_active_confirmed=bool(factory_activation.get("factory_active_confirmed")),
+                relocalization=relocalization,
+                navigation_readiness=navigation_readiness,
+                factory_active_identity=factory_activation.get("factory_active_confirmation"),
+            )
+            if not commit.get("ok"):
+                rollback = self._rollback_floor_switch_transaction(
+                    transaction,
+                    source_pose=source_pose,
+                    factory_timeout_s=factory_timeout_s,
+                )
+                state_uncertain = bool(rollback.get("state_uncertain", not bool(rollback.get("ok"))))
                 cancelled = not task_still_active
                 self._publish_floor_switch_result(
                     {
@@ -2872,17 +3484,43 @@ class WebDashboardNode(Node):
                         "code": (
                             "floor_switch_task_cancelled"
                             if cancelled
-                            else str(relocalization.get("code") or "floor_switch_relocalization_failed")
+                            else str(commit.get("code") or relocalization.get("code") or "floor_switch_relocalization_failed")
                         ),
                         "message": (
                             "跨楼层任务已停止，地图事务已回滚"
                             if cancelled
-                            else str(relocalization.get("message") or "目标层 2101 重定位未确认")
+                            else str(commit.get("message") or relocalization.get("message") or "目标层导航未就绪")
                         ),
                         "map_transaction": activation,
                         "relocalization": relocalization,
+                        "navigation_readiness": navigation_readiness,
                         "rollback": rollback,
                         "state_uncertain": state_uncertain,
+                        "transaction": transaction,
+                    }
+                )
+                return
+            committed = self._advance_floor_switch_transaction(
+                transaction,
+                "COMMITTED",
+                message="目标层地图内容、106 active、2101 重定位和 Nav2 全链路均已确认",
+                map_transaction=activation,
+                relocalization=relocalization,
+                navigation_readiness=navigation_readiness,
+            )
+            if not committed.get("ok"):
+                rollback = self._rollback_floor_switch_transaction(
+                    transaction,
+                    source_pose=source_pose,
+                    factory_timeout_s=factory_timeout_s,
+                )
+                self._publish_floor_switch_result(
+                    {
+                        **committed,
+                        "request_id": request_id,
+                        "rollback": rollback,
+                        "state_uncertain": bool(rollback.get("state_uncertain", not bool(rollback.get("ok")))),
+                        "transaction": transaction,
                     }
                 )
                 return
@@ -2895,17 +3533,37 @@ class WebDashboardNode(Node):
                     "target_floor": target_floor,
                     "target_map_id": target_map_id,
                     "target_pose": target_pose,
-                    "message": "106 原厂地图、104 Nav2 地图和 2101 重定位均已确认",
+                    "message": "106 原厂地图、104 Nav2 地图内容、2101 重定位和目标层 Nav2 全链路均已确认",
                     "map_transaction": activation,
                     "relocalization": relocalization,
+                    "navigation_readiness": navigation_readiness,
+                    "transaction": transaction,
                 }
             )
-            activation_succeeded = False
         except Exception as exc:
             self.get_logger().exception("cross-floor map transaction failed")
             rollback = None
-            if activation_succeeded and source_map_id and factory_timeout_s is not None:
-                rollback = self._rollback_floor_switch_map(source_map_id, factory_timeout_s)
+            if transaction is not None and source_map_id and factory_timeout_s is not None:
+                try:
+                    rollback = self._rollback_floor_switch_transaction(
+                        transaction,
+                        source_pose=source_pose,
+                        factory_timeout_s=factory_timeout_s,
+                    )
+                except Exception as rollback_exc:
+                    self.get_logger().exception("cross-floor rollback raised")
+                    rollback = self._mark_floor_switch_uncertain(
+                        transaction,
+                        message="跨楼层事务异常且回滚抛出异常，物理地图状态不确定",
+                        exception=str(exc),
+                        rollback_exception=str(rollback_exc),
+                    )
+            elif transaction is not None:
+                rollback = self._mark_floor_switch_uncertain(
+                    transaction,
+                    message="跨楼层事务异常，缺少完整回滚参数，物理地图状态不确定",
+                    exception=str(exc),
+                )
             self._publish_floor_switch_result(
                 {
                     "ok": False,
@@ -2913,7 +3571,8 @@ class WebDashboardNode(Node):
                     "code": "floor_switch_exception",
                     "message": str(exc),
                     "rollback": rollback,
-                    "state_uncertain": bool(activation_succeeded and not (rollback or {}).get("ok")),
+                    "state_uncertain": bool((rollback or {}).get("state_uncertain", not bool((rollback or {}).get("ok")))) if rollback is not None else True,
+                    "transaction": transaction,
                 }
             )
         finally:
@@ -2929,18 +3588,6 @@ class WebDashboardNode(Node):
             and str(active.get("task_id") or "") == str(task_id)
             and str(active.get("status") or "") == "running"
             and bool(active.get("multi_floor"))
-        )
-
-    def _rollback_floor_switch_map(
-        self,
-        source_map_id: str,
-        factory_timeout_s: float,
-    ) -> Dict[str, Any]:
-        return self._select_map(
-            {"map_id": source_map_id},
-            allow_active_task=True,
-            reason="cross_floor_rollback",
-            factory_timeout_s=factory_timeout_s,
         )
 
     def _floor_identity_validation(
@@ -3724,6 +4371,8 @@ class WebDashboardNode(Node):
         allow_active_task: bool = False,
         reason: str = "manual_select",
         factory_timeout_s: Optional[float] = None,
+        source_factory_identity: Optional[Dict[str, Any]] = None,
+        map_min_update_time: Optional[float] = None,
     ) -> Dict[str, Any]:
         map_id = str(payload.get("map_id") or "").strip() or None
         record: Optional[Dict[str, Any]] = None
@@ -3748,8 +4397,43 @@ class WebDashboardNode(Node):
                     str(identity["message"]),
                     {key: value for key, value in identity.items() if key not in ("ok", "message")},
                 )
+        factory_timeout = (
+            min(120.0, max(10.0, float(factory_timeout_s)))
+            if factory_timeout_s is not None
+            else min(120.0, max(10.0, float(self.get_parameter("map_import_timeout_s").value)))
+        )
+        factory_source_path = str(
+            (record or {}).get("factory_apply_path")
+            or (record or {}).get("source_path")
+            or ""
+        ).strip()
+        factory_map_required = factory_source_path.startswith("/var/opt/robot/data/maps/")
+        if source_factory_identity is not None and not factory_source_path:
+            return self._error(
+                "目标地图缺少 106 原厂路径，无法使用已捕获的 active 身份恢复",
+                {
+                    "code": "factory_map_path_missing",
+                    "state_uncertain": True,
+                },
+            )
+        if factory_map_required and source_factory_identity is None:
+            source_factory_identity = self._capture_factory_active_identity(
+                timeout_s=factory_timeout,
+            )
+            if not source_factory_identity.get("ok"):
+                return self._error(
+                    "106 当前 active 地图身份无法确认，拒绝切换",
+                    {
+                        "code": "factory_active_identity_unavailable",
+                        "factory_active_identity": source_factory_identity,
+                        "state_uncertain": True,
+                    },
+                )
         if map_id:
-            nav2_load = self._load_selected_map_into_nav2(record)
+            nav2_load = self._load_selected_map_into_nav2(
+                record,
+                min_update_time=map_min_update_time,
+            )
             if not nav2_load.get("ok"):
                 rollback_nav2 = (
                     self._load_selected_map_into_nav2(previous_record)
@@ -3773,7 +4457,9 @@ class WebDashboardNode(Node):
             }
         factory_apply = self._apply_selected_map_to_factory(
             record,
-            timeout_s=factory_timeout_s,
+            timeout_s=factory_timeout,
+            reject_active_alias=(reason == "cross_floor_transition"),
+            source_factory_identity=source_factory_identity,
         ) if map_id and record else {
             "ok": True,
             "skipped": True,
@@ -3786,9 +4472,12 @@ class WebDashboardNode(Node):
                 else {"ok": True, "skipped": True, "message": "没有上一张固定地图可回滚"}
             )
             rollback_factory = (
-                self._apply_selected_map_to_factory(previous_record, timeout_s=factory_timeout_s)
-                if previous_record is not None
-                else {"ok": True, "skipped": True, "message": "没有上一张 106 固定地图可回滚"}
+                self._restore_factory_active_identity(
+                    source_factory_identity,
+                    timeout_s=factory_timeout,
+                )
+                if factory_map_required and source_factory_identity is not None
+                else {"ok": True, "skipped": True, "message": "没有需要恢复的 106 active 身份"}
             )
             return self._error(
                 str(factory_apply.get("message") or "106 原厂地图切换失败"),
@@ -3851,10 +4540,16 @@ class WebDashboardNode(Node):
             "effective_map_id": effective_map_id,
             "nav2_load_map": nav2_load,
             "factory_apply_map": factory_apply,
+            "source_factory_identity": source_factory_identity,
             "map_relocalization_required": map_relocalization_required,
         }
 
-    def _load_selected_map_into_nav2(self, record: Dict[str, Any]) -> Dict[str, Any]:
+    def _load_selected_map_into_nav2(
+        self,
+        record: Dict[str, Any],
+        *,
+        min_update_time: Optional[float] = None,
+    ) -> Dict[str, Any]:
         if not bool(self.get_parameter("map_select_load_nav2_map").value):
             return {"ok": True, "skipped": True, "message": "map_select_load_nav2_map=false"}
         if LoadMap is None or self.load_map_client is None:
@@ -3879,7 +4574,14 @@ class WebDashboardNode(Node):
         selected_map = self._map_file_snapshot(str(record.get("id") or ""))
         with self._lock:
             live_map = dict(self._state.get("map") or {})
-        if map_metadata_mismatch_error(live_map, selected_map) is None:
+        current_match = selected_map_status_payload(
+            selected_map_id=str(record.get("id") or ""),
+            live_map=live_map,
+            selected_map=selected_map,
+            min_update_time=min_update_time,
+            now_text=now_text,
+        )
+        if current_match.get("ready"):
             return {
                 "ok": True,
                 "loaded": False,
@@ -3887,6 +4589,8 @@ class WebDashboardNode(Node):
                 "message": "Nav2 当前 /map 已经与前端选中地图一致",
                 "yaml_path": str(yaml_path),
                 "image_repair": image_repair,
+                "content_digest": selected_map.get("content_digest"),
+                "selected_map_status": current_match,
             }
         timeout_s = max(0.5, float(self.get_parameter("map_select_load_timeout_s").value))
         if not self.load_map_client.wait_for_service(timeout_sec=timeout_s):
@@ -3896,6 +4600,7 @@ class WebDashboardNode(Node):
                 "message": f"{self.load_map_client.srv_name} 不可用",
                 "yaml_path": str(yaml_path),
                 "image_repair": image_repair,
+                "content_digest": selected_map.get("content_digest"),
             }
         request = LoadMap.Request()
         request.map_url = str(yaml_path)
@@ -3911,6 +4616,7 @@ class WebDashboardNode(Node):
                 "message": f"Nav2 load_map 超时 {timeout_s:.1f}s",
                 "yaml_path": str(yaml_path),
                 "image_repair": image_repair,
+                "content_digest": selected_map.get("content_digest"),
                 "map_change_possible": True,
             }
         try:
@@ -3922,6 +4628,7 @@ class WebDashboardNode(Node):
                 "message": str(exc),
                 "yaml_path": str(yaml_path),
                 "image_repair": image_repair,
+                "content_digest": selected_map.get("content_digest"),
             }
         result = int(getattr(response, "result", 255))
         if result != int(getattr(LoadMap.Response, "RESULT_SUCCESS", 0)):
@@ -3932,9 +4639,13 @@ class WebDashboardNode(Node):
                 "result": result,
                 "yaml_path": str(yaml_path),
                 "image_repair": image_repair,
+                "content_digest": selected_map.get("content_digest"),
             }
         self._clear_task_costmaps("select_map_load_nav2")
-        match = self._wait_for_selected_map_match(selected_map)
+        match = self._wait_for_selected_map_match(
+            selected_map,
+            min_update_time=min_update_time,
+        )
         if not match.get("ready"):
             return {
                 "ok": False,
@@ -3944,6 +4655,7 @@ class WebDashboardNode(Node):
                 "result": result,
                 "selected_map_status": match,
                 "image_repair": image_repair,
+                "content_digest": selected_map.get("content_digest"),
                 "map_change_possible": True,
             }
         return {
@@ -3955,9 +4667,15 @@ class WebDashboardNode(Node):
             "map_matched": bool(match.get("ready")),
             "selected_map_status": match,
             "image_repair": image_repair,
+            "content_digest": selected_map.get("content_digest"),
         }
 
-    def _wait_for_selected_map_match(self, selected_map: Dict[str, Any]) -> Dict[str, Any]:
+    def _wait_for_selected_map_match(
+        self,
+        selected_map: Dict[str, Any],
+        *,
+        min_update_time: Optional[float] = None,
+    ) -> Dict[str, Any]:
         timeout_s = max(0.1, float(self.get_parameter("map_select_wait_match_timeout_s").value))
         poll_s = max(0.02, float(self.get_parameter("map_select_wait_match_poll_s").value))
         deadline = time.time() + timeout_s
@@ -3970,6 +4688,7 @@ class WebDashboardNode(Node):
                 selected_map_id=selected_map_id,
                 live_map=live_map,
                 selected_map=selected_map,
+                min_update_time=min_update_time,
                 now_text=now_text,
             )
             if last_status.get("ready"):
@@ -4360,11 +5079,148 @@ class WebDashboardNode(Node):
             timeout=timeout,
         )
 
+    @staticmethod
+    def _parse_factory_identity_output(output: Any) -> Dict[str, Any]:
+        values: Dict[str, str] = {}
+        for line in str(output or "").splitlines():
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            values[key.strip()] = value.strip()
+        resolved = values.get("resolved_path", "")
+        digest = values.get("content_digest", "")
+        try:
+            digest_valid = len(digest) == 64 and all(
+                char in "0123456789abcdefABCDEF" for char in digest
+            )
+        except TypeError:
+            digest_valid = False
+        return {
+            "resolved_path": resolved or None,
+            "content_digest": digest.lower() if digest_valid else None,
+            "file_count": int(values.get("file_count", "0") or 0),
+            "raw_output": str(output or ""),
+        }
+
+    def _factory_map_identity(
+        self,
+        source_path: str,
+        *,
+        timeout_s: float,
+    ) -> Dict[str, Any]:
+        """Read a canonical 106 map directory and a path-independent asset digest."""
+        source = str(source_path or "").strip()
+        if not source:
+            return {"ok": False, "code": "factory_map_path_missing", "message": "106 地图路径为空"}
+        target = shlex.quote(source)
+        probe = (
+            f"target={target}; "
+            'resolved=$(readlink -f "$target" 2>/dev/null || true); '
+            'test -n "$resolved" -a -d "$resolved"; '
+            "file_count=$(cd \"$resolved\" && find . -type f "
+            "\\( -iname '*.yaml' -o -iname '*.yml' -o -iname '*.pgm' "
+            "-o -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' \\) "
+            "-print | wc -l); "
+            'test "$file_count" -gt 0; '
+            "digest=$(cd \"$resolved\" && find . -type f "
+            "\\( -iname '*.yaml' -o -iname '*.yml' -o -iname '*.pgm' "
+            "-o -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' \\) "
+            "-print0 | sort -z | xargs -0 -r sha256sum | LC_ALL=C sort | "
+            "sha256sum | awk '{print $1}'); "
+            'test -n "$digest"; '
+            'printf "resolved_path=%s\\nfile_count=%s\\ncontent_digest=%s\\n" '
+            '"$resolved" "$file_count" "$digest"'
+        )
+        result = self._run_factory_shell(
+            probe,
+            factory_host=str(self.get_parameter("factory_host").value).strip(),
+            factory_user=str(self.get_parameter("factory_user").value).strip(),
+            timeout=min(60.0, max(5.0, float(timeout_s))),
+        )
+        parsed = self._parse_factory_identity_output(result.get("output"))
+        return {
+            "ok": bool(result.get("ok")) and bool(parsed.get("resolved_path")) and bool(parsed.get("content_digest")),
+            "source_path": source,
+            "resolved_path": parsed.get("resolved_path"),
+            "content_digest": parsed.get("content_digest"),
+            "file_count": parsed.get("file_count", 0),
+            "command": result.get("command"),
+            "output": result.get("output"),
+            "returncode": result.get("returncode"),
+            "message": (
+                "106 地图目录和内容摘要已确认"
+                if bool(result.get("ok")) and parsed.get("resolved_path") and parsed.get("content_digest")
+                else "106 地图目录或内容摘要无法确认"
+            ),
+        }
+
+    def _capture_factory_active_identity(self, *, timeout_s: float) -> Dict[str, Any]:
+        active_path = str(self.get_parameter("factory_active_map").value).strip()
+        identity = self._factory_map_identity(active_path, timeout_s=timeout_s)
+        if identity.get("ok"):
+            identity["identity_mode"] = "path"
+        return identity
+
+    def _restore_factory_active_identity(
+        self,
+        identity: Optional[Dict[str, Any]],
+        *,
+        timeout_s: float,
+    ) -> Dict[str, Any]:
+        """Restore the exact active package captured before a map transaction."""
+        evidence = dict(identity or {})
+        resolved = str(evidence.get("resolved_path") or "").strip()
+        expected_digest = str(evidence.get("content_digest") or "").strip()
+        if not resolved or not expected_digest:
+            return {
+                "ok": False,
+                "code": "factory_active_identity_missing",
+                "message": "缺少事务开始前的 active 目录或内容摘要，不能回滚",
+                "state_uncertain": True,
+            }
+        command = f"sudo -n drmap apply {shlex.quote(resolved)}"
+        applied = self._run_factory_shell(
+            command,
+            factory_host=str(self.get_parameter("factory_host").value).strip(),
+            factory_user=str(self.get_parameter("factory_user").value).strip(),
+            timeout=min(120.0, max(10.0, float(timeout_s))),
+        )
+        if not applied.get("ok"):
+            return {
+                "ok": False,
+                "code": "factory_active_restore_failed",
+                "message": "恢复事务开始前的 106 active 地图失败",
+                "apply": applied,
+                "expected_identity": evidence,
+                "state_uncertain": True,
+            }
+        confirmation = self._confirm_factory_active_map(
+            resolved,
+            expected_digest=expected_digest,
+            timeout_s=timeout_s,
+        )
+        return {
+            "ok": bool(confirmation.get("ok")),
+            "code": "factory_active_restored" if confirmation.get("ok") else "factory_active_restore_unconfirmed",
+            "message": (
+                "已恢复事务开始前的 106 active 地图并完成内容确认"
+                if confirmation.get("ok")
+                else "drmap apply 返回后仍无法确认事务开始前的 106 active 地图"
+            ),
+            "apply": applied,
+            "confirmation": confirmation,
+            "expected_identity": evidence,
+            "state_uncertain": not bool(confirmation.get("ok")),
+            "factory_active_confirmed": bool(confirmation.get("ok")),
+        }
+
     def _apply_selected_map_to_factory(
         self,
         record: Dict[str, Any],
         *,
         timeout_s: Optional[float] = None,
+        reject_active_alias: bool = False,
+        source_factory_identity: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         source_path = str(
             record.get("factory_apply_path")
@@ -4374,8 +5230,31 @@ class WebDashboardNode(Node):
         base = "/var/opt/robot/data/maps/"
         if not source_path:
             return {"ok": True, "skipped": True, "message": "地图记录没有 106 原厂路径；未调用 drmap apply"}
+        if source_path == "/var/opt/robot/data/maps/active" and reject_active_alias:
+            return {
+                "ok": False,
+                "code": "factory_target_active_alias",
+                "message": "目标地图只指向 106 active 软链接，无法证明它不是起始地图，拒绝跨层切换",
+                "source_path": source_path,
+            }
         if source_path == "/var/opt/robot/data/maps/active":
-            return {"ok": True, "skipped": True, "message": "地图记录只指向 active 软链接；未盲目 apply"}
+            confirmation = self._confirm_factory_active_map(
+                source_path,
+                expected_digest=(source_factory_identity or {}).get("content_digest"),
+                timeout_s=timeout_s or float(self.get_parameter("map_import_timeout_s").value),
+            )
+            return {
+                "ok": bool(confirmation.get("ok")),
+                "skipped": True,
+                "message": (
+                    "地图记录指向当前 106 active，已完成路径和内容确认"
+                    if confirmation.get("ok")
+                    else "地图记录指向 active，但无法完成内容确认"
+                ),
+                "source_path": source_path,
+                "factory_active_confirmed": bool(confirmation.get("ok")),
+                "factory_active_confirmation": confirmation,
+            }
         if not source_path.startswith(base):
             return {"ok": True, "skipped": True, "message": "地图不是 106 原厂地图包；未调用 drmap apply", "source_path": source_path}
         factory_host = str(self.get_parameter("factory_host").value).strip()
@@ -4401,12 +5280,74 @@ class WebDashboardNode(Node):
                 "output": result.get("output"),
                 "returncode": result.get("returncode"),
             }
+        confirmation = self._confirm_factory_active_map(
+            source_path,
+            expected_digest=None,
+            timeout_s=timeout,
+        )
+        if not confirmation.get("ok"):
+            return {
+                "ok": False,
+                "code": "factory_active_map_unconfirmed",
+                "message": "106 drmap apply 已返回，但 active 地图后验确认失败",
+                "source_path": source_path,
+                "apply": result,
+                "confirmation": confirmation,
+            }
         return {
             "ok": True,
             "source_path": source_path,
             "command": result.get("command"),
             "output": result.get("output"),
-            "message": "106 原厂 active 地图已切换",
+            "message": "106 原厂 active 地图已切换并完成后验确认",
+            "factory_active_confirmed": True,
+            "factory_active_confirmation": confirmation,
+        }
+
+    def _confirm_factory_active_map(
+        self,
+        source_path: str,
+        *,
+        expected_digest: Optional[str] = None,
+        timeout_s: float,
+    ) -> Dict[str, Any]:
+        """Verify active by canonical path and map-asset content identity."""
+        source_identity = self._factory_map_identity(source_path, timeout_s=timeout_s)
+        active_identity = self._factory_map_identity(
+            str(self.get_parameter("factory_active_map").value).strip(),
+            timeout_s=timeout_s,
+        )
+        expected_path = str(source_identity.get("resolved_path") or "").strip()
+        expected_content = str(
+            expected_digest or source_identity.get("content_digest") or ""
+        ).strip().lower()
+        active_path = str(active_identity.get("resolved_path") or "").strip()
+        active_content = str(active_identity.get("content_digest") or "").strip().lower()
+        identity = factory_identity_match(
+            source_identity,
+            active_identity,
+            expected_digest=expected_content or None,
+        )
+        ok = bool(source_identity.get("ok") and active_identity.get("ok") and identity.get("ok"))
+        identity_mode = identity.get("identity_mode")
+        return {
+            "ok": ok,
+            "factory_active_confirmed": ok,
+            "identity_mode": identity_mode,
+            "active_path": active_path or None,
+            "source_path": str(source_path or ""),
+            "expected_resolved_path": expected_path or None,
+            "expected_content_digest": expected_content or None,
+            "active_content_digest": active_content or None,
+            "content_digest": active_content or None,
+            "identity_match": identity,
+            "source_identity": source_identity,
+            "active_identity": active_identity,
+            "message": (
+                "106 active 已通过路径或内容摘要确认目标地图"
+                if ok
+                else "106 active 路径和内容摘要均未确认目标地图，不能把 drmap apply 退出码当作成功"
+            ),
         }
 
     def _cleanup_failed_map_import(self, dest: FsPath) -> Dict[str, Any]:
@@ -5210,6 +6151,7 @@ class WebDashboardNode(Node):
             self._remember_working_map_id(effective_map_id, reason="tasks_effective_map")
         with self._data_lock:
             active_task = self._settings.get("active_task")
+            floor_switch_transaction = self._settings.get("floor_switch_transaction")
             active_running = active_task if isinstance(active_task, dict) and active_task.get("status") == "running" else None
             active_task_id = active_running.get("task_id") if active_running else None
             selected_map_id = effective_map_id
@@ -5283,6 +6225,11 @@ class WebDashboardNode(Node):
             "map_relocalization_required": map_relocalization_required,
             "include_all": task_list["include_all"],
             "active_task": active_task,
+            "floor_switch_transaction": (
+                dict(floor_switch_transaction)
+                if isinstance(floor_switch_transaction, dict)
+                else None
+            ),
             "preflight": preflight,
             "last_preflight_ok": bool(preflight and preflight.get("ok")),
         }
@@ -7270,6 +8217,10 @@ class WebDashboardNode(Node):
         *,
         allow_active_task: bool = False,
         event_text: str = "网页发布重定位",
+        pose_tolerance_m: Optional[float] = None,
+        yaw_tolerance_rad: Optional[float] = None,
+        require_lifecycle: bool = False,
+        stability_window_s: float = 0.0,
     ) -> Dict[str, Any]:
         with self._data_lock:
             active = self._settings.get("active_task") or {}
@@ -7340,6 +8291,10 @@ class WebDashboardNode(Node):
         verification = self._wait_for_relocalization_verification(
             request_started_at,
             {"x": x, "y": y, "z": z, "yaw": yaw},
+            pose_tolerance_m=pose_tolerance_m,
+            yaw_tolerance_rad=yaw_tolerance_rad,
+            require_lifecycle=require_lifecycle,
+            stability_window_s=stability_window_s,
         )
         if bool(verification.get("factory_pose_accepted")):
             with self._data_lock:
@@ -7381,13 +8336,28 @@ class WebDashboardNode(Node):
         self,
         request_started_at: float,
         requested_pose: Dict[str, float],
+        *,
+        pose_tolerance_m: Optional[float] = None,
+        yaw_tolerance_rad: Optional[float] = None,
+        require_lifecycle: bool = False,
+        stability_window_s: float = 0.0,
     ) -> Dict[str, Any]:
         timeout_s = max(0.5, float(self.get_parameter("relocalization_verify_timeout_s").value))
         pose_tolerance_m = max(
             0.1,
-            float(self.get_parameter("relocalization_pose_tolerance_m").value),
+            float(
+                self.get_parameter("relocalization_pose_tolerance_m").value
+                if pose_tolerance_m is None
+                else pose_tolerance_m
+            ),
         )
+        if yaw_tolerance_rad is not None:
+            yaw_tolerance_rad = max(0.02, float(yaw_tolerance_rad))
+        stable_window = max(0.0, float(stability_window_s))
         deadline = time.time() + timeout_s
+        stable_since: Optional[float] = None
+        previous_stable_pose: Optional[Dict[str, float]] = None
+        stability_confirmed = stable_window <= 0.0
         evidence: Dict[str, Any] = {
             "tcp_2101_accepted": False,
             "tcp_2101_ambiguous": False,
@@ -7422,13 +8392,27 @@ class WebDashboardNode(Node):
                 local_costmap=local_costmap,
                 global_costmap=global_costmap,
                 pose_tolerance_m=pose_tolerance_m,
+                yaw_tolerance_rad=yaw_tolerance_rad,
             )
 
-            if evidence.get("ready_to_finish_wait"):
+            stability = relocalization_stability_step(
+                evidence=evidence,
+                current_pose=pose,
+                previous_pose=previous_stable_pose,
+                stable_since=stable_since,
+                now_time=time.time(),
+                stability_window_s=stable_window,
+                pose_tolerance_m=pose_tolerance_m,
+                yaw_tolerance_rad=yaw_tolerance_rad,
+            )
+            stable_since = stability.get("stable_since")
+            previous_stable_pose = stability.get("previous_stable_pose")
+            if stability.get("stable"):
+                stability_confirmed = True
                 break
             time.sleep(0.2)
 
-        navigation_readiness = self._navigation_readiness_payload(check_lifecycle=False)
+        navigation_readiness = self._navigation_readiness_payload(check_lifecycle=require_lifecycle)
         return manual_relocalization_verification_payload(
             tcp_2101_accepted=bool(evidence.get("tcp_2101_accepted")),
             tcp_2101_ambiguous=bool(evidence.get("tcp_2101_ambiguous")),
@@ -7449,6 +8433,7 @@ class WebDashboardNode(Node):
             tcp_pose_error_m=evidence.get("tcp_pose_error_m"),
             tcp_yaw_error_rad=evidence.get("tcp_yaw_error_rad"),
             pose_tolerance_m=pose_tolerance_m,
+            stability_confirmed=stability_confirmed,
             navigation_readiness=navigation_readiness,
             timeout_s=timeout_s,
         )
@@ -8819,6 +9804,8 @@ class WebDashboardNode(Node):
                         self._send_api(node._save_floor_route(payload))
                     elif parsed.path == "/api/floor_routes/delete":
                         self._send_api(node._delete_floor_route(payload))
+                    elif parsed.path == "/api/floor_switch/recover":
+                        self._send_api(node._recover_floor_switch_transaction(payload))
                     elif parsed.path == "/api/tasks/update":
                         self._send_api(node._update_task(payload))
                     elif parsed.path == "/api/tasks/start":

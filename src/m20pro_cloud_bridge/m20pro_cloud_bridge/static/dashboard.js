@@ -70,6 +70,7 @@
       loadingRadarResults: false,
       yoloControlBusy: false,
       yoloLiveRequestInFlight: false,
+      floorSwitchRecoveryBusy: false,
       teleop: {
         sessionId: null,
         sequence: 0,
@@ -2001,11 +2002,40 @@
         resultBox.appendChild(row);
       }
     }
-    function renderTaskExecutionFlow(activeTask, waypoint) {
+    function floorSwitchTransactionText(transaction) {
+      const stateName = String((transaction && transaction.state) || "").toUpperCase();
+      if (stateName === "PREPARED") return "跨楼层事务已准备";
+      if (stateName === "APPLYING") return "正在切换目标地图";
+      if (stateName === "RELOCALIZING") return "正在目标层重定位";
+      if (stateName === "ROLLING_BACK") return "目标层失败，正在恢复起始层";
+      if (stateName === "UNCERTAIN") return "地图状态不确定，需要人工确认";
+      if (stateName === "COMMITTED") return "跨楼层切换完成";
+      if (stateName === "ROLLED_BACK") return "跨楼层切换已回滚";
+      if (stateName === "RECOVERED") return "地图状态已人工核验恢复";
+      return "";
+    }
+    function renderTaskExecutionFlow(activeTask, waypoint, transaction = null) {
       const box = $("taskExecutionFlow");
       if (!box) return;
+      const transactionState = String((transaction && transaction.state) || "").toUpperCase();
+      const activeTransaction = ["PREPARED", "APPLYING", "RELOCALIZING", "ROLLING_BACK", "UNCERTAIN"].includes(transactionState);
+      const transactionMatchesTask = Boolean(
+        activeTask
+        && String((transaction && transaction.task_id) || "")
+        && String(transaction.task_id) === String(activeTask.task_id || "")
+      );
+      const showTransaction = activeTransaction || (
+        ["COMMITTED", "ROLLED_BACK"].includes(transactionState) && transactionMatchesTask
+      );
+      const transactionText = showTransaction ? floorSwitchTransactionText(transaction) : "";
+      const recoveryAction = transactionState === "UNCERTAIN"
+        ? `<div class="task-transaction-actions"><span>先选择当前固定地图并重新拉一次重定位箭头，再核验解除锁定。</span><button type="button" class="mini-btn" data-floor-switch-recover ${state.floorSwitchRecoveryBusy ? "disabled" : ""}>${state.floorSwitchRecoveryBusy ? "核验中..." : "确认当前地图并恢复"}</button></div>`
+        : "";
+      const transactionHtml = transactionText
+        ? `<div class="task-transaction ${transactionState === "UNCERTAIN" ? "fail" : (["COMMITTED", "ROLLED_BACK", "RECOVERED"].includes(transactionState) ? "ok" : "warn")}"><strong>${escapeHtml(transactionText)}</strong><span>${escapeHtml((transaction && transaction.message) || "")}</span>${recoveryAction}</div>`
+        : "";
       if (!activeTask || activeTask.status !== "running") {
-        box.innerHTML = '<div class="small">暂无执行任务</div>';
+        box.innerHTML = transactionHtml || '<div class="small">暂无执行任务</div>';
         return;
       }
       const task = state.tasks.find(item => String(item.id || "") === String(activeTask.task_id || ""));
@@ -2025,10 +2055,43 @@
         const stateText = index < current ? "已完成" : (index === current ? phaseText : "等待");
         return `<div class="task-flow-row ${stateClass}"><span class="task-flow-index">${index + 1}</span><span>${escapeHtml(label + floor)}</span><span class="task-flow-state">${stateText}</span></div>`;
       }).join("");
-      box.innerHTML = `
+      box.innerHTML = `${transactionHtml}
         <div class="task-flow-head"><strong>${escapeHtml(activeTask.task_name || activeTask.task_id || "执行任务")}</strong><span>${total ? `${current + 1} / ${total}` : phaseText}</span></div>
         <div class="task-progress-track"><div class="task-progress-fill" style="width:${progress}%"></div></div>
         <div class="task-flow-list">${rows || `<div class="small">${escapeHtml(activeTask.status_message || phaseText)}</div>`}</div>`;
+    }
+    async function recoverFloorSwitchTransaction() {
+      const transaction = (state.latest && state.latest.floor_switch_transaction) || null;
+      if (!transaction || String(transaction.state || "").toUpperCase() !== "UNCERTAIN") return;
+      if (!state.selectedMapId) {
+        showOperationFeedback("跨楼层恢复未执行", "请先在地图菜单中明确选择机器人当前所在的固定地图。", true);
+        return;
+      }
+      state.floorSwitchRecoveryBusy = true;
+      renderTaskExecutionFlow(
+        (state.latest && state.latest.active_task) || null,
+        (state.latest && state.latest.active_waypoint && state.latest.active_waypoint.parsed) || null,
+        transaction
+      );
+      try {
+        const payload = await api("POST", "/api/floor_switch/recover", {
+          request_id: transaction.request_id,
+          map_id: state.selectedMapId
+        });
+        if (state.latest) state.latest.floor_switch_transaction = payload.transaction || null;
+        showOperationFeedback("跨楼层地图状态已恢复", payload.message || "当前地图、重定位和导航链路均已确认。", false);
+        updateState(await fetchJson("/api/state?debug=0"));
+      } catch (err) {
+        showOperationFeedback("跨楼层恢复未通过", err, true);
+      } finally {
+        state.floorSwitchRecoveryBusy = false;
+        const latest = state.latest || {};
+        renderTaskExecutionFlow(
+          latest.active_task || null,
+          (latest.active_waypoint && latest.active_waypoint.parsed) || null,
+          latest.floor_switch_transaction || null
+        );
+      }
     }
     async function loadPreflight() {
       try {
@@ -2987,7 +3050,14 @@
       renderRadarInspection(s.radar_inspection);
       const taskTop = $("taskTopStatus");
       const activeWaypoint = s.active_waypoint && s.active_waypoint.parsed ? s.active_waypoint.parsed : null;
-      if (taskTop) taskTop.textContent = taskTopStatusText(s.active_task || null, activeWaypoint);
+      if (taskTop) {
+        const transaction = s.floor_switch_transaction || null;
+        const transactionText = floorSwitchTransactionText(transaction);
+        const transactionState = String((transaction && transaction.state) || "").toUpperCase();
+        taskTop.textContent = transactionText && ["APPLYING", "RELOCALIZING", "ROLLING_BACK", "UNCERTAIN"].includes(transactionState)
+          ? transactionText
+          : taskTopStatusText(s.active_task || null, activeWaypoint);
+      }
       renderTeleoperation(s.teleoperation || {});
       const radarTop = $("radarTopStatus");
       if (radarTop) {
@@ -3051,9 +3121,9 @@
         state.activeTaskLogUntil = 0;
         const waypoint = s.active_waypoint && s.active_waypoint.parsed ? s.active_waypoint.parsed : null;
         followRobotIfNeeded(s.active_task || null);
-        renderTaskExecutionFlow(s.active_task || null, waypoint || null);
+        renderTaskExecutionFlow(s.active_task || null, waypoint || null, s.floor_switch_transaction || null);
       } else if (Date.now() > state.activeTaskLogUntil) {
-        renderTaskExecutionFlow(null, null);
+        renderTaskExecutionFlow(null, null, s.floor_switch_transaction || null);
       }
       updateTaskControlButtons(s);
       const table = $("topics");
@@ -4829,6 +4899,9 @@
       loadRecordingList().catch(err => showOperationFeedback("读取录包列表失败", err, true));
     });
     $("taskStatusBtn").addEventListener("click", () => toggleStatusPopover("task"));
+    $("taskExecutionFlow").addEventListener("click", event => {
+      if (event.target.closest("[data-floor-switch-recover]")) recoverFloorSwitchTransaction();
+    });
     $("teleopStatusBtn").addEventListener("click", () => {
       toggleStatusPopover("teleop");
       loadTeleopStatus().catch(console.warn);

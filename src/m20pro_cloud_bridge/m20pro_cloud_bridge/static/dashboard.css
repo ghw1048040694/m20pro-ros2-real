@@ -1202,6 +1202,27 @@
       border-radius: 6px;
       background: #fbfcfe;
     }
+    .task-transaction {
+      display: grid;
+      gap: 3px;
+      margin-bottom: 8px;
+      padding: 7px 8px;
+      border-left: 3px solid var(--accent);
+      background: #f1f6ff;
+      font-size: 12px;
+    }
+    .task-transaction span { color: var(--muted); overflow-wrap: anywhere; }
+    .task-transaction.ok { border-left-color: var(--good); background: #f0faf4; }
+    .task-transaction.warn { border-left-color: #c58a00; background: #fff9e8; }
+    .task-transaction.fail { border-left-color: var(--bad); background: #fff1f1; }
+    .task-transaction-actions {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      margin-top: 5px;
+    }
+    .task-transaction-actions .mini-btn { white-space: nowrap; }
     .task-flow-head {
       display: flex;
       align-items: center;
