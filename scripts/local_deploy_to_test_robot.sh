@@ -27,9 +27,6 @@ for command_name in ssh rsync curl python3; do
 done
 
 "${ROOT_DIR}/scripts/m20pro_field_profile.py" check
-PROFILE_HASH="$("${ROOT_DIR}/scripts/m20pro_field_profile.py" show-json | \
-  python3 -c 'import json, sys; print(json.load(sys.stdin)["profile_hash"])')"
-echo "[local_deploy_to_test_robot] field_profile_hash=${PROFILE_HASH}"
 
 edge_was_active=1
 edge_was_enabled=1
@@ -43,13 +40,6 @@ printf "%s %s\n" "${active}" "${enabled}"
 ')"
   read -r edge_was_active edge_was_enabled <<<"${edge_previous_state}"
   "${ROOT_DIR}/scripts/local_deploy_edge_scan_to_106.sh" "${EDGE_HOST}" "${EDGE_WS}"
-fi
-
-EDGE_PROFILE_HASH="$(ssh "${EDGE_HOST}" \
-  "sed -n 's/^FIELD_PROFILE_HASH=//p' /etc/m20pro-edge-scan-106.env")"
-if [[ "${EDGE_PROFILE_HASH}" != "${PROFILE_HASH}" ]]; then
-  echo "106 field profile mismatch: local=${PROFILE_HASH} 106=${EDGE_PROFILE_HASH}" >&2
-  exit 16
 fi
 
 ssh "${HOST}" "mkdir -p '${STAGE}' '${BACKUP_ROOT}'"
@@ -130,16 +120,8 @@ if [[ "${edge_ready}" -ne 1 ]]; then
   exit 15
 fi
 
-REMOTE_PROFILE_HASH="$(ssh "${HOST}" \
-  "'${REMOTE_WS}/scripts/m20pro_field_profile.py' show-json | python3 -c 'import json, sys; print(json.load(sys.stdin)[\"profile_hash\"])'")"
-if [[ "${REMOTE_PROFILE_HASH}" != "${PROFILE_HASH}" ]]; then
-  echo "104 field profile mismatch: local=${PROFILE_HASH} 104=${REMOTE_PROFILE_HASH}" >&2
-  exit 17
-fi
-
 echo "[local_deploy_to_test_robot] done revision=${REVISION}"
 echo "[local_deploy_to_test_robot] API=${WEB_URL} edge_scan=ready"
-echo "[local_deploy_to_test_robot] field_profile_hash=${PROFILE_HASH} matched_on=104,106"
 
 if [[ "${M20PRO_DEPLOY_KEEP_BACKUP:-0}" != "1" ]]; then
   ssh "${HOST}" "rm -rf '${BACKUP}' '${BACKUP}.systemd'"

@@ -118,7 +118,6 @@ def main() -> int:
 
     summary = profile_summary(profile)
     print(f"field profile OK: {summary['profile_name']}")
-    print(f"profile hash: {summary['profile_hash']}")
     print(
         "navigation speed/goal/costmap: %.2f m/s / %.2f rad/s / %.2f m / %.2f rad / %.2f m"
         % (

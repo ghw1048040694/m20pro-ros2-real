@@ -69,7 +69,7 @@ source install/setup.bash
 ./scripts/apply_field_profile.sh          # 空闲时原子更新 106 和 104
 ```
 
-schema v4 共 67 个现场参数，其中 `navigation` 30 个、`teleoperation` 7 个，覆盖速度/加速度、纯旋转最低有效速度、到点、卡住判定、DWB 采样、局部/全局代价地图、全局规划、遥控限速、失联停车、跨层路线元数据与定位稳定性。旧楼梯感知参数已删除。不要直接编辑 106 的 `/etc/m20pro-edge-scan-106.env`、Nav2 参数占位符或定位参数占位符。整狗部署会比较上位机、104 和 106 的配置哈希，不一致即失败；任务运行中不支持热更新。
+schema v4 共 67 个现场参数，其中 `navigation` 30 个、`teleoperation` 7 个，覆盖速度/加速度、纯旋转最低有效速度、到点、卡住判定、DWB 采样、局部/全局代价地图、全局规划、遥控限速、失联停车、跨层路线元数据与定位稳定性。旧楼梯感知参数已删除。不要直接编辑 106 的 `/etc/m20pro-edge-scan-106.env`、Nav2 参数占位符或定位参数占位符；整狗部署会从唯一现场参数文件按固定顺序同步 106 和 104，任务运行中不支持热更新。
 
 说明：
 - 真机现场测试只用 `104_start_real_shadow.sh` 或 `104_start_real_move.sh` 全量启动。
@@ -99,7 +99,7 @@ schema v4 共 67 个现场参数，其中 `navigation` 30 个、`teleoperation` 
 - `104_autostart_status.sh` 查看自启动服务、8080 端口和最近日志。
 - `104_disable_autostart.sh` 停止并移除自启动服务。
 - `local_deploy_to_test_robot.sh` 是整狗部署入口：先用最小文件集在 106 编译、安装并启用 edge scan，再把上位机源码同步到 104 暂存目录；停服务切换后只在最终 `/home/user/m20pro_real_ros2_ws` 路径执行 `colcon --symlink-install`，失败自动恢复上一工作区和 systemd 配置。
-- `local_deploy_to_test_robot.sh` 在接触主机前严格校验唯一现场参数文件，部署后要求上位机、104、106 的 SHA-256 完全一致；106 的 env 只由该文件生成，不再保留可编辑模板。
+- `local_deploy_to_test_robot.sh` 在接触主机前校验唯一现场参数文件，按 106→104→106 的固定顺序同步和验收；106 的 env 只由该文件生成，不再保留可编辑模板。
 - 104 网页订阅者起来后，部署入口会重启一次 106 edge publisher，并要求 `/api/state` 明确返回 `edge_scan`、`m20pro_base_link` 和至少 20 个有效距离才算完成。不要只同步 104，也不要把暂存目录中的 symlink install 直接改名投入运行。
 - `local_deploy_edge_scan_to_106.sh` 是只补装 106 edge 组件的维护入口；正常整狗更新直接运行 `local_deploy_to_test_robot.sh`。
 - 如果 104 上 `/home/user/m20pro_real_ros2_ws` 不是 git 工作区，`git pull` 不会工作；先用 `104_diagnose_preflight.sh` 确认 `git_repo=yes/no`，非 git 工作区继续用上位机 `local_deploy_to_test_robot.sh`，或在网络稳定后用 `104_update_from_gitlab.sh`/`104_update_from_mirror.sh` 转成 git 工作区。

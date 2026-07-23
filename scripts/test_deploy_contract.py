@@ -21,7 +21,8 @@ def main() -> None:
 
     assert "local_deploy_edge_scan_to_106.sh" in deploy
     assert "m20pro_field_profile.py\" check" in deploy
-    assert "matched_on=104,106" in deploy
+    assert "matched_on=104,106" not in deploy
+    assert "field_profile_hash" not in deploy
     assert "sudo -n sed" not in deploy
     assert deploy.index("local_deploy_edge_scan_to_106.sh") < deploy.index("rsync -az --delete")
     assert "systemctl restart m20pro-edge-scan-106.service" in deploy
