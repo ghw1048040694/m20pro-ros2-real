@@ -1,5 +1,19 @@
 # M20 Pro ROS 2 跨楼层巡检导航系统项目日志
 
+## 2026-07-23 21:48 CST - 增加 terrain_guard 离线回放入口
+
+- 在现有 `m20pro_navigation` 包中新增 `terrain_guard_replay`，支持读取 rosbag2 的
+  `/LIDAR/POINTS` `PointCloud2`（目录或独立 `.db3`），也支持无 ROS 中间件的 JSON/JSONL 点云帧；不创建 ROS
+  节点、不发布话题、不发送运动或地图命令。
+- 回放统一调用 terrain guard 纯合同，输出每帧 `state/reason`、状态转移、可通行/阻塞
+  比例、首末时间戳和平均评估耗时，避免现场只能靠人工看日志判断算法变化；`--max-frames`
+  和 `--without-records` 控制回放规模与输出大小。
+- 新增回放合同测试和包入口，更新 DDDMR 阶段说明及 106 README。真实楼梯执行仍受
+  `stair_execution_retired` 保护。本轮只修改上位机源码、测试、文档和日志，未连接、
+  部署或重启 103/104/106，未发送导航、速度、姿态、重定位、切图或网络命令。
+
+Last updated: 2026-07-23 21:48 CST
+
 ## 2026-07-23 21:37 CST - 为 terrain_guard 增加连续走廊横向覆盖证据
 
 - 根治“窄物体高度剖面伪装成连续台阶”的输入缺口：106 terrain guard 现在要求每个

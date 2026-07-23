@@ -28,6 +28,23 @@ ros2 run m20pro_navigation terrain_guard_106
 `--ros-args -p max_points:=20000` 调整。原始点数、抽样点数、实际有效点数和
 抽样步长会随状态一起发布，便于在 106 上核对 CPU 与延迟。
 
+## 离线回放
+
+在上位机或 104 上可以不启动节点，直接复盘 PointCloud2 录包：
+
+```bash
+ros2 run m20pro_navigation terrain_guard_replay \
+  ~/bags/stairs_bag \
+  --request tools/terrain_guard_106/request_example.json \
+  --topic /LIDAR/POINTS \
+  --without-records --json
+```
+
+也可以使用不依赖 ROS 中间件的 JSON/JSONL 帧文件。每帧是一个对象，至少包含
+`points: [[x, y, z], ...]`，可选 `stamp_s` 和 `cloud_age_s`。回放输出每个状态和
+原因的计数、状态转移、可通行/阻塞比例以及平均评估耗时；它只调用纯合同，不发布
+任何 ROS 话题或运动命令。
+
 默认话题：
 
 | 方向 | 话题 | 类型 |

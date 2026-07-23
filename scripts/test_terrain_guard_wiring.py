@@ -34,6 +34,7 @@ def main() -> int:
     cloud_callback = _method(tree, "_on_cloud")
 
     assert "terrain_guard_106 = m20pro_navigation.terrain_guard_106_node:main" in setup_source
+    assert "terrain_guard_replay = m20pro_navigation.terrain_guard_replay:main" in setup_source
     assert "from .terrain_guard_contract import inspect_cloud, normalize_corridor" in source
     assert "sys.path.insert" not in source
     assert "uvs=uvs" in source
