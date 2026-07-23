@@ -1,5 +1,9 @@
 # M20 Pro ROS 2 跨楼层巡检导航系统
 
+跨楼层统一导航正在 GitLab 的 `feature/unified-navigation-dddmr` 分支开发。
+多人协作时请从该集成分支创建独立功能分支并提交 Merge Request，详见
+[CONTRIBUTING.md](CONTRIBUTING.md)；GitHub/Gitee 只发布验证后的 `main`。
+
 这是面向云深处 M20 Pro 的 ROS 2 二次开发 workspace。当前主要用于：
 
 - 在 104 通用主机上运行 Nav2、楼层管理、点云融合和网页操作台；
