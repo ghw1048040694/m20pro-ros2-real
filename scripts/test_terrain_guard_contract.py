@@ -8,9 +8,9 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools/terrain_guard_106"))
+sys.path.insert(0, str(ROOT / "src/m20pro_navigation"))
 
-from terrain_guard_contract import inspect_cloud  # noqa: E402
+from m20pro_navigation.terrain_guard_contract import inspect_cloud  # noqa: E402
 
 
 def assert_equal(actual, expected, message: str) -> None:

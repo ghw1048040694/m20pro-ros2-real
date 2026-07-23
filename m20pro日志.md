@@ -1,5 +1,25 @@
 # M20 Pro ROS 2 跨楼层巡检导航系统项目日志
 
+## 2026-07-23 21:15 CST - 将 106 terrain_guard 收敛为可构建的只读 ROS 节点
+
+- 将临时 `tools/terrain_guard_106` 中的实现和唯一地形合同正式归入现有
+  `m20pro_navigation` 包，不新建第二个 ROS package；新增入口
+  `ros2 run m20pro_navigation terrain_guard_106`，避免依赖手工 `python3` 路径注入，
+  使 106 部署可以通过统一的 `colcon build` 复现。
+- 点云回调现在只负责帧校验、确定性抽样和缓存；`inspect_cloud` 只由固定周期定时器
+  调用，并按 `max_points`（默认 30000）限制每帧参与计算的点数，状态记录原始点数、
+  抽样点数、有效点数和抽样步长，格式异常的点云会 fail-closed，根除回调与定时器重复
+  评估造成的额外 CPU 开销。
+- 新增 ROS wiring 静态合同测试，确认节点只订阅 `/LIDAR/POINTS` 和请求话题，始终
+  `permit_motion=false`、`certified_motion=false`，不含 `/cmd_vel`、步态、姿态或 104
+  网络客户端；更新 106 运行说明和统一导航阶段文档。
+- 本轮仅修改上位机源码、测试、文档和日志，未连接、部署或重启 103/104/106，未发送
+  导航、速度、姿态、重定位、切图或网络命令；`stair_execution_retired` 继续保留。
+  当前时间已过 21:00，完成验证后只推送 GitHub/GitLab 的
+  `feature/unified-navigation-v2`，不修改或推送 `main`。
+
+Last updated: 2026-07-23 21:15 CST
+
 ## 2026-07-23 19:25 CST - 收紧统一导航跨楼层地图事务闭环
 
 - 新增 `floor_switch_transaction_contract.py`，将跨层事务阶段统一为 `PREPARED -> APPLYING -> RELOCALIZING -> COMMITTED`，失败只能进入 `ROLLING_BACK -> ROLLED_BACK/UNCERTAIN`；规则由纯合同集中维护，Web 后台线程不再自行拼接成功条件。

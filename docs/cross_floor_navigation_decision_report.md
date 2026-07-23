@@ -218,7 +218,9 @@ building map set
 
 ## 六、106 三维地形安全感知
 
-106 新增唯一的三维地形处理执行体，命名为 `m20pro_terrain_guard`。它只在楼梯任务进入准备阶段后激活，平时不占用持续计算资源。
+106 新增唯一的三维地形处理执行体，ROS 入口为
+`ros2 run m20pro_navigation terrain_guard_106`。它只在明确请求楼梯走廊时分析本地点云
+并输出影子状态，不发布运动命令；未收到请求时只发布待命状态。
 
 输入：
 
@@ -377,7 +379,9 @@ and relocalization.navigation_ready == true
 
 ### 阶段 3：106 在线地形安全影子运行
 
-- 在 106 部署 `m20pro_terrain_guard`，仅输出状态，不参与控制。
+- 在 106 构建 `m20pro_navigation` 并运行 `ros2 run m20pro_navigation terrain_guard_106`，
+  仅输出状态，不参与控制。节点按 `max_points` 对 `/LIDAR/POINTS` 做确定性上限抽样，
+  状态中带原始点数、有效点数和抽样信息，避免点云回调直接重复计算造成不必要的 CPU 开销。
 - 分别录制平地、空楼梯、人员遮挡、箱体、缺口、上楼和下楼数据。
 - 根据录包确定参数和时效边界，所有参数进入唯一现场配置文件。
 - 影子结果未达到稳定标准前不解除执行门禁。

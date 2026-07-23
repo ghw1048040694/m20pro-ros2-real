@@ -1,7 +1,10 @@
 # 106 楼梯三维安全感知影子节点
 
-`m20pro_terrain_guard_106.py` 是运行在 106 的只读适配器。它把 106 本机的
+`terrain_guard_106` 是运行在 106 的只读 ROS 2 适配器。它把 106 本机的
 `/LIDAR/POINTS` 转成局部楼梯走廊的结构化状态，供后续专用楼梯执行器读取。
+
+实现位于 `src/m20pro_navigation/m20pro_navigation/`；本目录只保留运行说明和请求示例，
+不再保留一份可独立运行的副本。
 
 这不是平地导航链路，也不是运动控制节点：
 
@@ -13,11 +16,17 @@
 
 ## 运行
 
-在已经具备 ROS 2 Foxy 和厂商点云消息的 106 上运行：
+在已经具备 ROS 2 Foxy 和厂商点云消息的 106 上构建并运行：
 
 ```bash
-python3 tools/terrain_guard_106/m20pro_terrain_guard_106.py
+colcon build --packages-select m20pro_navigation --symlink-install
+source install/setup.bash
+ros2 run m20pro_navigation terrain_guard_106
 ```
+
+节点默认最多使用每帧 `30000` 个点，按点云存储顺序确定性抽样；可通过
+`--ros-args -p max_points:=20000` 调整。原始点数、抽样点数、实际有效点数和
+抽样步长会随状态一起发布，便于在 106 上核对 CPU 与延迟。
 
 默认话题：
 

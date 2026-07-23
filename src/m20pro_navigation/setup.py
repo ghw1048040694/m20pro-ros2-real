@@ -32,6 +32,7 @@ setup(
             "scan_recording_relay = m20pro_navigation.scan_recording_relay:main",
             "command_mux = m20pro_navigation.command_mux_node:main",
             "stair_executor = m20pro_navigation.stair_executor_node:main",
+            "terrain_guard_106 = m20pro_navigation.terrain_guard_106_node:main",
         ],
     },
 )
