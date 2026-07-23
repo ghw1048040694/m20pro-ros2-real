@@ -49,11 +49,12 @@ def map_payload(**extra) -> dict:
     return payload
 
 
-def status(selected_map_id="map_a", live_map=None, selected_map=None) -> dict:
+def status(selected_map_id="map_a", live_map=None, selected_map=None, min_update_time=None) -> dict:
     return selected_map_status_payload(
         selected_map_id=selected_map_id,
         live_map=live_map if live_map is not None else map_payload(),
         selected_map=selected_map if selected_map is not None else map_payload(),
+        min_update_time=min_update_time,
         now_text=now_text,
     )
 
@@ -73,6 +74,15 @@ def test_selected_map_ready() -> None:
     assert_equal(payload["selected_map_id"], "map_a", "selected id")
     assert_equal(payload["selected_map"]["name"], "F20_TEST", "selected name")
     assert_equal(payload["live_map"]["width"], 100, "live width")
+
+
+def test_selected_map_requires_transaction_fresh_sample() -> None:
+    stale = status(live_map=map_payload(last_update=99.0), min_update_time=100.0)
+    assert_equal(stale["ready"], False, "matching stale map cannot satisfy transaction")
+    assert_equal(stale["code"], "selected_map_sample_before_transaction", "stale map code")
+    fresh = status(live_map=map_payload(last_update=100.1), min_update_time=100.0)
+    assert_equal(fresh["ready"], True, "post-transaction matching map is accepted")
+    assert_equal(fresh["map_update_time"], 100.1, "fresh map evidence is returned")
 
 
 def test_selected_map_metadata_mismatch() -> None:
@@ -280,6 +290,7 @@ def main() -> int:
     for test in (
         test_selected_map_missing,
         test_selected_map_ready,
+        test_selected_map_requires_transaction_fresh_sample,
         test_selected_map_metadata_mismatch,
         test_live_map_unavailable,
         test_matching_fixed_map_id_for_live_map,

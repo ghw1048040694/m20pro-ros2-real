@@ -21,6 +21,7 @@ from m20pro_cloud_bridge.localization_contract import (  # noqa: E402
     parse_initialpose_request,
     relocalization_sample_evidence,
     relocalization_response_payload,
+    relocalization_stability_step,
 )
 
 
@@ -258,6 +259,205 @@ def test_relocalization_sample_evidence() -> None:
     assert_equal(ambiguous["tcp_2101_accepted"], False, "0xFFFF is not a success reply")
     assert_equal(ambiguous["tcp_2101_ambiguous"], True, "0xFFFF enters verification")
     assert_equal(ambiguous["ready_to_finish_wait"], True, "target pose verifies ambiguous reply")
+
+
+def _ready_relocalization_evidence() -> dict:
+    return relocalization_sample_evidence(
+        request_started_at=10.0,
+        requested_pose={"x": 1.0, "y": 2.0, "z": 0.0, "yaw": 0.0},
+        relocalization={
+            "last_update": 10.2,
+            "raw": "success: x=1.000 y=2.000 z=0.000 yaw=0.000",
+        },
+        pose={"last_update": 10.3, "x": 1.0, "y": 2.0, "z": 0.0, "yaw": 0.0},
+        localization_ok=True,
+        scan={"last_update": 10.1, "finite_ranges": 25},
+        local_costmap={"last_update": 10.1, "width": 10, "height": 10},
+        global_costmap={"last_update": 10.1, "width": 20, "height": 20},
+        pose_tolerance_m=0.5,
+        yaw_tolerance_rad=0.45,
+    )
+
+
+def test_cross_floor_platform_yaw_tolerance_is_strict() -> None:
+    """Cross-floor platform acceptance must check heading as well as XY."""
+
+    outside = relocalization_sample_evidence(
+        request_started_at=10.0,
+        requested_pose={"x": 1.0, "y": 2.0, "z": 0.0, "yaw": 0.0},
+        relocalization={
+            "last_update": 10.2,
+            "raw": "success: x=1.000 y=2.000 z=0.000 yaw=0.460",
+        },
+        pose={"last_update": 10.3, "x": 1.0, "y": 2.0, "z": 0.0, "yaw": 0.460},
+        localization_ok=True,
+        scan={"last_update": 10.1, "finite_ranges": 25},
+        local_costmap={"last_update": 10.1, "width": 10, "height": 10},
+        global_costmap={"last_update": 10.1, "width": 20, "height": 20},
+        pose_tolerance_m=0.50,
+        yaw_tolerance_rad=0.45,
+    )
+    assert_equal(outside["pose_near_request"], False, "platform yaw outside tolerance is rejected")
+    assert_equal(outside["tcp_pose_near_request"], False, "2101 platform yaw outside tolerance is rejected")
+    assert_equal(outside["ready_to_finish_wait"], False, "wrong platform heading cannot confirm")
+    assert_equal(outside["yaw_error_rad"], 0.46, "platform yaw error is exposed")
+
+    source_outside = relocalization_sample_evidence(
+        request_started_at=10.0,
+        requested_pose={"x": 4.0, "y": -1.0, "z": 0.0, "yaw": -1.0},
+        relocalization={
+            "last_update": 10.2,
+            "raw": "success: x=4.000 y=-1.000 z=0.000 yaw=-0.540",
+        },
+        pose={"last_update": 10.3, "x": 4.0, "y": -1.0, "z": 0.0, "yaw": -0.540},
+        localization_ok=True,
+        scan={"last_update": 10.1, "finite_ranges": 25},
+        local_costmap={"last_update": 10.1, "width": 10, "height": 10},
+        global_costmap={"last_update": 10.1, "width": 20, "height": 20},
+        pose_tolerance_m=0.50,
+        yaw_tolerance_rad=0.45,
+    )
+    assert_equal(source_outside["pose_near_request"], False, "source platform yaw outside tolerance is rejected")
+    assert_equal(source_outside["tcp_pose_near_request"], False, "source 2101 yaw outside tolerance is rejected")
+    assert_equal(source_outside["ready_to_finish_wait"], False, "source platform cannot confirm with wrong heading")
+
+    boundary = relocalization_sample_evidence(
+        request_started_at=10.0,
+        requested_pose={"x": 1.0, "y": 2.0, "z": 0.0, "yaw": 3.13},
+        relocalization={
+            "last_update": 10.2,
+            "raw": "success: x=1.000 y=2.000 z=0.000 yaw=-3.000000000",
+        },
+        pose={"last_update": 10.3, "x": 1.0, "y": 2.0, "z": 0.0, "yaw": -3.000000000},
+        localization_ok=True,
+        scan={"last_update": 10.1, "finite_ranges": 25},
+        local_costmap={"last_update": 10.1, "width": 10, "height": 10},
+        global_costmap={"last_update": 10.1, "width": 20, "height": 20},
+        pose_tolerance_m=0.50,
+        yaw_tolerance_rad=0.45,
+    )
+    assert_true(boundary["yaw_error_rad"] < 0.2, "platform yaw comparison wraps across +/-pi")
+    assert_equal(boundary["pose_near_request"], True, "wrapped platform yaw inside tolerance passes")
+    assert_equal(boundary["tcp_pose_near_request"], True, "wrapped 2101 platform yaw inside tolerance passes")
+    assert_equal(boundary["ready_to_finish_wait"], True, "valid platform heading confirms")
+
+
+def test_relocalization_stability_window_is_continuous() -> None:
+    evidence = _ready_relocalization_evidence()
+    first = relocalization_stability_step(
+        evidence=evidence,
+        current_pose={"x": 1.0, "y": 2.0, "z": 0.0, "yaw": 0.0},
+        previous_pose=None,
+        stable_since=None,
+        now_time=20.0,
+        stability_window_s=2.0,
+        pose_tolerance_m=0.50,
+        yaw_tolerance_rad=0.45,
+    )
+    assert_equal(first["stable"], False, "first stable sample starts but does not finish window")
+    assert_equal(first["code"], "stability_window_waiting", "window waiting code")
+    assert_equal(first["window_elapsed_s"], 0.0, "window starts at first sample")
+
+    before_deadline = relocalization_stability_step(
+        evidence=evidence,
+        current_pose={"x": 1.0, "y": 2.0, "z": 0.0, "yaw": 0.0},
+        previous_pose=first["previous_stable_pose"],
+        stable_since=first["stable_since"],
+        now_time=21.99,
+        stability_window_s=2.0,
+        pose_tolerance_m=0.50,
+        yaw_tolerance_rad=0.45,
+    )
+    assert_equal(before_deadline["stable"], False, "window not yet elapsed cannot confirm")
+    assert_true(before_deadline["window_elapsed_s"] < 2.0, "elapsed stability is below configured window")
+
+    finished = relocalization_stability_step(
+        evidence=evidence,
+        current_pose={"x": 1.0, "y": 2.0, "z": 0.0, "yaw": 0.0},
+        previous_pose=before_deadline["previous_stable_pose"],
+        stable_since=before_deadline["stable_since"],
+        now_time=22.0,
+        stability_window_s=2.0,
+        pose_tolerance_m=0.50,
+        yaw_tolerance_rad=0.45,
+    )
+    assert_equal(finished["stable"], True, "continuous stable window confirms at deadline")
+    assert_equal(finished["code"], "stability_window_satisfied", "window satisfied code")
+
+    changed = relocalization_stability_step(
+        evidence=evidence,
+        current_pose={"x": 1.0, "y": 2.0, "z": 0.0, "yaw": 0.2},
+        previous_pose=before_deadline["previous_stable_pose"],
+        stable_since=before_deadline["stable_since"],
+        now_time=22.1,
+        stability_window_s=2.0,
+        pose_tolerance_m=0.50,
+        yaw_tolerance_rad=0.45,
+    )
+    assert_equal(changed["stable"], False, "heading movement restarts stability window")
+    assert_equal(changed["stable_since"], 22.1, "changed pose starts a new window")
+
+    invalid_anchor = relocalization_stability_step(
+        evidence=evidence,
+        current_pose={"x": 1.0, "y": 2.0, "z": 0.0, "yaw": 0.0},
+        previous_pose={"x": float("nan"), "y": 2.0, "z": 0.0, "yaw": 0.0},
+        stable_since=20.0,
+        now_time=22.1,
+        stability_window_s=2.0,
+        pose_tolerance_m=0.50,
+        yaw_tolerance_rad=0.45,
+    )
+    assert_equal(invalid_anchor["stable"], False, "invalid prior anchor cannot preserve stability")
+    assert_equal(invalid_anchor["stable_since"], 22.1, "invalid anchor restarts window")
+
+    not_ready = relocalization_stability_step(
+        evidence={**evidence, "ready_to_finish_wait": False},
+        current_pose={"x": 1.0, "y": 2.0, "z": 0.0, "yaw": 0.0},
+        previous_pose=before_deadline["previous_stable_pose"],
+        stable_since=before_deadline["stable_since"],
+        now_time=25.0,
+        stability_window_s=2.0,
+        pose_tolerance_m=0.50,
+        yaw_tolerance_rad=0.45,
+    )
+    assert_equal(not_ready["stable"], False, "missing evidence cannot confirm stability")
+    assert_equal(not_ready["stable_since"], None, "missing evidence resets window")
+
+    immediate = relocalization_stability_step(
+        evidence=evidence,
+        current_pose={"x": 1.0, "y": 2.0, "z": 0.0, "yaw": 0.0},
+        previous_pose=None,
+        stable_since=None,
+        now_time=30.0,
+        stability_window_s=0.0,
+        pose_tolerance_m=0.50,
+        yaw_tolerance_rad=0.45,
+    )
+    assert_equal(immediate["stable"], True, "zero window preserves immediate verification mode")
+
+    incomplete_verification = manual_relocalization_verification_payload(
+        tcp_2101_accepted=True,
+        tcp_2101_result="success: x=1.000 y=2.000 z=0.000 yaw=0.000",
+        tcp_2101_ambiguous=False,
+        localization_ok=True,
+        pose_ok=True,
+        pose_near_request=True,
+        scan_ok=True,
+        local_costmap_ok=True,
+        global_costmap_ok=True,
+        tcp_pose_near_request=True,
+        stability_confirmed=False,
+    )
+    assert_equal(
+        incomplete_verification["factory_pose_accepted"],
+        False,
+        "final pose evidence cannot bypass an incomplete stability window",
+    )
+    assert_equal(
+        incomplete_verification["checks"]["stability_window"],
+        "fail",
+        "incomplete stability is exposed to the operator",
+    )
 
 
 def test_map_relocalization_clearance_uses_strong_current_evidence() -> None:
@@ -523,6 +723,10 @@ def main() -> int:
     print("[OK] test_localization_status_uses_factory_status_when_localization_topic_disagrees")
     test_relocalization_sample_evidence()
     print("[OK] test_relocalization_sample_evidence")
+    test_cross_floor_platform_yaw_tolerance_is_strict()
+    print("[OK] test_cross_floor_platform_yaw_tolerance_is_strict")
+    test_relocalization_stability_window_is_continuous()
+    print("[OK] test_relocalization_stability_window_is_continuous")
     test_map_relocalization_clearance_uses_strong_current_evidence()
     print("[OK] test_map_relocalization_clearance_uses_strong_current_evidence")
     test_localization_status_explains_success_reply_but_map_lock()

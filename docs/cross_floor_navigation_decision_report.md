@@ -310,19 +310,21 @@ PREPARED -> APPLYING -> RELOCALIZING -> COMMITTED
 
 跨层自动重定位必须使用独立于普通人工重定位的严格锚点容差，同时校验位置和朝向；不能继续使用当前通用接口的 `2.0m` 位置容差。具体数值由共享平台录包标定后进入唯一现场配置文件，不在代码中硬编码。
 
-当前切层实现距离上述事务还有以下根本缺口，必须整体收口后才能解除跨层门禁：
+当前 `feature/unified-navigation-v2` 已把上述判据收口为纯合同和持久事务实现，当前分支的提交门禁包括：
 
-1. 现有代码以 `relocalization.confirmed` 判断成功，而 `/scan` 和两张代价地图只进入 `navigation_ready`；正式逻辑必须同时要求：
+1. `relocalization.confirmed` 与 `relocalization.navigation_ready` 必须同时为真；`/scan`、两张代价地图和 Nav2 lifecycle/TF 不能只作为展示字段：
 
 ```text
 relocalization.confirmed == true
 and relocalization.navigation_ready == true
 ```
 
-2. 当前通用位置容差为 `2.0m`，朝向误差虽然被计算但没有进入成功门限；跨层必须使用独立、统一且经现场标定的位置/朝向容差。
-3. 当前 106 apply 主要依赖命令退出码，104 `/map` 主要比较元数据；二者都缺少不可变内容摘要的后验确认。
-4. 当前后台切图线程缺少持久事务阶段和迟到结果隔离，超时、取消或进程重启后可能留下无法判定的物理状态。
-5. 当前回滚只恢复源地图，没有使用 `source_platform` 重新执行 2101 并验证源层导航恢复。
+2. 跨层使用独立、统一且由现场配置提供的位置/朝向容差和连续稳定窗口；普通人工重定位的 `2.0m` 默认值不能覆盖平台门槛。
+3. 106 active 和 104 `/map` 均通过地图内容摘要后验确认；Web 返回的 active/expected 摘要必须一致。
+4. 后台切图线程使用持久 `request_id/map_epoch` 状态机；超时、取消、进程重启和迟到结果不能绕过事务状态。
+5. 回滚使用事务开始时捕获的源 active 身份、`source_platform` 重新执行 2101，并重新验证源层导航 readiness；无法完整确认时持久化为 `UNCERTAIN`。
+
+这些合同已经在离线测试中覆盖，但尚未完成真实楼梯执行器的现场验收、切层故障注入和跨楼层往返测试；因此当前仍不能宣称无人跨层可用，`stair_execution_retired` 必须继续保持。
 
 任一条件失败，都不能报告切层成功。“回切源地图”也不等于回滚完成：系统必须确认 106/104 源地图身份和摘要，使用 `source_platform` 重新执行 2101，并重新通过定位稳定窗口、TF、`/scan` 和两张代价地图检查，才能提交 `ROLLED_BACK`。此前始终保持 `current_floor` 未知、运动禁止和 `state_uncertain=true`；回滚无法闭环时要求人工选择地图和重定位。
 

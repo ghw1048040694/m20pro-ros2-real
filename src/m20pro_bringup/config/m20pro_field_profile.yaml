@@ -23,6 +23,9 @@ scan:
 stair_transition:
   entry_tolerance_m: 0.80         # 到达爬楼入口点的允许位置误差，单位 m
   floor_switch_timeout_s: 110.0   # 104/106 切图并完成目标层重定位的总超时，单位 s
+  platform_position_tolerance_m: 0.50 # 跨层共享平台重定位的位置容差，单位 m
+  platform_yaw_tolerance_rad: 0.45 # 跨层共享平台重定位的朝向容差，单位 rad
+  platform_stability_window_s: 2.0 # 跨层重定位连续稳定观察窗口，单位 s
   post_switch_goal_delay_s: 1.0   # 切层确认后再下发下一目标的等待时间，单位 s
   duplicate_goal_tolerance_m: 0.08 # 两目标位置差小于该值时视为重复，单位 m
   duplicate_goal_yaw_tolerance_rad: 0.12 # 两目标朝向差小于该值时视为重复，单位 rad

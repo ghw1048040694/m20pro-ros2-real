@@ -60,7 +60,7 @@ def main() -> None:
             "localization",
         )
     }
-    assert leaf_count(editable) == 67
+    assert leaf_count(editable) == 70
     assert leaf_count(editable["navigation"]) == 30
     assert leaf_count(editable["teleoperation"]) == 7
 
@@ -118,6 +118,8 @@ def main() -> None:
     assert command_mux["teleop_max_lateral_speed_mps"] == 0.30
     assert web_teleoperation["teleop_max_lateral_speed_mps"] == 0.30
     assert web_navigation["goal_reached_tolerance_m"] == profile["navigation"]["goal"]["xy_tolerance_m"]
+    assert web_navigation["cross_floor_platform_position_tolerance_m"] == profile["stair_transition"]["platform_position_tolerance_m"]
+    assert web_navigation["cross_floor_platform_yaw_tolerance_rad"] == profile["stair_transition"]["platform_yaw_tolerance_rad"]
     rendered = render_edge_environment(profile)
     assert not any(key.startswith("STAIR_") for key in environment)
     assert len(environment) == 17

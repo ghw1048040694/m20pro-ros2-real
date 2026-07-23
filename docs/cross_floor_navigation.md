@@ -66,7 +66,7 @@ launch 中启动，`stair_execution_retired` 继续有效。
 
 ## 现场参数
 
-点云高度带、楼层切换等待、Nav2 运动/规划/代价地图、网页遥控安全边界和定位稳定性参数统一写在 `src/m20pro_bringup/config/m20pro_field_profile.yaml`。schema v4 共开放 66 个现场参数，其中导航 29 个、遥控 7 个；旧楼梯感知配置组已删除。
+点云高度带、楼层切换等待、Nav2 运动/规划/代价地图、网页遥控安全边界和定位稳定性参数统一写在 `src/m20pro_bringup/config/m20pro_field_profile.yaml`。schema v4 共开放 70 个现场参数，其中导航 30 个、遥控 7 个；`stair_transition` 中的共享平台位置容差、朝向容差和稳定窗口只用于跨层事务，旧楼梯感知配置组已删除。
 
 上位机先运行 `./scripts/apply_field_profile.sh --check`，确认后再运行 `./scripts/apply_field_profile.sh`。后者只允许在无活动任务时更新，完整部署 106 和 104 后核对两端配置哈希。不要编辑 106 `/etc` 生成文件，不支持任务中热更新，也不保留旧值回退。
 
@@ -78,3 +78,33 @@ launch 中启动，`stair_execution_retired` 继续有效。
 - 当前任何跨层运动请求都在起步前以 `stair_execution_retired` 拒绝。
 - 回滚无法完整确认时，当前楼层置为空，必须人工选择正确地图并重新定位后才能继续。
 - 现场不使用 F19/F20/F21 历史样例代替真实地图，不根据楼层编号自动生成路线，不用地图显示变化代替成功证据。
+
+## 切层事务后验确认
+
+统一导航的切层事务由 104 Web 作为事务协调者，状态持久化在
+`settings.json` 的 `floor_switch_transaction`，并以单调递增的
+`floor_switch_map_epoch` 隔离迟到请求和进程重启后的旧结果。事务阶段为：
+
+```text
+PREPARED -> APPLYING -> RELOCALIZING -> COMMITTED
+                         |
+                         +-> ROLLING_BACK -> ROLLED_BACK | UNCERTAIN
+                                                        |
+                                                        +-> RECOVERED（人工重新证明）
+```
+
+提交必须同时满足：
+
+1. 106 `drmap apply` 后 active 路径后验确认指向目标地图包；
+2. 104 `/map` 与目标归档栅格的不可变 occupancy 内容摘要一致；
+3. 本次目标层 2101 重定位确认，位置和朝向均通过共享平台容差；
+4. 目标层 `/scan`、local/global costmap、Nav2 lifecycle 和 TF 均在本次切图后恢复就绪；
+5. 活动跨楼层任务和 `map_epoch` 仍与请求一致。
+
+只恢复源地图不算回滚完成。回滚还必须使用源平台坐标重新执行 2101，并重新确认源层导航链路；否则事务进入 `UNCERTAIN`，不更新当前楼层，也不允许继续运动。
+
+`UNCERTAIN` 不能靠清空状态或重放旧位姿解除。操作员应停止旧任务、明确选择机器人
+实际所在的固定地图，并在该地图上重新执行 2101；`POST /api/floor_switch/recover`
+随后重新证明 104 地图内容、106 active、定位和障碍感知/Nav2 全链路。只有本轮新
+2101 之后的 `/scan` 与两张代价地图均就绪才进入 `RECOVERED`，旧任务不会自动续跑。
+真实楼梯执行仍受 `stair_execution_retired` 保护。

@@ -192,8 +192,8 @@ def main() -> None:
     assert "function paintMapEditor" in script
     assert "button.textContent = item.label || item.id;" in script
     assert "button.textContent = `+ ${item.label || item.id}`" not in script
-    assert "20260722-battery-pack-count-1" in html
-    assert html.count("20260722-battery-pack-count-1") == 2
+    assert "20260723-floor-recovery-1" in html
+    assert html.count("20260723-floor-recovery-1") == 2
     assert 'id="floor"' not in html
     assert '$("floor")' not in script
     assert "const reportedCount = Number(battery.count);" in script
@@ -257,6 +257,12 @@ def main() -> None:
     assert 'return [1, 6, 8].includes(motion.state) ? "lie" : "stand";' in script
     assert '$("teleopPostureBtn").disabled = !owns || !postureAction;' in script
     assert '>姿态未知</button>' in html
+    assert "floor_switch_transaction" in backend
+    assert "floorSwitchTransactionText" in script
+    assert "task-transaction" in css
+    assert "data-floor-switch-recover" in script
+    assert '"/api/floor_switch/recover"' in script
+    assert 'elif parsed.path == "/api/floor_switch/recover":' in backend
     assert 'self.declare_parameter("motion_state_topic", "/m20pro_tcp_bridge/motion_state")' in backend
     assert 'id="locFloor"' not in html
     assert '$("locFloor")' not in script

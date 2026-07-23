@@ -1,5 +1,18 @@
 # M20 Pro ROS 2 跨楼层巡检导航系统项目日志
 
+## 2026-07-23 19:25 CST - 收紧统一导航跨楼层地图事务闭环
+
+- 新增 `floor_switch_transaction_contract.py`，将跨层事务阶段统一为 `PREPARED -> APPLYING -> RELOCALIZING -> COMMITTED`，失败只能进入 `ROLLING_BACK -> ROLLED_BACK/UNCERTAIN`；规则由纯合同集中维护，Web 后台线程不再自行拼接成功条件。
+- `settings.json` 持久化 `floor_switch_transaction` 和单调递增 `floor_switch_map_epoch`。进程重启发现未完成事务时自动标记 `UNCERTAIN`，拒绝新切层请求；事务结果继续按 `request_id` 隔离，避免迟到结果提交错误楼层。
+- 新增 `map_identity_contract.py`，对归档栅格与实时 `/map` 的尺寸、分辨率、原点及 occupancy 数据生成不可变内容摘要。切层不能再只凭 `/map` 元数据相同判定成功。
+- 106 `drmap apply` 后增加 active 路径后验确认；SSH 命令退出码不再单独作为目标地图成功证据。
+- 跨层目标层重定位现在使用独立的共享平台位置/朝向容差和连续稳定窗口，并同时要求 2101 重定位、`/scan`、local/global costmap、Nav2 lifecycle 和 TF readiness；仅 `relocalization.confirmed` 不得提交 `COMMITTED`。
+- 回滚改为“恢复源地图 -> 源平台 2101 重定位 -> 源层 Nav2 readiness”完整闭环，地图恢复但证据不足时进入 `UNCERTAIN`，不更新当前楼层、不允许继续运动。
+- 现场唯一配置 `m20pro_field_profile.yaml` 的 schema v4 增加 3 个 `stair_transition` 参数：共享平台位置容差、朝向容差、连续稳定窗口；现场参数总数由 67 增至 70。平地 `/scan`、Nav2、定位、仲裁和 106 原始点云链路未改变。
+- 新增 `scripts/test_floor_switch_transaction_contract.py`、`scripts/test_map_identity_contract.py`；现有全部 `scripts/test_*.py`、Python 编译检查和差异检查通过。真实楼梯执行仍保持 `stair_execution_retired`，本轮未部署、未重启 103/104/106，未发送导航、速度、切图或重定位命令。
+
+Last updated: 2026-07-23 19:25 CST
+
 ## 2026-07-23 19:05 CST - 将已标定楼梯走廊几何绑定到连接 profile
 
 - `terrain_guard` profile 现在可携带现场标定的 `corridor.width_m/lookahead_m`，并随路线、统一计划记录和执行器请求传递；104 只保存走廊身份/范围，不复制 106 的台阶高度和点云分类阈值。
@@ -24416,3 +24429,40 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - DDDMR 适配边界已记录：只借鉴静态可通行图加动态障碍/限速/禁行层的职责划分；未来 terrain guard 在 106 本地点云上运行，只输出有界安全状态，不跨主机搬运 raw 点云，也不替换当前 `/scan` 平地链路。
 - 新增 [CONTRIBUTING.md](CONTRIBUTING.md)，按“集成分支 + 单功能短分支 + GitLab Merge Request”组织多人开发，明确统一计划、106 terrain guard、连接边执行器和前端各自的边界。
 - 本轮只修改上位机分支和源码文档，未部署或重启 103/104/106，未发送导航、速度、重定位、地图、雷达或网络命令。
+
+## 2026-07-23 20:16 CST - 补齐跨层重定位 yaw 与稳定窗口合同
+
+- 将跨层重定位的连续稳定判据从 Web 等待循环提炼为 `localization_contract.py` 的纯状态转移函数；姿态证据未就绪或平台位置/朝向发生超出稳定阈值的变化时，窗口会重新开始，不再由散落的条件判断维护。
+- 修正稳定窗口未完成仍可能被最后一帧姿态证据判为成功的缺口：最终重定位合同现在显式携带 `stability_confirmed`，跨层窗口未满足时强制失败并在检查项中显示，零窗口仍保持原有立即确认语义。
+- 增加纯合同回归测试：位置正确但 yaw 超容差失败、源/目标平台朝向边界和 `+/-pi` 环绕通过、稳定窗口未满不得确认、姿态变化重启窗口、证据丢失清空窗口。
+- 验证：`python3 scripts/test_localization_contract.py`、Python 编译和 `git diff --check` 通过；本轮仅修改上位机分支，未部署或重启 103/104/106，未发送导航、速度、重定位、切图或网络命令。
+
+## 2026-07-23 20:20 CST - 收紧稳定窗口异常锚点处理
+
+- 稳定窗口合同对无效的上一帧姿态锚点改为立即重启窗口，不能沿用旧的稳定起始时间；新增回归断言覆盖该失败安全路径。
+- 验证：定位合同测试和差异检查通过；仍未部署或操作机器狗。
+
+## 2026-07-23 20:22 CST - 保持稳定窗口失败消息与真实回执一致
+
+- 收紧最终重定位提示条件：只有 2101/位姿证据本身已通过、但连续稳定窗口未完成时，才显示“稳定窗口未满足”；真正的 2101 失败不会被稳定窗口提示遮蔽。
+- 验证：定位合同测试继续通过；未部署或操作机器狗。
+
+## 2026-07-23 20:33 CST - 统一 106 active 摘要字段并补跨层提交回归
+
+- 修正跨层事务提交合同与 Web 后验确认字段不一致的根因：`commit_decision` 现在统一接受标准 `content_digest`，也接受 Web 返回的 `active_content_digest` + `expected_content_digest`，并拒绝两者摘要不一致；此前该字段差异会让真实目标层切换即使确认成功也被错误拦截。
+- 增加事务合同测试，覆盖 Web 形态摘要可提交和摘要不一致必须拒绝；未改变平地导航或主线。
+- 验证：`test_floor_switch_transaction_contract.py`、`test_cross_floor_runtime_contract.py` 和差异检查通过；未部署或操作机器狗。
+
+## 2026-07-23 20:36 CST - 校正文档中的跨层事务完成状态
+
+- 决策报告原文仍把已实现的目标层门禁、地图内容摘要、持久事务和源层回滚写成“当前缺口”；现已改为准确描述当前开发分支的合同实现和未完成的真实楼梯/故障注入验收。
+- 明确 `stair_execution_retired` 仍然有效：文档更新不代表解除真实运动门禁，也未改变主线或现场运行链路。
+- 本轮仅更新开发分支文档和日志，未部署或操作机器狗。
+
+## 2026-07-23 21:03 CST - 完成 UNCERTAIN 跨层事务人工恢复闭环
+
+- 根因修复：跨楼层切图或进程重启后无法证明物理地图状态时，事务保持 `UNCERTAIN`，不再允许靠清空状态、重放旧回执或自动猜测地图继续导航；补充 `uncertain_at_unix` 时间屏障，并将 `RECOVERED` 作为不可被迟到回调改写的终态。
+- 后端新增 `POST /api/floor_switch/recover`。操作员必须先停止任务、明确选择当前固定地图、重新执行一次 2101，再由后端同时核验 104 `/map` occupancy 摘要、106 active 原厂地图、定位锁、最新 2101、`/scan`、两张代价地图和 Nav2 lifecycle；任一证据不足均保持 `UNCERTAIN`。
+- 前端任务状态中仅在 `UNCERTAIN` 显示“确认当前地图并恢复”按钮，按钮只提交事务核验，不发布位姿、不切图、不发送运动命令；恢复成功后旧任务不会自动续跑，后续新事务才可重新开始。
+- 增加旧时间戳迁移、旧 2101 拒绝、地图摘要不符、106 未确认、定位锁、Nav2 未就绪、完整证据收口及 `RECOVERED` 不可改写等回归测试；更新前端 API、跨楼层方案文档并刷新静态资源版本。
+- 验证：`scripts/test_*.py` 共 44 个测试文件全部通过，Python 编译、JavaScript 语法和 `git diff --check` 通过；本轮未部署或重启 103/104/106，未发送运动、重定位、切图或网络命令。

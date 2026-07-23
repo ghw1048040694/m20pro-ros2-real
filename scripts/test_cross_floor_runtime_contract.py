@@ -13,6 +13,8 @@ def main() -> None:
     web = (CLOUD / "web_dashboard_node.py").read_text(encoding="utf-8")
     floor_manager = (NAVIGATION / "floor_manager.py").read_text(encoding="utf-8")
     tcp_bridge = (NAVIGATION / "tcp_bridge_node.py").read_text(encoding="utf-8")
+    transaction = (CLOUD / "floor_switch_transaction_contract.py").read_text(encoding="utf-8")
+    identity = (CLOUD / "map_identity_contract.py").read_text(encoding="utf-8")
 
     # The field profile supplies defaults and launch overrides; it is not a
     # runtime license/hash gate for the field-stable nodes.
@@ -39,6 +41,20 @@ def main() -> None:
     assert "DurabilityPolicy.TRANSIENT_LOCAL" in floor_manager
     assert "self._publish_runtime_floor_config()" in web
     assert "resolve_floor_switch_request(" in web
+    assert "begin_transaction(" in web
+    assert "commit_decision(" in web
+    assert "_persist_floor_switch_transaction" in web
+    assert "_rollback_floor_switch_transaction" in web
+    assert "check_lifecycle=True" in web
+    assert "content_digest" in web
+    assert "recover_interrupted_transaction" in web
+    assert "recover_uncertain_transaction" in web
+    assert 'elif parsed.path == "/api/floor_switch/recover":' in web
+    assert "min_update_time=relocalization_time" in web
+    assert 'requested_map_id != selected_map_id' in web
+    assert 'active_task.get("status") == "running"' in web
+    assert "floor_switch_transaction" in transaction
+    assert "occupancy_grid_content_digest" in identity
     assert 'reason="cross_floor_transition"' in web
     assert 'reason="cross_floor_rollback"' in web
     assert "rollback_factory_map" in web
