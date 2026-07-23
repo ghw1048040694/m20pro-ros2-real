@@ -52,33 +52,36 @@ class M20TcpBridge(Node):
         self.declare_parameter("pose_source", "tcp_1007")
         self.declare_parameter("reject_origin_placeholder_pose", True)
         self.declare_parameter("origin_placeholder_radius_m", 0.05)
-        self.declare_parameter("pose_jump_reject_m", 0.0)
+        # Keep the field-tested values as node defaults.  Launch files may
+        # still override them from the shared profile, but a missing profile
+        # must not turn the bridge into a startup gate or disable filtering.
+        self.declare_parameter("pose_jump_reject_m", 0.60)
         # Kept for launch-file compatibility. Positive values are intentionally
         # ignored: an uncommanded localization hypothesis must never become
         # trusted merely because it remains stable for a while.
         self.declare_parameter("pose_jump_accept_after_s", 0.0)
-        self.declare_parameter("pose_jump_candidate_radius_m", 0.0)
-        self.declare_parameter("pose_jump_candidate_yaw_tolerance_rad", 0.0)
-        self.declare_parameter("pose_stationary_drift_reject_m", 0.0)
-        self.declare_parameter("pose_stationary_drift_reject_yaw_rad", 0.0)
-        self.declare_parameter("pose_motion_command_hold_s", 0.0)
-        self.declare_parameter("handle_steer_motion_hold_s", 0.0)
-        self.declare_parameter("posture_transition_hold_s", 0.0)
-        self.declare_parameter("posture_transition_z_delta_m", 0.0)
-        self.declare_parameter("posture_transition_tilt_delta_rad", 0.0)
-        self.declare_parameter("pose_command_linear_deadband_mps", 0.0)
-        self.declare_parameter("pose_command_angular_deadband_rad_s", 0.0)
-        self.declare_parameter("pose_filter_hold_last_good_s", 0.0)
-        self.declare_parameter("pose_relocalization_jump_grace_s", 0.0)
-        self.declare_parameter("pose_relocalization_jump_grace_radius_m", 0.0)
-        self.declare_parameter("odom_rebase_jump_m", 0.0)
-        self.declare_parameter("odom_rebase_jump_yaw_rad", 0.0)
+        self.declare_parameter("pose_jump_candidate_radius_m", 0.30)
+        self.declare_parameter("pose_jump_candidate_yaw_tolerance_rad", 0.35)
+        self.declare_parameter("pose_stationary_drift_reject_m", 0.20)
+        self.declare_parameter("pose_stationary_drift_reject_yaw_rad", 0.30)
+        self.declare_parameter("pose_motion_command_hold_s", 1.0)
+        self.declare_parameter("handle_steer_motion_hold_s", 1.5)
+        self.declare_parameter("posture_transition_hold_s", 1.5)
+        self.declare_parameter("posture_transition_z_delta_m", 0.15)
+        self.declare_parameter("posture_transition_tilt_delta_rad", 0.20)
+        self.declare_parameter("pose_command_linear_deadband_mps", 0.03)
+        self.declare_parameter("pose_command_angular_deadband_rad_s", 0.05)
+        self.declare_parameter("pose_filter_hold_last_good_s", 1.0)
+        self.declare_parameter("pose_relocalization_jump_grace_s", 3.0)
+        self.declare_parameter("pose_relocalization_jump_grace_radius_m", 1.0)
+        self.declare_parameter("odom_rebase_jump_m", 0.60)
+        self.declare_parameter("odom_rebase_jump_yaw_rad", 0.75)
         self.declare_parameter("enable_tf_pose_fallback", True)
         self.declare_parameter("tf_pose_fallback_topic", "/tf")
         self.declare_parameter("handle_steer_topic", "/HANDLE_STEER")
         self.declare_parameter("tf_pose_fallback_map_frame", "map")
         self.declare_parameter("tf_pose_fallback_base_frame", "base_link")
-        self.declare_parameter("tf_pose_fallback_max_age_s", 0.0)
+        self.declare_parameter("tf_pose_fallback_max_age_s", 1.0)
         self.declare_parameter("tf_pose_fallback_require_location_ok", True)
         self.declare_parameter("flatten_odom_z", False)
         self.declare_parameter("odom_z", 0.0)
@@ -109,28 +112,6 @@ class M20TcpBridge(Node):
         self.declare_parameter("relocalization_duplicate_tolerance_m", 0.05)
         self.declare_parameter("relocalization_duplicate_yaw_tolerance_rad", 0.05)
         self.declare_parameter("send_heartbeat", False)
-
-        field_localization_parameters = (
-            "tf_pose_fallback_max_age_s",
-            "pose_jump_reject_m",
-            "pose_jump_candidate_radius_m",
-            "pose_jump_candidate_yaw_tolerance_rad",
-            "pose_stationary_drift_reject_m",
-            "pose_stationary_drift_reject_yaw_rad",
-            "pose_motion_command_hold_s",
-            "pose_command_linear_deadband_mps",
-            "pose_command_angular_deadband_rad_s",
-            "pose_filter_hold_last_good_s",
-            "pose_relocalization_jump_grace_s",
-            "pose_relocalization_jump_grace_radius_m",
-            "odom_rebase_jump_m",
-            "odom_rebase_jump_yaw_rad",
-        )
-        if any(
-            float(self.get_parameter(name).value) <= 0.0
-            for name in field_localization_parameters
-        ):
-            raise RuntimeError("tcp_bridge requires a validated canonical field profile")
 
         self.client = M20TcpClient(
             self.get_parameter("robot_ip").value,

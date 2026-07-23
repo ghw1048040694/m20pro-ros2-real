@@ -24,7 +24,7 @@ def main() -> None:
     scripts_readme = (ROOT / "scripts" / "README.md").read_text(encoding="utf-8")
 
     assert "local_deploy_edge_scan_to_106.sh" in deploy
-    assert "m20pro_field_profile.py\" check" in deploy
+    assert "m20pro_field_profile.py\" check" not in deploy
     assert "matched_on=104,106" not in deploy
     assert "field_profile_hash" not in deploy
     assert "sudo -n sed" not in deploy

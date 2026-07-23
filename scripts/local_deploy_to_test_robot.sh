@@ -26,8 +26,6 @@ for command_name in ssh rsync curl python3; do
   fi
 done
 
-"${ROOT_DIR}/scripts/m20pro_field_profile.py" check
-
 edge_was_active=1
 edge_was_enabled=1
 if [[ "${M20PRO_DEPLOY_SKIP_EDGE:-0}" != "1" ]]; then

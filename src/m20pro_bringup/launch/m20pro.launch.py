@@ -187,7 +187,7 @@ def generate_launch_description():
                 "\"sudo -n drmap stop_mapping\""
             ),
         ),
-        DeclareLaunchArgument("enable_stair_zone_postprocess", default_value="true"),
+        DeclareLaunchArgument("enable_stair_zone_postprocess", default_value="false"),
 
         LogInfo(
             msg="m20pro_bringup is real-only; non-real mode is unsupported in this workspace.",

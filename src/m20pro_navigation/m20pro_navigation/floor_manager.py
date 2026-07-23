@@ -51,7 +51,10 @@ class FloorManager(Node):
         self.declare_parameter("floor_switch_request_topic", "/m20pro/floor_switch_request")
         self.declare_parameter("floor_switch_result_topic", "/m20pro/floor_switch_result")
         self.declare_parameter("floor_context_topic", "/m20pro/set_current_floor")
-        self.declare_parameter("floor_switch_timeout_s", 0.0)
+        # These defaults preserve the field-tested transition behavior.  The
+        # shared profile can override them, but metadata/hash must never be a
+        # runtime startup gate for the legacy manager.
+        self.declare_parameter("floor_switch_timeout_s", 110.0)
         self.declare_parameter("field_profile_name", "")
         self.declare_parameter("field_profile_hash", "")
         self.declare_parameter(
@@ -75,30 +78,18 @@ class FloorManager(Node):
         self.declare_parameter("initialpose_covariance_xy", 0.25)
         self.declare_parameter("initialpose_covariance_yaw", 0.0685)
         self.declare_parameter("require_near_stair_entry", True)
-        self.declare_parameter("stair_entry_tolerance_m", 0.0)
+        self.declare_parameter("stair_entry_tolerance_m", 0.80)
         self.declare_parameter("flat_gait_label", "flat")
         self.declare_parameter("publish_flat_gait_before_nav", True)
         self.declare_parameter("stair_up_gait_label", "stair_up")
         self.declare_parameter("stair_down_gait_label", "stair_down")
-        self.declare_parameter("post_switch_goal_delay_s", 0.0)
-        self.declare_parameter("duplicate_goal_tolerance_m", 0.0)
-        self.declare_parameter("duplicate_goal_yaw_tolerance_rad", 0.0)
+        self.declare_parameter("post_switch_goal_delay_s", 1.0)
+        self.declare_parameter("duplicate_goal_tolerance_m", 0.08)
+        self.declare_parameter("duplicate_goal_yaw_tolerance_rad", 0.12)
         self.declare_parameter("nav_feedback_status_period_s", 1.0)
 
         self.field_profile_name = str(self.get_parameter("field_profile_name").value).strip()
         self.field_profile_hash = str(self.get_parameter("field_profile_hash").value).strip()
-        if (
-            not self.field_profile_name
-            or len(self.field_profile_hash) != 64
-            or any(ch not in "0123456789abcdef" for ch in self.field_profile_hash)
-            or float(self.get_parameter("floor_switch_timeout_s").value) <= 0.0
-            or float(self.get_parameter("stair_entry_tolerance_m").value) <= 0.0
-            or float(self.get_parameter("post_switch_goal_delay_s").value) <= 0.0
-            or float(self.get_parameter("duplicate_goal_tolerance_m").value) <= 0.0
-            or float(self.get_parameter("duplicate_goal_yaw_tolerance_rad").value) <= 0.0
-        ):
-            raise RuntimeError("floor_manager requires a validated canonical field profile")
-
         self.config_file = self._resolve_path(str(self.get_parameter("config_file").value))
         self.config = self._load_config(self.config_file)
         self.floors: Dict[str, Dict[str, Any]] = dict(self.config.get("floors", {}))
