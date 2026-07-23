@@ -1,5 +1,13 @@
 # M20 Pro ROS 2 跨楼层巡检导航系统项目日志
 
+## 2026-07-23 19:03 CST - 增加楼梯语义执行器 ROS 适配器（默认关闭）
+
+- 新增 `m20pro_navigation/stair_executor_node.py`，把楼梯 reducer 暴露为 JSON 启动/事件/动作/状态话题；它不导入 `Twist`，不发布 `cmd_vel`、步态、地图或厂商命令，只为未来仲裁适配器提供语义动作。
+- `stair_executor` 已加入 ROS 包入口但不加入 real launch，参数 `enabled=false` 默认关闭；默认路线仍返回 `stair_execution_retired`。只有现场完成 profile、terrain_guard、共享平台切图、原厂步态和仲裁验收后，才允许单独启用。
+- 补充静态 wiring、状态机、Python 编译测试；本轮未部署或操作 103/104/106，未发送运动、导航、重定位、切图或网络命令；当前时间早于 21:00，不推送 GitHub/GitLab。
+
+Last updated: 2026-07-23 19:03 CST
+
 ## 2026-07-23 18:59 CST - 建立楼梯连接边语义执行状态机合同
 
 - 在 `m20pro_navigation/stair_executor_contract.py` 新增单条认证楼梯连接边的纯状态 reducer：`PREPARING -> ENTRY_NAVIGATION -> TRAVERSING -> PLATFORM_HOLD -> EXIT_NAVIGATION -> COMPLETED`，统一处理 terrain_guard、入口/平台/出口、地图切换、停止、定位丢失、迟到事件和阶段超时。

@@ -54,6 +54,17 @@ def test_stair_executor_is_a_semantic_reducer_without_motion_publishers() -> Non
     assert "from geometry_msgs" not in source
     assert "request_floor_switch" in source
     assert "stair_execution_retired" in source
+    node = (
+        ROOT
+        / "src"
+        / "m20pro_navigation"
+        / "m20pro_navigation"
+        / "stair_executor_node.py"
+    ).read_text(encoding="utf-8")
+    assert 'self.declare_parameter("enabled", False)' in node
+    assert "cmd_vel_pub" not in node
+    assert "from geometry_msgs" not in node
+    assert "Twist(" not in node
 
 
 def test_compatibility_fields_are_plan_projections() -> None:
