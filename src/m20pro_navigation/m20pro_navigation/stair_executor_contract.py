@@ -82,7 +82,10 @@ def _failure(
         "code": code,
         "message": message,
         "execution": updated,
-        "actions": [_action("stop", reason=reason or code)],
+        "actions": [
+            _action("stop", reason=reason or code),
+            _action("release_terrain_guard"),
+        ],
     }
 
 
@@ -119,6 +122,8 @@ def create_connector_execution(
     route: Dict[str, Any],
     *,
     request_id: Any,
+    plan_id: Any = None,
+    map_epoch: Any = None,
     now_monotonic: float,
     stage_timeout_s: float = 180.0,
 ) -> Dict[str, Any]:
@@ -143,6 +148,8 @@ def create_connector_execution(
     profile = dict(route_check["profile"])
     execution = {
         "request_id": request,
+        "plan_id": _text(plan_id) or None,
+        "map_epoch": map_epoch,
         "route_id": _text(route.get("id")),
         "source_floor": _text(route.get("source_floor")),
         "target_floor": _text(route.get("target_floor")),
@@ -232,7 +239,16 @@ def step_connector_execution(
         return _failure(current, code="connector_stage_timeout", message="楼梯连接边阶段超时，已停止")
     if event_type in {"stop_requested", "arbiter_lost", "localization_lost"}:
         current.update({"state": "STOPPED", "status": "stopped", "status_message": "楼梯连接边收到停止/安全事件"})
-        return {"ok": True, "code": "connector_stopped", "message": current["status_message"], "execution": current, "actions": [_action("stop", reason=event_type)]}
+        return {
+            "ok": True,
+            "code": "connector_stopped",
+            "message": current["status_message"],
+            "execution": current,
+            "actions": [
+                _action("stop", reason=event_type),
+                _action("release_terrain_guard"),
+            ],
+        }
 
     if state == "PREPARING":
         if event_type != "terrain_status":
@@ -292,6 +308,16 @@ def step_connector_execution(
         if event_type != "exit_reached":
             return {"ok": True, "code": "connector_waiting_exit", "message": current["status_message"], "execution": current, "actions": []}
         current.update({"state": "COMPLETED", "status": "completed", "status_message": "楼梯连接边完成，已恢复平地导航"})
-        return {"ok": True, "code": "connector_completed", "message": current["status_message"], "execution": current, "actions": [_action("set_gait", gait="flat"), _action("resume_flat_navigation")]}
+        return {
+            "ok": True,
+            "code": "connector_completed",
+            "message": current["status_message"],
+            "execution": current,
+            "actions": [
+                _action("set_gait", gait="flat"),
+                _action("release_terrain_guard"),
+                _action("resume_flat_navigation"),
+            ],
+        }
 
     return {"ok": True, "code": "connector_event_waiting", "message": "等待楼梯执行阶段事件", "execution": current, "actions": []}

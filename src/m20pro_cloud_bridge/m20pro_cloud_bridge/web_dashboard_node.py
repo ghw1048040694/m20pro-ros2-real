@@ -43,11 +43,14 @@ from .active_task_contract import (
     active_task_failure_payload,
     append_active_task_timeline_event_state,
     begin_waypoint_dwell_state,
+    apply_connector_status_state,
+    connector_owns_navigation_status,
     create_active_task_state,
     dwell_tick_decision,
     fail_active_task_state,
     goal_dispatch_decision,
     idle_stop_task_response,
+    mark_connector_started_state,
     mark_floor_goal_published_state,
     mark_active_task_waiting_state,
     normalize_stop_task_request,
@@ -162,9 +165,11 @@ from .multi_floor_contract import (
 from .unified_navigation_contract import (
     build_unified_navigation_plan,
     navigation_plan_record,
+    runtime_transition_for_annotation,
     summarize_plan,
     task_navigation_plan_state,
 )
+from m20pro_navigation.stair_executor_contract import create_connector_execution
 from .nav_status_contract import (
     apply_ignored_nav_status_state,
     apply_nav_failure_state,
@@ -814,6 +819,11 @@ class WebDashboardNode(Node):
             str(self.get_parameter("stop_task_topic").value),
             10,
         )
+        self.stair_executor_start_pub = self.create_publisher(
+            String,
+            str(self.get_parameter("stair_executor_start_topic").value),
+            10,
+        )
         self.cmd_vel_pub = self.create_publisher(
             Twist,
             str(self.get_parameter("cmd_vel_topic").value),
@@ -903,6 +913,7 @@ class WebDashboardNode(Node):
         self._state: Dict[str, Any] = {
             "floor": None,
             "stair_status": None,
+            "stair_executor_status": None,
             "terrain_guard": None,
             "command_mux_status": None,
             "gait_command": None,
@@ -1050,6 +1061,10 @@ class WebDashboardNode(Node):
         self.declare_parameter("robot_pose_display_yaw_offset_rad", 0.0)
         self.declare_parameter("current_floor_topic", "/m20pro/current_floor")
         self.declare_parameter("stair_status_topic", "/m20pro/stair_status")
+        self.declare_parameter("stair_executor_start_topic", "/m20pro/stair_executor/start")
+        self.declare_parameter(
+            "stair_executor_status_topic", "/m20pro/stair_executor/status"
+        )
         self.declare_parameter("terrain_guard_status_topic", "/m20pro/terrain_guard/status")
         self.declare_parameter("terrain_guard_status_timeout_s", 1.0)
         self.declare_parameter("gait_command_topic", "/m20pro/gait_command")
@@ -1428,6 +1443,12 @@ class WebDashboardNode(Node):
         self.create_subscription(String, self._topic("stair_status_topic"), self._on_stair_status, 10)
         self.create_subscription(
             String,
+            self._topic("stair_executor_status_topic"),
+            self._on_stair_executor_status,
+            10,
+        )
+        self.create_subscription(
+            String,
             self._topic("terrain_guard_status_topic"),
             self._on_terrain_guard_status,
             10,
@@ -1519,6 +1540,73 @@ class WebDashboardNode(Node):
             self._state["stair_status"] = msg.data
             self._mark_topic("stair_status")
         self._handle_navigation_status_for_task(msg.data)
+
+    def _on_stair_executor_status(self, msg: String) -> None:
+        parsed = parse_json_text(msg.data)
+        with self._lock:
+            self._state["stair_executor_status"] = {
+                "last_update": time.time(),
+                "raw": msg.data,
+                "parsed": parsed,
+            }
+            self._mark_topic("stair_executor_status")
+        if not isinstance(parsed, dict):
+            return
+        request_id = str(parsed.get("request_id") or "").strip()
+        state = str(parsed.get("state") or "").strip().upper()
+        with self._data_lock:
+            active = dict(self._settings.get("active_task") or {})
+            status_update = apply_connector_status_state(
+                active,
+                parsed,
+                now_text=now_text(),
+                now_monotonic=time.monotonic(),
+            )
+            if not status_update.get("matched"):
+                return
+            active = status_update["active"]
+            self._settings["active_task"] = active
+            if status_update.get("persistent_changed") and not status_update.get("terminal"):
+                self._save_json("settings.json", self._settings)
+        if status_update.get("failed"):
+            self._fail_active_task(
+                active.get("task_id"),
+                str(parsed.get("message") or "楼梯连接边执行未完成，任务已停止"),
+                {
+                    "reason": str(parsed.get("code") or "stair_connector_failed"),
+                    "connector_request_id": request_id,
+                    "connector_state": state,
+                },
+            )
+            return
+        if not status_update.get("terminal"):
+            return
+        # A connector completion is the hand-off point back to the single
+        # task executor.  Clearing only the dispatch marker lets the next tick
+        # either send the final-floor goal or select the next ordered edge.
+        with self._data_lock:
+            active = dict(self._settings.get("active_task") or {})
+            if active.get("status") != "running":
+                return
+            active["connector_state"] = "COMPLETED"
+            active["last_connector_request_id"] = request_id
+            active.pop("connector_request_id", None)
+            active["status_message"] = "楼梯连接边完成，继续统一导航计划"
+            active["last_goal_annotation_id"] = None
+            active["last_nav_goal_status"] = None
+            active.pop("last_goal_attempt_id", None)
+            self._append_active_task_timeline_event(
+                active,
+                "stair_connector_completed",
+                active["status_message"],
+                {
+                    "connector_request_id": request_id,
+                    "route_id": parsed.get("route_id"),
+                    "target_floor": parsed.get("target_floor"),
+                },
+            )
+            self._settings["active_task"] = active
+            self._save_json("settings.json", self._settings)
 
     def _on_terrain_guard_status(self, msg: String) -> None:
         parsed = parse_json_text(msg.data)
@@ -7412,6 +7500,10 @@ class WebDashboardNode(Node):
 
     def _handle_navigation_status_for_task(self, status_text: str) -> None:
         status_text = str(status_text or "").strip()
+        with self._data_lock:
+            active = dict(self._settings.get("active_task") or {})
+        if connector_owns_navigation_status(active):
+            return
         decision = classify_navigation_status(status_text)
         action = decision.get("action")
         if action == "ignore":
@@ -7627,6 +7719,92 @@ class WebDashboardNode(Node):
                 self._save_json("settings.json", self._settings)
         if missing_failure is not None:
             self._fail_active_task_from_payload(missing_failure)
+
+    def _resolve_active_connector_transition(
+        self,
+        active: Dict[str, Any],
+        annotation: Dict[str, Any],
+        source_floor: str,
+    ) -> Dict[str, Any]:
+        """Resolve the next directed connector from the canonical route store."""
+        with self._data_lock:
+            known = {
+                str(item.get("id")): dict(item)
+                for item in self._annotations
+                if item.get("id")
+            }
+        plan = self._build_unified_navigation_plan(active.get("annotation_ids") or [], known)
+        if not plan.get("ok"):
+            return {
+                "ok": False,
+                "code": str(plan.get("code") or "navigation_plan_invalid"),
+                "message": str(plan.get("message") or "统一导航计划无法解析楼层连接"),
+            }
+        stored_plan = active.get("navigation_plan")
+        current_record = navigation_plan_record(plan)
+        if (
+            isinstance(stored_plan, dict)
+            and stored_plan.get("ok")
+            and current_record != stored_plan
+        ):
+            return {
+                "ok": False,
+                "code": "navigation_task_plan_stale",
+                "message": "任务执行期间点位或连接路线已变化，已停止以避免切入错误地图",
+            }
+        transition = runtime_transition_for_annotation(
+            plan,
+            annotation.get("id"),
+            current_floor=source_floor,
+        )
+        if transition.get("action") != "transition":
+            return {
+                "ok": False,
+                "code": str(transition.get("code") or "navigation_plan_transition_missing"),
+                "message": str(transition.get("message") or "统一导航计划缺少下一条楼层连接"),
+                "transition": transition,
+            }
+        edges = [item for item in transition.get("edges") or [] if isinstance(item, dict)]
+        if not edges or not isinstance(edges[0].get("route"), dict):
+            return {
+                "ok": False,
+                "code": "navigation_plan_route_geometry_missing",
+                "message": "统一导航计划的下一条连接缺少路线几何",
+                "transition": transition,
+            }
+        return {
+            "ok": True,
+            "transition": transition,
+            "edge": edges[0],
+            "route": dict(edges[0]["route"]),
+        }
+
+    def _publish_stair_connector_start(
+        self,
+        *,
+        active: Dict[str, Any],
+        route: Dict[str, Any],
+        request_id: str,
+        plan_id: str,
+    ) -> None:
+        message = String()
+        message.data = json.dumps(
+            {
+                "request_id": request_id,
+                "plan_id": plan_id,
+                "map_epoch": None,
+                "route": route,
+                "task_id": active.get("task_id"),
+                "run_id": active.get("run_id"),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        self.stair_executor_start_pub.publish(message)
+        self.get_logger().info(
+            "web task started stair connector request=%s route=%s plan=%s"
+            % (request_id, route.get("id"), plan_id)
+        )
 
     def _complete_active_waypoint_from_nav_result(self, status_text: str) -> None:
         with self._data_lock:
@@ -8460,6 +8638,10 @@ class WebDashboardNode(Node):
                 self._advance_active_task(annotation)
                 return
         if self._active_waypoint_waiting_cross_floor(active, annotation):
+            if connector_owns_navigation_status(active):
+                self._publish_active_waypoint(annotation, active, "cross_floor")
+                self._stop_task_if_connector_unresponsive(active, annotation)
+                return
             target_floor = str(annotation.get("floor") or "")
             self._mark_active_task_waiting(
                 active,
@@ -8786,6 +8968,39 @@ class WebDashboardNode(Node):
                 "label": annotation.get("label"),
                 "target_floor": annotation.get("floor"),
                 "age_s": age_s,
+                "timeout_s": timeout_s,
+            },
+        )
+        return True
+
+    def _stop_task_if_connector_unresponsive(
+        self,
+        active: Dict[str, Any],
+        annotation: Dict[str, Any],
+    ) -> bool:
+        try:
+            started = float(active.get("connector_started_monotonic") or 0.0)
+            last_status = float(active.get("connector_last_status_monotonic") or 0.0)
+        except (TypeError, ValueError):
+            started = 0.0
+            last_status = 0.0
+        reference = last_status if last_status > 0.0 else started
+        if reference <= 0.0:
+            return False
+        timeout_s = max(2.0, float(self.get_parameter("task_goal_accept_timeout_s").value))
+        age_s = max(0.0, time.monotonic() - reference)
+        if age_s < timeout_s:
+            return False
+        reason = "stair_executor_status_stale" if last_status > 0.0 else "stair_executor_no_response"
+        self._fail_active_task(
+            str(active.get("task_id") or ""),
+            "楼梯连接边执行器 %.1f 秒无状态回执，任务已停止" % timeout_s,
+            {
+                "reason": reason,
+                "annotation_id": annotation.get("id"),
+                "connector_request_id": active.get("connector_request_id"),
+                "connector_state": active.get("connector_state"),
+                "status_age_s": age_s,
                 "timeout_s": timeout_s,
             },
         )
@@ -9301,6 +9516,68 @@ class WebDashboardNode(Node):
                     str(floor_resolution["runtime_floor"]),
                 )
             )
+        cross_floor = bool(
+            active.get("multi_floor")
+            and source_floor
+            and str(goal.get("floor") or "").strip()
+            and source_floor != str(goal.get("floor") or "").strip()
+        )
+        connector_resolution: Optional[Dict[str, Any]] = None
+        connector_route: Optional[Dict[str, Any]] = None
+        connector_request_id = ""
+        connector_plan_id = ""
+        if cross_floor:
+            if (
+                str(active.get("last_goal_annotation_id") or "") == str(annotation.get("id") or "")
+                and str(active.get("connector_state") or "") not in {"", "COMPLETED", "FAILED", "STOPPED"}
+            ):
+                self._publish_active_waypoint(annotation, active, "cross_floor")
+                return
+            connector_resolution = self._resolve_active_connector_transition(
+                active,
+                annotation,
+                source_floor,
+            )
+            if not connector_resolution.get("ok"):
+                self._fail_active_task(
+                    active.get("task_id"),
+                    str(connector_resolution.get("message") or "统一导航计划无法启动楼层连接"),
+                    {
+                        "reason": connector_resolution.get("code") or "navigation_plan_transition_invalid",
+                        "transition": connector_resolution.get("transition"),
+                    },
+                )
+                return
+            connector_route = dict(connector_resolution["route"])
+            # Reuse the reducer's own validation as the activation gate.  The
+            # probe is pure and emits no ROS side effect; shadow/stop-only
+            # routes therefore fail before any goal or map transaction exists.
+            route_gate = create_connector_execution(
+                connector_route,
+                request_id="activation-probe",
+                now_monotonic=0.0,
+            )
+            if not route_gate.get("ok"):
+                self._fail_active_task(
+                    active.get("task_id"),
+                    str(route_gate.get("message") or "楼梯连接边尚未完成现场认证"),
+                    {
+                        "reason": route_gate.get("code") or "stair_execution_retired",
+                        "route_id": connector_route.get("id"),
+                        "source_floor": connector_route.get("source_floor"),
+                        "target_floor": connector_route.get("target_floor"),
+                    },
+                )
+                return
+            connector_request_id = str(active.get("connector_request_id") or "").strip()
+            if not connector_request_id:
+                connector_request_id = new_id("stair")
+            connector_plan_id = str(active.get("connector_plan_id") or "").strip()
+            if not connector_plan_id:
+                connector_plan_id = "%s:%s" % (
+                    str(active.get("task_id") or "task"),
+                    str(active.get("run_id") or "run"),
+                )
         goal_sent_path_version = current_path.get("version")
         missing_failure = None
         with self._data_lock:
@@ -9314,7 +9591,7 @@ class WebDashboardNode(Node):
                 now_text=now_text(),
                 now_monotonic=now_monotonic,
                 path_version=goal_sent_path_version,
-                goal_attempt_id=new_id("goal"),
+                goal_attempt_id=connector_request_id or new_id("goal"),
                 goal_semantics=annotation_semantics_payload(annotation),
             )
             action = str(prepared.get("action") or "")
@@ -9334,12 +9611,32 @@ class WebDashboardNode(Node):
                 return
             elif action == "send_goal":
                 active = prepared["active"]
-                self._append_active_task_timeline_event(
-                    active,
-                    str(prepared["event"]),
-                    str(prepared["message"]),
-                    dict(prepared["event_extra"]),
-                )
+                if connector_resolution is not None and connector_route is not None:
+                    connector_state = mark_connector_started_state(
+                        active,
+                        annotation,
+                        goal,
+                        transition=connector_resolution["edge"],
+                        request_id=connector_request_id,
+                        plan_id=connector_plan_id,
+                        map_epoch=None,
+                        now_text=now_text(),
+                        now_monotonic=now_monotonic,
+                    )
+                    active = connector_state["active"]
+                    self._append_active_task_timeline_event(
+                        active,
+                        str(connector_state["event"]),
+                        str(connector_state["message"]),
+                        dict(connector_state["event_extra"]),
+                    )
+                else:
+                    self._append_active_task_timeline_event(
+                        active,
+                        str(prepared["event"]),
+                        str(prepared["message"]),
+                        dict(prepared["event_extra"]),
+                    )
                 self._settings["active_task"] = active
                 self._save_json("settings.json", self._settings)
                 active_snapshot = dict(active)
@@ -9347,6 +9644,15 @@ class WebDashboardNode(Node):
                 return
         if missing_failure is not None:
             self._fail_active_task_from_payload(missing_failure)
+            return
+        if connector_resolution is not None and connector_route is not None:
+            self._publish_stair_connector_start(
+                active=active_snapshot,
+                route=connector_route,
+                request_id=connector_request_id,
+                plan_id=connector_plan_id,
+            )
+            self._publish_active_waypoint(annotation, active_snapshot, "cross_floor")
             return
         self._publish_floor_goal(str(goal["floor"]), float(goal["x"]), float(goal["y"]), float(goal["yaw"]), float(goal["z"]))
         with self._data_lock:

@@ -105,6 +105,7 @@ def test_full_connector_sequence_is_ordered_and_uses_route_poses() -> None:
         now_monotonic=5.0,
     )
     assert_equal(completed["execution"]["state"], "COMPLETED", "completed state")
+    assert_equal(completed["actions"][-2]["kind"], "release_terrain_guard", "release terrain before resume")
     assert_equal(completed["actions"][-1]["kind"], "resume_flat_navigation", "resume flat navigation")
 
 
@@ -144,6 +145,7 @@ def test_blocked_terrain_stops_without_recovery() -> None:
     )
     assert_equal(blocked["ok"], False, "blocked terrain fails")
     assert_equal(blocked["execution"]["state"], "FAILED", "blocked terminal state")
+    assert_equal(blocked["actions"][-1]["kind"], "release_terrain_guard", "failure releases terrain request")
     recovered = step_connector_execution(
         blocked["execution"],
         {"type": "terrain_status", "request_id": "r1", "status": status()},
@@ -185,10 +187,12 @@ def test_operator_stop_and_timeout_are_terminal() -> None:
     created = create_connector_execution(route(), request_id="r1", now_monotonic=0.0, stage_timeout_s=2.0)
     stopped = step_connector_execution(created["execution"], {"type": "stop_requested", "request_id": "r1"}, now_monotonic=0.1)
     assert_equal(stopped["execution"]["state"], "STOPPED", "operator stop")
+    assert_equal(stopped["actions"][-1]["kind"], "release_terrain_guard", "operator stop releases terrain request")
     created = create_connector_execution(route(), request_id="r2", now_monotonic=0.0, stage_timeout_s=2.0)
     timeout = step_connector_execution(created["execution"], {"type": "terrain_status", "request_id": "r2", "status": status()}, now_monotonic=3.0)
     assert_equal(timeout["execution"]["state"], "FAILED", "stage timeout")
     assert_equal(timeout["code"], "connector_stage_timeout", "timeout code")
+    assert_equal(timeout["actions"][-1]["kind"], "release_terrain_guard", "timeout releases terrain request")
 
 
 def main() -> int:

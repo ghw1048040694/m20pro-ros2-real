@@ -524,18 +524,20 @@ class FloorManager(Node):
             target_floor = self.current_floor
         if self.route_configured and not target_floor:
             self.get_logger().error("floor goal ignored; current floor is unknown")
-            self._publish_stair_status("error reason=no_current_floor_for_goal")
+            self._publish_stair_status("error reason=no_current_floor_for_goal label=floor_goal")
             return
         if self.route_configured and target_floor not in self.floors:
             self.get_logger().error("floor goal has unknown target floor: %s" % target_floor)
-            self._publish_stair_status("error reason=unknown_goal_floor floor=%s" % target_floor)
+            self._publish_stair_status(
+                "error reason=unknown_goal_floor floor=%s label=floor_goal" % target_floor
+            )
             return
         if not self.route_configured and target_floor and self.current_floor and target_floor != self.current_floor:
             self.get_logger().error(
                 "ordinary map mode cannot switch maps from a floor goal; select the target map first"
             )
             self._publish_stair_status(
-                "error reason=ordinary_map_floor_mismatch current=%s target=%s"
+                "error reason=ordinary_map_floor_mismatch current=%s target=%s label=floor_goal"
                 % (self.current_floor, target_floor)
             )
             return
@@ -574,7 +576,7 @@ class FloorManager(Node):
             "cross-floor goal rejected: the retired stair execution chain has been removed"
         )
         self._publish_stair_status(
-            "error reason=stair_execution_retired current=%s target=%s"
+            "error reason=stair_execution_retired current=%s target=%s label=floor_goal"
             % (self.current_floor, target_floor)
         )
 

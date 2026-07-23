@@ -263,12 +263,16 @@ def test_runtime_gate_uses_ordered_plan_transition() -> None:
         "transitions": [
             {
                 "route_id": "r12",
+                "source_floor": "F1",
+                "target_floor": "F2",
                 "source_segment_index": 0,
                 "target_segment_index": 1,
                 "path_step_index": 0,
             },
             {
                 "route_id": "r21",
+                "source_floor": "F2",
+                "target_floor": "F1",
                 "source_segment_index": 1,
                 "target_segment_index": 2,
                 "path_step_index": 0,

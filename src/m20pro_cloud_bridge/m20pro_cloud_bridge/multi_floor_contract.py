@@ -48,6 +48,7 @@ def stair_routes_from_config(config: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "post_exit": stair.get("post_exit"),
             }
             missing = [key for key, pose in poses.items() if not _pose_ready(pose)]
+            target_data = floors.get(target_floor) if isinstance(floors.get(target_floor), dict) else {}
             routes.append(
                 {
                     "id": f"{source_floor}:{name}",
@@ -55,6 +56,19 @@ def stair_routes_from_config(config: Dict[str, Any]) -> List[Dict[str, Any]]:
                     "source_floor": str(source_floor),
                     "target_floor": target_floor,
                     "direction": str(stair.get("direction") or ""),
+                    # These top-level fields are the canonical connector
+                    # schema consumed by stair_executor.  ``poses`` remains
+                    # as a compatibility projection for the workspace UI.
+                    "source_map_id": str(floor_data.get("map_id") or "").strip(),
+                    "target_map_id": str(target_data.get("map_id") or "").strip(),
+                    "source_map_yaml": str(floor_data.get("map_yaml") or "").strip(),
+                    "target_map_yaml": str(target_data.get("map_yaml") or "").strip(),
+                    "source_factory_path": str(floor_data.get("factory_apply_path") or "").strip(),
+                    "target_factory_path": str(target_data.get("factory_apply_path") or "").strip(),
+                    "entry": dict(poses["entry"] or {}) if isinstance(poses["entry"], dict) else None,
+                    "source_platform": dict(poses["source_platform"] or {}) if isinstance(poses["source_platform"], dict) else None,
+                    "target_platform": dict(poses["target_platform"] or {}) if isinstance(poses["target_platform"], dict) else None,
+                    "post_exit": dict(poses["post_exit"] or {}) if isinstance(poses["post_exit"], dict) else None,
                     "model": str(transition.get("model") or "shared_platform"),
                     "terrain_guard": connector_terrain_guard_profile(
                         {

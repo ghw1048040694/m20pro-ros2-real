@@ -57,6 +57,9 @@ def main() -> None:
     assert "occupancy_grid_content_digest" in identity
     assert 'reason="cross_floor_transition"' in web
     assert 'reason="cross_floor_rollback"' in web
+    assert "_publish_stair_connector_start" in web
+    assert "create_connector_execution(" in web
+    assert "mark_connector_started_state" in web
     assert "rollback_factory_map" in web
     assert "selected_map_not_observed" in web
     assert "self._floor_switch_task_is_active(task_id)" in web

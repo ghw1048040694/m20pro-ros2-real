@@ -52,6 +52,18 @@ GOAL_SENT_RESET_KEYS = (
     "last_transition_nav_goal_status",
     "last_transition_nav_label",
     "last_transition_nav_monotonic",
+    "connector_request_id",
+    "connector_route_id",
+    "connector_plan_id",
+    "connector_map_epoch",
+    "connector_state",
+    "connector_source_floor",
+    "connector_target_floor",
+    "connector_started_at",
+    "connector_started_monotonic",
+    "connector_last_status_at",
+    "connector_last_status_monotonic",
+    "connector_status_code",
     "plan_goal_verified",
     "plan_goal_error_m",
     "plan_path_version",
@@ -63,6 +75,14 @@ NEXT_WAYPOINT_RESET_KEYS = GOAL_SENT_RESET_KEYS + (
     "last_goal_label",
     "goal_sent_path_version",
 )
+
+CONNECTOR_ACTIVE_STATES = {
+    "PREPARING",
+    "ENTRY_NAVIGATION",
+    "TRAVERSING",
+    "PLATFORM_HOLD",
+    "EXIT_NAVIGATION",
+}
 
 
 def _as_float(value: Any, default: float = 0.0) -> float:
@@ -78,6 +98,59 @@ def _finite_float(value: Any) -> Optional[float]:
     except (TypeError, ValueError):
         return None
     return result if math.isfinite(result) else None
+
+
+def connector_owns_navigation_status(active: Dict[str, Any]) -> bool:
+    """Return whether connector internals, not the waypoint runner, own Nav2 status."""
+    return bool(
+        active.get("status") == "running"
+        and str(active.get("connector_request_id") or "").strip()
+        and str(active.get("connector_state") or "").strip().upper()
+        in CONNECTOR_ACTIVE_STATES
+    )
+
+
+def apply_connector_status_state(
+    active: Dict[str, Any],
+    status: Any,
+    *,
+    now_text: str,
+    now_monotonic: float,
+) -> Dict[str, Any]:
+    """Apply only a status belonging to the active connector request."""
+    if active.get("status") != "running" or not isinstance(status, dict):
+        return {"matched": False, "active": dict(active), "reason": "task_or_status_invalid"}
+    request_id = str(status.get("request_id") or "").strip()
+    expected_request_id = str(active.get("connector_request_id") or "").strip()
+    if not request_id or request_id != expected_request_id:
+        return {"matched": False, "active": dict(active), "reason": "connector_request_mismatch"}
+    state = str(status.get("state") or "").strip().upper()
+    if state not in CONNECTOR_ACTIVE_STATES | {"COMPLETED", "FAILED", "STOPPED"}:
+        return {"matched": False, "active": dict(active), "reason": "connector_state_invalid"}
+    updated = dict(active)
+    code = str(status.get("code") or "").strip()
+    message = str(status.get("message") or "").strip()
+    persistent_changed = any(
+        (
+            str(updated.get("connector_state") or "") != state,
+            str(updated.get("connector_status_code") or "") != code,
+            bool(message) and str(updated.get("status_message") or "") != message,
+        )
+    )
+    updated["connector_state"] = state
+    updated["connector_status_code"] = code or None
+    updated["connector_last_status_at"] = now_text
+    updated["connector_last_status_monotonic"] = float(now_monotonic)
+    if message:
+        updated["status_message"] = message
+    return {
+        "matched": True,
+        "active": updated,
+        "state": state,
+        "terminal": state in {"COMPLETED", "FAILED", "STOPPED"},
+        "failed": state in {"FAILED", "STOPPED"},
+        "persistent_changed": persistent_changed,
+    }
 
 
 def waypoint_goal_payload(annotation: Dict[str, Any]) -> Dict[str, Any]:
@@ -562,6 +635,76 @@ def mark_floor_goal_published_state(
         "event": "floor_goal_published",
         "message": updated["status_message"],
         "event_extra": event_extra,
+    }
+
+
+def mark_connector_started_state(
+    active: Dict[str, Any],
+    annotation: Dict[str, Any],
+    goal: Dict[str, Any],
+    *,
+    transition: Dict[str, Any],
+    request_id: str,
+    plan_id: Optional[str],
+    map_epoch: Any,
+    now_text: str,
+    now_monotonic: float,
+) -> Dict[str, Any]:
+    """Record a connector dispatch without pretending it is a floor goal.
+
+    The active task remains the single owner of waypoint order.  Connector
+    identity is runtime state only; route geometry continues to come from the
+    current validated route registry.
+    """
+    if active.get("status") != "running":
+        return {"changed": False, "active": dict(active), "reason": "task_not_running"}
+    updated = dict(active)
+    updated["last_goal_annotation_id"] = annotation.get("id")
+    updated["last_goal_label"] = annotation.get("label")
+    updated["last_goal_sent_at"] = now_text
+    updated["last_goal_sent_monotonic"] = float(now_monotonic)
+    updated["last_goal_attempt_id"] = request_id
+    updated["last_goal_pose"] = {
+        "floor": goal.get("floor"),
+        "x": goal.get("x"),
+        "y": goal.get("y"),
+        "z": goal.get("z"),
+        "yaw": goal.get("yaw"),
+    }
+    updated["phase"] = "navigating"
+    updated["last_nav_goal_status"] = "sent"
+    updated["connector_request_id"] = request_id
+    updated["connector_route_id"] = transition.get("route_id")
+    updated["connector_plan_id"] = plan_id or None
+    updated["connector_map_epoch"] = map_epoch
+    updated["connector_state"] = "PREPARING"
+    updated["connector_source_floor"] = transition.get("source_floor")
+    updated["connector_target_floor"] = transition.get("target_floor")
+    updated["connector_started_at"] = now_text
+    updated["connector_started_monotonic"] = float(now_monotonic)
+    updated["last_floor_goal_published_at"] = now_text
+    updated["last_floor_goal_published_monotonic"] = float(now_monotonic)
+    updated["last_floor_goal_annotation_id"] = annotation.get("id")
+    updated["last_floor_goal_label"] = annotation.get("label")
+    updated["last_floor_goal_source_floor"] = transition.get("source_floor")
+    updated["last_floor_goal_target_floor"] = transition.get("target_floor")
+    updated["last_floor_goal_cross_floor"] = True
+    updated["last_floor_goal_pose"] = dict(updated["last_goal_pose"])
+    updated["status_message"] = "已启动楼梯连接边，等待 terrain_guard 与入口导航"
+    return {
+        "changed": updated != active,
+        "active": updated,
+        "event": "stair_connector_started",
+        "message": updated["status_message"],
+        "event_extra": {
+            "annotation_id": annotation.get("id"),
+            "request_id": request_id,
+            "route_id": transition.get("route_id"),
+            "plan_id": plan_id,
+            "map_epoch": map_epoch,
+            "source_floor": transition.get("source_floor"),
+            "target_floor": transition.get("target_floor"),
+        },
     }
 
 

@@ -88,6 +88,11 @@ def test_multi_hop_connector_is_expanded() -> None:
     ]
     assert [item["path_step_index"] for item in plan["transitions"]] == [0, 1]
     assert [item["path_step_count"] for item in plan["transitions"]] == [2, 2]
+    from_f1 = runtime_transition_for_annotation(plan, "p3", current_floor="F1")
+    assert [item["route_id"] for item in from_f1["edges"]] == ["r12", "r23"]
+    from_intermediate_f2 = runtime_transition_for_annotation(plan, "p3", current_floor="F2")
+    assert from_intermediate_f2["action"] == "transition"
+    assert [item["route_id"] for item in from_intermediate_f2["edges"]] == ["r23"]
 
 
 def test_returning_to_previous_floor_keeps_contiguous_segments() -> None:

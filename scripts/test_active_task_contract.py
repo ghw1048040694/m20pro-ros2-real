@@ -14,6 +14,7 @@ from m20pro_cloud_bridge.active_task_contract import (  # noqa: E402
     GOAL_SENT_RESET_KEYS,
     NEXT_WAYPOINT_RESET_KEYS,
     advance_active_task_state,
+    apply_connector_status_state,
     active_annotation_from_list,
     active_annotation_missing_failure,
     active_annotation_resolution,
@@ -21,11 +22,13 @@ from m20pro_cloud_bridge.active_task_contract import (  # noqa: E402
     active_waypoint_elapsed_s,
     append_active_task_timeline_event_state,
     begin_waypoint_dwell_state,
+    connector_owns_navigation_status,
     create_active_task_state,
     dwell_tick_decision,
     fail_active_task_state,
     goal_dispatch_decision,
     idle_stop_task_response,
+    mark_connector_started_state,
     mark_floor_goal_published_state,
     mark_active_task_failed_state,
     mark_active_task_stopped_state,
@@ -360,6 +363,81 @@ def test_mark_floor_goal_published_state() -> None:
     )
     assert_true(not idle["changed"], "non-running task does not change")
     assert_equal(idle["reason"], "task_not_running", "non-running reason")
+
+
+def test_mark_connector_started_state() -> None:
+    ann = annotation()
+    goal = waypoint_goal_payload(ann)
+    result = mark_connector_started_state(
+        active(),
+        ann,
+        goal,
+        transition={
+            "route_id": "F20:F21:stairs",
+            "source_floor": "F20",
+            "target_floor": "F21",
+        },
+        request_id="stair_1",
+        plan_id="task_1:run_1",
+        map_epoch=None,
+        now_text="now",
+        now_monotonic=10.0,
+    )
+    marked = result["active"]
+    assert_equal(marked["connector_state"], "PREPARING", "connector starts preparing")
+    assert_equal(marked["connector_request_id"], "stair_1", "connector request identity")
+    assert_equal(marked["last_floor_goal_cross_floor"], True, "cross-floor timeout projection")
+    assert_equal(result["event"], "stair_connector_started", "connector timeline event")
+
+
+def test_connector_owns_internal_nav_status_until_terminal() -> None:
+    running = active(
+        connector_request_id="stair_1",
+        connector_state="ENTRY_NAVIGATION",
+    )
+    assert_true(connector_owns_navigation_status(running), "active connector owns its Nav2 status")
+    running["connector_state"] = "EXIT_NAVIGATION"
+    assert_true(connector_owns_navigation_status(running), "exit Nav2 remains connector-owned")
+    running["connector_state"] = "COMPLETED"
+    assert_true(not connector_owns_navigation_status(running), "completed connector releases Nav2 status")
+    running["connector_state"] = "ENTRY_NAVIGATION"
+    running.pop("connector_request_id")
+    assert_true(not connector_owns_navigation_status(running), "missing connector identity cannot claim status")
+
+
+def test_connector_status_is_identity_bound_and_tracks_liveness() -> None:
+    running = active(
+        connector_request_id="stair_1",
+        connector_state="PREPARING",
+    )
+    mismatch = apply_connector_status_state(
+        running,
+        {"request_id": "other", "state": "ENTRY_NAVIGATION"},
+        now_text="now",
+        now_monotonic=12.0,
+    )
+    assert_true(not mismatch["matched"], "other connector status is ignored")
+    heartbeat = apply_connector_status_state(
+        running,
+        {
+            "request_id": "stair_1",
+            "state": "ENTRY_NAVIGATION",
+            "code": "connector_heartbeat",
+            "message": "导航至楼梯入口",
+        },
+        now_text="now",
+        now_monotonic=12.0,
+    )
+    assert_true(heartbeat["matched"], "matching connector status is accepted")
+    assert_equal(heartbeat["active"]["connector_state"], "ENTRY_NAVIGATION", "connector phase updated")
+    assert_equal(heartbeat["active"]["connector_last_status_monotonic"], 12.0, "connector liveness updated")
+    completed = apply_connector_status_state(
+        heartbeat["active"],
+        {"request_id": "stair_1", "state": "COMPLETED", "code": "connector_completed"},
+        now_text="done",
+        now_monotonic=13.0,
+    )
+    assert_true(completed["terminal"] and not completed["failed"], "completed connector is terminal success")
 
 
 def test_create_active_task_state() -> None:
@@ -777,6 +855,9 @@ def main() -> int:
         test_mark_goal_sent_new_and_resend,
         test_prepare_goal_send_state,
         test_mark_floor_goal_published_state,
+        test_mark_connector_started_state,
+        test_connector_owns_internal_nav_status_until_terminal,
+        test_connector_status_is_identity_bound_and_tracks_liveness,
         test_create_active_task_state,
         test_mark_active_task_terminal_states,
         test_fail_active_task_state,

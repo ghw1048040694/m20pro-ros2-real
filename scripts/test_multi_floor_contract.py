@@ -86,6 +86,10 @@ def test_routes_and_multi_hop_path() -> None:
     routes = stair_routes_from_config(floor_config())
     assert_equal(len(routes), 2, "route count")
     assert_equal(all(item["configured"] for item in routes), True, "routes configured")
+    assert_equal(routes[0]["entry"], pose(1), "canonical entry pose projection")
+    assert_equal(routes[0]["source_platform"], pose(2), "canonical source platform projection")
+    assert_equal(routes[0]["target_platform"], pose(3), "canonical target platform projection")
+    assert_equal(routes[0]["post_exit"], pose(4), "canonical post-exit projection")
     assert_equal(find_floor_path(routes, "F19", "F21"), ["F19", "F20", "F21"], "multi-hop path")
     assert_equal(find_floor_path(routes, "F21", "F19"), None, "directed route")
 

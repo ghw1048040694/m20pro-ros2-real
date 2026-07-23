@@ -416,47 +416,70 @@ def runtime_transition_for_annotation(
             "target_segment_index": target_index,
         }
 
-    source_index = next(
-        (
-            index
-            for index in range(target_index - 1, -1, -1)
-            if _text(segments[index].get("floor")) == source_floor
-        ),
-        None,
-    )
-    if source_index is None:
+    boundary_edges = [
+        dict(item)
+        for item in plan.get("transitions") or []
+        if isinstance(item, dict)
+        and _int_or(item.get("target_segment_index", -1), -1) == target_index
+    ]
+    if not boundary_edges:
         return {
             "action": "invalid",
-            "code": "navigation_plan_source_segment_missing",
-            "message": "当前楼层不对应当前点位前的统一导航段",
+            "code": "navigation_plan_transition_missing",
+            "message": "统一导航计划缺少当前点位前的有向连接",
             "source_floor": source_floor,
             "target_floor": target_floor,
             "target_segment_index": target_index,
         }
 
-    edges = [
-        dict(item)
-        for item in plan.get("transitions") or []
-        if isinstance(item, dict)
-        and _int_or(item.get("source_segment_index", -1), -1) == source_index
-        and _int_or(item.get("target_segment_index", -1), -1) == target_index
-    ]
-    edges.sort(key=lambda item: _int_or(item.get("path_step_index", 0), 0))
-    if not edges:
+    grouped: Dict[int, List[Dict[str, Any]]] = {}
+    for edge in boundary_edges:
+        group_index = _int_or(edge.get("source_segment_index", -1), -1)
+        grouped.setdefault(group_index, []).append(edge)
+    selected_source_index: Optional[int] = None
+    selected_edges: List[Dict[str, Any]] = []
+    for group_index, group_edges in grouped.items():
+        group_edges.sort(key=lambda item: _int_or(item.get("path_step_index", 0), 0))
+        start_index = next(
+            (
+                index
+                for index, edge in enumerate(group_edges)
+                if _text(edge.get("source_floor")) == source_floor
+            ),
+            None,
+        )
+        if start_index is None:
+            continue
+        remaining = group_edges[start_index:]
+        expected_floor = source_floor
+        path_contiguous = True
+        for edge in remaining:
+            next_floor = _text(edge.get("target_floor"))
+            if _text(edge.get("source_floor")) != expected_floor or not next_floor:
+                path_contiguous = False
+                break
+            expected_floor = next_floor
+        if not path_contiguous:
+            continue
+        if expected_floor != target_floor:
+            continue
+        selected_source_index = group_index
+        selected_edges = remaining
+        break
+    if selected_source_index is None or not selected_edges:
         return {
             "action": "invalid",
-            "code": "navigation_plan_transition_missing",
-            "message": "统一导航计划缺少当前楼层到目标楼层的有向连接",
+            "code": "navigation_plan_source_path_missing",
+            "message": "当前楼层不在通往当前点位的剩余有向路径上",
             "source_floor": source_floor,
             "target_floor": target_floor,
-            "source_segment_index": source_index,
             "target_segment_index": target_index,
         }
     return {
         "action": "transition",
         "source_floor": source_floor,
         "target_floor": target_floor,
-        "source_segment_index": source_index,
+        "source_segment_index": selected_source_index,
         "target_segment_index": target_index,
-        "edges": edges,
+        "edges": selected_edges,
     }

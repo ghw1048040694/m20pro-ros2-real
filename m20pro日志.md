@@ -1,5 +1,71 @@
 # M20 Pro ROS 2 跨楼层巡检导航系统项目日志
 
+## 2026-07-23 22:45 CST - 根治连接边动作所有权、回执标签与多跳续跑缺口
+
+- 最终提交前沿真实 ROS 话题继续审计，发现 `stair_executor` 与新编排器同时涉及
+  terrain 请求，且编排器不认识执行器首个 `request_terrain_guard` 动作；收敛为唯一
+  所有权：执行器只输出 reducer 动作和状态、消费 106 状态，编排器独占
+  `/m20pro/terrain_guard/request` 发布。失败、停止和完成均显式输出
+  `release_terrain_guard`，不会把上一条请求留给下一条连接边。
+- 修正连接边终结判据字段拼写不一致造成的永久 busy：不再依赖错误的命令类型字符串，
+  而以显式 release 动作终结当前 request；新增 terrain 请求身份、释放和所有权测试。
+- 根治入口/出口回执无法推进：两者复用 `/m20pro/floor_goal` 后，`floor_manager` 的实际
+  回执标签都是 `floor_goal`，不能等待不存在的 `stair_entry/stair_exit` 标签。编排器现将
+  ROS 回执标签与连接边阶段分开保存，并继续以 `goal_seq` 隔离迟到成功；`floor_goal`
+  的早期错误统一携带协议标签，避免错误被漏掉后只能等超时。
+- Web 在连接边活动期间不再把内部入口/出口 `floor_goal` 回执当作最终巡检任务点完成；
+  连接边终结后才把 Nav2 回执所有权交回同一个任务执行器，没有增加第二个队列或导航 API。
+- 编排器仅保留最近 128 个终结请求身份并显式忽略其迟到动作，既防止已完成动作重新获得
+  副作用，也避免机器狗多日不关机时历史 request 集合无限增长。
+- 根治多跳中转层续跑失败：F1→F2→F3 在完成第一条边后，运行时直接从 F2 选择剩余
+  F2→F3 边，不再要求 F2 必须存在一个虚假任务点；任务执行期间若点位或路线记录变化，
+  立即以 `navigation_task_plan_stale` 停止，防止切入错误地图。
+- 根治新旧超时机制冲突：连接边等待 terrain、入口 Nav2、楼梯运动、切层或出口 Nav2
+  时，不再被旧“普通跨层目标 Nav2 接收超时”提前终止。执行器每 1 秒发布身份绑定心跳，
+  reducer 用统一阶段时钟执行超时；Web 只在执行器未响应或心跳中断时停止任务。执行器
+  关闭或 busy 也会携带本次 request 身份立即失败，不再静默等到超时；无动作的状态更新
+  不再重复发布 action 信封，避免楼梯状态频率放大成无效 ROS 消息。
+- 语义动作不再批量挪到信封末尾，严格保留 reducer 的原始顺序；即使当前步态和运动仍为
+  `dispatchable=false`，未来接入认证运动适配器时也不会把平地步态、terrain 释放和恢复
+  导航重排成另一套时序。
+- 本轮仍只修改上位机开发分支源码、测试、文档和日志，未连接、部署或重启
+  103/104/106，未发送导航、速度、姿态、重定位、切图或网络命令；编排器与执行器仍
+  默认关闭且不加入 real launch，`stair_execution_retired` 继续有效。
+- 验证：47 个 `scripts/test_*.py` 全部通过，Python 编译、JavaScript 语法和
+  `git diff --check` 通过；`m20pro_navigation`、`m20pro_cloud_bridge`、
+  `m20pro_bringup` 三包 `colcon build --symlink-install` 通过。
+
+Last updated: 2026-07-23 22:54 CST
+
+## 2026-07-23 22:23 CST - 闭合统一导航到楼梯语义动作的唯一编排边界
+
+- 修复统一导航分支的结构性缺口：`stair_executor` 之前只能产生
+  `dispatch_entry_goal`、`request_floor_switch`、`dispatch_exit_goal` 等语义动作，
+  仓库中没有消费者把动作送入已有 Nav2/切层/停止接口。新增
+  `stair_action_orchestrator_contract.py` 与 ROS 适配器，安全动作只映射到现有
+  `/m20pro/floor_goal`、`/m20pro/floor_switch_request`、`/m20pro/stop_task`，不新增任务队列。
+- `set_gait`、`start_connector_motion`、`resume_flat_navigation` 只输出
+  `dispatchable=false` 的语义意图；适配器默认关闭且不加入 real launch，不发布
+  `/cmd_vel`、原厂步态或 103 控制命令。动作和回送事件统一校验
+  `request_id/route_id/plan_id/sequence`，迟到或重复消息不能推进新连接边。
+- 统一任务跨楼层下发现在先复用 `stair_executor` 自身路线校验：默认
+  `shadow-v1/stop_only` 或未认证路线在创建普通楼层目标前直接以
+  `stair_execution_retired` 失败；认证路线才发布连接边启动请求。连接边完成后由同一
+  任务执行器继续当前点位或下一条有向边，单层仍是同一计划的 `n=1`。
+- 统一 `stair_routes_from_config` 的路线输出为执行器所需的顶层入口、平台、出口及地图
+  身份字段，保留 `poses` 仅作兼容投影，消除任务计划与执行器之间的路线 schema 分叉。
+- 新增动作编排、身份/序列、Nav2 阶段事件、切层回执和 connector 任务状态测试；本轮仅
+  修改上位机源码、测试、文档和日志，未连接、部署或重启 103/104/106，未发送导航、速度、
+  姿态、重定位、切图或网络命令。
+- 验证结果：全部 `scripts/test_*.py` 通过，Python 编译、JavaScript 语法和
+  `git diff --check` 通过；`m20pro_navigation`、`m20pro_cloud_bridge`、
+  `m20pro_bringup` 三包 `colcon build --symlink-install` 通过。
+- 追加安全相关性约束：编排器只有先观察到当前入口/出口 Nav2
+  `nav_goal_accepted` 的 `goal_seq`，才接受同序号的成功回执；上一条连接边的迟到
+  `nav_goal_succeeded` 不能推进当前连接边。对应回归测试通过。
+
+Last updated: 2026-07-23 22:31 CST
+
 ## 2026-07-23 21:48 CST - 增加 terrain_guard 离线回放入口
 
 - 在现有 `m20pro_navigation` 包中新增 `terrain_guard_replay`，支持读取 rosbag2 的

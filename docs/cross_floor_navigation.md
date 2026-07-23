@@ -62,12 +62,34 @@
 负责，楼梯本体只允许认证连接器沿三维走廊通过；遇到人员、箱体、横向覆盖不足、点云过期或
 定位异常立即停止，不在台阶上自由绕行。当前状态机只有合同和离线测试，尚未
 接入真实速度输出。`stair_executor` ROS 适配器默认关闭且不在 real launch 中启动，
-但其语义接口已经闭合：成功准备连接边时向
-`/m20pro/terrain_guard/request` 发布带 `request_id/profile_id/corridor_version` 的
-走廊请求，并消费 106 返回的同身份 `/m20pro/terrain_guard/status`；准备阶段的
+但其语义接口已经闭合：成功准备连接边时输出带身份的 terrain 请求动作，并消费 106
+返回的同身份 `/m20pro/terrain_guard/status`；准备阶段的
 `unknown/stale` 只等待点云恢复，进入入口导航或楼梯运动后再遇到未知、过期或阻塞
-则终止并停用该请求。适配器只发布语义动作和影子请求，不发布速度、步态或姿态命令，
+则终止并输出释放动作。适配器只发布语义动作和状态，不发布速度、步态、姿态或 terrain
+请求，
 `stair_execution_retired` 继续有效。
+
+语义动作由唯一的 `stair_action_orchestrator` 合同适配：
+
+- `dispatch_entry_goal` / `dispatch_exit_goal` 只映射到现有 `/m20pro/floor_goal`；
+- `request_terrain_guard` / `release_terrain_guard` 只映射到现有
+  `/m20pro/terrain_guard/request`，失败、停止和完成都显式释放请求；
+- `request_floor_switch` 只映射到 Web 已有的 `/m20pro/floor_switch_request` 持久事务；
+- `stop` 只映射到现有 `/m20pro/stop_task`；
+- `set_gait`、`start_connector_motion` 和 `resume_flat_navigation` 只发布
+  `dispatchable=false` 的语义意图，不会直接写 `/cmd_vel`、原厂步态或 103。
+
+该编排器默认关闭且不在 real launch 中启动。统一任务运行时在跨楼层目标
+下发前复用 `stair_executor` 自身的路线校验：未认证路线直接返回
+`stair_execution_retired`，不会先伪造一个普通楼层目标再等待超时；只有认证
+路线才会发布带 `request_id/plan_id` 的连接边启动请求。连接边完成后，Web
+清除当前转换标记，由同一个统一任务执行器继续当前点位或下一条有向连接，
+不创建第二个任务队列。入口与出口在 ROS 层都复用 `label=floor_goal`，连接边阶段由
+编排器独立保存，只有先收到本阶段 `nav_goal_accepted goal_seq=N`，同一序号成功回执
+才可推进；Web 在连接边活动期间不把其内部 Nav2 回执当成最终任务点完成。多跳路径在
+中转层按剩余有向边继续，不要求为中转层额外创建虚假任务点。执行器以 1 秒心跳向 Web
+报告当前阶段，并由 reducer 自己执行阶段超时；Web 只检查执行器心跳是否中断，不再套用
+旧普通跨层目标的 Nav2 接收超时。
 
 ## 现场参数
 
