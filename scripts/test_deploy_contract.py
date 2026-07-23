@@ -18,6 +18,10 @@ def main() -> None:
     autostart = (ROOT / "scripts" / "104_enable_autostart.sh").read_text(
         encoding="utf-8"
     )
+    mirror = (ROOT / "scripts" / "104_update_from_mirror.sh").read_text(
+        encoding="utf-8"
+    )
+    scripts_readme = (ROOT / "scripts" / "README.md").read_text(encoding="utf-8")
 
     assert "local_deploy_edge_scan_to_106.sh" in deploy
     assert "m20pro_field_profile.py\" check" in deploy
@@ -61,6 +65,12 @@ def main() -> None:
     assert "M20PRO_INSPECTION_BACKEND=${M20PRO_INSPECTION_BACKEND:-rknn}" in autostart
     assert "best_rk3588_fp16.rknn" in autostart
     assert "models/best.pt" not in autostart
+
+    gitee_mirror = "git@gitee.com:gggghw/m20pro-ros2-real.git"
+    assert f'M20PRO_REMOTE_URL:-{gitee_mirror}' in mirror
+    assert "github.com" not in mirror
+    assert gitee_mirror in scripts_readme
+    assert "只读部署公钥" in scripts_readme
 
     assert "edge_previous_state" in deploy
     assert "systemctl stop m20pro-edge-scan-106.service" in deploy

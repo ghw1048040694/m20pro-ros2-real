@@ -58,7 +58,7 @@ source install/setup.bash
 # 未来当 104 能直接访问公司 GitLab 后，在 104 上执行
 ./scripts/104_update_from_gitlab.sh
 
-# 如果公司 GitLab 不通，但测试机能访问 GitHub/Gitee 镜像仓库
+# 如果公司 GitLab 不通，但测试机能访问 Gitee 部署镜像
 ./scripts/104_update_from_mirror.sh
 ```
 
@@ -105,10 +105,6 @@ schema v4 共 67 个现场参数，其中 `navigation` 30 个、`teleoperation` 
 - 如果 104 上 `/home/user/m20pro_real_ros2_ws` 不是 git 工作区，`git pull` 不会工作；先用 `104_diagnose_preflight.sh` 确认 `git_repo=yes/no`，非 git 工作区继续用上位机 `local_deploy_to_test_robot.sh`，或在网络稳定后用 `104_update_from_gitlab.sh`/`104_update_from_mirror.sh` 转成 git 工作区。
 - 如果 104 需要通过 103 上网，104 必须能拿到默认路由和 DNS，103 自己也必须有 Wi-Fi/上游默认路由、IPv4 转发、NAT 和 dnsmasq；只看到 104 能 ping 到 `10.21.31.103` 不等于能访问 GitHub。
 - `104_update_from_gitlab.sh` 是 104 直连 GitLab 后使用的更新入口；如果当前网络访问不到 `git.fabu.ai`，先不要用它。
-- `104_update_from_mirror.sh` 是测试机直连镜像仓库的入口，默认使用 `git@github.com:ghw1048040694/m20pro-ros2-real.git`；如果改用 Gitee，可执行：
-
-```bash
-M20PRO_REMOTE_URL=git@gitee.com:<你的命名空间>/<仓库名>.git ./scripts/104_update_from_mirror.sh
-```
-
-- 镜像仓库如果是私有仓库，需要把测试机 104 的公钥加入 GitHub/Gitee 的 Deploy Key 或个人 SSH Key。
+- `104_update_from_mirror.sh` 是机器狗无法访问公司 GitLab 时的直接更新入口，默认只拉取 Gitee 部署镜像 `git@gitee.com:gggghw/m20pro-ros2-real.git` 的已验证 `main`。
+- Gitee 部署镜像是私有仓库。每台机器狗首次使用前，必须把 104 的公钥加入该仓库的只读部署公钥；脚本优先使用既有 `/home/user/.ssh/id_ed25519_m20pro_test_gitlab` 私钥，该文件不存在时由 SSH 使用 104 的标准密钥，不生成第二套密钥。
+- 三个仓库职责固定：GitLab 是公司开发源，允许保留开发分支；GitHub 是个人成果仓库，只保留 `main`；Gitee 是机器狗部署镜像，也只保留经过验证的 `main`。
