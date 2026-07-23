@@ -54,6 +54,7 @@ CONTROLLER_SPEC = {
     "frequency_hz": ("number", 2.0, 20.0),
     "max_linear_speed_mps": ("number", 0.10, 0.80),
     "max_angular_speed_radps": ("number", 0.40, 1.20),
+    "min_angular_speed_radps": ("number", 0.10, 0.80),
     "linear_acceleration_limit_mps2": ("number", 0.10, 5.00),
     "angular_acceleration_limit_radps2": ("number", 0.10, 5.00),
     "linear_deceleration_limit_mps2": ("number", 0.10, 5.00),
@@ -261,6 +262,10 @@ def validate_field_profile(raw: Any) -> Dict[str, Any]:
         raise FieldProfileError(
             "navigation.controller.stopped_linear_speed_mps must be below max_linear_speed_mps"
         )
+    if controller["min_angular_speed_radps"] > controller["max_angular_speed_radps"]:
+        raise FieldProfileError(
+            "navigation.controller.min_angular_speed_radps must not exceed max_angular_speed_radps"
+        )
     if (
         controller["recovery_min_angular_speed_radps"]
         > controller["max_angular_speed_radps"]
@@ -442,6 +447,7 @@ def render_nav2_parameters(
         "__FIELD_PROFILE_YAW_GOAL_TOLERANCE__": goal["yaw_tolerance_rad"],
         "__FIELD_PROFILE_MAX_LINEAR_SPEED__": controller["max_linear_speed_mps"],
         "__FIELD_PROFILE_MAX_ANGULAR_SPEED__": controller["max_angular_speed_radps"],
+        "__FIELD_PROFILE_MIN_ANGULAR_SPEED__": controller["min_angular_speed_radps"],
         "__FIELD_PROFILE_LINEAR_ACCELERATION__": controller[
             "linear_acceleration_limit_mps2"
         ],

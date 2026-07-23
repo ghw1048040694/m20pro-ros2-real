@@ -114,7 +114,9 @@ controller_server:
       max_vel_theta: __FIELD_PROFILE_MAX_ANGULAR_SPEED__
       min_speed_xy: 0.0
       max_speed_xy: __FIELD_PROFILE_MAX_LINEAR_SPEED__
-      min_speed_theta: 0.0
+      # DWB only applies this threshold to pure rotation. With forward motion,
+      # any angular velocity remains valid, preserving smooth obstacle tracking.
+      min_speed_theta: __FIELD_PROFILE_MIN_ANGULAR_SPEED__
       acc_lim_x: __FIELD_PROFILE_LINEAR_ACCELERATION__
       acc_lim_y: 0.0
       acc_lim_theta: __FIELD_PROFILE_ANGULAR_ACCELERATION__

@@ -83,6 +83,8 @@ def main() -> None:
     assert follow["max_vel_x"] == "__FIELD_PROFILE_MAX_LINEAR_SPEED__"
     assert follow["max_speed_xy"] == "__FIELD_PROFILE_MAX_LINEAR_SPEED__"
     assert follow["max_vel_theta"] == "__FIELD_PROFILE_MAX_ANGULAR_SPEED__"
+    assert follow["min_speed_theta"] == "__FIELD_PROFILE_MIN_ANGULAR_SPEED__"
+    assert navigation_profile["controller"]["min_angular_speed_radps"] == 0.35
     assert follow["publish_local_plan"] is True
     assert follow["stateful"] is False
     assert local["always_send_full_costmap"] is True
@@ -119,6 +121,7 @@ def main() -> None:
     assert type(rendered_controller["FollowPath"]["decel_lim_theta"]) is float
     assert type(rendered_controller["FollowPath"]["vx_samples"]) is int
     assert type(rendered_controller["FollowPath"]["vtheta_samples"]) is int
+    assert rendered_controller["FollowPath"]["min_speed_theta"] == 0.35
     assert type(rendered_controller["controller_frequency"]) is float
     assert type(rendered_controller["progress_checker"]["movement_time_allowance"]) is float
     assert rendered_nav2["local_costmap"]["local_costmap"]["ros__parameters"][

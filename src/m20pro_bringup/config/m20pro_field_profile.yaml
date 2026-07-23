@@ -34,6 +34,7 @@ navigation:
     frequency_hz: 10.0            # 局部控制循环频率，单位 Hz；越高越实时但 CPU 开销越大
     max_linear_speed_mps: 0.45    # 最大前进速度，单位 m/s
     max_angular_speed_radps: 0.75 # 最大旋转速度，单位 rad/s
+    min_angular_speed_radps: 0.35 # 纯旋转最低有效角速度，单位 rad/s；带线速度时不限制角速度
     linear_acceleration_limit_mps2: 2.20 # 线加速度上限，单位 m/s^2
     angular_acceleration_limit_radps2: 2.00 # 角加速度上限，单位 rad/s^2
     linear_deceleration_limit_mps2: 2.20 # 线减速度正数幅值，单位 m/s^2

@@ -58,8 +58,8 @@ def main() -> None:
             "localization",
         )
     }
-    assert leaf_count(editable) == 66
-    assert leaf_count(editable["navigation"]) == 29
+    assert leaf_count(editable) == 67
+    assert leaf_count(editable["navigation"]) == 30
     assert leaf_count(editable["teleoperation"]) == 7
 
     retired_stair_group = raw_profile()
@@ -69,6 +69,12 @@ def main() -> None:
     unsafe_speed = raw_profile()
     unsafe_speed["navigation"]["controller"]["stopped_linear_speed_mps"] = 0.50
     assert rejected(unsafe_speed)
+
+    impossible_turning_range = raw_profile()
+    impossible_turning_range["navigation"]["controller"][
+        "min_angular_speed_radps"
+    ] = 0.80
+    assert rejected(impossible_turning_range)
 
     unsafe_teleop = raw_profile()
     unsafe_teleop["teleoperation"]["max_forward_speed_mps"] = 0.60
