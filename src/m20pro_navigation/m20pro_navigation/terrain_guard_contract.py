@@ -87,6 +87,12 @@ def normalize_corridor(request: Dict[str, Any]) -> Dict[str, Any]:
         "max_step_height_m": max_step,
         "obstacle_height_m": obstacle_height,
         "bin_size_m": bin_size,
+        # A valid stair tread must occupy a meaningful lateral span.  Derive
+        # the default from the calibrated corridor instead of adding a field
+        # profile constant for every robot or stair.
+        "min_lateral_span_m": _positive(
+            corridor.get("min_lateral_span_m"), max(0.2, width_m * 0.4)
+        ),
         "min_points_per_bin": _int_at_least(corridor.get("min_points_per_bin"), 4, 1),
         "min_step_count": _int_at_least(corridor.get("min_step_count"), 2, 1),
         "min_coverage": min(1.0, max(0.1, _finite(corridor.get("min_coverage")) or 0.55)),
@@ -168,22 +174,38 @@ def inspect_cloud(
 
     bin_size = float(limits["bin_size_m"])
     bin_count = max(1, int(math.ceil(lookahead / bin_size)))
-    bins: List[List[float]] = [[] for _ in range(bin_count)]
+    bins: List[List[Tuple[float, float]]] = [[] for _ in range(bin_count)]
     for longitudinal, _y, z in selected:
         index = min(bin_count - 1, int(longitudinal / bin_size))
-        bins[index].append(z)
+        bins[index].append((_y, z))
 
     min_points = int(limits["min_points_per_bin"])
-    usable = [index for index, values in enumerate(bins) if len(values) >= min_points]
+    min_lateral_span = float(limits["min_lateral_span_m"])
+
+    def lateral_span(values: Sequence[Tuple[float, float]]) -> float:
+        if not values:
+            return 0.0
+        lateral = [point[0] for point in values]
+        return max(lateral) - min(lateral)
+
+    point_usable = [index for index, values in enumerate(bins) if len(values) >= min_points]
+    usable = [index for index in point_usable if lateral_span(bins[index]) >= min_lateral_span]
     coverage = len(usable) / float(bin_count)
     if coverage < float(limits["min_coverage"]):
+        reason = (
+            "corridor_lateral_coverage_low"
+            if point_usable and len(usable) < len(point_usable)
+            else "corridor_coverage_low"
+        )
         return _base_result(
             "unknown",
-            reason="corridor_coverage_low",
+            reason=reason,
             confidence=coverage,
             coverage=coverage,
             bins_with_points=len(usable),
             bin_count=bin_count,
+            bins_with_points_only=len(point_usable),
+            min_lateral_span_m=min_lateral_span,
         )
 
     # A stair profile may end at the visible range, but it may not have a
@@ -197,6 +219,7 @@ def inspect_cloud(
             coverage=coverage,
             bins_with_points=len(usable),
             bin_count=bin_count,
+            min_lateral_span_m=min_lateral_span,
         )
     last_usable = usable[-1]
     if usable != list(range(last_usable + 1)):
@@ -207,10 +230,14 @@ def inspect_cloud(
             coverage=coverage,
             bins_with_points=len(usable),
             bin_count=bin_count,
+            min_lateral_span_m=min_lateral_span,
         )
 
     # Do not infer terrain beyond the last continuously observed bin.
-    profiles = [_median_or_none(bins[index]) for index in range(last_usable + 1)]
+    profiles = [
+        _median_or_none([z for _y, z in bins[index]])
+        for index in range(last_usable + 1)
+    ]
     valid_profiles = [value for value in profiles if value is not None]
     baseline = min(valid_profiles) if valid_profiles else 0.0
     obstacle_height = float(limits["obstacle_height_m"])
@@ -219,7 +246,7 @@ def inspect_cloud(
     high_bins = [
         index
         for index, values in enumerate(bins)
-        if values and max(values) - baseline >= obstacle_height
+        if values and max(z for _y, z in values) - baseline >= obstacle_height
         and index * bin_size <= obstacle_distance
     ]
 
@@ -260,6 +287,7 @@ def inspect_cloud(
             hazard_type="step_height_out_of_range",
             hazard_distance_m=hazard_index * bin_size,
             step_count=0,
+            min_lateral_span_m=min_lateral_span,
         )
 
     if invalid_deltas:
@@ -271,6 +299,7 @@ def inspect_cloud(
             coverage=coverage,
             hazard_distance_m=index * bin_size,
             step_count=0,
+            min_lateral_span_m=min_lateral_span,
         )
 
     signs = [1 if delta > 0 else -1 for _index, delta in step_deltas]
@@ -286,6 +315,7 @@ def inspect_cloud(
             confidence=coverage * 0.5,
             coverage=coverage,
             step_count=coherent_steps,
+            min_lateral_span_m=min_lateral_span,
         )
 
     # An isolated jump that is much taller than the other steps is more
@@ -312,6 +342,7 @@ def inspect_cloud(
                     if abs(delta) > max(reference_height * 1.75, reference_height + 0.08)
                 ),
                 step_count=coherent_steps,
+                min_lateral_span_m=min_lateral_span,
             )
 
     if coherent_steps >= min_steps:
@@ -322,6 +353,7 @@ def inspect_cloud(
             coverage=coverage,
             step_count=coherent_steps,
             step_direction="up" if dominant_sign > 0 else "down",
+            min_lateral_span_m=min_lateral_span,
         )
 
     if high_bins:
@@ -333,6 +365,7 @@ def inspect_cloud(
             hazard_type="high_obstacle_in_corridor",
             hazard_distance_m=high_bins[0] * bin_size,
             step_count=coherent_steps,
+            min_lateral_span_m=min_lateral_span,
         )
 
     return _base_result(
@@ -341,4 +374,5 @@ def inspect_cloud(
         confidence=coverage * 0.5,
         coverage=coverage,
         step_count=coherent_steps,
+        min_lateral_span_m=min_lateral_span,
     )

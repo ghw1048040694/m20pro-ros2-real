@@ -70,6 +70,18 @@ def test_low_coverage_is_unknown() -> None:
     assert_equal(result["reason"], "corridor_coverage_low", "low coverage reason")
 
 
+def test_narrow_returns_are_not_a_full_tread() -> None:
+    points: list[tuple[float, float, float]] = []
+    for index, level in enumerate([0.0, 0.0, 0.12, 0.12, 0.24, 0.24]):
+        x = index * 0.2 + 0.05
+        for lateral in (-0.05, 0.05, 0.0, 0.02):
+            points.append((x, lateral, level))
+    result = inspect_cloud(points, request=request(), cloud_age_s=0.01)
+    assert_equal(result["state"], "unknown", "narrow lateral state")
+    assert_equal(result["reason"], "corridor_lateral_coverage_low", "narrow lateral reason")
+    assert_equal(result["permit_motion"], False, "narrow lateral permission")
+
+
 def test_profile_gap_is_unknown_even_with_two_steps() -> None:
     points = cloud([0.0, 0.0, 0.12, 0.12, 0.24, 0.24])
     points = [point for point in points if point[0] < 0.45 or point[0] > 0.65]
@@ -86,6 +98,7 @@ def test_continuous_upstairs_is_traversable() -> None:
     )
     assert_equal(result["state"], "traversable", "upstairs state")
     assert_equal(result["step_direction"], "up", "upstairs direction")
+    assert_equal(result["min_lateral_span_m"], 0.4, "calibrated lateral threshold")
     assert_equal(result["permit_motion"], False, "shadow guard permission")
 
 
@@ -146,6 +159,7 @@ def main() -> int:
         test_stale_cloud_is_stale,
         test_empty_cloud_is_unknown,
         test_low_coverage_is_unknown,
+        test_narrow_returns_are_not_a_full_tread,
         test_profile_gap_is_unknown_even_with_two_steps,
         test_continuous_upstairs_is_traversable,
         test_continuous_downstairs_is_traversable,

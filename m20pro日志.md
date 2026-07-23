@@ -1,5 +1,19 @@
 # M20 Pro ROS 2 跨楼层巡检导航系统项目日志
 
+## 2026-07-23 21:37 CST - 为 terrain_guard 增加连续走廊横向覆盖证据
+
+- 根治“窄物体高度剖面伪装成连续台阶”的输入缺口：106 terrain guard 现在要求每个
+  连续纵向 bin 除了达到最小点数，还必须覆盖标定走廊的最小横向跨度；默认值由走廊宽度
+  推导为 `max(0.2m, width_m * 0.4)`，不是新增一组现场硬编码参数。
+- 横向跨度不足只返回 `unknown/corridor_lateral_coverage_low`，不授予任何运动权限；
+  原有平地 `/scan`、Nav2 和点云链路不变。状态额外记录横向证据相关的覆盖信息，便于
+  后续用真实楼梯录包标定。
+- 新增窄回波回归测试，更新 106 请求示例、跨楼层说明和 terrain guard README。本轮
+  仅修改上位机源码、测试、文档和日志，未连接、部署或重启 103/104/106，未发送导航、
+  速度、姿态、重定位、切图或网络命令；`stair_execution_retired` 继续有效。
+
+Last updated: 2026-07-23 21:37 CST
+
 ## 2026-07-23 21:28 CST - 闭合楼梯 terrain_guard 语义请求与身份回传链
 
 - 修复根本缺口：`stair_executor` 合同虽然已经生成 `request_terrain_guard`，但原 ROS

@@ -12,7 +12,7 @@
 - 本节点不发布 `/scan`、`/cmd_vel`、步态或姿态命令。
 - 本节点不向 104 发送原始点云，只发布少量 JSON 状态。
 - `traversable` 只代表剖面证据完整；`permit_motion` 和 `certified_motion` 默认始终为 `false`。
-- 点云过期、坐标系不一致、走廊缺口、步高异常或方向混乱时均 fail-closed。
+- 点云过期、坐标系不一致、走廊缺口、横向覆盖不足、步高异常或方向混乱时均 fail-closed。
 
 ## 运行
 
@@ -44,13 +44,16 @@ ros2 run m20pro_navigation terrain_guard_106
 ```json
 {
   "enabled": true,
+  "request_id": "shadow-request-001",
   "route_id": "stairs-a-up",
+  "profile_id": "stairs-a-up:terrain",
   "corridor_version": "corridor-v1",
   "direction": "forward",
   "corridor": {
     "width_m": 1.0,
     "lookahead_m": 2.4,
     "bin_size_m": 0.12,
+    "min_lateral_span_m": 0.4,
     "min_step_height_m": 0.05,
     "max_step_height_m": 0.24,
     "obstacle_height_m": 0.22,
