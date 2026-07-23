@@ -112,14 +112,33 @@ def build_unified_navigation_plan(
             "map_ids": sorted(maps_by_floor[mixed_floor]),
         }
 
-    floor_sequence: List[str] = []
-    for floor in floors:
-        if not floor_sequence or floor_sequence[-1] != floor:
-            floor_sequence.append(floor)
+    # A segment is a contiguous run on one floor.  Do not group all points by
+    # floor: a valid mission may return to an earlier floor (F1 -> F2 -> F1),
+    # and merging those points would destroy execution order.
+    segments: List[Dict[str, Any]] = []
+    for item, floor, map_id in zip(annotations, floors, map_ids):
+        if not segments or segments[-1]["floor"] != floor:
+            segments.append(
+                {
+                    "kind": "floor",
+                    "index": len(segments),
+                    "floor": floor,
+                    "map_id": map_id,
+                    "annotation_ids": [],
+                }
+            )
+        segments[-1]["annotation_ids"].append(_text(item.get("id")))
+
+    floor_sequence = [str(item["floor"]) for item in segments]
+    transition_paths: List[Dict[str, Any]] = []
 
     configured_routes = _configured_routes(routes)
     transitions: List[Dict[str, Any]] = []
-    for source_floor, target_floor in zip(floor_sequence, floor_sequence[1:]):
+    for boundary_index, (source_floor, target_floor) in enumerate(
+        zip(floor_sequence, floor_sequence[1:])
+    ):
+        if source_floor == target_floor:
+            continue
         path = find_floor_path(configured_routes, source_floor, target_floor)
         if path is None:
             return {
@@ -129,6 +148,13 @@ def build_unified_navigation_plan(
                 "source_floor": source_floor,
                 "target_floor": target_floor,
             }
+        transition_paths.append(
+            {
+                "source_floor": source_floor,
+                "target_floor": target_floor,
+                "floor_path": list(path),
+            }
+        )
         for edge_source, edge_target in zip(path, path[1:]):
             route = _route_for_edge(configured_routes, edge_source, edge_target)
             if route is None:
@@ -145,25 +171,13 @@ def build_unified_navigation_plan(
                     "route_id": _text(route.get("id")) or f"{edge_source}->{edge_target}",
                     "source_floor": edge_source,
                     "target_floor": edge_target,
+                    "source_segment_index": boundary_index,
+                    "target_segment_index": boundary_index + 1,
                     "route": route,
                 }
             )
 
-    segments: List[Dict[str, Any]] = []
-    for floor in floor_sequence:
-        segment_annotations = [
-            item for item in annotations if _text(item.get("floor")) == floor
-        ]
-        segments.append(
-            {
-                "kind": "floor",
-                "floor": floor,
-                "map_id": next(iter(maps_by_floor[floor])),
-                "annotation_ids": [
-                    _text(item.get("id")) for item in segment_annotations if _text(item.get("id"))
-                ],
-            }
-        )
+    distinct_floors = _ordered_unique(floor_sequence)
 
     return {
         "ok": True,
@@ -171,9 +185,11 @@ def build_unified_navigation_plan(
         "annotation_ids": ordered_ids,
         "annotations": annotations,
         "floor_sequence": floor_sequence,
-        "floor_count": len(floor_sequence),
-        "single_floor": len(floor_sequence) == 1,
+        "floor_count": len(distinct_floors),
+        "segment_count": len(segments),
+        "single_floor": len(distinct_floors) == 1,
         "segments": segments,
+        "transition_paths": transition_paths,
         "transitions": transitions,
         "task_map_id": map_ids[0],
         "route_count": len(transitions),
@@ -190,12 +206,137 @@ def summarize_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
             "message": _text(plan.get("message")) if isinstance(plan, dict) else "导航计划无效",
         }
     floors = [_text(item.get("floor")) for item in plan.get("segments", [])]
+    distinct_floors = _ordered_unique(floors)
     return {
         "ok": True,
         "kind": "unified_navigation_plan",
-        "floor_count": len(floors),
+        "floor_count": len(distinct_floors),
+        "segment_count": len(floors),
         "floors": floors,
         "waypoint_count": len(plan.get("annotation_ids") or []),
         "transition_count": len(plan.get("transitions") or []),
         "single_floor": len(floors) == 1,
+    }
+
+
+def navigation_plan_record(plan: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the compact immutable task record for a validated plan.
+
+    Point payloads and full route configuration stay in their owning stores.
+    The task only needs ordered segment/map identities and directed connector
+    identities, preventing a task snapshot from becoming a second map or route
+    database.
+    """
+    if not isinstance(plan, dict) or not plan.get("ok"):
+        return summarize_plan(plan)
+    return {
+        "ok": True,
+        "kind": "unified_navigation_plan",
+        "version": 1,
+        "annotation_ids": list(plan.get("annotation_ids") or []),
+        "task_map_id": _text(plan.get("task_map_id")),
+        "floor_sequence": list(plan.get("floor_sequence") or []),
+        "floor_count": int(plan.get("floor_count") or 0),
+        "segment_count": int(plan.get("segment_count") or len(plan.get("segments") or [])),
+        "single_floor": bool(plan.get("single_floor")),
+        "segments": [
+            {
+                "kind": "floor",
+                "index": int(item.get("index", index)),
+                "floor": _text(item.get("floor")),
+                "map_id": _text(item.get("map_id")),
+                "annotation_ids": list(item.get("annotation_ids") or []),
+            }
+            for index, item in enumerate(plan.get("segments") or [])
+            if isinstance(item, dict)
+        ],
+        "transition_paths": [
+            {
+                "source_floor": _text(item.get("source_floor")),
+                "target_floor": _text(item.get("target_floor")),
+                "floor_path": list(item.get("floor_path") or []),
+            }
+            for item in plan.get("transition_paths") or []
+            if isinstance(item, dict)
+        ],
+        "transitions": [
+            {
+                "kind": "connector",
+                "route_id": _text(item.get("route_id")),
+                "source_floor": _text(item.get("source_floor")),
+                "target_floor": _text(item.get("target_floor")),
+                "source_segment_index": int(item.get("source_segment_index", 0)),
+                "target_segment_index": int(item.get("target_segment_index", 0)),
+            }
+            for item in plan.get("transitions") or []
+            if isinstance(item, dict)
+        ],
+        "route_count": len(plan.get("transitions") or []),
+    }
+
+
+def task_navigation_plan_state(
+    task: Dict[str, Any],
+    *,
+    annotations_by_id: Dict[str, Dict[str, Any]],
+    routes: Iterable[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Validate or migrate the canonical plan stored on a task.
+
+    The point store and the current directed route registry are the inputs of
+    truth.  A task created before unified navigation may have no plan and is
+    migrated to the compact record on first start.  A task that already has a
+    plan must still match those inputs; silently changing its route or point
+    order at execution time would make a persisted task mean something else.
+    """
+    if not isinstance(task, dict):
+        return {
+            "ok": False,
+            "code": "navigation_task_invalid",
+            "message": "任务记录无效，无法建立统一导航计划",
+        }
+
+    plan = build_unified_navigation_plan(
+        task.get("annotation_ids") or [],
+        annotations_by_id=annotations_by_id,
+        routes=routes,
+    )
+    if not plan.get("ok"):
+        return dict(plan)
+
+    task_map_id = _text(task.get("map_id"))
+    plan_map_id = _text(plan.get("task_map_id"))
+    if task_map_id and task_map_id != "live_map" and plan_map_id and task_map_id != plan_map_id:
+        return {
+            "ok": False,
+            "code": "navigation_task_map_mismatch",
+            "message": "任务绑定地图与任务点地图不一致，请重新生成任务",
+            "task_map_id": task_map_id,
+            "plan_map_id": plan_map_id,
+        }
+
+    record = navigation_plan_record(plan)
+    existing = task.get("navigation_plan")
+    if isinstance(existing, dict) and existing.get("ok"):
+        existing_record = navigation_plan_record(existing)
+        if existing_record != record:
+            return {
+                "ok": False,
+                "code": "navigation_task_plan_stale",
+                "message": "任务的统一导航计划已过期，请重新生成任务",
+                "expected_plan": existing_record,
+                "current_plan": record,
+            }
+        return {
+            "ok": True,
+            "plan": plan,
+            "record": record,
+            "migrated": False,
+        }
+
+    return {
+        "ok": True,
+        "plan": plan,
+        "record": record,
+        "migrated": True,
     }

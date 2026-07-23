@@ -12,6 +12,15 @@ NAVIGATION = ROOT / "src/m20pro_navigation/m20pro_navigation"
 def main() -> None:
     web = (CLOUD / "web_dashboard_node.py").read_text(encoding="utf-8")
     floor_manager = (NAVIGATION / "floor_manager.py").read_text(encoding="utf-8")
+    tcp_bridge = (NAVIGATION / "tcp_bridge_node.py").read_text(encoding="utf-8")
+
+    # The field profile supplies defaults and launch overrides; it is not a
+    # runtime license/hash gate for the field-stable nodes.
+    assert "requires a validated canonical field profile" not in floor_manager
+    assert "requires a validated canonical field profile" not in tcp_bridge
+    assert "field_profile.py\" check" not in (
+        ROOT / "scripts" / "local_deploy_to_test_robot.sh"
+    ).read_text(encoding="utf-8")
 
     for topic in (
         "/m20pro/floor_route_config",

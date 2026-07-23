@@ -146,6 +146,12 @@ from .multi_floor_contract import (
     cross_floor_task_context,
     stair_routes_from_config,
 )
+from .unified_navigation_contract import (
+    build_unified_navigation_plan,
+    navigation_plan_record,
+    summarize_plan,
+    task_navigation_plan_state,
+)
 from .nav_status_contract import (
     apply_ignored_nav_status_state,
     apply_nav_failure_state,
@@ -5220,7 +5226,18 @@ class WebDashboardNode(Node):
                     if str(known_annotations.get(str(annotation_id), {}).get("floor") or "")
                 }
             )
-            task["multi_floor"] = len(task["floors"]) > 1
+            navigation_plan = task.get("navigation_plan")
+            if not isinstance(navigation_plan, dict) or not navigation_plan.get("ok"):
+                navigation_plan = self._build_unified_navigation_plan(
+                    task.get("annotation_ids") or [],
+                    known_annotations,
+                )
+            if navigation_plan.get("ok"):
+                task["navigation_plan_summary"] = summarize_plan(navigation_plan)
+                task["floor_sequence"] = list(navigation_plan.get("floor_sequence") or [])
+                task["multi_floor"] = not bool(navigation_plan.get("single_floor"))
+            else:
+                task["multi_floor"] = len(task["floors"]) > 1
             task.pop("readiness", None)
             task["radar_results"] = self._radar_jobs_for_task(str(task.get("id") or ""))
         return {
@@ -6710,6 +6727,42 @@ class WebDashboardNode(Node):
             dict(event_payload["operator_payload"]),
         )
 
+    def _build_unified_navigation_plan(
+        self,
+        annotation_ids: Any,
+        annotations_by_id: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Build the one task plan shape used by every task entry point."""
+        config_payload = self._floor_config_payload()
+        routes = (
+            stair_routes_from_config(config_payload.get("config") or {})
+            if config_payload.get("ok")
+            else []
+        )
+        return build_unified_navigation_plan(
+            annotation_ids,
+            annotations_by_id=annotations_by_id,
+            routes=routes,
+        )
+
+    def _task_navigation_plan_state(
+        self,
+        task: Dict[str, Any],
+        annotations_by_id: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Validate/migrate the one plan used by task execution."""
+        config_payload = self._floor_config_payload()
+        routes = (
+            stair_routes_from_config(config_payload.get("config") or {})
+            if config_payload.get("ok")
+            else []
+        )
+        return task_navigation_plan_state(
+            task,
+            annotations_by_id=annotations_by_id,
+            routes=routes,
+        )
+
     def _create_task(
         self,
         payload: Dict[str, Any],
@@ -6755,6 +6808,18 @@ class WebDashboardNode(Node):
                     str(readiness["message"]),
                     validation_error_payload(readiness),
                 )
+            unified_plan = self._build_unified_navigation_plan(
+                static_context.get("annotation_ids") or [],
+                known,
+            )
+            if not unified_plan.get("ok"):
+                return self._error(
+                    str(unified_plan.get("message") or "统一导航计划无效"),
+                    {
+                        "code": str(unified_plan.get("code") or "navigation_plan_invalid"),
+                        "navigation_plan": summarize_plan(unified_plan),
+                    },
+                )
             task = build_task_create_record(
                 static_context,
                 task_id=new_id("task"),
@@ -6762,6 +6827,13 @@ class WebDashboardNode(Node):
             )
             if task_metadata:
                 task.update(task_metadata)
+            # Compatibility fields remain projections of the unified plan;
+            # they are never an independent source of route truth.
+            task["navigation_plan"] = navigation_plan_record(unified_plan)
+            task["navigation_plan_summary"] = summarize_plan(unified_plan)
+            task["floor_sequence"] = list(unified_plan.get("floor_sequence") or [])
+            task["route_plans"] = list(unified_plan.get("transition_paths") or [])
+            task["multi_floor"] = not bool(unified_plan.get("single_floor"))
             self._tasks.append(task)
             self._save_json("tasks.json", self._tasks)
         return {"ok": True, "task": task}
@@ -6816,7 +6888,13 @@ class WebDashboardNode(Node):
                 "waypoint_count": len(context["annotation_ids"]),
             },
         )
-        return {"ok": True, "task": task, "route_plans": context["route_plans"]}
+        return {
+            "ok": True,
+            "task": task,
+            "route_plans": context["route_plans"],
+            "navigation_plan": task.get("navigation_plan"),
+            "navigation_plan_summary": task.get("navigation_plan_summary"),
+        }
 
     def _task_start_pre_runtime_context(
         self,
@@ -6886,11 +6964,20 @@ class WebDashboardNode(Node):
                 now_text=now_text,
             )
             task_validation = None
+            task_plan_state = None
             if static_context.get("ok"):
                 task_validation = self._validate_task_annotations_for_map(
                     list(static_context.get("annotations") or []),
                     str(static_context["task_map_id"]),
                 )
+                if not task_validation:
+                    task_plan_state = self._task_navigation_plan_state(task, known)
+                    if not task_plan_state.get("ok"):
+                        task_validation = {
+                            "code": str(task_plan_state.get("code") or "navigation_plan_invalid"),
+                            "message": str(task_plan_state.get("message") or "统一导航计划无效"),
+                            "task_plan": task_plan_state,
+                        }
             if active.get("status") == "running":
                 return self._error(
                     "当前任务正在执行中" if active.get("task_id") == task_id else "已有任务正在执行，请先停止当前任务",
@@ -6923,6 +7010,19 @@ class WebDashboardNode(Node):
                     str(validation.get("message") or "任务静态条件无效"),
                     validation_error_payload(validation),
                 )
+            if task_plan_state and task_plan_state.get("ok"):
+                plan = task_plan_state.get("plan") if isinstance(task_plan_state.get("plan"), dict) else {}
+                record = task_plan_state.get("record") if isinstance(task_plan_state.get("record"), dict) else {}
+                projection = {
+                    "navigation_plan": record,
+                    "navigation_plan_summary": summarize_plan(plan),
+                    "floor_sequence": list(plan.get("floor_sequence") or []),
+                    "route_plans": list(plan.get("transition_paths") or []),
+                    "multi_floor": not bool(plan.get("single_floor")),
+                }
+                if any(task.get(key) != value for key, value in projection.items()):
+                    task.update(projection)
+                    self._save_json("tasks.json", self._tasks)
             task_map_id = str(static_context.get("task_map_id") or "live_map")
             selected_map_id = str(selected_map_id or "live_map")
             annotation_map_ids = {

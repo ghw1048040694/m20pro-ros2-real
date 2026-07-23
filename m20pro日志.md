@@ -1,6 +1,43 @@
 # M20 Pro ROS 2 跨楼层巡检导航系统项目日志
 
-Last updated: 2026-07-22 20:19 CST
+## 2026-07-23 18:15 CST - 收口统一导航任务执行边界
+
+- 当前在 `feature/unified-navigation-v2` 继续开发统一导航：普通任务和跨楼层任务创建、历史任务迁移、任务启动校验和活动任务状态现在都使用同一个 `unified_navigation_plan`；单层仍只是一个 floor segment，兼容字段不再作为第二套事实来源。
+- 统一计划按连续楼层段保存，修复 `F1 -> F2 -> F1` 被错误合并的问题；任务只保存点位 ID、地图/楼层段和有向连接 ID，不复制点位详情或完整路线配置。已有计划若与当前点位顺序、地图或路线不一致会拒绝启动并要求重新生成，避免执行时静默改变任务路线。
+- 历史任务若没有统一计划，会在首次启动前根据当前点位和有向路线配置迁移为紧凑计划；活动任务从该计划派生有序点位，避免创建阶段统一、运行阶段重新读取另一套顺序。
+- 已同步更新 `docs/frontend_api_contract.md`，说明 `navigation_plan`、`navigation_plan_summary` 以及旧任务迁移/过期行为；没有启用楼梯运动，也没有改变现有平地 `/scan`、Nav2、定位或仲裁链。
+- 验证：全部 `scripts/test_*.py` 离线合同测试通过，Python 编译和 `git diff --check` 通过；本机 `colcon build --symlink-install --packages-select m20pro_navigation m20pro_cloud_bridge m20pro_bringup` 三包构建成功。
+- 本轮只修改上位机源码、测试、API 文档和日志，未连接、部署或重启 103/104/106，未发送导航、速度、姿态、充电、重定位、切图或网络命令。当前时间早于 21:00，不推送 GitHub/GitLab。
+
+Last updated: 2026-07-23 18:15 CST
+
+## 2026-07-23 17:40 CST - 仅同步当前工作区到 104 验收
+
+- 使用 `M20PRO_DEPLOY_SKIP_EDGE=1` 执行 104-only 原子部署；没有同步、连接或重启 106，也没有修改上位机网络。5 个 ROS 包构建成功，104 `m20pro-real.service` 已重启并保持 `active/enabled`，`NRestarts=0`。
+- 网页 `http://10.21.31.104:8080/` 返回 `200`；`/api/state` 显示当前地图 `Test Field`、扫描帧 `m20pro_base_link`，约 `220` 个有效点且数据年龄约 `0.24s`，无活动任务、无速度指令。定位显示 `false` 是因为本轮没有替用户发布重定位命令。
+- 部署内容包含本地工作区的工地稳定参数、去除 profile/hash 启动门禁、前端保留项以及 `min_speed_theta=0.35` 反向旋转修复；脚本输出的 `revision=32946a2` 是当前 HEAD 标识，实际同步同时包含本轮尚未提交的工作区修改。
+- 本轮只做服务/API/扫描只读验收，未下发导航、遥控、充电、重定位或地图命令。当前时间早于 21:00，不推送 GitHub/GitLab。
+
+Last updated: 2026-07-23 17:40 CST
+
+## 2026-07-23 17:35 CST - 移除后来增加的 profile/hash 启动门禁
+
+- 用户确认工地稳定版不存在“必须通过 canonical profile 才能启动”的门禁。本轮从运行根部移除：`m20pro_tcp_bridge` 不再因定位参数未注入而抛出 `RuntimeError`，`floor_manager` 不再校验 profile 名称、64 位 hash 或 transition 参数后才启动，部署入口也不再先执行 profile `check` 阻断部署。
+- 为避免去掉门禁后退回零值，TCP bridge 的定位过滤、TF 备用位姿、姿态过渡和 odom 重基准默认值统一恢复为当前工地稳定参数；floor manager 的切层兼容参数也有同等稳定默认值。正常 launch 仍可从统一 YAML 覆盖，但 YAML/hash 只是配置与诊断信息，不是运行许可证。
+- 昨晚点 2 到点 3 出现的反向纯旋转卡住修复继续保留：Nav2 `FollowPath.min_speed_theta` 与现场 profile 的 `min_angular_speed_radps` 均为 `0.35 rad/s`，不是本轮回滚对象。
+- 前端改进、平地导航参数回滚、唯一 `/scan` 感知链和录包/YOLO/雷达/遥控/地图管理功能均保留；统一跨楼层/DDDMR 分支 `feature/unified-navigation-dddmr` 未修改。
+- 合同测试、Python/Shell 语法检查通过；本轮只修改上位机源码和测试合同，未连接、部署或重启 103/104/106，未发送导航、速度、姿态、充电、重定位或切图指令。当前时间早于 21:00，不推送 GitHub/GitLab。
+
+Last updated: 2026-07-23 17:35 CST
+
+## 2026-07-23 17:31 CST - 按工地稳定基线精确回滚平地导航参数
+
+- 本轮在独立分支 `feature/field-stability-baseline` 操作，统一跨楼层/DDDMR 分支 `feature/unified-navigation-dddmr` 未修改；没有把跨楼层开发内容合入主线。
+- 按 7 月 13--14 日工地稳定记录恢复 Nav2 平地参数：DWB `ObstacleFootprint.scale=0.05`，局部/全局激光 `observation_persistence=0.30s`，保持唯一感知链 `106 /LIDAR/POINTS -> /scan -> 104 Nav2/Web/录包`。同步放宽 profile 校验下限，确保恢复值能够被正式渲染。
+- 关闭默认楼梯语义区后处理（`enable_stair_zone_postprocess=false`），不新增节点、不改写 `floor_manager`，前端状态栏、录包管理、YOLO、雷达、遥控和地图管理代码均未回滚。
+- 合同测试和 Nav2 profile 渲染通过；本轮只修改上位机源码和测试合同，未连接、部署或重启 103/104/106，未发送导航、速度、姿态、充电、重定位或切图指令。该分支尚未宣称真机已恢复，部署前仍需按 106 -> 104 顺序做低速静态/动态障碍验收。
+
+Last updated: 2026-07-23 17:31 CST
 
 ## 2026-07-22 16:46 CST - 根除楼梯感知回归并恢复平地动态避障单链路
 

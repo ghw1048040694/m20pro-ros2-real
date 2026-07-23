@@ -305,66 +305,43 @@ def cross_floor_task_context(
     annotations_by_id: Dict[str, Dict[str, Any]],
     routes: Iterable[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    annotation_ids: List[str] = []
-    for value in payload.get("annotation_ids") or []:
-        annotation_id = str(value or "").strip()
-        if annotation_id and annotation_id not in annotation_ids:
-            annotation_ids.append(annotation_id)
-    if not annotation_ids:
-        return {"ok": False, "code": "cross_floor_no_waypoint", "message": "请先按顺序加入跨楼层任务点"}
-    missing = [item for item in annotation_ids if item not in annotations_by_id]
-    if missing:
+    # Keep this endpoint as a compatibility façade, but make the unified plan
+    # the only implementation of waypoint, map, floor and connector rules.
+    # The local import avoids a module cycle because the unified contract
+    # reuses ``find_floor_path`` from this module.
+    from .unified_navigation_contract import build_unified_navigation_plan
+
+    plan = build_unified_navigation_plan(
+        payload.get("annotation_ids") or [],
+        annotations_by_id=annotations_by_id,
+        routes=routes,
+    )
+    if not plan.get("ok"):
+        legacy_codes = {
+            "navigation_no_waypoint": "cross_floor_no_waypoint",
+            "navigation_missing_waypoint": "cross_floor_missing_waypoint",
+            "navigation_waypoint_floor_missing": "cross_floor_waypoint_floor_missing",
+            "navigation_waypoint_map_missing": "cross_floor_waypoint_map_missing",
+            "navigation_mixed_maps_on_floor": "cross_floor_mixed_maps_on_floor",
+            "navigation_route_missing": "cross_floor_route_missing",
+            "navigation_route_edge_missing": "cross_floor_route_missing",
+        }
+        result = dict(plan)
+        result["code"] = legacy_codes.get(str(plan.get("code")), plan.get("code"))
+        return result
+    if plan.get("single_floor"):
         return {
             "ok": False,
-            "code": "cross_floor_missing_waypoint",
-            "message": "跨楼层任务中存在已删除点位",
-            "missing": missing,
+            "code": "cross_floor_single_floor",
+            "message": "跨楼层任务至少需要两个不同楼层的点位",
         }
-    annotations = [annotations_by_id[item] for item in annotation_ids]
-    waypoint_floors = [str(item.get("floor") or "").strip() for item in annotations]
-    if any(not floor for floor in waypoint_floors):
-        return {"ok": False, "code": "cross_floor_waypoint_floor_missing", "message": "任务点中存在未填写楼层的点位"}
-    waypoint_map_ids = [str(item.get("map_id") or "").strip() for item in annotations]
-    if any(not map_id for map_id in waypoint_map_ids):
-        return {"ok": False, "code": "cross_floor_waypoint_map_missing", "message": "任务点中存在未绑定固定地图的点位"}
-    maps_by_floor: Dict[str, set] = {}
-    for floor, map_id in zip(waypoint_floors, waypoint_map_ids):
-        maps_by_floor.setdefault(floor, set()).add(map_id)
-    mixed_floor = next((floor for floor, map_ids in maps_by_floor.items() if len(map_ids) > 1), None)
-    if mixed_floor:
-        return {
-            "ok": False,
-            "code": "cross_floor_mixed_maps_on_floor",
-            "message": f"{mixed_floor} 的任务点来自不同地图，不能混合坐标系",
-            "floor": mixed_floor,
-            "map_ids": sorted(maps_by_floor[mixed_floor]),
-        }
-    floor_sequence: List[str] = []
-    for floor in waypoint_floors:
-        if not floor_sequence or floor_sequence[-1] != floor:
-            floor_sequence.append(floor)
-    if len(set(floor_sequence)) < 2:
-        return {"ok": False, "code": "cross_floor_single_floor", "message": "跨楼层任务至少需要两个不同楼层的点位"}
-    route_plans = []
-    route_items = list(routes)
-    for source, target in zip(floor_sequence, floor_sequence[1:]):
-        path = find_floor_path(route_items, source, target)
-        if path is None:
-            return {
-                "ok": False,
-                "code": "cross_floor_route_missing",
-                "message": f"没有可用的楼梯路线 {source}->{target}",
-                "source_floor": source,
-                "target_floor": target,
-            }
-        route_plans.append({"source_floor": source, "target_floor": target, "floor_path": path})
-    first_map_id = waypoint_map_ids[0]
     return {
         "ok": True,
         "name": str(payload.get("name") or "跨楼层巡检任务").strip() or "跨楼层巡检任务",
-        "annotation_ids": annotation_ids,
-        "annotations": annotations,
-        "task_map_id": first_map_id,
-        "floor_sequence": floor_sequence,
-        "route_plans": route_plans,
+        "annotation_ids": list(plan["annotation_ids"]),
+        "annotations": list(plan["annotations"]),
+        "task_map_id": plan["task_map_id"],
+        "floor_sequence": list(plan["floor_sequence"]),
+        "route_plans": list(plan["transition_paths"]),
+        "navigation_plan": plan,
     }

@@ -75,7 +75,9 @@ LOCAL_PLANNER_SPEC = {
     "simulation_time_s": ("number", 0.50, 5.00),
     "linear_velocity_samples": ("integer", 3, 50),
     "angular_velocity_samples": ("integer", 5, 80),
-    "obstacle_critic_scale": ("number", 0.10, 10.00),
+    # 0.05 is the field-tested pre-layer Nav2 baseline; higher values can
+    # reject otherwise valid trajectories before the robot reaches an obstacle.
+    "obstacle_critic_scale": ("number", 0.05, 10.00),
 }
 COSTMAP_SPEC = {
     "local_update_frequency_hz": ("number", 2.0, 20.0),

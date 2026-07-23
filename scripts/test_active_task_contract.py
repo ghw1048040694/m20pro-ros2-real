@@ -386,6 +386,34 @@ def test_create_active_task_state() -> None:
     assert_equal(created["last_nav_goal_status"], "idle", "created nav status")
     assert_equal(created["status_message"], "任务已创建，准备下发第一个点位", "created message")
 
+    planned_task = {
+        **task,
+        "annotation_ids": ["legacy_p1"],
+        "navigation_plan": {
+            "ok": True,
+            "kind": "unified_navigation_plan",
+            "version": 1,
+            "annotation_ids": ["p1", "p2"],
+            "segments": [],
+            "transitions": [],
+        },
+    }
+    planned = create_active_task_state(
+        planned_task,
+        task_map_id="map_a",
+        now_text="now",
+    )["active"]
+    assert_equal(
+        planned["annotation_ids"],
+        ["p1", "p2"],
+        "active task derives ordered ids from canonical plan",
+    )
+    assert_equal(
+        planned["navigation_plan"]["kind"],
+        "unified_navigation_plan",
+        "active task carries canonical plan",
+    )
+
 
 def test_mark_active_task_terminal_states() -> None:
     stopped = mark_active_task_stopped_state(active(status_message="old"))

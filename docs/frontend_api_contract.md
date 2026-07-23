@@ -497,6 +497,11 @@ GET /api/tasks?map_id=live_map
 
 响应中的任务会补充 `waypoints`，其中每个点位包含 `label`、`room`、`scan_point`、`result_file_prefix`、`radar` 等字段。雷达系统应该优先读取 `waypoints`，而不是再自己拼点位名称。
 
+任务还会返回 `navigation_plan_summary`。单层任务和跨楼层任务使用同一计划
+结构：单层只有一个 `floor segment`，跨楼层在连续楼层段之间增加有向
+`transition`。`floor_sequence`、`route_plans` 和 `multi_floor` 只是该计划的
+兼容投影，不能作为另一套任务顺序来源。
+
 ### POST `/api/tasks`
 
 生成任务。
@@ -523,6 +528,28 @@ GET /api/tasks?map_id=live_map
   }
 }
 ```
+
+完整任务记录中的 `navigation_plan` 是一个紧凑快照，只保存有序点位 ID、连续
+楼层段、地图 ID 和有向连接 ID，不复制点位详情或完整路线配置。例如：
+
+```json
+{
+  "kind": "unified_navigation_plan",
+  "version": 1,
+  "annotation_ids": ["point_a", "point_b"],
+  "segments": [
+    {"index": 0, "floor": "F1", "map_id": "map1", "annotation_ids": ["point_a"]},
+    {"index": 1, "floor": "F2", "map_id": "map2", "annotation_ids": ["point_b"]}
+  ],
+  "transitions": [
+    {"route_id": "F1:stairs_to_F2", "source_floor": "F1", "target_floor": "F2"}
+  ]
+}
+```
+
+历史任务如果没有 `navigation_plan`，后端在第一次启动前会根据当前点位和有向
+路线配置迁移为该格式；已有计划若与当前点位顺序、地图或路线不一致会拒绝
+启动并要求重新生成任务，不会静默改变任务路线。
 
 ### POST `/api/tasks/start`
 

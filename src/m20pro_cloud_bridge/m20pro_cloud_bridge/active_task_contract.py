@@ -225,6 +225,13 @@ def create_active_task_state(
     task_map_id: str,
     now_text: str,
 ) -> Dict[str, Any]:
+    stored_plan = task.get("navigation_plan")
+    navigation_plan = dict(stored_plan) if isinstance(stored_plan, dict) else None
+    planned_annotation_ids = (
+        list(navigation_plan.get("annotation_ids") or [])
+        if isinstance(navigation_plan, dict) and navigation_plan.get("ok")
+        else list(task.get("annotation_ids") or [])
+    )
     active = {
         "task_id": task.get("id"),
         "task_name": task.get("name"),
@@ -233,9 +240,10 @@ def create_active_task_state(
         "run_id": uuid.uuid4().hex,
         "map_id": task_map_id,
         "multi_floor": bool(task.get("multi_floor")),
+        "navigation_plan": navigation_plan,
         "status": "running",
         "index": 0,
-        "annotation_ids": list(task.get("annotation_ids") or []),
+        "annotation_ids": planned_annotation_ids,
         "started_at": now_text,
         "last_goal_annotation_id": None,
         "last_goal_sent_monotonic": 0.0,

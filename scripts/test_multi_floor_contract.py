@@ -232,6 +232,8 @@ def test_cross_floor_task_order_and_route() -> None:
     assert_equal(context["annotation_ids"], ["p19", "p20", "p21"], "point order")
     assert_equal(context["floor_sequence"], ["F19", "F20", "F21"], "floor order")
     assert_equal(context["task_map_id"], "map19", "start map")
+    assert_equal(context["navigation_plan"]["kind"], "unified_navigation_plan", "unified plan source")
+    assert_equal(context["navigation_plan"]["segment_count"], 3, "unified segment count")
 
     single = cross_floor_task_context(
         {"annotation_ids": ["p19"]},

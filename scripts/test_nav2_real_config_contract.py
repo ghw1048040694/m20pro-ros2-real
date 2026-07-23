@@ -79,7 +79,7 @@ def main() -> None:
     assert follow["sim_time"] == "__FIELD_PROFILE_SIMULATION_TIME__"
     assert local_planner_profile["simulation_time_s"] >= 1.5
     assert follow["ObstacleFootprint.scale"] == "__FIELD_PROFILE_OBSTACLE_CRITIC_SCALE__"
-    assert local_planner_profile["obstacle_critic_scale"] >= 1.0
+    assert abs(local_planner_profile["obstacle_critic_scale"] - 0.05) < 1e-6
     assert follow["max_vel_x"] == "__FIELD_PROFILE_MAX_LINEAR_SPEED__"
     assert follow["max_speed_xy"] == "__FIELD_PROFILE_MAX_LINEAR_SPEED__"
     assert follow["max_vel_theta"] == "__FIELD_PROFILE_MAX_ANGULAR_SPEED__"
@@ -99,6 +99,7 @@ def main() -> None:
         assert costmap["obstacle_layer"]["scan"]["inf_is_valid"] is True
         assert costmap["obstacle_layer"]["scan"]["obstacle_range"] == "__FIELD_PROFILE_OBSTACLE_RANGE__"
         assert costmap["obstacle_layer"]["scan"]["raytrace_range"] == "__FIELD_PROFILE_RAYTRACE_RANGE__"
+        assert costmap["obstacle_layer"]["scan"]["observation_persistence"] == "__FIELD_PROFILE_OBSERVATION_PERSISTENCE__"
     assert local["update_frequency"] == "__FIELD_PROFILE_LOCAL_COSTMAP_UPDATE_FREQUENCY__"
     assert global_costmap["update_frequency"] == "__FIELD_PROFILE_GLOBAL_COSTMAP_UPDATE_FREQUENCY__"
     planner = config["planner_server"]["ros__parameters"]

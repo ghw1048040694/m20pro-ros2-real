@@ -231,7 +231,7 @@ def generate_launch_description():
                 "\"sudo -n drmap stop_mapping\""
             ),
         ),
-        DeclareLaunchArgument("enable_stair_zone_postprocess", default_value="true"),
+        DeclareLaunchArgument("enable_stair_zone_postprocess", default_value="false"),
         DeclareLaunchArgument("stair_zones_topic", default_value="/m20pro/stair_zones"),
         DeclareLaunchArgument("rviz", default_value="true"),
         DeclareLaunchArgument("rviz_config", default_value=default_rviz),
