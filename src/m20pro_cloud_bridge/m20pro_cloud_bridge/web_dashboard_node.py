@@ -7536,6 +7536,18 @@ class WebDashboardNode(Node):
             return
         if pre_dispatch.get("action") == "fail":
             self._clear_active_task_runtime_loss(active)
+            plan_code = str(pre_dispatch.get("code") or "")
+            if plan_code.startswith("navigation_plan_"):
+                self._fail_active_task(
+                    str(active.get("task_id") or ""),
+                    str(pre_dispatch.get("message") or "统一导航计划无效，已停止任务"),
+                    {
+                        "reason": str(pre_dispatch.get("reason") or "navigation_plan_invalid"),
+                        "code": plan_code,
+                        "transition": pre_dispatch.get("transition"),
+                    },
+                )
+                return
             self._mark_active_task_waiting(
                 active,
                 str(pre_dispatch.get("code") or "task_waiting"),

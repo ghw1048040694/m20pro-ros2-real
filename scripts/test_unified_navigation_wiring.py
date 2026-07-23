@@ -36,6 +36,14 @@ def test_task_start_revalidates_or_migrates_plan() -> None:
     assert '"task_plan": task_plan_state' in WEB_SOURCE
 
 
+def test_runtime_plan_failure_stops_task() -> None:
+    marker = 'if pre_dispatch.get("action") == "fail":'
+    start = WEB_SOURCE.index(marker)
+    block = WEB_SOURCE[start : start + 1200]
+    assert 'plan_code.startswith("navigation_plan_")' in block
+    assert "self._fail_active_task(" in block
+
+
 if __name__ == "__main__":
     test_task_creation_builds_unified_plan()
     test_compatibility_fields_are_plan_projections()

@@ -251,6 +251,55 @@ def test_cross_floor_pre_dispatch_decision() -> None:
     assert_equal(waiting["code"], "cross_floor_transitioning", "cross-floor waiting code")
 
 
+def test_runtime_gate_uses_ordered_plan_transition() -> None:
+    plan = {
+        "ok": True,
+        "kind": "unified_navigation_plan",
+        "segments": [
+            {"floor": "F1", "annotation_ids": ["p1"]},
+            {"floor": "F2", "annotation_ids": ["p2"]},
+            {"floor": "F1", "annotation_ids": ["p3"]},
+        ],
+        "transitions": [
+            {
+                "route_id": "r12",
+                "source_segment_index": 0,
+                "target_segment_index": 1,
+                "path_step_index": 0,
+            },
+            {
+                "route_id": "r21",
+                "source_segment_index": 1,
+                "target_segment_index": 2,
+                "path_step_index": 0,
+            },
+        ],
+    }
+    first = active_task_tick_gate_decision(
+        active=active(last_goal_annotation_id=None, navigation_plan=plan),
+        pose={"x": 0.0, "y": 0.0, "yaw": 0.0},
+        annotation={**annotation(), "id": "p3", "floor": "F1"},
+        current_floor="F2",
+        localization_ok=True,
+        pose_age=0.1,
+        pose_timeout_s=2.0,
+    )
+    assert_equal(first["action"], "pass_cross_floor", "ordered transition is dispatched")
+    assert_equal(first["transition"]["edges"][0]["route_id"], "r21", "return edge selected")
+
+    invalid = active_task_tick_gate_decision(
+        active=active(last_goal_annotation_id=None, navigation_plan=plan),
+        pose={"x": 0.0, "y": 0.0, "yaw": 0.0},
+        annotation={**annotation(), "id": "unknown", "floor": "F1"},
+        current_floor="F2",
+        localization_ok=True,
+        pose_age=0.1,
+        pose_timeout_s=2.0,
+    )
+    assert_equal(invalid["action"], "fail", "unknown plan waypoint is rejected")
+    assert_equal(invalid["code"], "navigation_plan_waypoint_missing", "plan waypoint error")
+
+
 def test_task_start_localization_gate() -> None:
     base = {
         "localization_ok": True,
@@ -652,6 +701,7 @@ def main() -> int:
         test_distance_decision,
         test_pre_dispatch_decision,
         test_cross_floor_pre_dispatch_decision,
+        test_runtime_gate_uses_ordered_plan_transition,
         test_task_start_localization_gate,
         test_progress_detects_stall_and_recovery,
         test_stall_decision,

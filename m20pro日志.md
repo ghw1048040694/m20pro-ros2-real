@@ -1,5 +1,21 @@
 # M20 Pro ROS 2 跨楼层巡检导航系统项目日志
 
+## 2026-07-23 18:22 CST - 加固历史计划数据解析
+
+- 对统一计划的历史/异常数据增加整数和边索引容错：旧任务计划字段损坏时返回明确的计划错误，不让 Web 线程因类型转换异常退出；合法计划的边顺序和语义不变。
+- 全量 `scripts/test_*.py`、Python 编译、`git diff --check` 和三包 `colcon build` 再次通过。本轮仍未部署或操作 103/104/106，当前时间早于 21:00，不推送 GitHub/GitLab。
+
+Last updated: 2026-07-23 18:22 CST
+
+## 2026-07-23 18:20 CST - 运行态按连续楼层段解析有向连接
+
+- 统一导航运行态不再只比较目标点的楼层字符串：计划现在为多跳连接保存有序 `path_step_index/path_step_count`，运行时按目标点所在的连续 segment 解析当前 source segment 和完整 edge 列表。`F1 -> F2 -> F1` 会正确选择 `F2 -> F1`，不会按楼层集合合并或复用前一条边。
+- 任务执行前置门禁接入该解析结果；活动计划无法找到点位、当前楼层与计划段不一致或缺少有向连接时，任务进入失败并停止，不会持续显示等待或继续发布未经验证的跨层目标。
+- 新增统一导航和任务进度回归测试，覆盖多跳边顺序、返回旧楼层、运行态反向边选择和计划点位缺失；全量 `scripts/test_*.py`、Python 编译、`git diff --check` 通过。
+- 本机再次执行 `colcon build --symlink-install --packages-select m20pro_navigation m20pro_cloud_bridge m20pro_bringup`，三包构建成功。本轮没有启用楼梯运动或修改平地 `/scan`、Nav2、定位和仲裁链，未部署/重启 103/104/106，也未发送导航、速度、姿态、充电、重定位或切图命令。当前时间早于 21:00，不推送 GitHub/GitLab。
+
+Last updated: 2026-07-23 18:20 CST
+
 ## 2026-07-23 18:15 CST - 收口统一导航任务执行边界
 
 - 当前在 `feature/unified-navigation-v2` 继续开发统一导航：普通任务和跨楼层任务创建、历史任务迁移、任务启动校验和活动任务状态现在都使用同一个 `unified_navigation_plan`；单层仍只是一个 floor segment，兼容字段不再作为第二套事实来源。

@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, Optional
 
+from .unified_navigation_contract import runtime_transition_for_annotation
+
 
 def _as_float(value: Any, default: float = 0.0) -> float:
     try:
@@ -238,6 +240,22 @@ def active_task_tick_gate_decision(
     target_floor = annotation.get("floor")
     if current_floor and target_floor and current_floor != target_floor:
         active_state = dict(active or {})
+        plan = active_state.get("navigation_plan")
+        transition = None
+        if isinstance(plan, dict):
+            transition = runtime_transition_for_annotation(
+                plan,
+                annotation.get("id"),
+                current_floor=current_floor,
+            )
+            if transition.get("action") == "invalid":
+                return {
+                    "action": "fail",
+                    "code": str(transition.get("code") or "navigation_plan_invalid"),
+                    "reason": "navigation_plan_invalid",
+                    "message": str(transition.get("message") or "统一导航计划无法解析当前跨楼层连接"),
+                    "transition": transition,
+                }
         if active is not None and active_state.get("last_goal_annotation_id") != annotation.get("id"):
             return {
                 "action": "pass_cross_floor",
@@ -246,6 +264,7 @@ def active_task_tick_gate_decision(
                 "message": "当前点位在 %s，先下发跨楼层目标给 floor_manager" % target_floor,
                 "current_floor": current_floor,
                 "target_floor": target_floor,
+                "transition": transition,
             }
         return {
             "action": "wait",
@@ -254,6 +273,7 @@ def active_task_tick_gate_decision(
             "message": "跨楼层目标已下发，等待从 %s 切换到 %s" % (current_floor, target_floor),
             "current_floor": current_floor,
             "target_floor": target_floor,
+            "transition": transition,
         }
     return {"action": "pass", "reason": "ready"}
 

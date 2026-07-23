@@ -17,6 +17,13 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _int_or(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _route_key(route: Dict[str, Any]) -> tuple[str, str]:
     return (_text(route.get("source_floor")), _text(route.get("target_floor")))
 
@@ -173,6 +180,14 @@ def build_unified_navigation_plan(
                     "target_floor": edge_target,
                     "source_segment_index": boundary_index,
                     "target_segment_index": boundary_index + 1,
+                    "path_step_index": len(
+                        [
+                            item
+                            for item in transitions
+                            if item.get("source_segment_index") == boundary_index
+                        ]
+                    ),
+                    "path_step_count": len(path) - 1,
                     "route": route,
                 }
             )
@@ -236,13 +251,15 @@ def navigation_plan_record(plan: Dict[str, Any]) -> Dict[str, Any]:
         "annotation_ids": list(plan.get("annotation_ids") or []),
         "task_map_id": _text(plan.get("task_map_id")),
         "floor_sequence": list(plan.get("floor_sequence") or []),
-        "floor_count": int(plan.get("floor_count") or 0),
-        "segment_count": int(plan.get("segment_count") or len(plan.get("segments") or [])),
+        "floor_count": _int_or(plan.get("floor_count"), 0),
+        "segment_count": _int_or(
+            plan.get("segment_count"), len(plan.get("segments") or [])
+        ),
         "single_floor": bool(plan.get("single_floor")),
         "segments": [
             {
                 "kind": "floor",
-                "index": int(item.get("index", index)),
+                "index": _int_or(item.get("index", index), index),
                 "floor": _text(item.get("floor")),
                 "map_id": _text(item.get("map_id")),
                 "annotation_ids": list(item.get("annotation_ids") or []),
@@ -265,8 +282,10 @@ def navigation_plan_record(plan: Dict[str, Any]) -> Dict[str, Any]:
                 "route_id": _text(item.get("route_id")),
                 "source_floor": _text(item.get("source_floor")),
                 "target_floor": _text(item.get("target_floor")),
-                "source_segment_index": int(item.get("source_segment_index", 0)),
-                "target_segment_index": int(item.get("target_segment_index", 0)),
+                "source_segment_index": _int_or(item.get("source_segment_index", 0), 0),
+                "target_segment_index": _int_or(item.get("target_segment_index", 0), 0),
+                "path_step_index": _int_or(item.get("path_step_index", 0), 0),
+                "path_step_count": _int_or(item.get("path_step_count", 1), 1),
             }
             for item in plan.get("transitions") or []
             if isinstance(item, dict)
@@ -339,4 +358,97 @@ def task_navigation_plan_state(
         "plan": plan,
         "record": record,
         "migrated": True,
+    }
+
+
+def runtime_transition_for_annotation(
+    plan: Dict[str, Any],
+    annotation_id: Any,
+    *,
+    current_floor: Any,
+) -> Dict[str, Any]:
+    """Resolve the connector boundary for the active waypoint.
+
+    The lookup is segment-based rather than set-based, so returning to a
+    previous floor remains ordered.  A multi-hop connector is returned as its
+    ordered edge list; callers must not collapse it into a direct floor jump.
+    """
+    if not isinstance(plan, dict) or not plan.get("ok"):
+        return {
+            "action": "invalid",
+            "code": "navigation_plan_missing",
+            "message": "活动任务缺少统一导航计划",
+        }
+    target_id = _text(annotation_id)
+    segments = [item for item in plan.get("segments") or [] if isinstance(item, dict)]
+    target_index = next(
+        (
+            index
+            for index, segment in enumerate(segments)
+            if target_id in [_text(value) for value in segment.get("annotation_ids") or []]
+        ),
+        None,
+    )
+    if target_index is None:
+        return {
+            "action": "invalid",
+            "code": "navigation_plan_waypoint_missing",
+            "message": "当前点位不在统一导航计划中",
+            "annotation_id": target_id,
+        }
+
+    target_segment = segments[target_index]
+    target_floor = _text(target_segment.get("floor"))
+    source_floor = _text(current_floor)
+    if not source_floor or source_floor == target_floor:
+        return {
+            "action": "same_floor",
+            "source_floor": source_floor,
+            "target_floor": target_floor,
+            "target_segment_index": target_index,
+        }
+
+    source_index = next(
+        (
+            index
+            for index in range(target_index - 1, -1, -1)
+            if _text(segments[index].get("floor")) == source_floor
+        ),
+        None,
+    )
+    if source_index is None:
+        return {
+            "action": "invalid",
+            "code": "navigation_plan_source_segment_missing",
+            "message": "当前楼层不对应当前点位前的统一导航段",
+            "source_floor": source_floor,
+            "target_floor": target_floor,
+            "target_segment_index": target_index,
+        }
+
+    edges = [
+        dict(item)
+        for item in plan.get("transitions") or []
+        if isinstance(item, dict)
+        and _int_or(item.get("source_segment_index", -1), -1) == source_index
+        and _int_or(item.get("target_segment_index", -1), -1) == target_index
+    ]
+    edges.sort(key=lambda item: _int_or(item.get("path_step_index", 0), 0))
+    if not edges:
+        return {
+            "action": "invalid",
+            "code": "navigation_plan_transition_missing",
+            "message": "统一导航计划缺少当前楼层到目标楼层的有向连接",
+            "source_floor": source_floor,
+            "target_floor": target_floor,
+            "source_segment_index": source_index,
+            "target_segment_index": target_index,
+        }
+    return {
+        "action": "transition",
+        "source_floor": source_floor,
+        "target_floor": target_floor,
+        "source_segment_index": source_index,
+        "target_segment_index": target_index,
+        "edges": edges,
     }

@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT / "src/m20pro_cloud_bridge"))
 from m20pro_cloud_bridge.unified_navigation_contract import (  # noqa: E402
     build_unified_navigation_plan,
     navigation_plan_record,
+    runtime_transition_for_annotation,
     summarize_plan,
     task_navigation_plan_state,
 )
@@ -59,6 +60,8 @@ def test_multi_floor_uses_same_plan_shape() -> None:
     assert plan["single_floor"] is False
     assert plan["floor_count"] == 3
     assert [item["route_id"] for item in plan["transitions"]] == ["r12", "r23"]
+    assert [item["path_step_index"] for item in plan["transitions"]] == [0, 0]
+    assert [item["path_step_count"] for item in plan["transitions"]] == [1, 1]
     assert summarize_plan(plan)["transition_count"] == 2
 
 
@@ -78,6 +81,8 @@ def test_multi_hop_connector_is_expanded() -> None:
     assert plan["transition_paths"] == [
         {"source_floor": "F1", "target_floor": "F3", "floor_path": ["F1", "F2", "F3"]}
     ]
+    assert [item["path_step_index"] for item in plan["transitions"]] == [0, 1]
+    assert [item["path_step_count"] for item in plan["transitions"]] == [2, 2]
 
 
 def test_returning_to_previous_floor_keeps_contiguous_segments() -> None:
@@ -102,6 +107,22 @@ def test_returning_to_previous_floor_keeps_contiguous_segments() -> None:
     assert "annotations" not in record
     assert "route" not in record["transitions"][0]
     assert record["segments"][2]["annotation_ids"] == ["p3"]
+
+    back_to_f1 = runtime_transition_for_annotation(
+        plan,
+        "p3",
+        current_floor="F2",
+    )
+    assert back_to_f1["action"] == "transition"
+    assert [item["route_id"] for item in back_to_f1["edges"]] == ["r21"]
+    assert back_to_f1["target_segment_index"] == 2
+
+    forward_to_f2 = runtime_transition_for_annotation(
+        plan,
+        "p2",
+        current_floor="F1",
+    )
+    assert [item["route_id"] for item in forward_to_f2["edges"]] == ["r12"]
 
 
 def test_missing_connector_fails_before_execution() -> None:
