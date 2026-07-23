@@ -79,7 +79,7 @@ teleoperation:
   navigation_timeout_s: 0.60      # Nav2 速度样本超过该时间立即零速停车，单位 s
   max_forward_speed_mps: 0.18     # 遥控最大前进速度，单位 m/s
   max_reverse_speed_mps: 0.12     # 遥控最大后退速度，单位 m/s
-  max_lateral_speed_mps: 0.18     # 遥控最大横移速度，单位 m/s；与前进速度一致，避免只侧倾不平移
+  max_lateral_speed_mps: 0.30     # 遥控最大横移速度，单位 m/s；对应原厂横移归一化指令 0.60
   max_angular_speed_radps: 0.45   # 遥控最大旋转角速度，单位 rad/s
 
 # 定位稳定性高级参数；现场调整时一次只改一组，并结合 rosbag 验证。

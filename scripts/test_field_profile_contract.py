@@ -15,11 +15,13 @@ sys.path.insert(0, str(ROOT / "src/m20pro_navigation"))
 
 from m20pro_navigation.field_profile_contract import (  # noqa: E402
     FieldProfileError,
+    command_mux_field_parameters,
     edge_environment,
     load_field_profile,
     render_edge_environment,
     validate_field_profile,
     web_navigation_field_parameters,
+    web_teleoperation_field_parameters,
 )
 
 
@@ -110,7 +112,11 @@ def main() -> None:
     assert changed_profile["profile_hash"] != profile["profile_hash"]
 
     environment = edge_environment(profile)
+    command_mux = command_mux_field_parameters(profile)
+    web_teleoperation = web_teleoperation_field_parameters(profile)
     web_navigation = web_navigation_field_parameters(profile)
+    assert command_mux["teleop_max_lateral_speed_mps"] == 0.30
+    assert web_teleoperation["teleop_max_lateral_speed_mps"] == 0.30
     assert web_navigation["goal_reached_tolerance_m"] == profile["navigation"]["goal"]["xy_tolerance_m"]
     rendered = render_edge_environment(profile)
     assert not any(key.startswith("STAIR_") for key in environment)
