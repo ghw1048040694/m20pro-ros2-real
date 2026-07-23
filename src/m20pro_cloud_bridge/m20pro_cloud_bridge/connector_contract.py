@@ -11,6 +11,23 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _positive(value: Any) -> Any:
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) and number > 0.0 else None
+
+
+def _corridor_geometry(raw: Dict[str, Any]) -> Any:
+    corridor = raw.get("corridor") if isinstance(raw.get("corridor"), dict) else {}
+    width = _positive(corridor.get("width_m"))
+    lookahead = _positive(corridor.get("lookahead_m"))
+    if width is None or lookahead is None:
+        return None
+    return {"width_m": width, "lookahead_m": lookahead}
+
+
 def connector_terrain_guard_profile(route: Dict[str, Any]) -> Dict[str, Any]:
     """Return the immutable 106 terrain identity carried by one connector.
 
@@ -35,6 +52,7 @@ def connector_terrain_guard_profile(route: Dict[str, Any]) -> Dict[str, Any]:
         "certified_motion": bool(raw.get("certified_motion", False))
         and policy == "certified_connector",
         "source": "106_local_pointcloud",
+        "corridor": _corridor_geometry(raw),
     }
 
 

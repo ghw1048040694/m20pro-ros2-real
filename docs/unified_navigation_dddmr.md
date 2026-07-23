@@ -31,9 +31,9 @@ unified_navigation_plan
 顺序，不把多跳路线压缩成一个未经验证的直达目标。
 
 每条 connector transition 还绑定唯一的 `terrain_guard` 身份：
-`profile_id`、`corridor_version`、`motion_policy` 和数据来源。它只绑定 106
+`profile_id`、`corridor_version`、走廊 `width_m/lookahead_m`、`motion_policy` 和数据来源。它只绑定 106
 本地点云影子感知的版本，不把几何阈值复制到 104；路线编辑接口不能把自身标成
-已认证运动。新路线默认是 `shadow-v1 + stop_only`，感知和楼梯执行验收完成前，
+已认证运动。未标定路线的 corridor 保持为空。新路线默认是 `shadow-v1 + stop_only`，感知和楼梯执行验收完成前，
 统一计划仍不能越过 `stair_execution_retired`。
 
 ## 从 DDDMR 借鉴什么

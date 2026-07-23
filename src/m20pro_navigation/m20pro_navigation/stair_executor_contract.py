@@ -52,6 +52,7 @@ def _profile(route: Dict[str, Any]) -> Dict[str, Any]:
         "motion_policy": policy,
         "certified_motion": bool(raw.get("certified_motion", False))
         and policy == "certified_connector",
+        "corridor": dict(raw.get("corridor") or {}) if isinstance(raw.get("corridor"), dict) else None,
     }
 
 
@@ -102,6 +103,13 @@ def _route_validation(route: Any) -> Dict[str, Any]:
             "ok": False,
             "code": "stair_execution_retired",
             "message": "楼梯连接边尚未完成现场认证，保持 stop-only",
+            "terrain_guard": profile,
+        }
+    if not isinstance(profile.get("corridor"), dict) or not profile["corridor"].get("width_m") or not profile["corridor"].get("lookahead_m"):
+        return {
+            "ok": False,
+            "code": "connector_terrain_profile_missing",
+            "message": "认证楼梯连接边缺少已标定的三维走廊几何",
             "terrain_guard": profile,
         }
     return {"ok": True, "profile": profile}
@@ -163,6 +171,7 @@ def create_connector_execution(
                 profile_id=profile["profile_id"],
                 corridor_version=profile["corridor_version"],
                 direction=execution["direction"],
+                corridor=profile.get("corridor"),
             )
         ],
     }

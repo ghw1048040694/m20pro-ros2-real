@@ -38,6 +38,7 @@ def route(certified: bool = True) -> dict:
             "corridor_version": "field-v1",
             "motion_policy": "certified_connector" if certified else "stop_only",
             "certified_motion": certified,
+            "corridor": {"width_m": 1.0, "lookahead_m": 2.4},
         },
     }
 

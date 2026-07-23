@@ -991,11 +991,12 @@ ROS 2 功能包也可以订阅：
   "corridor_version": "shadow-v1",
   "motion_policy": "stop_only",
   "certified_motion": false,
-  "source": "106_local_pointcloud"
+  "source": "106_local_pointcloud",
+  "corridor": null
 }
 ```
 
-该块只绑定楼梯连接边与 106 本地点云 profile 的版本，不携带或复制点云几何阈值。路线编辑接口不能把路线标记为已认证运动；地图、走廊或 profile 版本变化时，统一导航计划必须重新生成。平地任务不经过该字段，也不改变 `/scan`/Nav2 链路。
+`corridor` 只有在现场标定完成后才填写 `width_m` 和 `lookahead_m`；缺失时表示未标定，不能猜测默认走廊。该块不携带或复制点云几何阈值。路线编辑接口不能把路线标记为已认证运动；地图、走廊几何或 profile 版本变化时，统一导航计划必须重新生成。平地任务不经过该字段，也不改变 `/scan`/Nav2 链路。
 
 ### POST `/api/floor_routes/delete`
 

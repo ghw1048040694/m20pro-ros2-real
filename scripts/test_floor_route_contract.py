@@ -93,6 +93,7 @@ def test_validate_route_and_runtime_config() -> None:
     assert_equal(route["terrain_guard"]["profile_id"], "route_up:terrain", "terrain profile identity")
     assert_equal(route["terrain_guard"]["corridor_version"], "shadow-v1", "shadow corridor version")
     assert_equal(route["terrain_guard"]["certified_motion"], False, "route API cannot certify motion")
+    assert_equal(route["terrain_guard"]["corridor"], None, "uncalibrated route has no guessed corridor")
     config = runtime_floor_config([route])
     stair = config["floors"]["F1"]["stairs"]["route_up"]
     assert_equal(stair["target_floor"], "F2", "directed target")
@@ -140,6 +141,7 @@ def test_route_edit_cannot_enable_certified_motion() -> None:
                 "corridor_version": "v3",
                 "motion_policy": "certified_connector",
                 "certified_motion": True,
+                "corridor": {"width_m": 1.1, "lookahead_m": 3.2},
             }
         ),
         annotations_by_id=annotations(),
@@ -153,6 +155,7 @@ def test_route_edit_cannot_enable_certified_motion() -> None:
     assert_equal(edited["route"]["terrain_guard"]["corridor_version"], "v3", "corridor version retained")
     assert_equal(edited["route"]["terrain_guard"]["motion_policy"], "stop_only", "motion policy forced stop-only")
     assert_equal(edited["route"]["terrain_guard"]["certified_motion"], False, "certification forced false")
+    assert_equal(edited["route"]["terrain_guard"]["corridor"], {"width_m": 1.1, "lookahead_m": 3.2}, "calibrated geometry retained")
 
 
 def test_floor_switch_request_contract() -> None:

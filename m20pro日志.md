@@ -1,5 +1,13 @@
 # M20 Pro ROS 2 跨楼层巡检导航系统项目日志
 
+## 2026-07-23 19:05 CST - 将已标定楼梯走廊几何绑定到连接 profile
+
+- `terrain_guard` profile 现在可携带现场标定的 `corridor.width_m/lookahead_m`，并随路线、统一计划记录和执行器请求传递；104 只保存走廊身份/范围，不复制 106 的台阶高度和点云分类阈值。
+- 未标定路线的 corridor 保持为空，认证连接边若缺少走廊几何直接拒绝（`connector_terrain_profile_missing`），不会使用猜测的默认长度；路线 profile、走廊几何或地图变化会让统一计划重新生成。
+- 补充路线 API、执行器和统一计划测试；全量合同测试、Python 编译、`git diff --check` 和三包构建待本轮全部复核后提交。本轮未部署或操作 103/104/106，未发送运动、导航、重定位、切图或网络命令；当前时间早于 21:00，不推送 GitHub/GitLab。
+
+Last updated: 2026-07-23 19:05 CST
+
 ## 2026-07-23 19:03 CST - 增加楼梯语义执行器 ROS 适配器（默认关闭）
 
 - 新增 `m20pro_navigation/stair_executor_node.py`，把楼梯 reducer 暴露为 JSON 启动/事件/动作/状态话题；它不导入 `Twist`，不发布 `cmd_vel`、步态、地图或厂商命令，只为未来仲裁适配器提供语义动作。
