@@ -40,6 +40,22 @@ def test_floor_switch_requires_fresh_terrain_status() -> None:
     assert "terrain_guard_timeout_s" in WEB_SOURCE
 
 
+def test_stair_executor_is_a_semantic_reducer_without_motion_publishers() -> None:
+    source = (
+        ROOT
+        / "src"
+        / "m20pro_navigation"
+        / "m20pro_navigation"
+        / "stair_executor_contract.py"
+    ).read_text(encoding="utf-8")
+    assert "def create_connector_execution(" in source
+    assert "def step_connector_execution(" in source
+    assert "cmd_vel_pub" not in source
+    assert "from geometry_msgs" not in source
+    assert "request_floor_switch" in source
+    assert "stair_execution_retired" in source
+
+
 def test_compatibility_fields_are_plan_projections() -> None:
     marker = 'task["navigation_plan"] = navigation_plan_record(unified_plan)'
     start = WEB_SOURCE.index(marker)
@@ -67,5 +83,6 @@ def test_runtime_plan_failure_stops_task() -> None:
 if __name__ == "__main__":
     test_task_creation_builds_unified_plan()
     test_connector_plan_carries_terrain_identity()
+    test_stair_executor_is_a_semantic_reducer_without_motion_publishers()
     test_compatibility_fields_are_plan_projections()
     print("unified navigation wiring tests passed")

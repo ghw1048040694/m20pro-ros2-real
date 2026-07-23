@@ -1,5 +1,14 @@
 # M20 Pro ROS 2 跨楼层巡检导航系统项目日志
 
+## 2026-07-23 18:59 CST - 建立楼梯连接边语义执行状态机合同
+
+- 在 `m20pro_navigation/stair_executor_contract.py` 新增单条认证楼梯连接边的纯状态 reducer：`PREPARING -> ENTRY_NAVIGATION -> TRAVERSING -> PLATFORM_HOLD -> EXIT_NAVIGATION -> COMPLETED`，统一处理 terrain_guard、入口/平台/出口、地图切换、停止、定位丢失、迟到事件和阶段超时。
+- 执行器合同只输出语义动作（入口/出口目标、步态、停止、切层请求、恢复平地导航），不导入 ROS、不发布 `cmd_vel`、不直接改地图或绕过现有仲裁；默认 `shadow-v1/stop_only` 在创建阶段返回 `stair_execution_retired`。动态障碍、过期点云、错误切层回执和人工停止均进入终态，不能自动恢复。
+- 修复单调时间从 `0.0` 开始时被错误当作未初始化导致阶段超时失效的问题；新增完整上楼序列、影子拒绝、动态障碍停止、迟到事件、错误切层回执、人工停止和超时测试。当前尚未接入真实速度输出或解除跨层门禁。
+- 本轮仍未部署或操作 103/104/106，未发送运动、导航、重定位、切图或网络命令；当前时间早于 21:00，不推送 GitHub/GitLab。
+
+Last updated: 2026-07-23 18:59 CST
+
 ## 2026-07-23 18:52 CST - 将 106 terrain_guard 新鲜状态接入切层前置门
 
 - 104 Web 现在订阅 `/m20pro/terrain_guard/status`，切层事务在执行 104/106 地图切换前，必须校验状态与路线的 `profile_id/corridor_version` 匹配、状态为 `traversable`、状态时间和点云年龄均未过期；缺失、阻塞、未知、profile 不一致或过期均直接拒绝，不进入地图切换。
