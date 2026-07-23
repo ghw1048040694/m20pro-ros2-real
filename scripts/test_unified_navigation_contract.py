@@ -60,6 +60,11 @@ def test_multi_floor_uses_same_plan_shape() -> None:
     assert plan["single_floor"] is False
     assert plan["floor_count"] == 3
     assert [item["route_id"] for item in plan["transitions"]] == ["r12", "r23"]
+    assert [item["terrain_guard"]["profile_id"] for item in plan["transitions"]] == [
+        "r12:terrain",
+        "r23:terrain",
+    ]
+    assert all(not item["terrain_guard"]["certified_motion"] for item in plan["transitions"])
     assert [item["path_step_index"] for item in plan["transitions"]] == [0, 0]
     assert [item["path_step_count"] for item in plan["transitions"]] == [1, 1]
     assert summarize_plan(plan)["transition_count"] == 2
@@ -107,6 +112,7 @@ def test_returning_to_previous_floor_keeps_contiguous_segments() -> None:
     assert "annotations" not in record
     assert "route" not in record["transitions"][0]
     assert record["segments"][2]["annotation_ids"] == ["p3"]
+    assert record["transitions"][1]["terrain_guard"]["profile_id"] == "r21:terrain"
 
     back_to_f1 = runtime_transition_for_annotation(
         plan,

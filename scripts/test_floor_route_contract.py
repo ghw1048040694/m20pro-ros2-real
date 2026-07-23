@@ -76,11 +76,15 @@ def test_validate_route_and_runtime_config() -> None:
     assert_equal(route["target_floor"], "F2", "target floor")
     assert_equal(route["direction"], "up", "direction inferred")
     assert_equal(route["source_platform"], pose(3.0, 4.0, 0.2), "source platform pose")
+    assert_equal(route["terrain_guard"]["profile_id"], "route_up:terrain", "terrain profile identity")
+    assert_equal(route["terrain_guard"]["corridor_version"], "shadow-v1", "shadow corridor version")
+    assert_equal(route["terrain_guard"]["certified_motion"], False, "route API cannot certify motion")
     config = runtime_floor_config([route])
     stair = config["floors"]["F1"]["stairs"]["route_up"]
     assert_equal(stair["target_floor"], "F2", "directed target")
     assert_equal(stair["target_map_id"], "map_f2", "target map")
     assert_equal(stair["post_exit"], pose(7.0, 8.0, 0.4), "post-exit pose")
+    assert_equal(stair["terrain_guard"], route["terrain_guard"], "runtime keeps one terrain identity")
     assert_equal(config["floors"]["F2"]["stairs"], {}, "reverse route is not invented")
 
 
@@ -113,6 +117,30 @@ def test_route_set_and_upsert() -> None:
     assert_equal(conflict["code"], "floor_route_map_conflict", "floor map conflict rejected")
 
 
+def test_route_edit_cannot_enable_certified_motion() -> None:
+    route = valid_route()
+    edited = validate_floor_route(
+        route_payload(
+            terrain_guard={
+                "profile_id": "field-calibrated",
+                "corridor_version": "v3",
+                "motion_policy": "certified_connector",
+                "certified_motion": True,
+            }
+        ),
+        annotations_by_id=annotations(),
+        maps_by_id=maps(),
+        resolve_map_yaml=lambda record: record.get("yaml_path", ""),
+        route_id="route_edit",
+        now_text="now",
+    )
+    assert_equal(edited["ok"], True, "edited route remains valid")
+    assert_equal(edited["route"]["terrain_guard"]["profile_id"], "field-calibrated", "profile id retained")
+    assert_equal(edited["route"]["terrain_guard"]["corridor_version"], "v3", "corridor version retained")
+    assert_equal(edited["route"]["terrain_guard"]["motion_policy"], "stop_only", "motion policy forced stop-only")
+    assert_equal(edited["route"]["terrain_guard"]["certified_motion"], False, "certification forced false")
+
+
 def test_floor_switch_request_contract() -> None:
     route = valid_route()
     request = {"request_id": "switch_1", "route_id": "route_up", "source_floor": "F1", "target_floor": "F2", "target_map_id": "map_f2"}
@@ -140,6 +168,7 @@ def main() -> int:
         test_validate_route_and_runtime_config,
         test_route_validation_rejects_bad_assets,
         test_route_set_and_upsert,
+        test_route_edit_cannot_enable_certified_motion,
         test_floor_switch_request_contract,
         test_public_payload_only_exposes_semantic_candidates,
     ):

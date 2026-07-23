@@ -4,6 +4,8 @@ import math
 import re
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
+from .connector_contract import terrain_guard_profile_for_route
+
 
 ResolveMapYaml = Callable[[Dict[str, Any]], str]
 
@@ -163,6 +165,7 @@ def validate_floor_route(
             "source_platform": _pose(source_platform.get("pose")),
             "target_platform": _pose(target_platform.get("pose")),
             "post_exit": _pose(post_exit.get("pose")),
+            "terrain_guard": terrain_guard_profile_for_route(str(route_id), payload),
             "updated_at": str(now_text),
         },
     }
@@ -345,6 +348,10 @@ def runtime_floor_config(routes: Iterable[Dict[str, Any]], *, mission: Optional[
             "source_platform": dict(route.get("source_platform") or {}),
             "target_platform": dict(route.get("target_platform") or {}),
             "post_exit": dict(route.get("post_exit") or {}),
+            "terrain_guard": terrain_guard_profile_for_route(
+                str(route.get("id") or f"{source_floor}_to_{target_floor}"),
+                route,
+            ),
             "transition": dict(config["mission"]["stair_transition_defaults"]),
         }
     return config

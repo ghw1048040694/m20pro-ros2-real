@@ -6,6 +6,7 @@ from collections import deque
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .mapping_contract import mapping_floor_steps
+from .connector_contract import connector_terrain_guard_profile
 
 
 def floor_sort_key(value: Any) -> Tuple[int, int, str]:
@@ -37,6 +38,9 @@ def stair_routes_from_config(config: Dict[str, Any]) -> List[Dict[str, Any]]:
             if not target_floor:
                 continue
             transition = stair.get("transition") if isinstance(stair.get("transition"), dict) else {}
+            terrain_guard = stair.get("terrain_guard")
+            if not isinstance(terrain_guard, dict):
+                terrain_guard = transition.get("terrain_guard")
             poses = {
                 "entry": stair.get("entry"),
                 "source_platform": stair.get("source_platform") or stair.get("traverse_to"),
@@ -52,6 +56,12 @@ def stair_routes_from_config(config: Dict[str, Any]) -> List[Dict[str, Any]]:
                     "target_floor": target_floor,
                     "direction": str(stair.get("direction") or ""),
                     "model": str(transition.get("model") or "shared_platform"),
+                    "terrain_guard": connector_terrain_guard_profile(
+                        {
+                            "id": f"{source_floor}:{name}",
+                            "terrain_guard": terrain_guard,
+                        }
+                    ),
                     "poses": poses,
                     "missing_poses": missing,
                     "configured": not missing,

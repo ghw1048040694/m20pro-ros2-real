@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional
 
+from .connector_contract import connector_terrain_guard_profile
 from .multi_floor_contract import find_floor_path
 
 
@@ -188,6 +189,7 @@ def build_unified_navigation_plan(
                         ]
                     ),
                     "path_step_count": len(path) - 1,
+                    "terrain_guard": connector_terrain_guard_profile(route),
                     "route": route,
                 }
             )
@@ -286,6 +288,12 @@ def navigation_plan_record(plan: Dict[str, Any]) -> Dict[str, Any]:
                 "target_segment_index": _int_or(item.get("target_segment_index", 0), 0),
                 "path_step_index": _int_or(item.get("path_step_index", 0), 0),
                 "path_step_count": _int_or(item.get("path_step_count", 1), 1),
+                "terrain_guard": connector_terrain_guard_profile(
+                    {
+                        "id": _text(item.get("route_id")),
+                        "terrain_guard": item.get("terrain_guard"),
+                    }
+                ),
             }
             for item in plan.get("transitions") or []
             if isinstance(item, dict)

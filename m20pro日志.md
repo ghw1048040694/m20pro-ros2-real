@@ -1,5 +1,20 @@
 # M20 Pro ROS 2 跨楼层巡检导航系统项目日志
 
+## 2026-07-23 18:44 CST - 将楼梯 terrain_guard 身份并入统一导航计划
+
+- 统一计划的每条有向连接边现在绑定唯一 `terrain_guard` 身份：`profile_id`、`corridor_version`、`motion_policy`、`certified_motion` 和来源；多跳路线、反向路线及 `F1 -> F2 -> F1` 均按各自连接边保存，不再让路线配置和 106 三维感知 profile 脱节。
+- 新增纯合同模块 `connector_contract.py`，路线保存、运行 floor config、统一计划记录均调用同一套 profile 归一化规则。浏览器/API 即使提交 `certified_motion=true` 也会被服务器强制为 `stop_only/false`；真实认证只能留给未来现场验收流程。
+- 新路线默认 `shadow-v1 + stop_only`，只用于 106 影子感知版本校验；不会替换平地 `/scan`、Nav2、定位或仲裁，也没有解除 `stair_execution_retired`。几何阈值仍只保留在 106 本地 terrain guard，不复制到 104。
+- 补充路线、统一计划、多跳、反向路线和防误认证测试；全量 `scripts/test_*.py`、Python 编译、`git diff --check` 和 `m20pro_navigation/m20pro_cloud_bridge/m20pro_bringup` 三包构建通过。本轮未部署或操作 103/104/106，未发送运动、导航、重定位、切图或网络命令；当前时间早于 21:00，不推送 GitHub/GitLab。
+
+Last updated: 2026-07-23 18:44 CST
+
+## 2026-07-23 18:46 CST - 清理统一合同格式
+
+- 删除统一计划合同中 profile 接入后多余的空行，重新通过差异检查；运行语义和安全边界不变。本轮仍未部署或操作 103/104/106，当前时间早于 21:00，不推送 GitHub/GitLab。
+
+Last updated: 2026-07-23 18:46 CST
+
 ## 2026-07-23 18:34 CST - 将三维导航范围收敛到楼梯连接边影子感知
 
 - 根据“平地保持二维、只有楼梯处使用三维”的统一边界，新增 `tools/terrain_guard_106` 只读影子组件：106 本地消费 `/LIDAR/POINTS`，只对显式楼梯走廊检查点云时效、前方覆盖、连续台阶、步高范围、方向一致性和高障碍，不发布 `/scan`、`/cmd_vel`、步态或姿态命令，也不向 104 传原始点云。

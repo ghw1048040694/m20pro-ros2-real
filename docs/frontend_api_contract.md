@@ -983,6 +983,20 @@ ROS 2 功能包也可以订阅：
 
 保存时后端强制检查：两侧点位类型、楼层、地图和坐标一致；两张地图均具备 104 Nav2 yaml 和非 `active` 的 106 原厂地图包；同一楼层的所有路线只能引用同一张正式地图。路线持久化到 Web `data_dir/floor_routes.json`，并通过 transient-local `/m20pro/floor_route_config` 动态下发给 `floor_manager`。
 
+后端会为每条路线保存一个 `terrain_guard` 身份块，例如：
+
+```json
+{
+  "profile_id": "floor_route_xxx:terrain",
+  "corridor_version": "shadow-v1",
+  "motion_policy": "stop_only",
+  "certified_motion": false,
+  "source": "106_local_pointcloud"
+}
+```
+
+该块只绑定楼梯连接边与 106 本地点云 profile 的版本，不携带或复制点云几何阈值。路线编辑接口不能把路线标记为已认证运动；地图、走廊或 profile 版本变化时，统一导航计划必须重新生成。平地任务不经过该字段，也不改变 `/scan`/Nav2 链路。
+
 ### POST `/api/floor_routes/delete`
 
 ```json

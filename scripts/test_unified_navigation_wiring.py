@@ -20,6 +20,19 @@ def test_task_creation_builds_unified_plan() -> None:
     assert "task[\"navigation_plan\"] = navigation_plan_record(unified_plan)" in WEB_SOURCE
 
 
+def test_connector_plan_carries_terrain_identity() -> None:
+    contract = (
+        ROOT
+        / "src"
+        / "m20pro_cloud_bridge"
+        / "m20pro_cloud_bridge"
+        / "unified_navigation_contract.py"
+    ).read_text(encoding="utf-8")
+    assert "connector_terrain_guard_profile" in contract
+    assert '"terrain_guard": connector_terrain_guard_profile(route)' in contract
+    assert '"terrain_guard": connector_terrain_guard_profile(' in contract
+
+
 def test_compatibility_fields_are_plan_projections() -> None:
     marker = 'task["navigation_plan"] = navigation_plan_record(unified_plan)'
     start = WEB_SOURCE.index(marker)
@@ -46,5 +59,6 @@ def test_runtime_plan_failure_stops_task() -> None:
 
 if __name__ == "__main__":
     test_task_creation_builds_unified_plan()
+    test_connector_plan_carries_terrain_identity()
     test_compatibility_fields_are_plan_projections()
     print("unified navigation wiring tests passed")
