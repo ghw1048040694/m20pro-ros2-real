@@ -45,6 +45,7 @@ def route(certified: bool = True) -> dict:
 
 def status(**extra) -> dict:
     payload = {
+        "request_id": "r1",
         "profile_id": "route_up:terrain",
         "corridor_version": "field-v1",
         "state": "traversable",
@@ -107,6 +108,33 @@ def test_full_connector_sequence_is_ordered_and_uses_route_poses() -> None:
     assert_equal(completed["actions"][-1]["kind"], "resume_flat_navigation", "resume flat navigation")
 
 
+def test_preparing_waits_for_initial_unknown_terrain() -> None:
+    created = create_connector_execution(route(), request_id="r1", now_monotonic=0.0)
+    waiting = step_connector_execution(
+        created["execution"],
+        {
+            "type": "terrain_status",
+            "request_id": "r1",
+            "status": status(state="unknown", reason="awaiting_pointcloud"),
+        },
+        now_monotonic=0.2,
+    )
+    assert_equal(waiting["ok"], True, "initial unknown terrain waits")
+    assert_equal(waiting["execution"]["state"], "PREPARING", "initial unknown keeps preparing")
+    assert_equal(waiting["actions"], [], "initial unknown emits no motion action")
+
+
+def test_event_without_request_identity_is_ignored() -> None:
+    created = create_connector_execution(route(), request_id="r1", now_monotonic=0.0)
+    ignored = step_connector_execution(
+        created["execution"],
+        {"type": "entry_reached"},
+        now_monotonic=0.2,
+    )
+    assert_equal(ignored["code"], "connector_event_request_missing", "event identity required")
+    assert_equal(ignored["execution"]["state"], "PREPARING", "missing identity cannot advance")
+
+
 def test_blocked_terrain_stops_without_recovery() -> None:
     created = create_connector_execution(route(), request_id="r1", now_monotonic=0.0)
     blocked = step_connector_execution(
@@ -167,6 +195,8 @@ def main() -> int:
     tests = [
         test_shadow_route_is_rejected_before_motion,
         test_full_connector_sequence_is_ordered_and_uses_route_poses,
+        test_preparing_waits_for_initial_unknown_terrain,
+        test_event_without_request_identity_is_ignored,
         test_blocked_terrain_stops_without_recovery,
         test_stale_event_and_wrong_floor_result_are_safe,
         test_operator_stop_and_timeout_are_terminal,

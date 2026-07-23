@@ -67,6 +67,26 @@ def test_stair_executor_is_a_semantic_reducer_without_motion_publishers() -> Non
     assert "Twist(" not in node
 
 
+def test_stair_executor_wires_identity_bound_terrain_topics() -> None:
+    node = (
+        ROOT
+        / "src"
+        / "m20pro_navigation"
+        / "m20pro_navigation"
+        / "stair_executor_node.py"
+    ).read_text(encoding="utf-8")
+    assert '"terrain_request_topic", "/m20pro/terrain_guard/request"' in node
+    assert '"terrain_status_topic", "/m20pro/terrain_guard/status"' in node
+    assert "self._terrain_request_pub = self.create_publisher" in node
+    assert "self._on_terrain_status" in node
+    assert "def _publish_terrain_request(" in node
+    assert '"request_id": request_id' in node
+    assert '"enabled": True' in node
+    assert '"enabled": False' in node
+    assert '"/cmd_vel"' not in node
+    assert "Twist(" not in node
+
+
 def test_compatibility_fields_are_plan_projections() -> None:
     marker = 'task["navigation_plan"] = navigation_plan_record(unified_plan)'
     start = WEB_SOURCE.index(marker)
@@ -95,5 +115,6 @@ if __name__ == "__main__":
     test_task_creation_builds_unified_plan()
     test_connector_plan_carries_terrain_identity()
     test_stair_executor_is_a_semantic_reducer_without_motion_publishers()
+    test_stair_executor_wires_identity_bound_terrain_topics()
     test_compatibility_fields_are_plan_projections()
     print("unified navigation wiring tests passed")

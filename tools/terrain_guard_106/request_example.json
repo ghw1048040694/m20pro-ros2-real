@@ -1,6 +1,8 @@
 {
   "enabled": true,
+  "request_id": "shadow-request-001",
   "route_id": "stairs-a-up",
+  "profile_id": "stairs-a-up:terrain",
   "corridor_version": "corridor-v1",
   "direction": "forward",
   "corridor": {

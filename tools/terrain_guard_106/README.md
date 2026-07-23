@@ -38,6 +38,9 @@ ros2 run m20pro_navigation terrain_guard_106
 
 请求是 JSON，必须包含矩形走廊和方向。例如：
 
+`request_id`、`route_id`、`profile_id` 和 `corridor_version` 是必需身份字段；缺失任一
+字段时节点只返回 `unknown`，不会沿用上一条请求的结果。
+
 ```json
 {
   "enabled": true,

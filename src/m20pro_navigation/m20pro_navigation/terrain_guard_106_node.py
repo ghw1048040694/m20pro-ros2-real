@@ -54,6 +54,8 @@ class TerrainGuard106(Node):
         self._max_points = max(1000, configured_max_points)
         self._request: Optional[Dict[str, Any]] = None
         self._request_error: Optional[str] = None
+        self._request_id = ""
+        self._request_profile_id = ""
         self._points: list[tuple[float, float, float]] = []
         self._last_cloud_monotonic: Optional[float] = None
         self._last_cloud_frame = ""
@@ -86,40 +88,68 @@ class TerrainGuard106(Node):
             status_topic,
         )
 
+    def _reset_result(self, reason: str) -> None:
+        self._last_result = {
+            "state": "unknown",
+            "reason": reason,
+            "confidence": 0.0,
+            "traversable": False,
+            "permit_motion": False,
+        }
+
     def _on_request(self, message: String) -> None:
         try:
             value = json.loads(message.data)
         except (TypeError, ValueError, json.JSONDecodeError):
             self._request = None
             self._request_error = "terrain_request_json_invalid"
+            self._request_id = ""
+            self._request_profile_id = ""
+            self._reset_result(self._request_error)
             self._publish_status()
             return
         if not isinstance(value, dict):
             self._request = None
             self._request_error = "terrain_request_invalid"
+            self._request_id = ""
+            self._request_profile_id = ""
+            self._reset_result(self._request_error)
             self._publish_status()
             return
         enabled = value.get("enabled", value.get("active", True))
         if enabled is False:
             self._request = None
             self._request_error = None
-            self._last_result = {
-                "state": "unknown",
-                "reason": "terrain_guard_disabled",
-                "confidence": 0.0,
-                "traversable": False,
-                "permit_motion": False,
-            }
+            self._request_id = ""
+            self._request_profile_id = ""
+            self._reset_result("terrain_guard_disabled")
             self._publish_status()
             return
         normalized = normalize_corridor(value)
         if not normalized.get("ok", True):
             self._request = None
             self._request_error = str(normalized.get("code") or "terrain_request_invalid")
+            self._request_id = ""
+            self._request_profile_id = ""
+            self._reset_result(self._request_error)
+            self._publish_status()
+            return
+        request_id = str(value.get("request_id") or "").strip()
+        route_id = str(value.get("route_id") or "").strip()
+        profile_id = str(value.get("profile_id") or (f"{route_id}:terrain" if route_id else "")).strip()
+        corridor_version = str(value.get("corridor_version") or "").strip()
+        if not request_id or not route_id or not profile_id or not corridor_version:
+            self._request = None
+            self._request_error = "terrain_request_identity_missing"
+            self._request_id = ""
+            self._request_profile_id = ""
+            self._reset_result(self._request_error)
             self._publish_status()
             return
         self._request = value
         self._request_error = None
+        self._request_id = request_id
+        self._request_profile_id = profile_id
         self._sequence = 0
         self._last_result = {
             "state": "unknown",
@@ -252,6 +282,8 @@ class TerrainGuard106(Node):
         payload.update(
             {
                 "route_id": str((self._request or {}).get("route_id") or ""),
+                "profile_id": self._request_profile_id,
+                "request_id": self._request_id,
                 "corridor_version": str((self._request or {}).get("corridor_version") or ""),
                 "sequence": self._sequence,
                 "stamp_unix_s": time.time(),

@@ -1,5 +1,27 @@
 # M20 Pro ROS 2 跨楼层巡检导航系统项目日志
 
+## 2026-07-23 21:28 CST - 闭合楼梯 terrain_guard 语义请求与身份回传链
+
+- 修复根本缺口：`stair_executor` 合同虽然已经生成 `request_terrain_guard`，但原 ROS
+  适配器没有真正把请求发到 106。现在适配器在认证连接边准备成功后，向
+  `/m20pro/terrain_guard/request` 发布带 `request_id/profile_id/corridor_version`、方向
+  和走廊几何的请求；结束、停止或失败时自动发布禁用请求。
+- 106 `terrain_guard_106` 保存并回传请求身份，状态不再只有路线名，避免同一路线的旧
+  点云状态被下一次任务误认；缺少请求、路线、profile 或版本身份的请求直接拒绝。104 适配器订阅 `/m20pro/terrain_guard/status` 并将状态
+ 送回同一个 reducer；所有执行事件也必须携带同一 `request_id`，重复启动连接边会被
+  拒绝，不会覆盖旧请求。
+- 无效请求现在会同步清空上一条结果并返回 `unknown`，不会因为上一条任务曾经可通行
+  而在新请求身份缺失时继续显示 `traversable`。
+- 修复状态机初始时序：准备阶段收到 `unknown/awaiting_pointcloud` 或 `stale` 只等待
+  新鲜点云，超过阶段超时才失败；一旦进入入口导航或楼梯运动阶段，任何未知、过期、
+  阻塞、身份不一致状态仍立即停止，保持 fail-closed。没有新增速度、步态、姿态或地图
+  发布器，`stair_execution_retired` 继续有效。
+- 新增初始未知状态等待、请求身份校验、语义话题 wiring 回归测试，更新跨楼层和 DDDMR
+  文档、请求示例。本轮仅修改上位机源码、测试、文档和日志，未连接、部署或重启
+  103/104/106，未发送导航、速度、姿态、重定位、切图或网络命令。
+
+Last updated: 2026-07-23 21:28 CST
+
 ## 2026-07-23 21:15 CST - 将 106 terrain_guard 收敛为可构建的只读 ROS 节点
 
 - 将临时 `tools/terrain_guard_106` 中的实现和唯一地形合同正式归入现有

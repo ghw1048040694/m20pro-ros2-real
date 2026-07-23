@@ -38,6 +38,10 @@ def main() -> int:
     assert "sys.path.insert" not in source
     assert "uvs=uvs" in source
     assert "max_points" in source
+    assert "terrain_request_identity_missing" in source
+    assert "self._request_id = request_id" in source
+    assert '"request_id": self._request_id' in source
+    assert '"profile_id": self._request_profile_id' in source
     assert '"permit_motion": False' in source
     assert '"certified_motion": False' in source
     assert 'create_subscription(PointCloud2, cloud_topic, self._on_cloud' in source

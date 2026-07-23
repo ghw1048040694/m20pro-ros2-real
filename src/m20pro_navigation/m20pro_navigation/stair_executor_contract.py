@@ -1,10 +1,10 @@
 """Fail-closed state machine contract for one certified stair connector.
 
 The reducer emits semantic actions only.  It never publishes ``cmd_vel``,
-gait commands, map changes, or 106 requests itself; a future ROS node must
-route those actions through the existing command arbiter and floor-switch
-transaction.  The default route profile is shadow/stop-only and is rejected
-before any stair motion is possible.
+gait commands, map changes, or raw point clouds; the ROS adapter routes its
+request/status actions through the 106 terrain topic and existing command
+arbiter/floor-switch transaction.  The default route profile is
+shadow/stop-only and is rejected before any stair motion is possible.
 """
 
 from __future__ import annotations
@@ -179,13 +179,18 @@ def create_connector_execution(
 
 def _event_request_matches(execution: Dict[str, Any], event: Dict[str, Any]) -> bool:
     event_request = _text(event.get("request_id"))
-    return not event_request or event_request == _text(execution.get("request_id"))
+    return bool(event_request) and event_request == _text(execution.get("request_id"))
 
 
 def _terrain_ready(execution: Dict[str, Any], status: Any, now_monotonic: float) -> Dict[str, Any]:
     if not isinstance(status, dict):
         return {"ok": False, "code": "terrain_guard_status_missing", "message": "缺少楼梯 terrain_guard 状态"}
     profile = execution.get("terrain_guard") if isinstance(execution.get("terrain_guard"), dict) else {}
+    status_request_id = _text(status.get("request_id"))
+    if not status_request_id:
+        return {"ok": False, "code": "terrain_guard_request_id_missing", "message": "楼梯 terrain_guard 状态缺少请求身份"}
+    if status_request_id != _text(execution.get("request_id")):
+        return {"ok": False, "code": "terrain_guard_request_mismatch", "message": "楼梯 terrain_guard 状态不是当前请求"}
     status_profile = _text(status.get("profile_id"))
     if not status_profile:
         status_profile = f"{_text(status.get('route_id'))}:terrain"
@@ -218,6 +223,8 @@ def step_connector_execution(
     if state in TERMINAL_STATES:
         return {"ok": True, "code": "connector_terminal_ignored", "message": "楼梯执行已结束，忽略迟到事件", "execution": current, "actions": []}
     if not _event_request_matches(current, event):
+        if not _text(event.get("request_id")):
+            return {"ok": True, "code": "connector_event_request_missing", "message": "楼梯执行事件缺少请求身份，已忽略", "execution": current, "actions": []}
         return {"ok": True, "code": "connector_stale_event_ignored", "message": "忽略其他楼梯执行的迟到事件", "execution": current, "actions": []}
     stage_started = _finite(current.get("stage_started_monotonic"))
     elapsed = float(now_monotonic) - (stage_started if stage_started is not None else float(now_monotonic))
@@ -232,6 +239,11 @@ def step_connector_execution(
             return {"ok": True, "code": "connector_waiting_terrain", "message": current["status_message"], "execution": current, "actions": []}
         terrain = _terrain_ready(current, event.get("status"), now_monotonic)
         if not terrain.get("ok"):
+            raw_status = event.get("status")
+            raw_state = _text(raw_status.get("state")).lower() if isinstance(raw_status, dict) else ""
+            if raw_state in {"unknown", "stale"} and terrain.get("code") == "terrain_guard_not_traversable":
+                current["status_message"] = "等待楼梯 terrain_guard 新鲜可通行证据"
+                return {"ok": True, "code": "connector_waiting_terrain", "message": current["status_message"], "execution": current, "actions": []}
             return _failure(current, code=str(terrain["code"]), message=str(terrain["message"]))
         current.update({"state": "ENTRY_NAVIGATION", "stage_started_monotonic": float(now_monotonic), "status_message": "terrain_guard 通过，导航至楼梯入口"})
         return {"ok": True, "code": "connector_entry_requested", "message": current["status_message"], "execution": current, "actions": [_action("dispatch_entry_goal", pose=dict(current["entry"]), map_id=current["source_map_id"])]}
