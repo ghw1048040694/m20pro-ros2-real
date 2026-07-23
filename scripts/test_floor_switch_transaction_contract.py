@@ -42,7 +42,7 @@ def context() -> dict:
 
 def transaction() -> dict:
     result = begin_transaction(
-        request={"request_id": "switch-1"},
+        request={"request_id": "switch-1", "plan_id": "task-1:run-1"},
         context=context(),
         source_map_digest="source-digest",
         target_map_digest="target-digest",
@@ -82,6 +82,27 @@ def test_restart_recovery_and_admission() -> None:
     )
     check(migrated["changed"], "legacy uncertain transaction receives a fresh recovery barrier")
     check(migrated["transaction"]["uncertain_at_unix"] == 101.0, "recovery barrier is persisted")
+
+
+def test_transaction_requires_reserved_connector_identity() -> None:
+    missing_plan = begin_transaction(
+        request={"request_id": "switch-1"},
+        context=context(),
+        source_map_digest="source-digest",
+        target_map_digest="target-digest",
+        map_epoch=1,
+        now_text="now",
+    )
+    check(missing_plan["code"] == "floor_switch_plan_id_missing", "plan identity is mandatory")
+    invalid_epoch = begin_transaction(
+        request={"request_id": "switch-1", "plan_id": "task-1:run-1"},
+        context=context(),
+        source_map_digest="source-digest",
+        target_map_digest="target-digest",
+        map_epoch=0,
+        now_text="now",
+    )
+    check(invalid_epoch["code"] == "floor_switch_map_epoch_invalid", "epoch must be pre-reserved")
 
 
 def test_commit_requires_all_evidence() -> None:
@@ -306,6 +327,7 @@ def test_complete_uncertain_recovery_is_terminal_and_admits_next_request() -> No
 def main() -> int:
     check(next_map_epoch({"floor_switch_map_epoch": 7}) == 8, "epoch increments")
     test_restart_recovery_and_admission()
+    test_transaction_requires_reserved_connector_identity()
     test_commit_requires_all_evidence()
     test_rollback_requires_source_relocalization()
     test_uncertain_state_is_the_only_emergency_closeout()

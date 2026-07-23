@@ -46,6 +46,9 @@ def route(certified: bool = True) -> dict:
 def status(**extra) -> dict:
     payload = {
         "request_id": "r1",
+        "route_id": "route_up",
+        "plan_id": "plan-1",
+        "map_epoch": 4,
         "profile_id": "route_up:terrain",
         "corridor_version": "field-v1",
         "state": "traversable",
@@ -56,19 +59,41 @@ def status(**extra) -> dict:
     return payload
 
 
+def create(request_id: str = "r1", *, certified: bool = True, **extra) -> dict:
+    return create_connector_execution(
+        route(certified=certified),
+        request_id=request_id,
+        plan_id="plan-1",
+        map_epoch=4,
+        now_monotonic=0.0,
+        **extra,
+    )
+
+
+def event(event_type: str, request_id: str = "r1", **extra) -> dict:
+    return {
+        "type": event_type,
+        "request_id": request_id,
+        "route_id": "route_up",
+        "plan_id": "plan-1",
+        "map_epoch": 4,
+        **extra,
+    }
+
+
 def test_shadow_route_is_rejected_before_motion() -> None:
-    result = create_connector_execution(route(certified=False), request_id="r1", now_monotonic=0.0)
+    result = create(certified=False)
     assert_equal(result["ok"], False, "shadow route rejected")
     assert_equal(result["code"], "stair_execution_retired", "shadow route gate")
     assert_equal(result["actions"][0]["kind"], "stop", "shadow route stop")
 
 
 def test_full_connector_sequence_is_ordered_and_uses_route_poses() -> None:
-    created = create_connector_execution(route(), request_id="r1", now_monotonic=0.0)
+    created = create()
     assert_equal(created["execution"]["state"], "PREPARING", "initial state")
     prepared = step_connector_execution(
         created["execution"],
-        {"type": "terrain_status", "request_id": "r1", "status": status()},
+        event("terrain_status", status=status()),
         now_monotonic=1.0,
     )
     assert_equal(prepared["execution"]["state"], "ENTRY_NAVIGATION", "entry state")
@@ -76,7 +101,7 @@ def test_full_connector_sequence_is_ordered_and_uses_route_poses() -> None:
 
     traversing = step_connector_execution(
         prepared["execution"],
-        {"type": "entry_reached", "request_id": "r1", "entry_pose": {"x": 999, "y": 999, "yaw": 9}},
+        event("entry_reached", entry_pose={"x": 999, "y": 999, "yaw": 9}),
         now_monotonic=2.0,
     )
     assert_equal(traversing["execution"]["state"], "TRAVERSING", "traversing state")
@@ -84,7 +109,7 @@ def test_full_connector_sequence_is_ordered_and_uses_route_poses() -> None:
 
     holding = step_connector_execution(
         traversing["execution"],
-        {"type": "platform_reached", "request_id": "r1", "terrain_status": status()},
+        event("platform_reached", terrain_status=status()),
         now_monotonic=3.0,
     )
     assert_equal(holding["execution"]["state"], "PLATFORM_HOLD", "platform hold")
@@ -93,7 +118,7 @@ def test_full_connector_sequence_is_ordered_and_uses_route_poses() -> None:
 
     exiting = step_connector_execution(
         holding["execution"],
-        {"type": "floor_switch_result", "request_id": "r1", "ok": True, "target_floor": "F2", "target_map_id": "map_f2", "post_exit_pose": {"x": 999, "y": 999, "yaw": 9}},
+        event("floor_switch_result", ok=True, target_floor="F2", target_map_id="map_f2", post_exit_pose={"x": 999, "y": 999, "yaw": 9}),
         now_monotonic=4.0,
     )
     assert_equal(exiting["execution"]["state"], "EXIT_NAVIGATION", "exit state")
@@ -101,7 +126,7 @@ def test_full_connector_sequence_is_ordered_and_uses_route_poses() -> None:
 
     completed = step_connector_execution(
         exiting["execution"],
-        {"type": "exit_reached", "request_id": "r1"},
+        event("exit_reached"),
         now_monotonic=5.0,
     )
     assert_equal(completed["execution"]["state"], "COMPLETED", "completed state")
@@ -110,14 +135,13 @@ def test_full_connector_sequence_is_ordered_and_uses_route_poses() -> None:
 
 
 def test_preparing_waits_for_initial_unknown_terrain() -> None:
-    created = create_connector_execution(route(), request_id="r1", now_monotonic=0.0)
+    created = create()
     waiting = step_connector_execution(
         created["execution"],
-        {
-            "type": "terrain_status",
-            "request_id": "r1",
-            "status": status(state="unknown", reason="awaiting_pointcloud"),
-        },
+        event(
+            "terrain_status",
+            status=status(state="unknown", reason="awaiting_pointcloud"),
+        ),
         now_monotonic=0.2,
     )
     assert_equal(waiting["ok"], True, "initial unknown terrain waits")
@@ -126,21 +150,21 @@ def test_preparing_waits_for_initial_unknown_terrain() -> None:
 
 
 def test_event_without_request_identity_is_ignored() -> None:
-    created = create_connector_execution(route(), request_id="r1", now_monotonic=0.0)
+    created = create()
     ignored = step_connector_execution(
         created["execution"],
         {"type": "entry_reached"},
         now_monotonic=0.2,
     )
-    assert_equal(ignored["code"], "connector_event_request_missing", "event identity required")
+    assert_equal(ignored["code"], "connector_event_identity_missing", "event identity required")
     assert_equal(ignored["execution"]["state"], "PREPARING", "missing identity cannot advance")
 
 
 def test_blocked_terrain_stops_without_recovery() -> None:
-    created = create_connector_execution(route(), request_id="r1", now_monotonic=0.0)
+    created = create()
     blocked = step_connector_execution(
         created["execution"],
-        {"type": "terrain_status", "request_id": "r1", "status": status(state="blocked")},
+        event("terrain_status", status=status(state="blocked")),
         now_monotonic=1.0,
     )
     assert_equal(blocked["ok"], False, "blocked terrain fails")
@@ -148,7 +172,7 @@ def test_blocked_terrain_stops_without_recovery() -> None:
     assert_equal(blocked["actions"][-1]["kind"], "release_terrain_guard", "failure releases terrain request")
     recovered = step_connector_execution(
         blocked["execution"],
-        {"type": "terrain_status", "request_id": "r1", "status": status()},
+        event("terrain_status", status=status()),
         now_monotonic=2.0,
     )
     assert_equal(recovered["code"], "connector_terminal_ignored", "failed connector cannot auto-recover")
@@ -156,27 +180,27 @@ def test_blocked_terrain_stops_without_recovery() -> None:
 
 
 def test_stale_event_and_wrong_floor_result_are_safe() -> None:
-    created = create_connector_execution(route(), request_id="r1", now_monotonic=0.0)
+    created = create()
     stale = step_connector_execution(
         created["execution"],
-        {"type": "terrain_status", "request_id": "old", "status": status()},
+        event("terrain_status", request_id="old", status=status()),
         now_monotonic=1.0,
     )
     assert_equal(stale["code"], "connector_stale_event_ignored", "stale event ignored")
     prepared = step_connector_execution(
         created["execution"],
-        {"type": "terrain_status", "request_id": "r1", "status": status()},
+        event("terrain_status", status=status()),
         now_monotonic=1.0,
     )
-    traversing = step_connector_execution(prepared["execution"], {"type": "entry_reached", "request_id": "r1"}, now_monotonic=2.0)
+    traversing = step_connector_execution(prepared["execution"], event("entry_reached"), now_monotonic=2.0)
     holding = step_connector_execution(
         traversing["execution"],
-        {"type": "platform_reached", "request_id": "r1", "terrain_status": status()},
+        event("platform_reached", terrain_status=status()),
         now_monotonic=3.0,
     )
     mismatch = step_connector_execution(
         holding["execution"],
-        {"type": "floor_switch_result", "request_id": "r1", "ok": True, "target_floor": "F3", "target_map_id": "map_f3"},
+        event("floor_switch_result", ok=True, target_floor="F3", target_map_id="map_f3"),
         now_monotonic=4.0,
     )
     assert_equal(mismatch["execution"]["state"], "FAILED", "wrong switch result fails")
@@ -184,12 +208,12 @@ def test_stale_event_and_wrong_floor_result_are_safe() -> None:
 
 
 def test_operator_stop_and_timeout_are_terminal() -> None:
-    created = create_connector_execution(route(), request_id="r1", now_monotonic=0.0, stage_timeout_s=2.0)
-    stopped = step_connector_execution(created["execution"], {"type": "stop_requested", "request_id": "r1"}, now_monotonic=0.1)
+    created = create(stage_timeout_s=2.0)
+    stopped = step_connector_execution(created["execution"], event("stop_requested"), now_monotonic=0.1)
     assert_equal(stopped["execution"]["state"], "STOPPED", "operator stop")
     assert_equal(stopped["actions"][-1]["kind"], "release_terrain_guard", "operator stop releases terrain request")
-    created = create_connector_execution(route(), request_id="r2", now_monotonic=0.0, stage_timeout_s=2.0)
-    timeout = step_connector_execution(created["execution"], {"type": "terrain_status", "request_id": "r2", "status": status()}, now_monotonic=3.0)
+    created = create("r2", stage_timeout_s=2.0)
+    timeout = step_connector_execution(created["execution"], event("terrain_status", request_id="r2", status=status(request_id="r2")), now_monotonic=3.0)
     assert_equal(timeout["execution"]["state"], "FAILED", "stage timeout")
     assert_equal(timeout["code"], "connector_stage_timeout", "timeout code")
     assert_equal(timeout["actions"][-1]["kind"], "release_terrain_guard", "timeout releases terrain request")

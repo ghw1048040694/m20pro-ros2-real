@@ -35,13 +35,18 @@ def main() -> int:
 
     assert "terrain_guard_106 = m20pro_navigation.terrain_guard_106_node:main" in setup_source
     assert "terrain_guard_replay = m20pro_navigation.terrain_guard_replay:main" in setup_source
-    assert "from .terrain_guard_contract import inspect_cloud, normalize_corridor" in source
+    assert "from .terrain_guard_contract import (" in source
+    assert "inspect_cloud," in source
+    assert "normalize_corridor," in source
     assert "sys.path.insert" not in source
     assert "uvs=uvs" in source
     assert "max_points" in source
     assert "terrain_request_identity_missing" in source
     assert "self._request_id = request_id" in source
     assert '"request_id": self._request_id' in source
+    assert '"plan_id": str((self._request or {}).get("plan_id") or "")' in source
+    assert '"map_epoch": (self._request or {}).get("map_epoch")' in source
+    assert "terrain_request_ownership_decision" in source
     assert '"profile_id": self._request_profile_id' in source
     assert '"permit_motion": False' in source
     assert '"certified_motion": False' in source

@@ -55,6 +55,7 @@ class StairActionOrchestrator(Node):
         self.declare_parameter("floor_switch_result_topic", "/m20pro/floor_switch_result")
         self.declare_parameter("terrain_request_topic", "/m20pro/terrain_guard/request")
         self.declare_parameter("intent_topic", "/m20pro/stair_executor/intent")
+        self.declare_parameter("heartbeat_period_s", 1.0)
 
         self._enabled = bool(self.get_parameter("enabled").value)
         self._identity: Optional[Dict[str, Any]] = None
@@ -102,6 +103,10 @@ class StairActionOrchestrator(Node):
             str(self.get_parameter("floor_switch_result_topic").value),
             self._on_floor_switch_result,
             10,
+        )
+        self.create_timer(
+            max(0.2, float(self.get_parameter("heartbeat_period_s").value)),
+            self._publish_runtime_heartbeat,
         )
         self._publish_status(
             {
@@ -285,8 +290,42 @@ class StairActionOrchestrator(Node):
         if event is not None:
             self._event_pub.publish(_json_message(event))
 
+    def _busy(self) -> bool:
+        request_id = str((self._identity or {}).get("request_id") or "")
+        return bool(
+            self._enabled
+            and request_id
+            and request_id not in self._retired_request_ids
+        )
+
+    def _publish_runtime_heartbeat(self) -> None:
+        self._publish_status(
+            {
+                "ok": self._enabled,
+                "code": "stair_action_orchestrator_ready"
+                if self._enabled
+                else "stair_action_orchestrator_retired",
+                "message": "楼梯动作编排器已就绪"
+                if self._enabled
+                else "楼梯动作编排器默认关闭",
+            }
+        )
+
     def _publish_status(self, payload: Dict[str, Any]) -> None:
-        self._status_pub.publish(_json_message(payload))
+        busy = self._busy()
+        identity = self._identity or {}
+        enriched = {
+            "component": "stair_action_orchestrator",
+            "enabled": self._enabled,
+            "ready": self._enabled,
+            "busy": busy,
+            "request_id": identity.get("request_id") if busy else None,
+            "route_id": identity.get("route_id") if busy else None,
+            "plan_id": identity.get("plan_id") if busy else None,
+            "map_epoch": identity.get("map_epoch") if busy else None,
+            **payload,
+        }
+        self._status_pub.publish(_json_message(enriched))
 
 
 def main(args: Optional[list[str]] = None) -> None:

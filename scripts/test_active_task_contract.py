@@ -379,13 +379,14 @@ def test_mark_connector_started_state() -> None:
         },
         request_id="stair_1",
         plan_id="task_1:run_1",
-        map_epoch=None,
+        map_epoch=7,
         now_text="now",
         now_monotonic=10.0,
     )
     marked = result["active"]
     assert_equal(marked["connector_state"], "PREPARING", "connector starts preparing")
     assert_equal(marked["connector_request_id"], "stair_1", "connector request identity")
+    assert_equal(marked["connector_map_epoch"], 7, "connector map epoch reserved")
     assert_equal(marked["last_floor_goal_cross_floor"], True, "cross-floor timeout projection")
     assert_equal(result["event"], "stair_connector_started", "connector timeline event")
 
@@ -408,11 +409,20 @@ def test_connector_owns_internal_nav_status_until_terminal() -> None:
 def test_connector_status_is_identity_bound_and_tracks_liveness() -> None:
     running = active(
         connector_request_id="stair_1",
+        connector_route_id="F20:F21:stairs",
+        connector_plan_id="task_1:run_1",
+        connector_map_epoch=7,
         connector_state="PREPARING",
     )
     mismatch = apply_connector_status_state(
         running,
-        {"request_id": "other", "state": "ENTRY_NAVIGATION"},
+        {
+            "request_id": "other",
+            "route_id": "F20:F21:stairs",
+            "plan_id": "task_1:run_1",
+            "map_epoch": 7,
+            "state": "ENTRY_NAVIGATION",
+        },
         now_text="now",
         now_monotonic=12.0,
     )
@@ -421,6 +431,9 @@ def test_connector_status_is_identity_bound_and_tracks_liveness() -> None:
         running,
         {
             "request_id": "stair_1",
+            "route_id": "F20:F21:stairs",
+            "plan_id": "task_1:run_1",
+            "map_epoch": 7,
             "state": "ENTRY_NAVIGATION",
             "code": "connector_heartbeat",
             "message": "导航至楼梯入口",
@@ -431,9 +444,29 @@ def test_connector_status_is_identity_bound_and_tracks_liveness() -> None:
     assert_true(heartbeat["matched"], "matching connector status is accepted")
     assert_equal(heartbeat["active"]["connector_state"], "ENTRY_NAVIGATION", "connector phase updated")
     assert_equal(heartbeat["active"]["connector_last_status_monotonic"], 12.0, "connector liveness updated")
+    wrong_epoch = apply_connector_status_state(
+        heartbeat["active"],
+        {
+            "request_id": "stair_1",
+            "route_id": "F20:F21:stairs",
+            "plan_id": "task_1:run_1",
+            "map_epoch": 6,
+            "state": "COMPLETED",
+        },
+        now_text="late",
+        now_monotonic=12.5,
+    )
+    assert_true(not wrong_epoch["matched"], "previous map epoch status is ignored")
     completed = apply_connector_status_state(
         heartbeat["active"],
-        {"request_id": "stair_1", "state": "COMPLETED", "code": "connector_completed"},
+        {
+            "request_id": "stair_1",
+            "route_id": "F20:F21:stairs",
+            "plan_id": "task_1:run_1",
+            "map_epoch": 7,
+            "state": "COMPLETED",
+            "code": "connector_completed",
+        },
         now_text="done",
         now_monotonic=13.0,
     )

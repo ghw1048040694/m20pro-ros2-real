@@ -55,7 +55,8 @@ ros2 run m20pro_navigation terrain_guard_replay \
 
 请求是 JSON，必须包含矩形走廊和方向。例如：
 
-`request_id`、`route_id`、`profile_id` 和 `corridor_version` 是必需身份字段；缺失任一
+`request_id`、`route_id`、`plan_id`、正整数 `map_epoch`、`profile_id` 和
+`corridor_version` 是必需身份字段；缺失任一
 字段时节点只返回 `unknown`，不会沿用上一条请求的结果。
 
 ```json
@@ -63,6 +64,8 @@ ros2 run m20pro_navigation terrain_guard_replay \
   "enabled": true,
   "request_id": "shadow-request-001",
   "route_id": "stairs-a-up",
+  "plan_id": "offline-replay-plan",
+  "map_epoch": 1,
   "profile_id": "stairs-a-up:terrain",
   "corridor_version": "corridor-v1",
   "direction": "forward",
@@ -81,7 +84,9 @@ ros2 run m20pro_navigation terrain_guard_replay \
 }
 ```
 
-停止影子检查时发布 `{"enabled": false}`。请求只能由后续已经通过路线、地图和共享平台事务校验的楼梯执行器生成；当前还没有把它接入真实运动。
+停止影子检查也必须带回同一组 `request_id/route_id/plan_id/map_epoch`；其他连接边的
+迟到释放请求不能清除当前走廊。请求只能由已经通过路线、地图和共享平台事务校验的
+楼梯动作编排器生成；当前还没有把它接入真实运动。
 
 ## 当前状态
 

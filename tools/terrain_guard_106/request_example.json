@@ -2,6 +2,8 @@
   "enabled": true,
   "request_id": "shadow-request-001",
   "route_id": "stairs-a-up",
+  "plan_id": "offline-replay-plan",
+  "map_epoch": 1,
   "profile_id": "stairs-a-up:terrain",
   "corridor_version": "corridor-v1",
   "direction": "forward",

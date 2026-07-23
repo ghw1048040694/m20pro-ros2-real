@@ -58,7 +58,9 @@ def main() -> None:
     assert 'reason="cross_floor_transition"' in web
     assert 'reason="cross_floor_rollback"' in web
     assert "_publish_stair_connector_start" in web
-    assert "create_connector_execution(" in web
+    assert "connector_route_activation_decision(" in web
+    assert "connector_runtime_readiness(" in web
+    assert 'self._settings["floor_switch_map_epoch"] = reserved_epoch' in web
     assert "mark_connector_started_state" in web
     assert "rollback_factory_map" in web
     assert "selected_map_not_observed" in web

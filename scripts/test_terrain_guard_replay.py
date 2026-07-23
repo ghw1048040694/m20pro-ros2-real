@@ -19,7 +19,10 @@ from m20pro_navigation.terrain_guard_replay import (  # noqa: E402
 
 def request() -> dict:
     return {
+        "request_id": "offline-replay-1",
         "route_id": "stairs-a-up",
+        "plan_id": "offline-replay-plan",
+        "map_epoch": 1,
         "corridor_version": "corridor-v1",
         "direction": "forward",
         "corridor": {

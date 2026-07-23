@@ -124,6 +124,24 @@ def apply_connector_status_state(
     expected_request_id = str(active.get("connector_request_id") or "").strip()
     if not request_id or request_id != expected_request_id:
         return {"matched": False, "active": dict(active), "reason": "connector_request_mismatch"}
+    identity_pairs = (
+        ("route_id", "connector_route_id"),
+        ("plan_id", "connector_plan_id"),
+    )
+    if any(
+        not str(status.get(status_key) or "").strip()
+        or str(status.get(status_key) or "").strip()
+        != str(active.get(active_key) or "").strip()
+        for status_key, active_key in identity_pairs
+    ):
+        return {"matched": False, "active": dict(active), "reason": "connector_identity_mismatch"}
+    try:
+        status_epoch = int(status.get("map_epoch"))
+        active_epoch = int(active.get("connector_map_epoch"))
+    except (TypeError, ValueError, OverflowError):
+        return {"matched": False, "active": dict(active), "reason": "connector_identity_mismatch"}
+    if status_epoch <= 0 or status_epoch != active_epoch:
+        return {"matched": False, "active": dict(active), "reason": "connector_identity_mismatch"}
     state = str(status.get("state") or "").strip().upper()
     if state not in CONNECTOR_ACTIVE_STATES | {"COMPLETED", "FAILED", "STOPPED"}:
         return {"matched": False, "active": dict(active), "reason": "connector_state_invalid"}
@@ -658,12 +676,30 @@ def mark_connector_started_state(
     """
     if active.get("status") != "running":
         return {"changed": False, "active": dict(active), "reason": "task_not_running"}
+    connector_request_id = str(request_id or "").strip()
+    connector_route_id = str(transition.get("route_id") or "").strip()
+    connector_plan_id = str(plan_id or "").strip()
+    try:
+        connector_epoch = int(map_epoch)
+    except (TypeError, ValueError, OverflowError):
+        connector_epoch = 0
+    if (
+        not connector_request_id
+        or not connector_route_id
+        or not connector_plan_id
+        or connector_epoch <= 0
+    ):
+        return {
+            "changed": False,
+            "active": dict(active),
+            "reason": "connector_identity_invalid",
+        }
     updated = dict(active)
     updated["last_goal_annotation_id"] = annotation.get("id")
     updated["last_goal_label"] = annotation.get("label")
     updated["last_goal_sent_at"] = now_text
     updated["last_goal_sent_monotonic"] = float(now_monotonic)
-    updated["last_goal_attempt_id"] = request_id
+    updated["last_goal_attempt_id"] = connector_request_id
     updated["last_goal_pose"] = {
         "floor": goal.get("floor"),
         "x": goal.get("x"),
@@ -673,10 +709,10 @@ def mark_connector_started_state(
     }
     updated["phase"] = "navigating"
     updated["last_nav_goal_status"] = "sent"
-    updated["connector_request_id"] = request_id
-    updated["connector_route_id"] = transition.get("route_id")
-    updated["connector_plan_id"] = plan_id or None
-    updated["connector_map_epoch"] = map_epoch
+    updated["connector_request_id"] = connector_request_id
+    updated["connector_route_id"] = connector_route_id
+    updated["connector_plan_id"] = connector_plan_id
+    updated["connector_map_epoch"] = connector_epoch
     updated["connector_state"] = "PREPARING"
     updated["connector_source_floor"] = transition.get("source_floor")
     updated["connector_target_floor"] = transition.get("target_floor")
@@ -698,10 +734,10 @@ def mark_connector_started_state(
         "message": updated["status_message"],
         "event_extra": {
             "annotation_id": annotation.get("id"),
-            "request_id": request_id,
-            "route_id": transition.get("route_id"),
-            "plan_id": plan_id,
-            "map_epoch": map_epoch,
+            "request_id": connector_request_id,
+            "route_id": connector_route_id,
+            "plan_id": connector_plan_id,
+            "map_epoch": connector_epoch,
             "source_floor": transition.get("source_floor"),
             "target_floor": transition.get("target_floor"),
         },

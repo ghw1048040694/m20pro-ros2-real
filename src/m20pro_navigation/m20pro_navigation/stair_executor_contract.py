@@ -118,6 +118,19 @@ def _route_validation(route: Any) -> Dict[str, Any]:
     return {"ok": True, "profile": profile}
 
 
+def connector_route_activation_decision(route: Any) -> Dict[str, Any]:
+    """Validate route geometry and certification without creating execution state."""
+    return _route_validation(route)
+
+
+def _positive_epoch(value: Any) -> Optional[int]:
+    try:
+        epoch = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return epoch if epoch > 0 else None
+
+
 def create_connector_execution(
     route: Dict[str, Any],
     *,
@@ -130,11 +143,19 @@ def create_connector_execution(
     """Create a single connector execution and its first semantic action."""
     route_check = _route_validation(route)
     request = _text(request_id)
+    plan = _text(plan_id)
+    epoch = _positive_epoch(map_epoch)
     if not request:
         route_check = {"ok": False, "code": "connector_request_id_missing", "message": "楼梯执行缺少 request_id"}
+    elif not plan:
+        route_check = {"ok": False, "code": "connector_plan_id_missing", "message": "楼梯执行缺少 plan_id"}
+    elif epoch is None:
+        route_check = {"ok": False, "code": "connector_map_epoch_invalid", "message": "楼梯执行缺少有效 map_epoch"}
     if not route_check.get("ok"):
         execution = {
             "request_id": request or None,
+            "plan_id": plan or None,
+            "map_epoch": epoch,
             "route_id": _text(route.get("id")) if isinstance(route, dict) else "",
             "state": "FAILED",
             "status": "failed",
@@ -148,8 +169,8 @@ def create_connector_execution(
     profile = dict(route_check["profile"])
     execution = {
         "request_id": request,
-        "plan_id": _text(plan_id) or None,
-        "map_epoch": map_epoch,
+        "plan_id": plan,
+        "map_epoch": epoch,
         "route_id": _text(route.get("id")),
         "source_floor": _text(route.get("source_floor")),
         "target_floor": _text(route.get("target_floor")),
@@ -184,9 +205,12 @@ def create_connector_execution(
     }
 
 
-def _event_request_matches(execution: Dict[str, Any], event: Dict[str, Any]) -> bool:
-    event_request = _text(event.get("request_id"))
-    return bool(event_request) and event_request == _text(execution.get("request_id"))
+def _event_identity_matches(execution: Dict[str, Any], event: Dict[str, Any]) -> bool:
+    for key in ("request_id", "route_id", "plan_id"):
+        if not _text(event.get(key)) or _text(event.get(key)) != _text(execution.get(key)):
+            return False
+    event_epoch = _positive_epoch(event.get("map_epoch"))
+    return event_epoch is not None and event_epoch == _positive_epoch(execution.get("map_epoch"))
 
 
 def _terrain_ready(execution: Dict[str, Any], status: Any, now_monotonic: float) -> Dict[str, Any]:
@@ -229,9 +253,14 @@ def step_connector_execution(
     event_type = _text(event.get("type"))
     if state in TERMINAL_STATES:
         return {"ok": True, "code": "connector_terminal_ignored", "message": "楼梯执行已结束，忽略迟到事件", "execution": current, "actions": []}
-    if not _event_request_matches(current, event):
-        if not _text(event.get("request_id")):
-            return {"ok": True, "code": "connector_event_request_missing", "message": "楼梯执行事件缺少请求身份，已忽略", "execution": current, "actions": []}
+    if not _event_identity_matches(current, event):
+        if (
+            not _text(event.get("request_id"))
+            or not _text(event.get("route_id"))
+            or not _text(event.get("plan_id"))
+            or _positive_epoch(event.get("map_epoch")) is None
+        ):
+            return {"ok": True, "code": "connector_event_identity_missing", "message": "楼梯执行事件缺少完整身份，已忽略", "execution": current, "actions": []}
         return {"ok": True, "code": "connector_stale_event_ignored", "message": "忽略其他楼梯执行的迟到事件", "execution": current, "actions": []}
     stage_started = _finite(current.get("stage_started_monotonic"))
     elapsed = float(now_monotonic) - (stage_started if stage_started is not None else float(now_monotonic))

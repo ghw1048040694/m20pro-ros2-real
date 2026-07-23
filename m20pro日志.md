@@ -24602,3 +24602,10 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 前端任务状态中仅在 `UNCERTAIN` 显示“确认当前地图并恢复”按钮，按钮只提交事务核验，不发布位姿、不切图、不发送运动命令；恢复成功后旧任务不会自动续跑，后续新事务才可重新开始。
 - 增加旧时间戳迁移、旧 2101 拒绝、地图摘要不符、106 未确认、定位锁、Nav2 未就绪、完整证据收口及 `RECOVERED` 不可改写等回归测试；更新前端 API、跨楼层方案文档并刷新静态资源版本。
 - 验证：`scripts/test_*.py` 共 44 个测试文件全部通过，Python 编译、JavaScript 语法和 `git diff --check` 通过；本轮未部署或重启 103/104/106，未发送运动、重定位、切图或网络命令。
+## 2026-07-23 23:53 CST - 闭合统一连接边运行门禁与 map_epoch 身份链
+
+- 根因确认：Web 启动楼梯连接边时曾把 `map_epoch` 设为 `None`，后台切图线程随后又自行递增 epoch，导致执行器、terrain_guard、切层事务和迟到回执没有共享同一个地图代次；同时 Web 只等待 `stair_executor`，没有证明动作编排器也已启用，任一组件缺失都会拖到阶段超时才暴露。
+- 根治修正：新增纯 `connector_runtime_contract`，连接边起步前必须同时收到 `stair_executor` 与 `stair_action_orchestrator` 的新鲜 `enabled/ready/busy=false` 心跳；新增节点持续心跳和显式组件身份，缺失、过期、禁用、忙碌或身份错误均在发布楼梯目标前停止任务。未改变默认 `enabled=false`，未加入 real launch，`stair_execution_retired` 继续有效。
+- 身份链统一：Web 通过运行门后一次性持久化预留递增 `map_epoch`，启动信封、执行器状态、terrain 请求、floor switch 请求、事务和回执统一绑定 `request_id/route_id/plan_id/map_epoch`；切层线程只消费预留 epoch，不再生成第二个代次。旧 epoch、缺字段或其他连接边回执不能推进状态机。
+- 106 所有权修正：terrain guard 对 malformed、迟到或其他连接边的启用/释放请求保持当前所有者，不再被任意 `enabled=false` 清空；状态回传补齐 `plan_id/map_epoch`，示例和说明同步更新。
+- 验证：全部 `scripts/test_*.py` 通过；新增运行门禁、epoch、旧回执和 terrain 所有权回归；Python 编译、JavaScript 语法、`git diff --check` 通过；`m20pro_navigation`、`m20pro_cloud_bridge`、`m20pro_bringup` 三包构建通过。本轮仅修改上位机开发分支，未部署或操作 103/104/106，未发送运动、导航、重定位、切图或网络命令。

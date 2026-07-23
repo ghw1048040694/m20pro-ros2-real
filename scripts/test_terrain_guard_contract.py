@@ -10,7 +10,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src/m20pro_navigation"))
 
-from m20pro_navigation.terrain_guard_contract import inspect_cloud  # noqa: E402
+from m20pro_navigation.terrain_guard_contract import (  # noqa: E402
+    inspect_cloud,
+    terrain_request_ownership_decision,
+)
 
 
 def assert_equal(actual, expected, message: str) -> None:
@@ -20,7 +23,11 @@ def assert_equal(actual, expected, message: str) -> None:
 
 def request(direction: str = "forward") -> dict:
     return {
+        "enabled": True,
+        "request_id": "terrain-1",
         "route_id": "stairs-a-up",
+        "plan_id": "task-1:run-1",
+        "map_epoch": 7,
         "corridor_version": "corridor-v1",
         "direction": direction,
         "corridor": {
@@ -50,6 +57,21 @@ def test_no_corridor_is_unknown() -> None:
     result = inspect_cloud(cloud([0.0] * 6), request={"direction": "forward"}, cloud_age_s=0.01)
     assert_equal(result["state"], "unknown", "missing corridor state")
     assert_equal(result["permit_motion"], False, "missing corridor permission")
+
+
+def test_request_ownership_rejects_stale_release_and_malformed_replacement() -> None:
+    active = request()
+    stale_release = terrain_request_ownership_decision(
+        active,
+        {**active, "enabled": False, "map_epoch": 6},
+    )
+    assert_equal(stale_release["code"], "terrain_request_owner_mismatch", "old release rejected")
+    assert_equal(stale_release["preserve_current"], True, "old release preserves active corridor")
+    malformed = terrain_request_ownership_decision(active, {"enabled": True})
+    assert_equal(malformed["code"], "terrain_request_identity_missing", "malformed request rejected")
+    assert_equal(malformed["preserve_current"], True, "malformed request preserves active corridor")
+    release = terrain_request_ownership_decision(active, {**active, "enabled": False})
+    assert_equal(release["action"], "release", "matching owner can release corridor")
 
 
 def test_stale_cloud_is_stale() -> None:
@@ -156,6 +178,7 @@ def test_reverse_direction_uses_reverse_longitudinal_axis() -> None:
 def main() -> int:
     tests = [
         test_no_corridor_is_unknown,
+        test_request_ownership_rejects_stale_release_and_malformed_replacement,
         test_stale_cloud_is_stale,
         test_empty_cloud_is_unknown,
         test_low_coverage_is_unknown,

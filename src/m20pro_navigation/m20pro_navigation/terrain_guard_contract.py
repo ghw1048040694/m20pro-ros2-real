@@ -51,6 +51,54 @@ def _error(code: str, message: str, **extra: Any) -> Dict[str, Any]:
     }
 
 
+def terrain_request_identity(request: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(request, dict):
+        return None
+    request_id = _text(request.get("request_id"))
+    route_id = _text(request.get("route_id"))
+    plan_id = _text(request.get("plan_id"))
+    try:
+        map_epoch = int(request.get("map_epoch"))
+    except (TypeError, ValueError, OverflowError):
+        map_epoch = 0
+    if not request_id or not route_id or not plan_id or map_epoch <= 0:
+        return None
+    return {
+        "request_id": request_id,
+        "route_id": route_id,
+        "plan_id": plan_id,
+        "map_epoch": map_epoch,
+    }
+
+
+def terrain_request_ownership_decision(current: Any, incoming: Any) -> Dict[str, Any]:
+    """Prevent malformed or stale requests from replacing the active corridor."""
+    identity = terrain_request_identity(incoming)
+    current_identity = terrain_request_identity(current)
+    if identity is None:
+        return _error(
+            "terrain_request_identity_missing",
+            "terrain request lacks request/route/plan/epoch identity",
+            preserve_current=current_identity is not None,
+        )
+    enabled = incoming.get("enabled", incoming.get("active", True)) is not False
+    if current_identity is not None and identity != current_identity:
+        return _error(
+            "terrain_request_owner_mismatch",
+            "terrain request belongs to another connector",
+            preserve_current=True,
+            identity=identity,
+            active_identity=current_identity,
+        )
+    if not enabled:
+        return {
+            "ok": True,
+            "action": "release" if current_identity is not None else "release_noop",
+            "identity": identity,
+        }
+    return {"ok": True, "action": "activate", "identity": identity}
+
+
 def normalize_corridor(request: Dict[str, Any]) -> Dict[str, Any]:
     """Validate the local rectangular corridor carried by a stair request."""
     if not isinstance(request, dict):

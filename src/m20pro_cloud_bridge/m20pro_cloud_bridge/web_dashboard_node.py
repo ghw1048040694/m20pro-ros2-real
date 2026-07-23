@@ -36,6 +36,7 @@ from m20pro_navigation.command_mux_contract import (
 )
 
 from .battery_contract import battery_pack_present
+from .connector_runtime_contract import connector_runtime_readiness
 from .active_task_contract import (
     advance_active_task_state,
     active_annotation_from_list,
@@ -169,7 +170,7 @@ from .unified_navigation_contract import (
     summarize_plan,
     task_navigation_plan_state,
 )
-from m20pro_navigation.stair_executor_contract import create_connector_execution
+from m20pro_navigation.stair_executor_contract import connector_route_activation_decision
 from .nav_status_contract import (
     apply_ignored_nav_status_state,
     apply_nav_failure_state,
@@ -914,6 +915,7 @@ class WebDashboardNode(Node):
             "floor": None,
             "stair_status": None,
             "stair_executor_status": None,
+            "stair_action_orchestrator_status": None,
             "terrain_guard": None,
             "command_mux_status": None,
             "gait_command": None,
@@ -1065,6 +1067,11 @@ class WebDashboardNode(Node):
         self.declare_parameter(
             "stair_executor_status_topic", "/m20pro/stair_executor/status"
         )
+        self.declare_parameter(
+            "stair_action_orchestrator_status_topic",
+            "/m20pro/stair_executor/orchestrator_status",
+        )
+        self.declare_parameter("connector_runtime_status_timeout_s", 3.5)
         self.declare_parameter("terrain_guard_status_topic", "/m20pro/terrain_guard/status")
         self.declare_parameter("terrain_guard_status_timeout_s", 1.0)
         self.declare_parameter("gait_command_topic", "/m20pro/gait_command")
@@ -1449,6 +1456,12 @@ class WebDashboardNode(Node):
         )
         self.create_subscription(
             String,
+            self._topic("stair_action_orchestrator_status_topic"),
+            self._on_stair_action_orchestrator_status,
+            10,
+        )
+        self.create_subscription(
+            String,
             self._topic("terrain_guard_status_topic"),
             self._on_terrain_guard_status,
             10,
@@ -1607,6 +1620,16 @@ class WebDashboardNode(Node):
             )
             self._settings["active_task"] = active
             self._save_json("settings.json", self._settings)
+
+    def _on_stair_action_orchestrator_status(self, msg: String) -> None:
+        parsed = parse_json_text(msg.data)
+        with self._lock:
+            self._state["stair_action_orchestrator_status"] = {
+                "last_update": time.time(),
+                "raw": msg.data,
+                "parsed": parsed,
+            }
+            self._mark_topic("stair_action_orchestrator_status")
 
     def _on_terrain_guard_status(self, msg: String) -> None:
         parsed = parse_json_text(msg.data)
@@ -2853,10 +2876,27 @@ class WebDashboardNode(Node):
         return {"ok": True, "route_id": route_id, "message": "跨楼层路线已删除"}
 
     def _publish_floor_switch_result(self, payload: Dict[str, Any]) -> None:
+        enriched = dict(payload)
+        request_id = str(enriched.get("request_id") or "").strip()
+        transaction = enriched.get("transaction")
+        if isinstance(transaction, dict) and str(transaction.get("request_id") or "").strip() == request_id:
+            for key in ("route_id", "plan_id", "map_epoch"):
+                if transaction.get(key) is not None:
+                    enriched.setdefault(key, transaction.get(key))
+        with self._data_lock:
+            active = dict(self._settings.get("active_task") or {})
+        if request_id and request_id == str(active.get("connector_request_id") or "").strip():
+            for result_key, active_key in (
+                ("route_id", "connector_route_id"),
+                ("plan_id", "connector_plan_id"),
+                ("map_epoch", "connector_map_epoch"),
+            ):
+                if active.get(active_key) is not None:
+                    enriched.setdefault(result_key, active.get(active_key))
         message = String()
-        message.data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        message.data = json.dumps(enriched, ensure_ascii=False, separators=(",", ":"))
         self.floor_switch_result_pub.publish(message)
-        self._append_event("跨楼层地图事务", payload)
+        self._append_event("跨楼层地图事务", enriched)
 
     def _persist_floor_switch_transaction(self, transaction: Dict[str, Any]) -> None:
         with self._data_lock:
@@ -3343,8 +3383,7 @@ class WebDashboardNode(Node):
             source_factory_identity = self._capture_factory_active_identity(
                 timeout_s=factory_timeout_s,
             )
-            with self._data_lock:
-                epoch = next_map_epoch(self._settings)
+            epoch = int(context["map_epoch"])
             started = begin_transaction(
                 request=request,
                 context=context,
@@ -3358,8 +3397,6 @@ class WebDashboardNode(Node):
                 self._publish_floor_switch_result({**started, "request_id": request_id})
                 return
             transaction = dict(started["transaction"])
-            with self._data_lock:
-                self._settings["floor_switch_map_epoch"] = epoch
             self._persist_floor_switch_transaction(transaction)
             if not source_factory_identity.get("ok"):
                 uncertain = self._mark_floor_switch_uncertain(
@@ -7786,13 +7823,14 @@ class WebDashboardNode(Node):
         route: Dict[str, Any],
         request_id: str,
         plan_id: str,
+        map_epoch: int,
     ) -> None:
         message = String()
         message.data = json.dumps(
             {
                 "request_id": request_id,
                 "plan_id": plan_id,
-                "map_epoch": None,
+                "map_epoch": int(map_epoch),
                 "route": route,
                 "task_id": active.get("task_id"),
                 "run_id": active.get("run_id"),
@@ -9526,6 +9564,7 @@ class WebDashboardNode(Node):
         connector_route: Optional[Dict[str, Any]] = None
         connector_request_id = ""
         connector_plan_id = ""
+        connector_map_epoch = 0
         if cross_floor:
             if (
                 str(active.get("last_goal_annotation_id") or "") == str(annotation.get("id") or "")
@@ -9552,11 +9591,7 @@ class WebDashboardNode(Node):
             # Reuse the reducer's own validation as the activation gate.  The
             # probe is pure and emits no ROS side effect; shadow/stop-only
             # routes therefore fail before any goal or map transaction exists.
-            route_gate = create_connector_execution(
-                connector_route,
-                request_id="activation-probe",
-                now_monotonic=0.0,
-            )
+            route_gate = connector_route_activation_decision(connector_route)
             if not route_gate.get("ok"):
                 self._fail_active_task(
                     active.get("task_id"),
@@ -9566,6 +9601,31 @@ class WebDashboardNode(Node):
                         "route_id": connector_route.get("id"),
                         "source_floor": connector_route.get("source_floor"),
                         "target_floor": connector_route.get("target_floor"),
+                    },
+                )
+                return
+            with self._lock:
+                executor_status = dict(self._state.get("stair_executor_status") or {})
+                orchestrator_status = dict(
+                    self._state.get("stair_action_orchestrator_status") or {}
+                )
+            runtime_gate = connector_runtime_readiness(
+                executor_status=executor_status,
+                orchestrator_status=orchestrator_status,
+                now_unix_s=time.time(),
+                timeout_s=float(
+                    self.get_parameter("connector_runtime_status_timeout_s").value
+                ),
+            )
+            if not runtime_gate.get("ok"):
+                self._fail_active_task(
+                    active.get("task_id"),
+                    str(runtime_gate.get("message") or "楼梯连接边运行组件尚未就绪"),
+                    {
+                        "reason": runtime_gate.get("code")
+                        or "connector_runtime_not_ready",
+                        "route_id": connector_route.get("id"),
+                        "runtime": runtime_gate,
                     },
                 )
                 return
@@ -9612,6 +9672,7 @@ class WebDashboardNode(Node):
             elif action == "send_goal":
                 active = prepared["active"]
                 if connector_resolution is not None and connector_route is not None:
+                    reserved_epoch = next_map_epoch(self._settings)
                     connector_state = mark_connector_started_state(
                         active,
                         annotation,
@@ -9619,17 +9680,26 @@ class WebDashboardNode(Node):
                         transition=connector_resolution["edge"],
                         request_id=connector_request_id,
                         plan_id=connector_plan_id,
-                        map_epoch=None,
+                        map_epoch=reserved_epoch,
                         now_text=now_text(),
                         now_monotonic=now_monotonic,
                     )
-                    active = connector_state["active"]
-                    self._append_active_task_timeline_event(
-                        active,
-                        str(connector_state["event"]),
-                        str(connector_state["message"]),
-                        dict(connector_state["event_extra"]),
-                    )
+                    if not connector_state.get("changed"):
+                        missing_failure = {
+                            "message": "楼梯连接边身份无法持久化，任务已停止",
+                            "reason": connector_state.get("reason")
+                            or "connector_identity_invalid",
+                        }
+                    else:
+                        connector_map_epoch = reserved_epoch
+                        self._settings["floor_switch_map_epoch"] = reserved_epoch
+                        active = connector_state["active"]
+                        self._append_active_task_timeline_event(
+                            active,
+                            str(connector_state["event"]),
+                            str(connector_state["message"]),
+                            dict(connector_state["event_extra"]),
+                        )
                 else:
                     self._append_active_task_timeline_event(
                         active,
@@ -9637,9 +9707,10 @@ class WebDashboardNode(Node):
                         str(prepared["message"]),
                         dict(prepared["event_extra"]),
                     )
-                self._settings["active_task"] = active
-                self._save_json("settings.json", self._settings)
-                active_snapshot = dict(active)
+                if missing_failure is None:
+                    self._settings["active_task"] = active
+                    self._save_json("settings.json", self._settings)
+                    active_snapshot = dict(active)
             else:
                 return
         if missing_failure is not None:
@@ -9651,6 +9722,7 @@ class WebDashboardNode(Node):
                 route=connector_route,
                 request_id=connector_request_id,
                 plan_id=connector_plan_id,
+                map_epoch=connector_map_epoch,
             )
             self._publish_active_waypoint(annotation, active_snapshot, "cross_floor")
             return

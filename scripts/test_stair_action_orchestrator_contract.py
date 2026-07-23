@@ -197,14 +197,40 @@ def test_status_events_are_bound_to_current_stage() -> None:
     )
     check(early_failure and early_failure["type"] == "stop_requested", "identified early floor goal error stops connector")
     switch = event_for_floor_switch_result(
-        {"request_id": "stair-1", "ok": True, "target_floor": "F2", "target_map_id": "map-f2"},
+        {
+            "request_id": "stair-1",
+            "route_id": "route-f1-f2",
+            "plan_id": "plan-1",
+            "map_epoch": 4,
+            "ok": True,
+            "target_floor": "F2",
+            "target_map_id": "map-f2",
+        },
         identity=identity,
     )
     check(switch and switch["type"] == "floor_switch_result", "matching switch result becomes event")
     wrong = event_for_floor_switch_result(
-        {"request_id": "other", "ok": True}, identity=identity
+        {
+            "request_id": "other",
+            "route_id": "route-f1-f2",
+            "plan_id": "plan-1",
+            "map_epoch": 4,
+            "ok": True,
+        },
+        identity=identity,
     )
     check(wrong is None, "late switch result is ignored")
+    wrong_epoch = event_for_floor_switch_result(
+        {
+            "request_id": "stair-1",
+            "route_id": "route-f1-f2",
+            "plan_id": "plan-1",
+            "map_epoch": 3,
+            "ok": True,
+        },
+        identity=identity,
+    )
+    check(wrong_epoch is None, "previous map epoch result is ignored")
 
 
 if __name__ == "__main__":

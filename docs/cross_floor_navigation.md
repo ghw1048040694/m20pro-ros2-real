@@ -91,6 +91,14 @@
 报告当前阶段，并由 reducer 自己执行阶段超时；Web 只检查执行器心跳是否中断，不再套用
 旧普通跨层目标的 Nav2 接收超时。
 
+连接边启动还必须同时收到 `stair_executor` 和
+`stair_action_orchestrator` 的新鲜 `enabled/ready/busy=false` 心跳；任一节点
+未启动、过期或仍占用上一条连接边，Web 会在发布任何楼梯目标前停止任务。Web
+在这个门通过后一次性持久化递增 `map_epoch`，并把
+`request_id/route_id/plan_id/map_epoch` 贯穿 106 terrain_guard、执行器事件、
+切层事务和回执。切层线程只消费已预留的 epoch，不再自行生成第二个代次；旧
+epoch 或身份不完整的结果不能推进状态机。
+
 ## 现场参数
 
 点云高度带、楼层切换等待、Nav2 运动/规划/代价地图、网页遥控安全边界和定位稳定性参数统一写在 `src/m20pro_bringup/config/m20pro_field_profile.yaml`。schema v4 共开放 70 个现场参数，其中导航 30 个、遥控 7 个；`stair_transition` 中的共享平台位置容差、朝向容差和稳定窗口只用于跨层事务，旧楼梯感知配置组已删除。

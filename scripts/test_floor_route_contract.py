@@ -160,8 +160,26 @@ def test_route_edit_cannot_enable_certified_motion() -> None:
 
 def test_floor_switch_request_contract() -> None:
     route = valid_route()
-    request = {"request_id": "switch_1", "route_id": "route_up", "source_floor": "F1", "target_floor": "F2", "target_map_id": "map_f2"}
-    active = {"task_id": "task_1", "status": "running", "multi_floor": True, "last_floor_goal_source_floor": "F1", "last_floor_goal_target_floor": "F2"}
+    request = {
+        "request_id": "switch_1",
+        "route_id": "route_up",
+        "plan_id": "task_1:run_1",
+        "map_epoch": 7,
+        "source_floor": "F1",
+        "target_floor": "F2",
+        "target_map_id": "map_f2",
+    }
+    active = {
+        "task_id": "task_1",
+        "status": "running",
+        "multi_floor": True,
+        "connector_request_id": "switch_1",
+        "connector_route_id": "route_up",
+        "connector_plan_id": "task_1:run_1",
+        "connector_map_epoch": 7,
+        "last_floor_goal_source_floor": "F1",
+        "last_floor_goal_target_floor": "F2",
+    }
     accepted = resolve_floor_switch_request(
         request,
         routes=[route],
@@ -172,6 +190,7 @@ def test_floor_switch_request_contract() -> None:
     )
     assert_equal(accepted["ok"], True, "matching request accepted")
     assert_equal(accepted["task_id"], "task_1", "transaction binds active task")
+    assert_equal(accepted["map_epoch"], 7, "transaction keeps reserved connector epoch")
     wrong_map = resolve_floor_switch_request(
         request,
         routes=[route],
@@ -185,6 +204,17 @@ def test_floor_switch_request_contract() -> None:
     assert_equal(wrong_route["code"], "floor_switch_request_route_mismatch", "request cannot override route")
     ordinary = resolve_floor_switch_request(request, routes=[route], active_task={**active, "multi_floor": False}, selected_map_id="map_f1")
     assert_equal(ordinary["code"], "floor_switch_no_active_task", "ordinary task cannot switch")
+    wrong_epoch = resolve_floor_switch_request(
+        {**request, "map_epoch": 6},
+        routes=[route],
+        active_task=active,
+        selected_map_id="map_f1",
+    )
+    assert_equal(
+        wrong_epoch["code"],
+        "floor_switch_connector_identity_mismatch",
+        "previous connector epoch cannot switch maps",
+    )
 
     missing_status = resolve_floor_switch_request(
         request,

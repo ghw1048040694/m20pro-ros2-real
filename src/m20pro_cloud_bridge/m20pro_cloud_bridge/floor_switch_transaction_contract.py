@@ -90,6 +90,15 @@ def begin_transaction(
     request_id = _text(request.get("request_id"))
     if not request_id:
         return _error("floor_switch_request_id_missing", "切层请求缺少 request_id")
+    plan_id = _text(request.get("plan_id"))
+    if not plan_id:
+        return _error("floor_switch_plan_id_missing", "切层请求缺少 plan_id")
+    try:
+        normalized_epoch = int(map_epoch)
+    except (TypeError, ValueError, OverflowError):
+        normalized_epoch = 0
+    if normalized_epoch <= 0:
+        return _error("floor_switch_map_epoch_invalid", "切层请求缺少有效 map_epoch")
     task_id = _text(context.get("task_id"))
     if not task_id:
         return _error("floor_switch_task_id_missing", "切层事务缺少活动任务 ID")
@@ -99,7 +108,8 @@ def begin_transaction(
         return _error("floor_switch_map_identity_missing", "切层事务缺少源/目标地图身份")
     transaction = {
         "request_id": request_id,
-        "map_epoch": int(map_epoch),
+        "plan_id": plan_id,
+        "map_epoch": normalized_epoch,
         "task_id": task_id,
         "route_id": _text(context.get("route", {}).get("id")) if isinstance(context.get("route"), dict) else "",
         "source_floor": _text(context.get("source_floor")),

@@ -22,7 +22,11 @@ from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
 from std_msgs.msg import String
 
-from .terrain_guard_contract import inspect_cloud, normalize_corridor
+from .terrain_guard_contract import (
+    inspect_cloud,
+    normalize_corridor,
+    terrain_request_ownership_decision,
+)
 
 
 def _json_message(payload: Dict[str, Any]) -> String:
@@ -97,27 +101,41 @@ class TerrainGuard106(Node):
             "permit_motion": False,
         }
 
+    def _reject_request(self, reason: str, *, preserve_current: bool) -> None:
+        if preserve_current and self._request is not None:
+            self.get_logger().warning("ignored terrain request: %s" % reason)
+            self._publish_status()
+            return
+        self._request = None
+        self._request_error = reason
+        self._request_id = ""
+        self._request_profile_id = ""
+        self._reset_result(reason)
+        self._publish_status()
+
     def _on_request(self, message: String) -> None:
         try:
             value = json.loads(message.data)
         except (TypeError, ValueError, json.JSONDecodeError):
-            self._request = None
-            self._request_error = "terrain_request_json_invalid"
-            self._request_id = ""
-            self._request_profile_id = ""
-            self._reset_result(self._request_error)
-            self._publish_status()
+            self._reject_request(
+                "terrain_request_json_invalid",
+                preserve_current=self._request is not None,
+            )
             return
         if not isinstance(value, dict):
-            self._request = None
-            self._request_error = "terrain_request_invalid"
-            self._request_id = ""
-            self._request_profile_id = ""
-            self._reset_result(self._request_error)
-            self._publish_status()
+            self._reject_request(
+                "terrain_request_invalid",
+                preserve_current=self._request is not None,
+            )
             return
-        enabled = value.get("enabled", value.get("active", True))
-        if enabled is False:
+        ownership = terrain_request_ownership_decision(self._request, value)
+        if not ownership.get("ok"):
+            self._reject_request(
+                str(ownership.get("code") or "terrain_request_invalid"),
+                preserve_current=bool(ownership.get("preserve_current")),
+            )
+            return
+        if ownership.get("action") in {"release", "release_noop"}:
             self._request = None
             self._request_error = None
             self._request_id = ""
@@ -127,24 +145,29 @@ class TerrainGuard106(Node):
             return
         normalized = normalize_corridor(value)
         if not normalized.get("ok", True):
-            self._request = None
-            self._request_error = str(normalized.get("code") or "terrain_request_invalid")
-            self._request_id = ""
-            self._request_profile_id = ""
-            self._reset_result(self._request_error)
-            self._publish_status()
+            self._reject_request(
+                str(normalized.get("code") or "terrain_request_invalid"),
+                preserve_current=self._request is not None,
+            )
             return
         request_id = str(value.get("request_id") or "").strip()
         route_id = str(value.get("route_id") or "").strip()
+        plan_id = str(value.get("plan_id") or "").strip()
+        map_epoch = int(value["map_epoch"])
         profile_id = str(value.get("profile_id") or (f"{route_id}:terrain" if route_id else "")).strip()
         corridor_version = str(value.get("corridor_version") or "").strip()
-        if not request_id or not route_id or not profile_id or not corridor_version:
-            self._request = None
-            self._request_error = "terrain_request_identity_missing"
-            self._request_id = ""
-            self._request_profile_id = ""
-            self._reset_result(self._request_error)
-            self._publish_status()
+        if (
+            not request_id
+            or not route_id
+            or not plan_id
+            or map_epoch <= 0
+            or not profile_id
+            or not corridor_version
+        ):
+            self._reject_request(
+                "terrain_request_identity_missing",
+                preserve_current=self._request is not None,
+            )
             return
         self._request = value
         self._request_error = None
@@ -282,6 +305,8 @@ class TerrainGuard106(Node):
         payload.update(
             {
                 "route_id": str((self._request or {}).get("route_id") or ""),
+                "plan_id": str((self._request or {}).get("plan_id") or ""),
+                "map_epoch": (self._request or {}).get("map_epoch"),
                 "profile_id": self._request_profile_id,
                 "request_id": self._request_id,
                 "corridor_version": str((self._request or {}).get("corridor_version") or ""),

@@ -43,7 +43,8 @@ def test_floor_switch_requires_fresh_terrain_status() -> None:
 def test_cross_floor_dispatch_uses_connector_gate() -> None:
     assert "_resolve_active_connector_transition" in WEB_SOURCE
     assert "_publish_stair_connector_start" in WEB_SOURCE
-    assert "create_connector_execution(" in WEB_SOURCE
+    assert "connector_route_activation_decision(" in WEB_SOURCE
+    assert "connector_runtime_readiness(" in WEB_SOURCE
     assert '"stair_execution_retired"' in WEB_SOURCE
     assert '"stair_executor_start_topic"' in WEB_SOURCE
     assert "mark_connector_started_state" in WEB_SOURCE
@@ -51,6 +52,8 @@ def test_cross_floor_dispatch_uses_connector_gate() -> None:
     assert "current_record != stored_plan" in WEB_SOURCE
     assert "connector_owns_navigation_status(active)" in WEB_SOURCE
     assert "_stop_task_if_connector_unresponsive" in WEB_SOURCE
+    assert 'self._settings["floor_switch_map_epoch"] = reserved_epoch' in WEB_SOURCE
+    assert '"map_epoch": int(map_epoch)' in WEB_SOURCE
 
 
 def test_stair_executor_is_a_semantic_reducer_without_motion_publishers() -> None:
@@ -81,6 +84,8 @@ def test_stair_executor_is_a_semantic_reducer_without_motion_publishers() -> Non
     assert '"watchdog_period_s", 1.0' in node
     assert "def _on_watchdog_tick(" in node
     assert '"connector_heartbeat"' in node
+    assert '"component": "stair_executor"' in node
+    assert '"ready": self._enabled' in node
     assert "if actions:\n            self._publish_action(actions, envelope)" in node
 
 
@@ -143,6 +148,8 @@ def test_stair_action_orchestrator_is_the_only_semantic_adapter() -> None:
     assert "self._expected_nav_stage" in node
     assert "deque(maxlen=128)" in node
     assert '"stair_action_retired_ignored"' in node
+    assert '"component": "stair_action_orchestrator"' in node
+    assert "def _publish_runtime_heartbeat(" in node
 
 
 def test_floor_goal_early_errors_keep_protocol_label() -> None:

@@ -148,6 +148,9 @@ class StairExecutorNode(Node):
         event = {
             "type": "terrain_status",
             "request_id": (status or {}).get("request_id") if isinstance(status, dict) else None,
+            "route_id": (status or {}).get("route_id") if isinstance(status, dict) else None,
+            "plan_id": (status or {}).get("plan_id") if isinstance(status, dict) else None,
+            "map_epoch": (status or {}).get("map_epoch") if isinstance(status, dict) else None,
             "status": status,
         }
         result = step_connector_execution(
@@ -161,12 +164,14 @@ class StairExecutorNode(Node):
 
     def _on_watchdog_tick(self) -> None:
         if not self._enabled or self._execution is None:
+            self._publish_runtime_heartbeat()
             return
         if str(self._execution.get("state") or "") in {"COMPLETED", "STOPPED", "FAILED"}:
+            self._publish_runtime_heartbeat()
             return
         result = step_connector_execution(
             self._execution,
-            {"type": "watchdog_tick", "request_id": self._execution.get("request_id")},
+            {"type": "watchdog_tick", **self._execution_identity()},
             now_monotonic=self.get_clock().now().nanoseconds / 1e9,
         )
         if isinstance(result.get("execution"), dict):
@@ -184,6 +189,26 @@ class StairExecutorNode(Node):
                 "code": "connector_heartbeat",
                 "message": self._execution.get("status_message"),
                 "execution": dict(self._execution),
+                "actions": [],
+            }
+        )
+
+    def _execution_identity(self) -> Dict[str, Any]:
+        execution = self._execution or {}
+        return {
+            "request_id": execution.get("request_id"),
+            "route_id": execution.get("route_id"),
+            "plan_id": execution.get("plan_id"),
+            "map_epoch": execution.get("map_epoch"),
+        }
+
+    def _publish_runtime_heartbeat(self) -> None:
+        self._publish_status(
+            {
+                "ok": self._enabled,
+                "code": "stair_executor_ready" if self._enabled else "stair_execution_retired",
+                "message": "楼梯语义执行器已就绪" if self._enabled else "楼梯执行器默认关闭",
+                "execution": dict(self._execution or {}),
                 "actions": [],
             }
         )
@@ -242,8 +267,14 @@ class StairExecutorNode(Node):
     def _publish_status(self, result: Dict[str, Any]) -> None:
         message = String()
         execution = result.get("execution") if isinstance(result.get("execution"), dict) else self._execution or {}
+        execution_state = str(execution.get("state") or "IDLE").upper()
+        busy = execution_state not in {"IDLE", "COMPLETED", "STOPPED", "FAILED"}
         message.data = json.dumps(
             {
+                "component": "stair_executor",
+                "enabled": self._enabled,
+                "ready": self._enabled,
+                "busy": busy,
                 "ok": bool(result.get("ok")),
                 "code": result.get("code"),
                 "message": result.get("message"),

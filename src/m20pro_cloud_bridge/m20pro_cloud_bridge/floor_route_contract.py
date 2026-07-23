@@ -25,6 +25,14 @@ def _error(code: str, message: str, **extra: Any) -> Dict[str, Any]:
     return {"ok": False, "code": code, "message": message, **extra}
 
 
+def _positive_int(value: Any) -> Optional[int]:
+    try:
+        result = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return result if result > 0 else None
+
+
 def _pose(value: Any) -> Optional[Dict[str, float]]:
     if not isinstance(value, dict):
         return None
@@ -234,6 +242,39 @@ def resolve_floor_switch_request(
     if str(active_task.get("status") or "") != "running" or not bool(active_task.get("multi_floor")):
         return _error("floor_switch_no_active_task", "没有运行中的跨楼层任务，拒绝自动切层")
 
+    expected_connector = {
+        "request_id": str(active_task.get("connector_request_id") or "").strip(),
+        "route_id": str(active_task.get("connector_route_id") or "").strip(),
+        "plan_id": str(active_task.get("connector_plan_id") or "").strip(),
+        "map_epoch": _positive_int(active_task.get("connector_map_epoch")),
+    }
+    if (
+        not expected_connector["request_id"]
+        or not expected_connector["route_id"]
+        or not expected_connector["plan_id"]
+        or expected_connector["map_epoch"] is None
+    ):
+        return _error(
+            "floor_switch_connector_identity_missing",
+            "活动任务缺少完整楼梯连接边身份，拒绝切层",
+        )
+    request_epoch = _positive_int(request.get("map_epoch"))
+    identity_mismatches = {
+        key: {"requested": request.get(key), "active": expected_value}
+        for key, expected_value in expected_connector.items()
+        if (
+            request_epoch != expected_value
+            if key == "map_epoch"
+            else str(request.get(key) or "").strip() != str(expected_value)
+        )
+    }
+    if identity_mismatches:
+        return _error(
+            "floor_switch_connector_identity_mismatch",
+            "切层请求不属于当前楼梯连接边，已拒绝执行",
+            mismatches=identity_mismatches,
+        )
+
     route_id = str(request.get("route_id") or "").strip()
     if not route_id:
         return _error("floor_switch_route_id_missing", "切层请求缺少已保存路线 ID")
@@ -303,6 +344,8 @@ def resolve_floor_switch_request(
         "ok": True,
         "request_id": request_id,
         "task_id": str(active_task.get("task_id") or ""),
+        "plan_id": expected_connector["plan_id"],
+        "map_epoch": expected_connector["map_epoch"],
         "route": route,
         "source_map_id": source_map_id,
         "terrain_guard": terrain_profile,

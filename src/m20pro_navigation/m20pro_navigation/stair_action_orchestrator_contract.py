@@ -42,6 +42,14 @@ def _finite(value: Any) -> Optional[float]:
     return result if math.isfinite(result) else None
 
 
+def _positive_epoch(value: Any) -> Optional[int]:
+    try:
+        result = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return result if result > 0 else None
+
+
 def _identity(envelope: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "request_id": _text(envelope.get("request_id")),
@@ -136,6 +144,8 @@ def _terrain_guard_command(
         "enabled": bool(enabled),
         "request_id": identity["request_id"],
         "route_id": identity["route_id"],
+        "plan_id": identity["plan_id"],
+        "map_epoch": identity["map_epoch"],
     }
     if not enabled:
         return {
@@ -193,8 +203,16 @@ def translate_action_envelope(
     if _text(envelope.get("source")) != "m20pro_stair_executor":
         return _error("stair_action_source_invalid", "楼梯执行动作来源不是 stair_executor")
     identity = _identity(envelope)
-    if not identity["request_id"] or not identity["route_id"]:
-        return _error("stair_action_identity_missing", "楼梯执行动作缺少 request_id 或 route_id")
+    if (
+        not identity["request_id"]
+        or not identity["route_id"]
+        or not identity["plan_id"]
+        or _positive_epoch(identity["map_epoch"]) is None
+    ):
+        return _error(
+            "stair_action_identity_missing",
+            "楼梯执行动作缺少 request_id、route_id、plan_id 或有效 map_epoch",
+        )
     if expected_identity and not _identity_matches(identity, expected_identity):
         return _error(
             "stair_action_identity_mismatch",
@@ -399,7 +417,16 @@ def event_for_floor_switch_result(
     """Bind a floor-switch result to the active connector request."""
     if not isinstance(result, dict):
         return None
-    if _text(result.get("request_id")) != _text(identity.get("request_id")):
+    if any(
+        _text(result.get(key)) != _text(identity.get(key))
+        for key in ("request_id", "route_id", "plan_id")
+    ):
+        return None
+    if (
+        _positive_epoch(result.get("map_epoch")) is None
+        or _positive_epoch(result.get("map_epoch"))
+        != _positive_epoch(identity.get("map_epoch"))
+    ):
         return None
     event = {
         "type": "floor_switch_result",
