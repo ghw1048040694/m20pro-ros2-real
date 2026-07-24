@@ -72,6 +72,11 @@ def main() -> None:
     # has changed, so direct cross-floor goals remain rejected.
     assert "stair_execution_retired" in floor_manager
     assert 'label in ("stair_traverse", "stair_exit")' in floor_manager
+    assert "terrain_segments_from_config" not in floor_manager
+    assert "terrain_segment_at_pose" not in floor_manager
+    assert "_update_terrain_segment_gait" not in floor_manager
+    assert 'self._publish_flat_gait("same_floor_goal")' not in floor_manager
+    assert "if rclpy.ok():" in floor_manager
 
     print("cross-floor runtime contract tests passed")
 

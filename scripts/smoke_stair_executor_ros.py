@@ -242,12 +242,17 @@ def _run_direction(direction: str, index: int) -> None:
             node.nav_status_pub,
             _text("nav_goal_accepted label=floor_goal goal_seq=2"),
         )
+        flat_count = node.gaits.count("flat")
         _publish_repeated(
             node,
             node.nav_status_pub,
             _text("nav_goal_succeeded label=floor_goal goal_seq=2"),
         )
-        _spin_until(node, lambda: "flat" in node.gaits, f"{direction} flat gait")
+        _spin_until(
+            node,
+            lambda: node.gaits.count("flat") > flat_count,
+            f"{direction} final flat gait",
+        )
         _spin_until(
             node,
             lambda: any(item.get("state") == "COMPLETED" for item in node.statuses),

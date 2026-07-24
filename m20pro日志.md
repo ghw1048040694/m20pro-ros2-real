@@ -24639,3 +24639,21 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 纳入安装态 ROS 烟雾测试 `scripts/smoke_stair_executor_ros.py`，在强制本机独立 ROS 域、私有话题和 `/tmp` 隔离日志目录下分别回放上楼、下楼、瞬时定位诊断标志、楼层同步和出口目标；测试明确断言瞬时 `localization_ok=false` 不打断楼梯速度，且目标楼层上下文确认前不得发送出口目标。测试消息不会进入机器狗正常 ROS 域，也不依赖用户目录写权限。
 - 验证：48 个 `scripts/test_*.py` 全部通过；Python 编译、JavaScript 语法、`git diff --check`、跨层 replay、事务/执行器/统一接线合同和 `m20pro_navigation`、`m20pro_cloud_bridge`、`m20pro_bringup` 三包构建均通过。安装态 ROS 烟雾测试完成上行和下行闭环；正式 `m20pro_real.launch.py` 也在独立 ROS 域、轴控制关闭且 TCP 目标重定向本机回环的条件下成功拉起 `stair_executor`、`command_mux`、`tcp_bridge` 和录包转发节点，测试进程已清理。
 - 本轮仅修改上位机开发分支，没有合并 `main`、部署或操作 103/104/106，也没有改变上位机网络。
+
+## 2026-07-24 12:23 CST - 移除 floor_manager 遗留自动步态控制
+
+- 继续按“先跑通唯一最小链路”的要求审计真实运行接线，发现 `floor_manager.use_stairs()` 虽已拒绝旧入口，但 `_on_robot_pose()` 仍会根据旧 terrain segment 自动发布 `stair_up/stair_down/flat`，会与新 `stair_executor` 同时拥有步态控制权；这是并行运动机制，而不是必要安全判定。
+- 从 `floor_manager` 删除 terrain segment 解析、位姿命中和自动步态发布路径；terrain segment 仍可作为地图语义数据保留，但不再直接控制机器狗。当前楼梯步态唯一来源为活动统一任务中的 `stair_executor`，同楼层 Nav2、地图上下文、定位和避障链不变。
+- 进一步发现 `floor_manager` 对每个同层 Nav2 目标都会强制发布 `flat`：这会在 `stair_executor` 切图后下发 `post_exit` 时提前覆盖楼梯步态。现删除该隐式发布，由执行器在入口目标前主动设为 `flat`、入口到达后设为 `stair_up/stair_down`、出口真正到达后再恢复 `flat`，步态时序和所有权统一到一处。
+- 新增安装态 `floor_manager + stair_executor + 假 Nav2 action server` 集成回放后，链路已完成上行，但进程清理暴露 `floor_manager` 对 SIGINT 重复调用 `rclpy.shutdown()`、把正常停止误报为退出码 1；现按节点生命周期只在 ROS context 仍有效时关闭，避免服务重启产生虚假失败。
+- 增加运行合同，明确禁止 `floor_manager` 再导入或调用 terrain segment 自动步态逻辑；新增切图事务真实方法测试，成功路径必须按“104/106 激活 -> 2101 -> 发布目标楼层 -> 成功回执”执行，模拟 106 激活失败时确认不会继续 2101 或改变楼层上下文。
+- 安装态联合烟雾测试现已完成上行和下行：入口前为 `flat`，楼梯段为 `stair_up/stair_down`；假 Nav2 在目标层出口被刻意暂停 0.4 秒期间没有提前出现 `flat`，出口成功后才由 `stair_executor` 恢复平地步态。两个本机烟雾测试的运行方法已写入跨楼层操作文档。
+- 全量回归首次运行发现旧跨层 replay 仍假定入口目标是第一个动作；现同步为先断言执行器发布 `flat`、再断言入口 Nav2 目标，确保测试锁定新的唯一所有权时序。
+- 三台主机 `10.21.31.103/104/106` 当前均离线，本轮只修改上位机 `feature/unified-navigation-v2`，未部署、未重启服务、未发送运动/导航/切图/重定位命令，也未改变上位机网络。
+
+## 2026-07-24 12:39 CST - 最小跨层链路最终离线验收
+
+- 再次确认开发准则：先让唯一最小闭环真实跑通，再依据现场录包补必要安全边界；首轮不增加未经实测证明的条件判断、重复门禁、多重仲裁或复杂回退。
+- 全部 `scripts/test_*.py` 共 49 个测试文件通过；Python 编译、`git diff --check` 和 `m20pro_navigation`、`m20pro_cloud_bridge`、`m20pro_bringup` 三包安装态构建通过。
+- `stair_executor` 独立 ROS 烟雾回放及 `floor_manager + stair_executor + 假 Nav2` 联合回放均完成上、下楼闭环；目标层出口 Nav2 被刻意暂停期间保持楼梯步态，出口成功后才恢复 `flat`。
+- 本轮仍只验证上位机开发分支，没有合并 `main`、部署或操作 103/104/106，也没有改变上位机网络；下一步仅在开发狗联机后做两层单程最小真机测试。

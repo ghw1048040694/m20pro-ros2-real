@@ -202,6 +202,7 @@ def create_connector_execution(
         "message": execution["status_message"],
         "execution": execution,
         "actions": [
+            _action("set_gait", gait="flat"),
             _action(
                 "dispatch_entry_goal",
                 pose=dict(execution["entry"]),

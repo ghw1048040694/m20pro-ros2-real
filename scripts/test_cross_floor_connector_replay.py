@@ -61,7 +61,8 @@ def main() -> int:
         now_monotonic=0.0,
         stage_timeout_s=180.0,
     )
-    check(created["actions"][0]["kind"] == "dispatch_entry_goal", "entry goal starts")
+    check(created["actions"][0] == {"kind": "set_gait", "gait": "flat"}, "flat gait starts")
+    check(created["actions"][1]["kind"] == "dispatch_entry_goal", "entry goal follows")
     traversing = step_connector_execution(
         created["execution"], event("entry_reached"), now_monotonic=10.0
     )

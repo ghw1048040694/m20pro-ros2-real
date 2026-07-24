@@ -130,6 +130,10 @@ def test_floor_goal_early_errors_keep_protocol_label() -> None:
         marker = 'reason=%s' % reason
         start = floor_manager.index(marker)
         assert "label=floor_goal" in floor_manager[start : start + 180]
+    assert "terrain_segments_from_config" not in floor_manager
+    assert "terrain_segment_at_pose" not in floor_manager
+    assert "_update_terrain_segment_gait" not in floor_manager
+    assert 'self._publish_flat_gait("same_floor_goal")' not in floor_manager
 
 
 def test_compatibility_fields_are_plan_projections() -> None:

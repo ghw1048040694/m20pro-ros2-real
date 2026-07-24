@@ -21,6 +21,8 @@
 
 旧 `floor_manager.use_stairs()` 只保留明确拒绝，防止历史入口与新链并行。已删除第二个动作编排节点。`terrain_guard` 当前只可在 106 做影子观测，不作为首轮跨层运动的前置门禁，也不改变平地 `/scan`。
 
+`floor_manager` 只负责同楼层 Nav2 目标和楼层上下文，不再根据地图中的 terrain segment 或收到普通 Nav2 目标自动切换步态。`stair_executor` 在入口导航前明确使用 `flat`，到达入口后切换楼梯步态，越过目标层出口后再恢复 `flat`，避免两套机制同时控制机器狗。
+
 ## 成功定义
 
 一条跨层任务只有在以下顺序全部完成后才算成功：
@@ -102,9 +104,10 @@ stair_transition:
 source /opt/ros/humble/setup.bash
 source install/setup.bash
 python3 scripts/smoke_stair_executor_ros.py
+python3 scripts/smoke_stair_floor_manager_ros.py
 ```
 
-该脚本强制使用仅本机 DDS 和独立 ROS domain，通过私有话题分别回放上楼与下楼，不会向机器狗默认 domain 发送速度。
+两个脚本都强制使用仅本机 DDS、独立 ROS domain 和私有话题，不会向机器狗默认 domain 发送速度。第一个验证执行器自身的上/下楼状态顺序；第二个同时启动安装态 `floor_manager` 和 `stair_executor`，用本机假 Nav2 action server 验证入口/出口目标及 `flat -> stair_up/down -> flat` 的真实步态时序。
 
 ## 最小现场验收
 

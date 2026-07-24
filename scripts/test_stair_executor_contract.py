@@ -63,12 +63,13 @@ def test_valid_route_starts_with_entry_navigation() -> None:
     result = create()
     assert_equal(result["ok"], True, "configured route accepted")
     assert_equal(result["execution"]["state"], "ENTRY_NAVIGATION", "entry is first state")
-    assert_equal(result["actions"][0]["kind"], "dispatch_entry_goal", "entry goal is first action")
+    assert_equal(result["actions"][0], {"kind": "set_gait", "gait": "flat"}, "executor owns entry flat gait")
+    assert_equal(result["actions"][1]["kind"], "dispatch_entry_goal", "entry goal follows flat gait")
 
 
 def test_full_connector_sequence_is_ordered_and_uses_route_poses() -> None:
     created = create()
-    assert_equal(created["actions"][0]["pose"], route()["entry"], "entry pose is route-owned")
+    assert_equal(created["actions"][1]["pose"], route()["entry"], "entry pose is route-owned")
 
     traversing = step_connector_execution(
         created["execution"],
