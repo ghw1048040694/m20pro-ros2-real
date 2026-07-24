@@ -11,7 +11,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src/m20pro_cloud_bridge"))
 
 from m20pro_cloud_bridge.map_identity_contract import (  # noqa: E402
-    factory_identity_match,
     map_content_match,
     occupancy_grid_content_digest,
 )
@@ -37,15 +36,19 @@ def main() -> int:
     assert digest != occupancy_grid_content_digest(changed)
     assert map_content_match(first, same)["ok"]
     assert map_content_match(first, changed)["code"] == "map_content_mismatch"
-    expected = {"resolved_path": "/maps/source", "content_digest": "a" * 64}
-    active_same_path_changed = {"resolved_path": "/maps/source", "content_digest": "b" * 64}
-    assert not factory_identity_match(expected, active_same_path_changed)["ok"]
-    active_copy = {"resolved_path": "/maps/active-copy", "content_digest": "a" * 64}
-    assert factory_identity_match(expected, active_copy)["identity_mode"] == "content"
-    assert not factory_identity_match(
-        expected,
-        {"resolved_path": "/maps/active-copy", "content_digest": "c" * 64},
-    )["ok"]
+    web_source = (
+        ROOT / "src/m20pro_cloud_bridge/m20pro_cloud_bridge/web_dashboard_node.py"
+    ).read_text(encoding="utf-8")
+    for retired_factory_gate in (
+        "sha256sum",
+        "source_factory_identity",
+        "_parse_factory_identity_output",
+        "_factory_map_identity",
+        "_capture_factory_active_identity",
+        "_restore_factory_active_identity",
+        "_confirm_factory_active_map",
+    ):
+        assert retired_factory_gate not in web_source
     print("map identity contract tests passed")
     return 0
 

@@ -139,7 +139,7 @@ from .map_contract import (
     map_file_metadata_payload,
     removable_map_archive_directory,
 )
-from .map_identity_contract import factory_identity_match, occupancy_grid_content_digest
+from .map_identity_contract import occupancy_grid_content_digest
 from .map_selection_contract import (
     apply_selected_map_choice_state,
     effective_map_id_for_display,
@@ -4120,7 +4120,6 @@ class WebDashboardNode(Node):
         allow_active_task: bool = False,
         reason: str = "manual_select",
         factory_timeout_s: Optional[float] = None,
-        source_factory_identity: Optional[Dict[str, Any]] = None,
         map_min_update_time: Optional[float] = None,
     ) -> Dict[str, Any]:
         map_id = str(payload.get("map_id") or "").strip() or None
@@ -4151,33 +4150,6 @@ class WebDashboardNode(Node):
             if factory_timeout_s is not None
             else min(120.0, max(10.0, float(self.get_parameter("map_import_timeout_s").value)))
         )
-        factory_source_path = str(
-            (record or {}).get("factory_apply_path")
-            or (record or {}).get("source_path")
-            or ""
-        ).strip()
-        factory_map_required = factory_source_path.startswith("/var/opt/robot/data/maps/")
-        if source_factory_identity is not None and not factory_source_path:
-            return self._error(
-                "目标地图缺少 106 原厂路径，无法使用已捕获的 active 身份恢复",
-                {
-                    "code": "factory_map_path_missing",
-                    "state_uncertain": True,
-                },
-            )
-        if factory_map_required and source_factory_identity is None:
-            source_factory_identity = self._capture_factory_active_identity(
-                timeout_s=factory_timeout,
-            )
-            if not source_factory_identity.get("ok"):
-                return self._error(
-                    "106 当前 active 地图身份无法确认，拒绝切换",
-                    {
-                        "code": "factory_active_identity_unavailable",
-                        "factory_active_identity": source_factory_identity,
-                        "state_uncertain": True,
-                    },
-                )
         if map_id:
             nav2_load = self._load_selected_map_into_nav2(
                 record,
@@ -4208,7 +4180,6 @@ class WebDashboardNode(Node):
             record,
             timeout_s=factory_timeout,
             reject_active_alias=(reason == "cross_floor_transition"),
-            source_factory_identity=source_factory_identity,
         ) if map_id and record else {
             "ok": True,
             "skipped": True,
@@ -4220,14 +4191,6 @@ class WebDashboardNode(Node):
                 if previous_record is not None
                 else {"ok": True, "skipped": True, "message": "没有上一张固定地图可回滚"}
             )
-            rollback_factory = (
-                self._restore_factory_active_identity(
-                    source_factory_identity,
-                    timeout_s=factory_timeout,
-                )
-                if factory_map_required and source_factory_identity is not None
-                else {"ok": True, "skipped": True, "message": "没有需要恢复的 106 active 身份"}
-            )
             return self._error(
                 str(factory_apply.get("message") or "106 原厂地图切换失败"),
                 {
@@ -4235,10 +4198,7 @@ class WebDashboardNode(Node):
                     "nav2_load_map": nav2_load,
                     "factory_apply_map": factory_apply,
                     "rollback_nav2_map": rollback_nav2,
-                    "rollback_factory_map": rollback_factory,
-                    "state_uncertain": not (
-                        bool(rollback_nav2.get("ok")) and bool(rollback_factory.get("ok"))
-                    ),
+                    "state_uncertain": not bool(rollback_nav2.get("ok")),
                 },
             )
         with self._data_lock:
@@ -4289,7 +4249,6 @@ class WebDashboardNode(Node):
             "effective_map_id": effective_map_id,
             "nav2_load_map": nav2_load,
             "factory_apply_map": factory_apply,
-            "source_factory_identity": source_factory_identity,
             "map_relocalization_required": map_relocalization_required,
         }
 
@@ -4840,148 +4799,12 @@ class WebDashboardNode(Node):
             timeout=timeout,
         )
 
-    @staticmethod
-    def _parse_factory_identity_output(output: Any) -> Dict[str, Any]:
-        values: Dict[str, str] = {}
-        for line in str(output or "").splitlines():
-            if "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            values[key.strip()] = value.strip()
-        resolved = values.get("resolved_path", "")
-        digest = values.get("content_digest", "")
-        try:
-            digest_valid = len(digest) == 64 and all(
-                char in "0123456789abcdefABCDEF" for char in digest
-            )
-        except TypeError:
-            digest_valid = False
-        return {
-            "resolved_path": resolved or None,
-            "content_digest": digest.lower() if digest_valid else None,
-            "file_count": int(values.get("file_count", "0") or 0),
-            "raw_output": str(output or ""),
-        }
-
-    def _factory_map_identity(
-        self,
-        source_path: str,
-        *,
-        timeout_s: float,
-    ) -> Dict[str, Any]:
-        """Read a canonical 106 map directory and a path-independent asset digest."""
-        source = str(source_path or "").strip()
-        if not source:
-            return {"ok": False, "code": "factory_map_path_missing", "message": "106 地图路径为空"}
-        target = shlex.quote(source)
-        probe = (
-            f"target={target}; "
-            'resolved=$(readlink -f "$target" 2>/dev/null || true); '
-            'test -n "$resolved" -a -d "$resolved"; '
-            "file_count=$(cd \"$resolved\" && find . -type f "
-            "\\( -iname '*.yaml' -o -iname '*.yml' -o -iname '*.pgm' "
-            "-o -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' \\) "
-            "-print | wc -l); "
-            'test "$file_count" -gt 0; '
-            "digest=$(cd \"$resolved\" && find . -type f "
-            "\\( -iname '*.yaml' -o -iname '*.yml' -o -iname '*.pgm' "
-            "-o -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' \\) "
-            "-print0 | sort -z | xargs -0 -r sha256sum | LC_ALL=C sort | "
-            "sha256sum | awk '{print $1}'); "
-            'test -n "$digest"; '
-            'printf "resolved_path=%s\\nfile_count=%s\\ncontent_digest=%s\\n" '
-            '"$resolved" "$file_count" "$digest"'
-        )
-        result = self._run_factory_shell(
-            probe,
-            factory_host=str(self.get_parameter("factory_host").value).strip(),
-            factory_user=str(self.get_parameter("factory_user").value).strip(),
-            timeout=min(60.0, max(5.0, float(timeout_s))),
-        )
-        parsed = self._parse_factory_identity_output(result.get("output"))
-        return {
-            "ok": bool(result.get("ok")) and bool(parsed.get("resolved_path")) and bool(parsed.get("content_digest")),
-            "source_path": source,
-            "resolved_path": parsed.get("resolved_path"),
-            "content_digest": parsed.get("content_digest"),
-            "file_count": parsed.get("file_count", 0),
-            "command": result.get("command"),
-            "output": result.get("output"),
-            "returncode": result.get("returncode"),
-            "message": (
-                "106 地图目录和内容摘要已确认"
-                if bool(result.get("ok")) and parsed.get("resolved_path") and parsed.get("content_digest")
-                else "106 地图目录或内容摘要无法确认"
-            ),
-        }
-
-    def _capture_factory_active_identity(self, *, timeout_s: float) -> Dict[str, Any]:
-        active_path = str(self.get_parameter("factory_active_map").value).strip()
-        identity = self._factory_map_identity(active_path, timeout_s=timeout_s)
-        if identity.get("ok"):
-            identity["identity_mode"] = "path"
-        return identity
-
-    def _restore_factory_active_identity(
-        self,
-        identity: Optional[Dict[str, Any]],
-        *,
-        timeout_s: float,
-    ) -> Dict[str, Any]:
-        """Restore the exact active package captured before a map transaction."""
-        evidence = dict(identity or {})
-        resolved = str(evidence.get("resolved_path") or "").strip()
-        expected_digest = str(evidence.get("content_digest") or "").strip()
-        if not resolved or not expected_digest:
-            return {
-                "ok": False,
-                "code": "factory_active_identity_missing",
-                "message": "缺少事务开始前的 active 目录或内容摘要，不能回滚",
-                "state_uncertain": True,
-            }
-        command = f"sudo -n drmap apply {shlex.quote(resolved)}"
-        applied = self._run_factory_shell(
-            command,
-            factory_host=str(self.get_parameter("factory_host").value).strip(),
-            factory_user=str(self.get_parameter("factory_user").value).strip(),
-            timeout=min(120.0, max(10.0, float(timeout_s))),
-        )
-        if not applied.get("ok"):
-            return {
-                "ok": False,
-                "code": "factory_active_restore_failed",
-                "message": "恢复事务开始前的 106 active 地图失败",
-                "apply": applied,
-                "expected_identity": evidence,
-                "state_uncertain": True,
-            }
-        confirmation = self._confirm_factory_active_map(
-            resolved,
-            expected_digest=expected_digest,
-            timeout_s=timeout_s,
-        )
-        return {
-            "ok": bool(confirmation.get("ok")),
-            "code": "factory_active_restored" if confirmation.get("ok") else "factory_active_restore_unconfirmed",
-            "message": (
-                "已恢复事务开始前的 106 active 地图并完成内容确认"
-                if confirmation.get("ok")
-                else "drmap apply 返回后仍无法确认事务开始前的 106 active 地图"
-            ),
-            "apply": applied,
-            "confirmation": confirmation,
-            "expected_identity": evidence,
-            "state_uncertain": not bool(confirmation.get("ok")),
-            "factory_active_confirmed": bool(confirmation.get("ok")),
-        }
-
     def _apply_selected_map_to_factory(
         self,
         record: Dict[str, Any],
         *,
         timeout_s: Optional[float] = None,
         reject_active_alias: bool = False,
-        source_factory_identity: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         source_path = str(
             record.get("factory_apply_path")
@@ -4999,22 +4822,11 @@ class WebDashboardNode(Node):
                 "source_path": source_path,
             }
         if source_path == "/var/opt/robot/data/maps/active":
-            confirmation = self._confirm_factory_active_map(
-                source_path,
-                expected_digest=(source_factory_identity or {}).get("content_digest"),
-                timeout_s=timeout_s or float(self.get_parameter("map_import_timeout_s").value),
-            )
             return {
-                "ok": bool(confirmation.get("ok")),
+                "ok": True,
                 "skipped": True,
-                "message": (
-                    "地图记录指向当前 106 active，已完成路径和内容确认"
-                    if confirmation.get("ok")
-                    else "地图记录指向 active，但无法完成内容确认"
-                ),
+                "message": "地图记录指向当前 106 active；无需重复调用 drmap apply",
                 "source_path": source_path,
-                "factory_active_confirmed": bool(confirmation.get("ok")),
-                "factory_active_confirmation": confirmation,
             }
         if not source_path.startswith(base):
             return {"ok": True, "skipped": True, "message": "地图不是 106 原厂地图包；未调用 drmap apply", "source_path": source_path}
@@ -5041,74 +4853,13 @@ class WebDashboardNode(Node):
                 "output": result.get("output"),
                 "returncode": result.get("returncode"),
             }
-        confirmation = self._confirm_factory_active_map(
-            source_path,
-            expected_digest=None,
-            timeout_s=timeout,
-        )
-        if not confirmation.get("ok"):
-            return {
-                "ok": False,
-                "code": "factory_active_map_unconfirmed",
-                "message": "106 drmap apply 已返回，但 active 地图后验确认失败",
-                "source_path": source_path,
-                "apply": result,
-                "confirmation": confirmation,
-            }
         return {
             "ok": True,
             "source_path": source_path,
             "command": result.get("command"),
             "output": result.get("output"),
-            "message": "106 原厂 active 地图已切换并完成后验确认",
-            "factory_active_confirmed": True,
-            "factory_active_confirmation": confirmation,
-        }
-
-    def _confirm_factory_active_map(
-        self,
-        source_path: str,
-        *,
-        expected_digest: Optional[str] = None,
-        timeout_s: float,
-    ) -> Dict[str, Any]:
-        """Verify active by canonical path and map-asset content identity."""
-        source_identity = self._factory_map_identity(source_path, timeout_s=timeout_s)
-        active_identity = self._factory_map_identity(
-            str(self.get_parameter("factory_active_map").value).strip(),
-            timeout_s=timeout_s,
-        )
-        expected_path = str(source_identity.get("resolved_path") or "").strip()
-        expected_content = str(
-            expected_digest or source_identity.get("content_digest") or ""
-        ).strip().lower()
-        active_path = str(active_identity.get("resolved_path") or "").strip()
-        active_content = str(active_identity.get("content_digest") or "").strip().lower()
-        identity = factory_identity_match(
-            source_identity,
-            active_identity,
-            expected_digest=expected_content or None,
-        )
-        ok = bool(source_identity.get("ok") and active_identity.get("ok") and identity.get("ok"))
-        identity_mode = identity.get("identity_mode")
-        return {
-            "ok": ok,
-            "factory_active_confirmed": ok,
-            "identity_mode": identity_mode,
-            "active_path": active_path or None,
-            "source_path": str(source_path or ""),
-            "expected_resolved_path": expected_path or None,
-            "expected_content_digest": expected_content or None,
-            "active_content_digest": active_content or None,
-            "content_digest": active_content or None,
-            "identity_match": identity,
-            "source_identity": source_identity,
-            "active_identity": active_identity,
-            "message": (
-                "106 active 已通过路径或内容摘要确认目标地图"
-                if ok
-                else "106 active 路径和内容摘要均未确认目标地图，不能把 drmap apply 退出码当作成功"
-            ),
+            "returncode": result.get("returncode"),
+            "message": "106 drmap apply 执行成功",
         }
 
     def _cleanup_failed_map_import(self, dest: FsPath) -> Dict[str, Any]:

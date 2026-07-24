@@ -24673,3 +24673,11 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 启动文件不再向 `floor_manager` 注入旧切图、楼梯区域、步态或行为树参数；静态合同明确禁止上述旧发布能力重新进入该节点，联合 ROS 回放只给它同层 Nav2 所需话题。
 - 验证：49 个 `scripts/test_*.py` 全部通过，现场参数检查和 `git diff --check` 通过，三包构建通过；`stair_executor` 独立回放及 `floor_manager + stair_executor + 假 Nav2` 联合回放均完成上/下楼闭环。使用 schema v5 渲染后的临时参数，在独立 ROS 域、轴控制关闭条件下，正式 launch 成功拉起 `command_mux`、`stair_executor`、`tcp_bridge`、`floor_manager` 和 `floor_goal_bridge`；上位机缺少 104/Foxy 的 `nav2_recoveries`，完整 Nav2 启动仍需在 104 在线后验收。
 - 三台主机 `10.21.31.103/104/106` 仍离线；本轮未部署、未发送运动/导航/重定位/切图命令，也未改变上位机网络。历史备份中没有真实两层路线资产，首轮真机测试仍需在实际楼梯分别准备两层地图、106 原厂包和四个实测语义点。
+
+## 2026-07-24 13:22 CST - 删除 106 地图哈希门禁和复杂回滚
+
+- 按“先跑通、再加固”的硬约束复查跨层切图，确认 Web 曾在一次地图选择中远程捕获 106 active 目录身份、递归计算地图文件 SHA-256、执行 `drmap apply`、再次计算摘要确认，并在失败时尝试按摘要回滚；这套链路会把原厂切图命令已经成功但摘要探测失败的情况误判为切图失败，也是首轮真机闭环不需要的额外阻断层。
+- 从运行代码连根删除 106 原厂地图的目录解析、摘要捕获、后验确认、身份比较和摘要回滚。现在固定原厂地图包只执行一次 `sudo -n drmap apply <目标包路径>`，以命令返回状态作为 106 激活结果；失败时停止当次切层，成功时直接进入目标平台 2101。普通地图记录指向当前 `active` 时直接跳过重复激活；跨层目标若只有 `active` 别名仍拒绝，因为该记录没有提供可执行的目标地图包。
+- 保留 104 Nav2 `/map` 与归档 OccupancyGrid 的内容一致性检查：它直接验证导航实际使用的栅格，解决过历史上的旧图/错图问题，不属于本次删除的跨主机包哈希门禁。
+- 新增静态回归约束，禁止 `sha256sum`、factory identity 捕获/确认/恢复方法和 `source_factory_identity` 再进入 Web 运行链；删除已无消费者的 `factory_identity_match`。
+- 验证：49 个 `scripts/test_*.py` 全部通过，Python 编译和 `git diff --check` 通过，`m20pro_navigation`、`m20pro_cloud_bridge`、`m20pro_bringup` 三包构建通过。本轮仅修改上位机 `feature/unified-navigation-v2`，三台主机仍未联机，因此未部署或发送运动、导航、切图、重定位、网络命令，也未改变上位机网络。
