@@ -24724,3 +24724,10 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - API 和统一导航说明同步明确：`navigation_plan` 是当前点位与路线的可重建投影，不是第二份路线数据库；任务执行期间路线编辑仍被禁止。README 和跨层操作文档补充连接边独占入口/出口 Nav2、任务可直接重复执行以及入口/出口明确失败会停止。
 - 验证：现存 48 个 `scripts/test_*.py` 全部通过，Python/JavaScript 语法和差异检查通过，三个 ROS 包构建通过；执行器独立 smoke 完成上楼、下楼和禁用身份拒绝，联合 smoke 完成上/下楼并确认 Nav2 action 不可用时 3 秒内停止。现场 YAML 经正式渲染入口生成运行参数后，在独立 ROS 域、仅本机通信和轴运动命令关闭条件下，正式 launch 成功拉起 `command_mux`、`stair_executor`、`tcp_bridge`、`scan_recording_relay`、`floor_manager` 和 `floor_goal_bridge`；`tcp_bridge` 确认为 shadow 模式。
 - 本轮仍只修改上位机 `feature/unified-navigation-v2`，没有合并 `main`、部署或操作 103/104/106，也没有改变上位机网络。
+
+## 2026-07-24 14:10 CST - 统一跨层离线版本双远端固化
+
+- 将连接边 Nav2 所有权、失败反馈和回执相关性修复提交为 `76892fc`，正式启动验证记录提交为 `2335280`，均已同步推送到 GitHub 与 GitLab 的 `feature/unified-navigation-v2`；两端 `main` 均保持 `7290ea6`，没有合并主线。
+- 复核上位机默认 Web 数据目录 `~/.m20pro_web`：当前没有 `maps.json` 和 `floor_routes.json`，因此不存在可用于真实跨层验收的两张地图和有向路线；旧 `settings.json` 只残留预览环境的 `builtin_F20` 选择信息，不能作为真机证据。
+- 下一步必须在开发狗联机并到达实际楼梯后，分别准备两张真实 104 Nav2 地图、两份 106 原厂地图包和一条实测四点有向路线，再执行受监督的单程上楼录包。离线代码已闭环，但在完成该测试前不宣称真实跨层导航验收通过。
+- 本轮没有部署或操作 103/104/106，没有发送运动、导航、切图或重定位命令，也没有改变上位机网络。
