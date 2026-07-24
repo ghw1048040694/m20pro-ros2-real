@@ -24690,3 +24690,10 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 验证：现存 48 个 `scripts/test_*.py` 全部通过，三个 ROS 包构建通过；安装态 `stair_executor` 独立回放和 `floor_manager + stair_executor + 假 Nav2` 联合回放均完成上楼、下楼闭环。测试锁定前置心跳门禁不得重新进入 Web，同时保留启动后执行器无回执超时。
 - 资产审计确认上位机 `~/.m20pro_web` 当前没有 `maps.json` 和 `floor_routes.json`，`annotations.json` 为空；源码 F19/F20/F21 的 PGM 内容完全相同，不能充当真实两层地图。现有 `Original_map_factory_cache_20260604_1045` 也只有一份原厂地图包。因此代码已具备离线闭环，但真机验收仍必须现场准备两张真实 104 地图、两份 106 原厂包和 `entry/source_platform/target_platform/post_exit` 四个实测位姿。
 - `10.21.31.103/104/106` 本轮均不可达，未部署、未启动服务、未发送运动/导航/切图/重定位/网络命令，也未改变上位机网络。
+
+## 2026-07-24 13:34 CST - 修复动态跨层路线 ID 在运行链中被改写的根因
+
+- 端到端审计发现确定性故障：前端保存的动态路线 ID 如 `route_up` 进入 `runtime_floor_config()` 后，`stair_routes_from_config()` 又按旧静态配置规则改写为 `F1:route_up`。统一计划和 `stair_executor` 随后携带改写后的 ID 请求切图，而 Web 的持久路线库仍只有 `route_up`，导致机器狗到达共享平台后必然以 `floor_switch_route_missing` 停止；此前路线合同、计划合同和执行器回放各自使用手写数据，没有覆盖这次跨模块转换。
+- 统一路线身份规则：配置中存在 `route_id` 时必须原样保留，只有没有显式 ID 的历史静态 YAML 才生成 `源楼层:配置键` 兼容 ID。没有增加新字段、别名表、运行判断或补丁映射，前端路线库仍是唯一身份来源。
+- 增加同数据贯穿回放：使用前端路线保存合同生成两张地图和四个语义点，依次经过 `runtime_floor_config -> stair_routes_from_config -> build_unified_navigation_plan -> runtime_transition_for_annotation -> create/step_connector_execution -> resolve_floor_switch_request`，断言 `route_up` 全程不变并能被切图事务解析。
+- 验证：现存 48 个 `scripts/test_*.py` 全部通过，三包构建通过；安装态执行器独立回放和 `floor_manager + stair_executor` 联合回放均完成上、下楼闭环。开发狗 104 仍不可达，本轮未部署或发送任何真机命令，也未改变上位机网络。

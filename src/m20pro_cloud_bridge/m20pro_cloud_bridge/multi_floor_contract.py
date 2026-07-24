@@ -34,6 +34,7 @@ def stair_routes_from_config(config: Dict[str, Any]) -> List[Dict[str, Any]]:
         for name, stair in stairs.items():
             if not isinstance(stair, dict):
                 continue
+            route_id = str(stair.get("route_id") or f"{source_floor}:{name}").strip()
             target_floor = str(stair.get("target_floor") or "").strip()
             if not target_floor:
                 continue
@@ -51,7 +52,7 @@ def stair_routes_from_config(config: Dict[str, Any]) -> List[Dict[str, Any]]:
             target_data = floors.get(target_floor) if isinstance(floors.get(target_floor), dict) else {}
             routes.append(
                 {
-                    "id": f"{source_floor}:{name}",
+                    "id": route_id,
                     "name": str(name),
                     "source_floor": str(source_floor),
                     "target_floor": target_floor,
@@ -72,7 +73,7 @@ def stair_routes_from_config(config: Dict[str, Any]) -> List[Dict[str, Any]]:
                     "model": str(transition.get("model") or "shared_platform"),
                     "terrain_guard": connector_terrain_guard_profile(
                         {
-                            "id": f"{source_floor}:{name}",
+                            "id": route_id,
                             "terrain_guard": terrain_guard,
                         }
                     ),

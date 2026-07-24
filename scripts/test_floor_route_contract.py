@@ -9,6 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src/m20pro_cloud_bridge"))
+sys.path.insert(0, str(ROOT / "src/m20pro_navigation"))
 
 from m20pro_cloud_bridge.floor_route_contract import (  # noqa: E402
     floor_route_public_payload,
@@ -17,6 +18,15 @@ from m20pro_cloud_bridge.floor_route_contract import (  # noqa: E402
     upsert_floor_route,
     validate_floor_route,
     validate_floor_route_set,
+)
+from m20pro_cloud_bridge.multi_floor_contract import stair_routes_from_config  # noqa: E402
+from m20pro_cloud_bridge.unified_navigation_contract import (  # noqa: E402
+    build_unified_navigation_plan,
+    runtime_transition_for_annotation,
+)
+from m20pro_navigation.stair_executor_contract import (  # noqa: E402
+    create_connector_execution,
+    step_connector_execution,
 )
 
 
@@ -198,6 +208,98 @@ def test_floor_switch_request_contract() -> None:
         "previous connector epoch cannot switch maps",
     )
 
+
+def test_saved_route_identity_survives_the_complete_runtime_chain() -> None:
+    saved_route = valid_route()
+    runtime_routes = stair_routes_from_config(runtime_floor_config([saved_route]))
+    assert_equal(runtime_routes[0]["id"], "route_up", "runtime keeps saved route id")
+
+    task_points = {
+        "task_f1": {
+            "id": "task_f1",
+            "type": "task",
+            "floor": "F1",
+            "map_id": "map_f1",
+            "pose": pose(0.0, 0.0),
+        },
+        "task_f2": {
+            "id": "task_f2",
+            "type": "task",
+            "floor": "F2",
+            "map_id": "map_f2",
+            "pose": pose(9.0, 9.0),
+        },
+    }
+    plan = build_unified_navigation_plan(
+        ["task_f1", "task_f2"],
+        annotations_by_id=task_points,
+        routes=runtime_routes,
+    )
+    assert_equal(plan["ok"], True, "saved route builds unified task")
+    transition = runtime_transition_for_annotation(
+        plan,
+        "task_f2",
+        current_floor="F1",
+    )
+    route = transition["edges"][0]["route"]
+    assert_equal(route["id"], "route_up", "task plan keeps saved route id")
+
+    created = create_connector_execution(
+        route,
+        request_id="switch_1",
+        plan_id="task_1:run_1",
+        map_epoch=7,
+        now_monotonic=0.0,
+    )
+    traversing = step_connector_execution(
+        created["execution"],
+        {
+            "type": "entry_reached",
+            "request_id": "switch_1",
+            "route_id": "route_up",
+            "plan_id": "task_1:run_1",
+            "map_epoch": 7,
+        },
+        now_monotonic=1.0,
+    )
+    holding = step_connector_execution(
+        traversing["execution"],
+        {
+            "type": "platform_reached",
+            "request_id": "switch_1",
+            "route_id": "route_up",
+            "plan_id": "task_1:run_1",
+            "map_epoch": 7,
+        },
+        now_monotonic=2.0,
+    )
+    switch_action = next(
+        item for item in holding["actions"] if item["kind"] == "request_floor_switch"
+    )
+    request = {
+        **switch_action,
+        "plan_id": "task_1:run_1",
+        "map_epoch": 7,
+    }
+    active = {
+        "task_id": "task_1",
+        "status": "running",
+        "multi_floor": True,
+        "connector_request_id": "switch_1",
+        "connector_route_id": "route_up",
+        "connector_plan_id": "task_1:run_1",
+        "connector_map_epoch": 7,
+        "last_floor_goal_source_floor": "F1",
+        "last_floor_goal_target_floor": "F2",
+    }
+    accepted = resolve_floor_switch_request(
+        request,
+        routes=[saved_route],
+        active_task=active,
+        selected_map_id="map_f1",
+    )
+    assert_equal(accepted["ok"], True, "executor request resolves saved route")
+
 def test_public_payload_only_exposes_semantic_candidates() -> None:
     items = list(annotations().values()) + [{"id": "patrol", "type": "patrol", "floor": "F1", "map_id": "map_f1", "pose": pose(0, 0)}]
     payload = floor_route_public_payload([valid_route()], annotations=items, maps=maps().values())
@@ -212,6 +314,7 @@ def main() -> int:
         test_route_set_and_upsert,
         test_route_edit_cannot_enable_certified_motion,
         test_floor_switch_request_contract,
+        test_saved_route_identity_survives_the_complete_runtime_chain,
         test_public_payload_only_exposes_semantic_candidates,
     ):
         test()
