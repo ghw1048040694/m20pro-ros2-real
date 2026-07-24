@@ -24722,5 +24722,5 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 在安装态验证前继续审查回执状态机，发现新增失败解析器会在本次 `nav_goal_accepted` 尚未到达时接受一条迟到的 `nav_goal_succeeded`，存在把入口或出口假判完成的窗口；现要求先建立本次 `goal_seq`，随后只有同序号成功才能推进，接收确认前的成功和其他序号的接收回执均忽略。
 - 前置失败单独保留立即停止语义：Nav2 action 不可用、请求失败、目标拒绝、当前楼层缺失、已有楼层任务冲突和旧跨层入口误用不需要等待接收确认；`floor_manager` 的重复目标和任务冲突回执统一补齐实际 `label=floor_goal`。
 - API 和统一导航说明同步明确：`navigation_plan` 是当前点位与路线的可重建投影，不是第二份路线数据库；任务执行期间路线编辑仍被禁止。README 和跨层操作文档补充连接边独占入口/出口 Nav2、任务可直接重复执行以及入口/出口明确失败会停止。
-- 验证：现存 48 个 `scripts/test_*.py` 全部通过，Python/JavaScript 语法和差异检查通过，三个 ROS 包构建通过；执行器独立 smoke 完成上楼、下楼和禁用身份拒绝，联合 smoke 完成上/下楼并确认 Nav2 action 不可用时 3 秒内停止。受限沙箱只打印 UDP 网卡访问警告，本机私有 ROS 话题断言全部通过。
+- 验证：现存 48 个 `scripts/test_*.py` 全部通过，Python/JavaScript 语法和差异检查通过，三个 ROS 包构建通过；执行器独立 smoke 完成上楼、下楼和禁用身份拒绝，联合 smoke 完成上/下楼并确认 Nav2 action 不可用时 3 秒内停止。现场 YAML 经正式渲染入口生成运行参数后，在独立 ROS 域、仅本机通信和轴运动命令关闭条件下，正式 launch 成功拉起 `command_mux`、`stair_executor`、`tcp_bridge`、`scan_recording_relay`、`floor_manager` 和 `floor_goal_bridge`；`tcp_bridge` 确认为 shadow 模式。
 - 本轮仍只修改上位机 `feature/unified-navigation-v2`，没有合并 `main`、部署或操作 103/104/106，也没有改变上位机网络。
