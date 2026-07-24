@@ -319,7 +319,7 @@ def test_friendly_nav_status() -> None:
     )
     assert_equal(
         friendly_nav_status("error reason=stair_execution_retired current=F20 target=F21"),
-        "旧爬楼链路已停用，新方案未接入前禁止执行跨楼层任务",
+        "检测到已停用的旧跨楼层入口；请从统一巡检任务启动跨楼层路线",
         "retired stair execution text",
     )
     assert_equal(

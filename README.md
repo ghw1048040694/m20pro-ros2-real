@@ -1,13 +1,13 @@
 # M20 Pro ROS 2 跨楼层巡检导航系统
 
-跨楼层统一导航正在 GitLab 的 `feature/unified-navigation-dddmr` 分支开发。
-多人协作时请从该集成分支创建独立功能分支并提交 Merge Request，详见
-[CONTRIBUTING.md](CONTRIBUTING.md)；GitHub/Gitee 只发布验证后的 `main`。
+跨楼层统一导航正在 `feature/unified-navigation-v2` 分支开发，该分支同步到
+GitLab 和 GitHub；`main` 仍是已验证现场基线，Gitee 只发布验证后的 `main`。
+多人协作约定见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 这是面向云深处 M20 Pro 的 ROS 2 二次开发 workspace。当前主要用于：
 
 - 在 104 通用主机上运行 Nav2、楼层管理、点云融合和网页操作台；
-- 使用 106 原厂建图结果做 2D 导航地图，支持跨楼层地图、楼梯语义和巡检任务编排；旧爬楼执行链已停用，新方案接入前跨层执行会在运动前拒绝；
+- 使用 106 原厂建图结果做 2D 导航地图，以同一任务模型支持单层和跨楼层巡检；跨层只由唯一 `stair_executor` 执行，旧爬楼入口保持停用；
 - 对接 103 官方 TCP JSON 协议读取位姿/状态，并在允许时下发运动控制；
 - 支持单楼层巡检、多楼层地图切换、巡检点编排、YOLO 检测、U360 雷达巡检和现场录包。
 
@@ -127,9 +127,9 @@ src/m20pro_bringup/config/m20pro_field_profile.yaml
 ./scripts/apply_field_profile.sh
 ```
 
-应用入口会拒绝任务执行期间换参，先校验字段、范围和参数耦合，再按完整部署流程同时更新 106 和 104。106 的 `/etc/m20pro-edge-scan-106.env` 是自动生成物，不可手工编辑；Nav2 参数文件中的现场项也是不可直接运行的占位符，只能由该配置启动时重写。104 和 106 会携带并核对同一份配置的 SHA-256，不提供旧参数回退或热更新。
+应用入口会拒绝任务执行期间换参，先校验字段、范围和参数耦合，再按完整部署流程同时更新 106 和 104。106 的 `/etc/m20pro-edge-scan-106.env` 是自动生成物，不可手工编辑；Nav2 参数文件中的现场项也是不可直接运行的占位符，只能由该配置启动时重写。配置 SHA-256 仅用于部署诊断，不作为节点启动或任务运行的门禁；系统不提供旧参数热切换。
 
-当前 schema v4 共开放 75 个现场参数，其中 `navigation` 30 个、`teleoperation` 7 个；导航按 `controller / goal / progress / local_planner / costmap / global_planner` 分组，遥控统一配置速度上限、指令租约和仲裁看门狗。`localization` 还统一配置原厂手柄运动证据和起立/趴下姿态过渡判定。`stair_transition` 统一配置楼梯速度、指令频率、步态等待、阶段超时和共享平台定位参数。旧楼梯感知、扫描选择器和 `floor_manager.use_stairs()` 运动入口保持停用；跨层任务只由统一任务中的单一 `stair_executor` 执行。
+当前 schema v4 共开放 74 个现场参数，其中 `navigation` 30 个、`teleoperation` 7 个；导航按 `controller / goal / progress / local_planner / costmap / global_planner` 分组，遥控统一配置速度上限、指令租约和仲裁看门狗。`localization` 还统一配置原厂手柄运动证据和起立/趴下姿态过渡判定。`stair_transition` 统一配置楼梯速度、指令频率、步态等待、阶段超时和共享平台定位参数。旧楼梯感知、扫描选择器和 `floor_manager.use_stairs()` 运动入口保持停用；跨层任务只由统一任务中的单一 `stair_executor` 执行。
 
 导航减速度在统一配置中填写正数幅值，运行时自动转换成 DWB 要求的负值；同一最大线速度同时驱动 `max_vel_x/max_speed_xy`，同一障碍、清障和膨胀参数同时驱动局部与全局代价地图。校验器会拒绝停止阈值大于最大速度、发布频率高于刷新频率、清障范围小于障碍范围以及定位阈值相互冲突等组合。
 
@@ -276,7 +276,7 @@ http://10.21.31.104:8080
 9. `任务`：单层任务按当前地图编排；跨层任务在“跨楼层编排”中按实际执行顺序加入不同楼层任务点，路线预览通过后生成任务。
 10. `任务`：点击开始执行，必要时点击停止当前任务。
 
-当前网页一次显示一张楼层地图。统一任务的单层情况是 `n=1`；需要跨层时，同一执行器在楼层任务点之间插入已配置的有向楼梯连接边。`104_start_real_move.sh` 随轴运动能力启动唯一 `stair_executor`；`shadow` 不启动楼梯运动。楼梯链依次执行入口 Nav2、步态切换、低速直行、共享平台停车、104/106 切图与 2101 重定位、出口 Nav2，然后恢复平地步态和原任务。单层导航、前端、自检和录包继续直接使用 106 的 `/scan`，`terrain_guard` 首轮只做 106 影子观测，不阻断运动。完整流程见 [docs/cross_floor_navigation.md](docs/cross_floor_navigation.md)。
+当前网页一次显示一张楼层地图。统一任务的单层情况是 `n=1`；需要跨层时，同一执行器在楼层任务点之间插入已配置的有向楼梯连接边。`104_start_real_move.sh` 随轴运动能力启动唯一 `stair_executor`；`shadow` 不启动楼梯运动。楼梯链依次执行入口 Nav2、步态切换、低速直行、共享重叠平台停车、并行激活 104/106 预置目标地图、目标平台 2101 自动重定位、出口 Nav2，然后恢复平地步态和原任务。运行时不下载地图，也不在地图边界线上切换。单层导航、前端、自检和录包继续直接使用 106 的 `/scan`，`terrain_guard` 首轮只做 106 影子观测，不阻断运动。完整流程见 [docs/cross_floor_navigation.md](docs/cross_floor_navigation.md)。
 
 地图可在地图浮层删除；当前地图、任务执行期间和跨楼层路线引用的地图受保护。删除普通地图会同步清理 104 上的点位、任务和建图会话引用，不会删除独立保存的雷达历史结果，也不会自动删除 106 原厂地图包。需要清理 106 时必须先确认 `active` 不指向目标包，再精确删除对应原厂目录。
 

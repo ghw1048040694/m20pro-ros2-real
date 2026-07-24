@@ -5,7 +5,7 @@
 #   ./scripts/apply_field_profile.sh
 #
 # 不要直接修改 104/106 上自动生成的 /etc 配置文件。
-# 配置只管理当前正式运行链路；新爬楼方案未落地前不保留旧感知参数。
+# 配置只管理当前唯一运行链路；不保留旧楼梯感知和旧爬楼参数。
 schema_version: 4                 # 配置结构版本，程序使用，禁止自行修改
 profile_name: default_field       # 配置名称，仅允许 ASCII 字母、数字、点、下划线和短横线
 

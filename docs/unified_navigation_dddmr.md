@@ -26,6 +26,8 @@ unified_navigation_plan
 
 `stair_executor` 只向现有 `/cmd_vel_nav` 发布楼梯段速度，下游仍由 `command_mux` 处理仲裁和看门狗。上楼正向，下楼后退。楼梯段不使用 DWB 自由规划，入口和出口仍使用现有 Nav2。
 
+地图切换只在共享重叠停车区进行，不在地图边界线上进行。104 和 106 的地图资产在任务前预置，停车后并行激活两端目标地图，再在目标图的 `target_platform` 自动执行 2101。运行时不下载地图、不计算跨主机哈希，也不建立第二套定位器。
+
 `m20pro_real_full.sh shadow` 不启动楼梯运动。`m20pro_real_full.sh move` 随轴运动能力启动楼梯执行器。原始 launch 参数默认仍为 `false`，避免只开执行器却没有 103 运动链。
 
 ## DDDMR 的使用方式

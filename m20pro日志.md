@@ -24623,7 +24623,19 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 删除 `stair_action_orchestrator` 节点、合同和测试入口，旧 `floor_manager.use_stairs()` 继续明确拒绝，防止历史运动链与新链并行；`terrain_guard` 仅保留 106 影子观测，不参与首轮运动和切图门禁。
 - 切层事务从多层摘要/readiness/回滚/解锁机制简化为 `SWITCHING_MAP -> RELOCALIZING -> COMMITTED | FAILED`：104 Nav2 地图和 106 原厂地图并行激活，成功后在 `target_platform` 执行 2101；只核对两端切图返回、2101 和目标图位姿。失败立即停止当次任务，不建立永久锁；人工确认当前地图并重定位后可重新测试。
 - 切层成功后先同步目标楼层；`stair_executor` 只在收到 `/m20pro/current_floor` 的目标层回执后下发出口 Nav2 目标，避免 `floor_manager` 仍持有源层上下文时拒绝出口。该回执只用于保证链路顺序，不是新的多层认证。
-- 启动边界统一：`m20pro_real_full.sh shadow` 不启动楼梯执行器，`move` 随 103 轴运动能力启动；原始 launch 参数默认仍为 `false`。现场参数统一进入 `m20pro_field_profile.yaml`，schema v4 现为 75 项。
+- 启动边界统一：`m20pro_real_full.sh shadow` 不启动楼梯执行器，`move` 随 103 轴运动能力启动；原始 launch 参数默认仍为 `false`。现场参数统一进入 `m20pro_field_profile.yaml`，schema v4 现为 74 项。
 - 新增完整离线 replay，覆盖入口、步态、楼梯速度、平台停车、104/106 切图、2101、出口和恢复平地步态；全部 `scripts/test_*.py`、Python 编译、JavaScript 语法、`git diff --check` 和 `m20pro_navigation/m20pro_cloud_bridge/m20pro_bringup` 三包构建通过。
 - README、跨楼层操作文档、技术路线报告和前端 API 说明已同步到当前唯一链路。当前结论是“已具备两层单程最小真机测试条件”，仍需真实楼梯验收，不宣称已可无人跨层运行。
 - 本轮只修改上位机 `feature/unified-navigation-v2` 分支，没有合并 `main`、没有部署或操作 103/104/106，也没有改动上位机网络。
+
+## 2026-07-24 12:09 CST - 统一跨层说明与实际运行链收口
+
+- 完成提交后逐项审计，确认运行代码已经使用唯一 `stair_executor`，但 README、协作说明、现场参数注释和旧入口提示仍残留 `feature/unified-navigation-dddmr`、“新方案未接入”及 75 项参数等旧口径；现统一为 `feature/unified-navigation-v2`、已接入的统一任务入口和实际 74 项参数。
+- 明确慢切图的唯一处理方式：不能在地图边界线上切换；每条连接边使用两张定位图共同覆盖且有停车余量的共享重叠平台，104 Nav2 地图与 106 原厂地图包必须在任务前预置，停车后并行激活两端目标地图并自动执行目标平台 2101。运行时不下载、复制、生成地图或计算跨主机哈希。
+- 原厂定位器一次只激活一张地图，因此不承诺零停顿；首次现场测试直接记录两端激活与 2101 的真实耗时，不在缺少实测数据时预设暂停时间或重叠区尺寸。
+- 纠正文档中的停止条件：楼梯运动不因瞬时 `localization_ok=false` 停止，只在地图位姿超过 `motion_pose_timeout_s` 未更新时按通信超时停车；用户停止、阶段超时、切图失败和 2101 失败仍保留。
+- 将用户再次明确的“先跑通、再加固”要求固化到协作约定：先让唯一最小链路形成闭环，首轮不增加哈希认证、多层 readiness、重复仲裁、平行动作链或复杂回退；后续新增判定必须对应真实录包或现场观测到的故障，并说明触发行为与回归测试。
+- 校正 README 对配置哈希的描述：104/106 携带的 SHA-256 只用于部署诊断，不是节点启动或任务运行许可证，避免维护时误把已移除的 hash 门禁恢复回来。
+- 纳入安装态 ROS 烟雾测试 `scripts/smoke_stair_executor_ros.py`，在强制本机独立 ROS 域、私有话题和 `/tmp` 隔离日志目录下分别回放上楼、下楼、瞬时定位诊断标志、楼层同步和出口目标；测试明确断言瞬时 `localization_ok=false` 不打断楼梯速度，且目标楼层上下文确认前不得发送出口目标。测试消息不会进入机器狗正常 ROS 域，也不依赖用户目录写权限。
+- 验证：48 个 `scripts/test_*.py` 全部通过；Python 编译、JavaScript 语法、`git diff --check`、跨层 replay、事务/执行器/统一接线合同和 `m20pro_navigation`、`m20pro_cloud_bridge`、`m20pro_bringup` 三包构建均通过。安装态 ROS 烟雾测试完成上行和下行闭环；正式 `m20pro_real.launch.py` 也在独立 ROS 域、轴控制关闭且 TCP 目标重定向本机回环的条件下成功拉起 `stair_executor`、`command_mux`、`tcp_bridge` 和录包转发节点，测试进程已清理。
+- 本轮仅修改上位机开发分支，没有合并 `main`、部署或操作 103/104/106，也没有改变上位机网络。

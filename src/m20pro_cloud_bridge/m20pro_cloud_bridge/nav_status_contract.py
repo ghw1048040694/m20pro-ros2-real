@@ -151,7 +151,7 @@ def friendly_nav_status(status_text: str) -> str:
     if text.startswith("error "):
         reason = str(payload.get("reason") or "")
         if reason == "stair_execution_retired":
-            return "旧爬楼链路已停用，新方案未接入前禁止执行跨楼层任务"
+            return "检测到已停用的旧跨楼层入口；请从统一巡检任务启动跨楼层路线"
         return "导航链路报错，任务已停止"
     return text
 
