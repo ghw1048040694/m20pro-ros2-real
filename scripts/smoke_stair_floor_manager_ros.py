@@ -203,13 +203,16 @@ def _run_direction(direction: str, index: int, workspace: Path) -> None:
         "-p",
         f"floor_route_config_topic:={prefix}/floor_routes",
         "-p",
-        f"switch_floor_topic:={prefix}/manual_floor",
-        "-p",
         f"stair_command_topic:={prefix}/retired_stair",
-        "-p",
-        f"stair_zones_topic:={prefix}/stair_zones",
     ]
-    for name, value in shared_topics.items():
+    for name in (
+        "floor_goal_topic",
+        "current_floor_topic",
+        "stair_status_topic",
+        "stop_task_topic",
+        "cmd_vel_topic",
+    ):
+        value = shared_topics[name]
         floor_manager_command.extend(["-p", f"{name}:={value}"])
 
     stair_executor_command = [

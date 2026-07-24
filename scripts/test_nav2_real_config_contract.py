@@ -107,7 +107,12 @@ def main() -> None:
     assert planner["GridBased"]["tolerance"] == "__FIELD_PROFILE_PLANNER_GOAL_TOLERANCE__"
     assert planner_profile["goal_tolerance_m"] >= goal_profile["xy_tolerance_m"]
     assert len(bridge_rewrites) == 18
-    assert len(floor_rewrites) == 7
+    assert set(floor_rewrites) == {
+        "field_profile_name",
+        "field_profile_hash",
+        "duplicate_goal_tolerance_m",
+        "duplicate_goal_yaw_tolerance_rad",
+    }
     for parameter_name in bridge_rewrites:
         assert bridge_config[parameter_name].startswith("__FIELD_PROFILE_")
     rendered_nav2 = render_nav2_parameters(config, field_profile)
@@ -182,19 +187,6 @@ def main() -> None:
     assert timed_nodes
     for node in timed_nodes:
         assert int(node.attrib.get("server_timeout", "0")) >= 500
-
-    stair_tree_path = (
-        ROOT
-        / "src"
-        / "m20pro_bringup"
-        / "behavior_trees"
-        / "m20pro_stair_traverse_foxy.xml"
-    )
-    stair_root = ET.parse(stair_tree_path).getroot()
-    assert stair_root.find(".//ComputePathToPose") is not None
-    assert stair_root.find(".//FollowPath") is not None
-    for forbidden_tag in ("BackUp", "Spin", "ClearEntireCostmap", "RecoveryNode"):
-        assert stair_root.find(f".//{forbidden_tag}") is None
 
     dashboard = (
         ROOT
@@ -345,8 +337,15 @@ def main() -> None:
     assert 'self.scan_received_monotonic = 0.0' in system_check_source
     assert 'scan_stale=age:' in system_check_source
     assert 'self.create_subscription(LaserScan, self.scan_topic' in system_check_source
-    assert 'label in ("stair_traverse", "stair_exit")' in floor_manager
-    assert "goal.behavior_tree = behavior_tree" in floor_manager
+    assert 'label in ("stair_traverse", "stair_exit")' not in floor_manager
+    assert "goal.behavior_tree = behavior_tree" not in floor_manager
+    assert not (
+        ROOT
+        / "src"
+        / "m20pro_bringup"
+        / "behavior_trees"
+        / "m20pro_stair_traverse_foxy.xml"
+    ).exists()
     assert "stair_execution_retired" in floor_manager
     assert "stair_clearance" not in floor_manager
     assert "stair_perception" not in floor_manager

@@ -73,11 +73,24 @@ def main() -> None:
     # the map transition and only sends entry/exit goals after floor context
     # has changed, so direct cross-floor goals remain rejected.
     assert "stair_execution_retired" in floor_manager
-    assert 'label in ("stair_traverse", "stair_exit")' in floor_manager
     assert "terrain_segments_from_config" not in floor_manager
     assert "terrain_segment_at_pose" not in floor_manager
     assert "_update_terrain_segment_gait" not in floor_manager
-    assert 'self._publish_flat_gait("same_floor_goal")' not in floor_manager
+    for retired_owner in (
+        "LoadMap",
+        "PoseWithCovarianceStamped",
+        "floor_switch_request_pub",
+        "gait_command_pub",
+        "_on_floor_switch_result",
+        "_request_coordinated_floor_switch",
+        "_publish_gait",
+        "_publish_flat_gait",
+        "_start_stair_route_to_floor",
+        "_finish_pending_stair_transition",
+        "stair_zones_topic",
+        'label in ("stair_traverse", "stair_exit")',
+    ):
+        assert retired_owner not in floor_manager
     assert "if rclpy.ok():" in floor_manager
 
     # A field bag must show every hand-off in the minimal connector chain.

@@ -69,7 +69,6 @@ def generate_launch_description():
     enable_system_check = LaunchConfiguration("enable_system_check")
     enable_config_audit = LaunchConfiguration("enable_config_audit")
     initial_floor = LaunchConfiguration("initial_floor")
-    load_initial_floor = LaunchConfiguration("load_initial_floor")
     enable_initialpose_3d_adapter = LaunchConfiguration("enable_initialpose_3d_adapter")
     initialpose_3d_z = LaunchConfiguration("initialpose_3d_z")
     enable_web_dashboard = LaunchConfiguration("enable_web_dashboard")
@@ -161,7 +160,6 @@ def generate_launch_description():
             default_value="",
             description="Optional runtime map label; empty means ordinary map navigation without a floor registry.",
         ),
-        DeclareLaunchArgument("load_initial_floor", default_value="false"),
         DeclareLaunchArgument("enable_initialpose_3d_adapter", default_value="false"),
         DeclareLaunchArgument("initialpose_3d_z", default_value="0.0"),
         DeclareLaunchArgument("enable_web_dashboard", default_value="false"),
@@ -382,10 +380,6 @@ def generate_launch_description():
                 {
                     "config_file": floor_config,
                     "initial_floor": initial_floor,
-                    "load_initial_floor": ParameterValue(load_initial_floor, value_type=bool),
-                    "stair_zones_topic": stair_zones_topic,
-                    "flat_gait_label": "flat",
-                    "stair_behavior_tree": "package://m20pro_bringup/behavior_trees/m20pro_stair_traverse_foxy.xml",
                     "cmd_vel_topic": "/cmd_vel_nav",
                     **floor_manager_parameters,
                 }

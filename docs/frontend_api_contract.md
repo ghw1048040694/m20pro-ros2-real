@@ -454,7 +454,7 @@ GET /api/annotations?map_id=live_map
 - `type` 的正式前端取值依次为 `patrol`（任务点）、`transition`、`charge`、`stair_entry`（爬楼梯点）、`stair_exit`、`stair_switch`。
 - `manual_point_type` 由 `type` 推导；外部调用可以显式传入，但不能与 `type` 表达相反的业务含义。
 - `vendor_navigation` 只接受 `Gait` 和 `Speed` 调整；后端始终固定 `Manner=0`、`ObsMode=0`、`NavMode=1`，并根据点位语义生成 `PointInfo`。
-- `stair_entry` 未显式传 `Gait` 时默认 `14`，其他点位默认 `12`。实际跨楼层上下楼方向及步态切换由 `floor_manager` 路线配置负责。
+- `stair_entry` 未显式传 `Gait` 时默认 `14`，其他点位默认 `12`。统一跨楼层任务的上下楼方向及步态切换由唯一 `stair_executor` 负责。
 
 ### DELETE `/api/annotations?id=<annotation_id>`
 
@@ -986,7 +986,7 @@ ROS 2 功能包也可以订阅：
 }
 ```
 
-保存时后端强制检查：两侧点位类型、楼层、地图和坐标一致；两张地图均具备 104 Nav2 yaml 和非 `active` 的 106 原厂地图包；同一楼层的所有路线只能引用同一张正式地图。路线持久化到 Web `data_dir/floor_routes.json`，并通过 transient-local `/m20pro/floor_route_config` 动态下发给 `floor_manager`。
+保存时后端强制检查：两侧点位类型、楼层、地图和坐标一致；两张地图均具备 104 Nav2 yaml 和非 `active` 的 106 原厂地图包；同一楼层的所有路线只能引用同一张正式地图。路线持久化到 Web `data_dir/floor_routes.json`；任务运行时 Web 将选中的完整有向连接边直接交给唯一 `stair_executor`，`/m20pro/floor_route_config` 只同步楼层身份给同层 Nav2 网关。
 
 后端会为每条路线保存一个 `terrain_guard` 影子观测身份块，例如：
 

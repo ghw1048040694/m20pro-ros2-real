@@ -61,7 +61,7 @@ def main() -> None:
             "localization",
         )
     }
-    assert leaf_count(editable) == 74
+    assert leaf_count(editable) == 73
     assert leaf_count(editable["navigation"]) == 30
     assert leaf_count(editable["teleoperation"]) == 7
 
@@ -104,7 +104,7 @@ def main() -> None:
     assert rejected(unsafe_localization)
 
     legacy_schema = raw_profile()
-    legacy_schema["schema_version"] = 3
+    legacy_schema["schema_version"] = 4
     assert rejected(legacy_schema)
 
     changed = deepcopy(raw_profile())
@@ -120,6 +120,7 @@ def main() -> None:
     assert command_mux["teleop_max_lateral_speed_mps"] == 0.30
     assert web_teleoperation["teleop_max_lateral_speed_mps"] == 0.30
     assert web_navigation["goal_reached_tolerance_m"] == profile["navigation"]["goal"]["xy_tolerance_m"]
+    assert web_navigation["cross_floor_factory_apply_timeout_s"] == profile["stair_transition"]["floor_switch_timeout_s"]
     assert web_navigation["cross_floor_platform_position_tolerance_m"] == profile["stair_transition"]["platform_position_tolerance_m"]
     assert web_navigation["cross_floor_platform_yaw_tolerance_rad"] == profile["stair_transition"]["platform_yaw_tolerance_rad"]
     assert stair_executor["motion_speed_mps"] == 0.12

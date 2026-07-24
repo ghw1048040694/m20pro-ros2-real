@@ -24664,3 +24664,12 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 统一录包脚本新增楼梯执行器启动/状态、切图请求/结果、目标楼层同步、步态命令和原厂步态回执话题；真机失败后可直接判断停在入口、步态切换、共享平台、104/106 切图、2101、楼层同步还是出口阶段。
 - 跨层运行合同新增录包话题断言，防止后续链路演进时再次漏掉关键交接证据；录包内容只旁路观察，不参与任务放行或停止。
 - 验证：全部 `scripts/test_*.py` 共 49 个测试文件通过，`git diff --check` 通过，`m20pro_navigation`、`m20pro_cloud_bridge`、`m20pro_bringup` 三包构建通过；本轮未部署或操作 103/104/106，未改变上位机网络。
+
+## 2026-07-24 13:13 CST - 从 floor_manager 连根移除旧跨层动作链
+
+- 减法审计确认：旧 `floor_manager.use_stairs()` 虽然已拒绝外部调用，但节点内部仍完整保留另一套地图加载、`initialpose`、代价地图清理、楼梯区域、步态发布、切图请求/回执和跨层任务续跑对象；这些对象默认不可达，但继续常驻会模糊跨层动作所有权，并存在以后被回调或维护改动重新接通的风险。
+- 将 `floor_manager` 从约 1500 行收敛为纯“楼层上下文 + 同层 Nav2 目标网关”：保留同层目标接收、重复目标处理、取消、反馈/结果关联、停止和旧 `/m20pro/use_stairs` 明确拒绝；彻底删除其 `LoadMap`、2101、步态发布、楼梯 Nav2 行为树、切图请求/回执和楼梯区域订阅能力。跨层运动和步态唯一所有者为 `stair_executor`，104/106 切图与 2101 唯一所有者为 Web 切图事务。
+- 同步删除无消费者的 `m20pro_stair_traverse_foxy.xml` 和 `entry_tolerance_m`，现场参数升级为 schema v5、73 个有效可编辑项；`floor_switch_timeout_s` 不再错误传给旧管理器，改为直接配置 Web 的 106 原厂目标地图激活超时。
+- 启动文件不再向 `floor_manager` 注入旧切图、楼梯区域、步态或行为树参数；静态合同明确禁止上述旧发布能力重新进入该节点，联合 ROS 回放只给它同层 Nav2 所需话题。
+- 验证：49 个 `scripts/test_*.py` 全部通过，现场参数检查和 `git diff --check` 通过，三包构建通过；`stair_executor` 独立回放及 `floor_manager + stair_executor + 假 Nav2` 联合回放均完成上/下楼闭环。使用 schema v5 渲染后的临时参数，在独立 ROS 域、轴控制关闭条件下，正式 launch 成功拉起 `command_mux`、`stair_executor`、`tcp_bridge`、`floor_manager` 和 `floor_goal_bridge`；上位机缺少 104/Foxy 的 `nav2_recoveries`，完整 Nav2 启动仍需在 104 在线后验收。
+- 三台主机 `10.21.31.103/104/106` 仍离线；本轮未部署、未发送运动/导航/重定位/切图命令，也未改变上位机网络。历史备份中没有真实两层路线资产，首轮真机测试仍需在实际楼梯分别准备两层地图、106 原厂包和四个实测语义点。

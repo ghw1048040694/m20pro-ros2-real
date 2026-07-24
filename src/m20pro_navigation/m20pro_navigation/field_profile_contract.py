@@ -13,7 +13,7 @@ from typing import Any, Dict, Iterable, Mapping
 import yaml
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 PROFILE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 TOP_LEVEL_KEYS = {
@@ -44,7 +44,6 @@ NAVIGATION_KEYS = {
 }
 
 STAIR_TRANSITION_SPEC = {
-    "entry_tolerance_m": ("number", 0.30, 2.00),
     "motion_speed_mps": ("number", 0.05, 0.30),
     "motion_command_hz": ("number", 2.0, 20.0),
     "motion_pose_timeout_s": ("number", 0.50, 5.00),
@@ -596,9 +595,6 @@ def floor_manager_field_parameters(profile: Mapping[str, Any]) -> Dict[str, Any]
     return {
         "field_profile_name": profile["profile_name"],
         "field_profile_hash": profile["profile_hash"],
-        "stair_entry_tolerance_m": transition["entry_tolerance_m"],
-        "floor_switch_timeout_s": transition["floor_switch_timeout_s"],
-        "post_switch_goal_delay_s": transition["post_switch_goal_delay_s"],
         "duplicate_goal_tolerance_m": transition["duplicate_goal_tolerance_m"],
         "duplicate_goal_yaw_tolerance_rad": transition[
             "duplicate_goal_yaw_tolerance_rad"
@@ -655,6 +651,9 @@ def web_navigation_field_parameters(profile: Mapping[str, Any]) -> Dict[str, Any
     transition = profile["stair_transition"]
     return {
         "goal_reached_tolerance_m": goal["xy_tolerance_m"],
+        "cross_floor_factory_apply_timeout_s": transition[
+            "floor_switch_timeout_s"
+        ],
         "cross_floor_platform_position_tolerance_m": transition[
             "platform_position_tolerance_m"
         ],
