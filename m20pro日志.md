@@ -24731,3 +24731,12 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 复核上位机默认 Web 数据目录 `~/.m20pro_web`：当前没有 `maps.json` 和 `floor_routes.json`，因此不存在可用于真实跨层验收的两张地图和有向路线；旧 `settings.json` 只残留预览环境的 `builtin_F20` 选择信息，不能作为真机证据。
 - 下一步必须在开发狗联机并到达实际楼梯后，分别准备两张真实 104 Nav2 地图、两份 106 原厂地图包和一条实测四点有向路线，再执行受监督的单程上楼录包。离线代码已闭环，但在完成该测试前不宣称真实跨层导航验收通过。
 - 本轮没有部署或操作 103/104/106，没有发送运动、导航、切图或重定位命令，也没有改变上位机网络。
+
+## 2026-07-24 14:27 CST - 用生产 Web 切图事务贯穿联合 ROS 回放
+
+- 继续按“先跑通唯一最小链路”审计离线证据，发现原联合 smoke 已真实启动安装态 `floor_manager` 和 `stair_executor`，但到共享平台后仍由测试脚本手工发布目标楼层和切图成功回执，没有证明生产 Web 切图事务与 ROS 执行链之间的真实交接。
+- 将 `scripts/smoke_stair_floor_manager_ros.py` 的上/下楼回放改为直接调用生产 `WebDashboardNode._run_floor_switch_transaction()`；只用确定性适配器代替真实 104 Nav2 `load_map`、106 `drmap apply` 和 2101，其余请求身份解析、`SWITCHING_MAP -> RELOCALIZING -> COMMITTED`、目标楼层发布、切图回执、出口 Nav2 和步态恢复均走生产代码与真实 ROS 话题。
+- 新回放确认上楼和下楼都能贯穿 `flat -> stair_up/down -> 104/106切图事务 -> 目标楼层同步 -> 出口Nav2 -> flat`，且 `request_id/route_id/plan_id/map_epoch` 在切图请求和回执中一致；Nav2 action 不可用仍在 3 秒内停止。
+- 本轮没有增加任何生产运行判定、仲裁、哈希、readiness 或回滚机制；新增内容全部位于离线 smoke 和文档，不影响真机运行时性能或链路复杂度。
+- 验证：现存 48 个 `scripts/test_*.py` 全部通过，Python 编译和 `git diff --check` 通过，`m20pro_navigation`、`m20pro_cloud_bridge`、`m20pro_bringup` 三包构建通过；执行器独立 smoke 及包含生产 Web 切图事务的联合 smoke 通过。
+- `10.21.31.103/104/106` 仍不可达；本轮未部署、未发送任何运动/导航/切图/重定位命令，也未改变上位机网络。

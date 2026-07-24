@@ -110,7 +110,7 @@ python3 scripts/smoke_stair_executor_ros.py
 python3 scripts/smoke_stair_floor_manager_ros.py
 ```
 
-两个脚本都强制使用仅本机 DDS、独立 ROS domain 和私有话题，不会向机器狗默认 domain 发送速度。第一个验证执行器自身的上/下楼状态顺序；第二个同时启动安装态 `floor_manager` 和 `stair_executor`，用本机假 Nav2 action server 验证入口/出口目标及 `flat -> stair_up/down -> flat` 的真实步态时序。
+两个脚本都强制使用仅本机 DDS、独立 ROS domain 和私有话题，不会向机器狗默认 domain 发送速度。第一个验证执行器自身的上/下楼状态顺序；第二个同时启动安装态 `floor_manager` 和 `stair_executor`，用本机假 Nav2 action server 验证入口/出口目标及 `flat -> stair_up/down -> flat` 的真实步态时序，并在共享平台直接调用生产 Web 的切图事务方法，以确定性适配器代替真实 104/106 和 2101，验证请求身份、目标楼层同步和切图回执能继续推进出口 Nav2。
 
 ## 最小现场验收
 

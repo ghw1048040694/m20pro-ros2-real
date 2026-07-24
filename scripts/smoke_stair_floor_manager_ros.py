@@ -21,6 +21,8 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from std_msgs.msg import Bool, String
 
+from m20pro_cloud_bridge.web_dashboard_node import WebDashboardNode
+
 
 TIMEOUT_S = 10.0
 
@@ -59,6 +61,7 @@ class Harness(Node):
         self.gaits: List[str] = []
         self.commands: List[Twist] = []
         self.switches: List[Dict[str, Any]] = []
+        self.floor_results: List[Dict[str, Any]] = []
         self.current_floors: List[str] = []
         self.nav_goals: List[PoseStamped] = []
         self.exit_goal_received = threading.Event()
@@ -74,6 +77,7 @@ class Harness(Node):
         self.create_subscription(String, f"{prefix}/gait", self._on_gait, 10)
         self.create_subscription(Twist, f"{prefix}/cmd_vel", self.commands.append, 10)
         self.create_subscription(String, f"{prefix}/floor_request", self._on_switch, 10)
+        self.create_subscription(String, f"{prefix}/floor_result", self._on_floor_result, 10)
         self.create_subscription(String, f"{prefix}/current_floor", self._on_floor, 10)
         self._action_server = ActionServer(
             self,
@@ -104,6 +108,14 @@ class Harness(Node):
     def _on_floor(self, message: String) -> None:
         self.current_floors.append(str(message.data or "").strip())
 
+    def _on_floor_result(self, message: String) -> None:
+        try:
+            payload = json.loads(message.data)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return
+        if isinstance(payload, dict):
+            self.floor_results.append(payload)
+
     def _execute_navigation(self, goal_handle: Any) -> NavigateToPose.Result:
         pose = goal_handle.request.pose
         self.nav_goals.append(pose)
@@ -119,6 +131,105 @@ class Harness(Node):
         self.release_exit_goal.set()
         self._action_server.destroy()
         return super().destroy_node()
+
+
+class _Parameter:
+    def __init__(self, value: Any) -> None:
+        self.value = value
+
+
+class _FloorSwitchRuntime:
+    """Run the production Web map-switch method with deterministic adapters."""
+
+    _advance_floor_switch_transaction = WebDashboardNode._advance_floor_switch_transaction
+    _fail_floor_switch_transaction = WebDashboardNode._fail_floor_switch_transaction
+    _floor_switch_task_is_active = WebDashboardNode._floor_switch_task_is_active
+    _publish_floor_switch_result = WebDashboardNode._publish_floor_switch_result
+
+    def __init__(
+        self,
+        node: Harness,
+        route: Dict[str, Any],
+        identity: Dict[str, Any],
+    ) -> None:
+        self._data_lock = threading.RLock()
+        self._floor_switch_lock = threading.RLock()
+        self._floor_switch_inflight = str(identity["request_id"])
+        self._floor_routes = [dict(route)]
+        self._settings: Dict[str, Any] = {
+            "selected_map_id": route["source_map_id"],
+            "active_task": {
+                "task_id": f"task-{identity['request_id']}",
+                "status": "running",
+                "multi_floor": True,
+                "connector_request_id": identity["request_id"],
+                "connector_route_id": identity["route_id"],
+                "connector_plan_id": identity["plan_id"],
+                "connector_map_epoch": identity["map_epoch"],
+                "last_floor_goal_source_floor": route["source_floor"],
+                "last_floor_goal_target_floor": route["target_floor"],
+            },
+        }
+        self.floor_context_pub = node.floor_context_pub
+        self.floor_switch_result_pub = node.floor_result_pub
+        self.persisted_states: List[str] = []
+        self.events: List[str] = []
+        self.exceptions: List[str] = []
+
+    def get_parameter(self, name: str) -> _Parameter:
+        values = {
+            "cross_floor_platform_position_tolerance_m": 0.50,
+            "cross_floor_platform_yaw_tolerance_rad": 0.45,
+        }
+        return _Parameter(values[name])
+
+    def get_logger(self) -> "_FloorSwitchRuntime":
+        return self
+
+    def exception(self, message: str) -> None:
+        self.exceptions.append(str(message))
+
+    def _save_json(self, _name: str, _payload: Any) -> None:
+        return None
+
+    def _append_event(self, name: str, _payload: Dict[str, Any]) -> None:
+        self.events.append(str(name))
+
+    def _persist_floor_switch_transaction(self, transaction: Dict[str, Any]) -> None:
+        self._settings["floor_switch_transaction"] = dict(transaction)
+        self.persisted_states.append(str(transaction.get("state") or ""))
+
+    def _activate_cross_floor_target_map(self, map_id: str) -> Dict[str, Any]:
+        route = self._floor_routes[0]
+        assert map_id == route["target_map_id"]
+        self._settings["selected_map_id"] = map_id
+        return {
+            "ok": True,
+            "code": "floor_switch_maps_activated",
+            "selected_map_id": map_id,
+            "nav2_load_map": {"ok": True},
+            "factory_apply_map": {"ok": True},
+        }
+
+    def _publish_initialpose(
+        self,
+        payload: Dict[str, Any],
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        route = self._floor_routes[0]
+        target_pose = route["target_platform"]
+        assert payload["floor"] == route["target_floor"]
+        assert math.isclose(float(payload["x"]), float(target_pose["x"]), abs_tol=1e-6)
+        assert kwargs["allow_active_task"] is True
+        assert kwargs["require_lifecycle"] is False
+        assert math.isclose(float(kwargs["stability_window_s"]), 0.0, abs_tol=1e-6)
+        return {
+            "confirmed": True,
+            "verification": {"factory_pose_accepted": True},
+        }
+
+    def run(self, request: Dict[str, Any]) -> None:
+        WebDashboardNode._run_floor_switch_transaction(self, dict(request))
 
 
 def _wait(condition: Callable[[], bool], label: str) -> None:
@@ -287,18 +398,21 @@ def _run_direction(direction: str, index: int, workspace: Path) -> None:
         _publish_repeated(node.pose_pub, _pose(2.0))
         _wait(lambda: bool(node.switches), f"{direction} floor switch request")
         assert all(node.switches[-1].get(key) == value for key, value in identity.items())
-        _publish_repeated(node.floor_context_pub, _text(target_floor))
+        switch_runtime = _FloorSwitchRuntime(node, route, identity)
+        switch_runtime.run(node.switches[-1])
+        assert switch_runtime.persisted_states == ["SWITCHING_MAP", "RELOCALIZING", "COMMITTED"]
+        assert switch_runtime._settings["selected_map_id"] == route["target_map_id"]
+        assert switch_runtime._floor_switch_inflight is None
+        assert switch_runtime.exceptions == []
         _wait(lambda: target_floor in node.current_floors, f"{direction} target floor context")
-        node.floor_result_pub.publish(
-            _json_message(
-                {
-                    **identity,
-                    "ok": True,
-                    "target_floor": target_floor,
-                    "target_map_id": route["target_map_id"],
-                }
-            )
+        _wait(lambda: bool(node.floor_results), f"{direction} floor switch result")
+        assert node.floor_results[-1]["ok"] is True
+        assert all(
+            node.floor_results[-1].get(key) == value
+            for key, value in identity.items()
         )
+        assert node.floor_results[-1]["target_floor"] == target_floor
+        assert node.floor_results[-1]["target_map_id"] == route["target_map_id"]
 
         _wait(node.exit_goal_received.is_set, f"{direction} exit Nav2 goal")
         stair_index = node.gaits.index(expected_gait)
@@ -489,7 +603,10 @@ def main() -> int:
     finally:
         if rclpy.ok():
             rclpy.shutdown()
-    print("stair + floor manager ROS smoke passed: up, down, and Nav2 failure")
+    print(
+        "stair + floor manager + Web switch ROS smoke passed: "
+        "up, down, and Nav2 failure"
+    )
     return 0
 
 
