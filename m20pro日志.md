@@ -24697,3 +24697,12 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 统一路线身份规则：配置中存在 `route_id` 时必须原样保留，只有没有显式 ID 的历史静态 YAML 才生成 `源楼层:配置键` 兼容 ID。没有增加新字段、别名表、运行判断或补丁映射，前端路线库仍是唯一身份来源。
 - 增加同数据贯穿回放：使用前端路线保存合同生成两张地图和四个语义点，依次经过 `runtime_floor_config -> stair_routes_from_config -> build_unified_navigation_plan -> runtime_transition_for_annotation -> create/step_connector_execution -> resolve_floor_switch_request`，断言 `route_up` 全程不变并能被切图事务解析。
 - 验证：现存 48 个 `scripts/test_*.py` 全部通过，三包构建通过；安装态执行器独立回放和 `floor_manager + stair_executor` 联合回放均完成上、下楼闭环。开发狗 104 仍不可达，本轮未部署或发送任何真机命令，也未改变上位机网络。
+
+## 2026-07-24 13:44 CST - floor_manager 收敛为无路线白名单的同层 Nav2 网关
+
+- 按用户再次明确的“先保证跑起来，再依据真实问题补安全；只保留必要判定”原则复查运行链，发现 `floor_manager` 仍加载静态 `runtime_navigation.yaml`、订阅 Web 动态路线配置，并在存在任意跨层路线后把路线涉及楼层当成普通导航白名单。该机制会在只配置 F1/F2 跨层路线时拒绝正常 F20 地图，不是最小链路所需能力。
+- 从 `floor_manager` 连根删除路线 YAML 加载、动态路线订阅、楼层集合校验及 `unknown_goal_floor/ordinary_map_floor_mismatch` 两套模式分支；节点现在只维护当前地图楼层上下文：未建立上下文时接受首个明确楼层，同层目标直接交给 Nav2，不同楼层目标明确返回 `stair_execution_retired`，由唯一 `stair_executor` 跨层链处理。
+- 删除 Web 无消费者的 `/m20pro/floor_route_config` 发布器、参数和保存/删除路线后的同步动作。动态路线仍由 `floor_routes.json` 唯一持久化，并在任务执行时作为完整有向连接边直接交给 `stair_executor`，没有新增中间状态、别名或兼容动作链。
+- `floor_manager` 的地图坐标系改为单一 `map_frame` 参数，默认 `map`；同时删除该节点仅用于日志展示、从不参与运行的 `field_profile_name/field_profile_hash` 参数，避免哈希以后被误用成启动或任务门禁。跨层资产完整性、人工停止、通信/阶段超时、104/106 切图失败和 2101 失败等必要边界不变。
+- 本轮整体净删除约 200 行。现存 48 个 `scripts/test_*.py` 全部通过；`m20pro_navigation`、`m20pro_cloud_bridge`、`m20pro_bringup` 三包构建通过；安装态 `stair_executor` 独立回放及 `floor_manager + stair_executor + 假 Nav2` 联合回放均完成上、下楼闭环。
+- 本轮只修改上位机 `feature/unified-navigation-v2` 分支，未合并 `main`，未部署或操作 103/104/106，也未改变上位机网络。

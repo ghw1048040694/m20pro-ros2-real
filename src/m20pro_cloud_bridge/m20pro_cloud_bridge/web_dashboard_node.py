@@ -862,14 +862,6 @@ class WebDashboardNode(Node):
             str(self.get_parameter("stair_zones_topic").value),
             10,
         )
-        route_qos = QoSProfile(depth=1)
-        route_qos.reliability = ReliabilityPolicy.RELIABLE
-        route_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
-        self.floor_route_config_pub = self.create_publisher(
-            String,
-            str(self.get_parameter("floor_route_config_topic").value),
-            route_qos,
-        )
         self.floor_switch_result_pub = self.create_publisher(
             String,
             str(self.get_parameter("floor_switch_result_topic").value),
@@ -944,7 +936,6 @@ class WebDashboardNode(Node):
         }
 
         self._create_subscriptions()
-        self._publish_runtime_floor_config()
         self.create_timer(1.0, self._tick_active_task)
         teleop_watchdog_period = max(
             0.05,
@@ -996,7 +987,6 @@ class WebDashboardNode(Node):
         self.declare_parameter("map_import_timeout_s", 180.0)
         self.declare_parameter("enable_stair_zone_postprocess", True)
         self.declare_parameter("stair_zones_topic", "/m20pro/stair_zones")
-        self.declare_parameter("floor_route_config_topic", "/m20pro/floor_route_config")
         self.declare_parameter("floor_switch_request_topic", "/m20pro/floor_switch_request")
         self.declare_parameter("floor_switch_result_topic", "/m20pro/floor_switch_result")
         self.declare_parameter("floor_context_topic", "/m20pro/set_current_floor")
@@ -2763,23 +2753,6 @@ class WebDashboardNode(Node):
                 maps=self._all_maps_unlocked(),
             )
 
-    def _publish_runtime_floor_config(self) -> None:
-        config_payload = self._floor_config_payload()
-        if not config_payload.get("ok"):
-            self.get_logger().warning(str(config_payload.get("message") or "楼梯路线配置不可用"))
-            return
-        message = String()
-        message.data = json.dumps(
-            {
-                "version": now_text(),
-                "config": config_payload["config"],
-                "route_count": int(config_payload.get("dynamic_route_count") or 0),
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        self.floor_route_config_pub.publish(message)
-
     def _save_floor_route(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self._data_lock:
             active = dict(self._settings.get("active_task") or {})
@@ -2818,7 +2791,6 @@ class WebDashboardNode(Node):
             self._floor_routes = candidate_routes
             self._save_json("floor_routes.json", self._floor_routes)
             self._route_config_floor_ids = self._configured_route_floor_ids()
-        self._publish_runtime_floor_config()
         self._append_event(
             "跨楼层路线已保存",
             {
@@ -2829,7 +2801,7 @@ class WebDashboardNode(Node):
                 "target_map_id": route["target_map_id"],
             },
         )
-        return {"ok": True, "route": route, "message": "跨楼层路线已保存并下发到 floor_manager"}
+        return {"ok": True, "route": route, "message": "跨楼层路线已保存"}
 
     def _delete_floor_route(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         route_id = str(payload.get("id") or payload.get("route_id") or "").strip()
@@ -2845,7 +2817,6 @@ class WebDashboardNode(Node):
             self._floor_routes = updated
             self._save_json("floor_routes.json", self._floor_routes)
             self._route_config_floor_ids = self._configured_route_floor_ids()
-        self._publish_runtime_floor_config()
         self._append_event("跨楼层路线已删除", {"route_id": route_id})
         return {"ok": True, "route_id": route_id, "message": "跨楼层路线已删除"}
 

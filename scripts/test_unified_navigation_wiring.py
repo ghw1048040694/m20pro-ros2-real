@@ -121,7 +121,7 @@ def test_real_move_mode_starts_connector_with_the_existing_axis_chain() -> None:
     assert 'enable_stair_connector:="${AXIS_ENABLED}"' in start
 
 
-def test_floor_goal_early_errors_keep_protocol_label() -> None:
+def test_floor_manager_is_a_same_floor_nav2_gateway_without_route_whitelists() -> None:
     floor_manager = (
         ROOT
         / "src"
@@ -129,15 +129,17 @@ def test_floor_goal_early_errors_keep_protocol_label() -> None:
         / "m20pro_navigation"
         / "floor_manager.py"
     ).read_text(encoding="utf-8")
-    for reason in (
-        "no_current_floor_for_goal",
-        "unknown_goal_floor",
-        "ordinary_map_floor_mismatch",
-        "stair_execution_retired",
-    ):
+    for reason in ("no_current_floor_for_goal", "stair_execution_retired"):
         marker = 'reason=%s' % reason
         start = floor_manager.index(marker)
         assert "label=floor_goal" in floor_manager[start : start + 180]
+    assert 'self.declare_parameter("map_frame", "map")' in floor_manager
+    assert "config_file" not in floor_manager
+    assert "floor_route_config_topic" not in floor_manager
+    assert "route_configured" not in floor_manager
+    assert "unknown_goal_floor" not in floor_manager
+    assert "ordinary_map_floor_mismatch" not in floor_manager
+    assert "field_profile_hash" not in floor_manager
     assert "terrain_segments_from_config" not in floor_manager
     assert "terrain_segment_at_pose" not in floor_manager
     assert "_update_terrain_segment_gait" not in floor_manager
@@ -175,6 +177,6 @@ if __name__ == "__main__":
     test_stair_executor_is_the_single_connector_runtime_owner()
     test_cross_floor_dispatch_uses_the_single_executor_without_a_readiness_gate()
     test_real_move_mode_starts_connector_with_the_existing_axis_chain()
-    test_floor_goal_early_errors_keep_protocol_label()
+    test_floor_manager_is_a_same_floor_nav2_gateway_without_route_whitelists()
     test_compatibility_fields_are_plan_projections()
     print("unified navigation wiring tests passed")

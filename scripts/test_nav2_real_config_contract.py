@@ -108,8 +108,6 @@ def main() -> None:
     assert planner_profile["goal_tolerance_m"] >= goal_profile["xy_tolerance_m"]
     assert len(bridge_rewrites) == 18
     assert set(floor_rewrites) == {
-        "field_profile_name",
-        "field_profile_hash",
         "duplicate_goal_tolerance_m",
         "duplicate_goal_yaw_tolerance_rad",
     }

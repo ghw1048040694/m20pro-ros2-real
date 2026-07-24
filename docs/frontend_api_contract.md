@@ -986,7 +986,7 @@ ROS 2 功能包也可以订阅：
 }
 ```
 
-保存时后端强制检查：两侧点位类型、楼层、地图和坐标一致；两张地图均具备 104 Nav2 yaml 和非 `active` 的 106 原厂地图包；同一楼层的所有路线只能引用同一张正式地图。路线持久化到 Web `data_dir/floor_routes.json`；任务运行时 Web 将选中的完整有向连接边直接交给唯一 `stair_executor`，`/m20pro/floor_route_config` 只同步楼层身份给同层 Nav2 网关。
+保存时后端强制检查：两侧点位类型、楼层、地图和坐标一致；两张地图均具备 104 Nav2 yaml 和非 `active` 的 106 原厂地图包；同一楼层的所有路线只能引用同一张正式地图。路线持久化到 Web `data_dir/floor_routes.json`；任务运行时 Web 将选中的完整有向连接边直接交给唯一 `stair_executor`。`floor_manager` 只接收当前地图的楼层上下文并转发同层 Nav2 目标，不加载路线表，也不把路线楼层作为普通地图白名单。
 
 后端会为每条路线保存一个 `terrain_guard` 影子观测身份块，例如：
 

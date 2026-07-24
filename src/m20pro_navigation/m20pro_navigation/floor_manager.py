@@ -1,20 +1,14 @@
-import json
 import math
-import os
 import time
 from functools import partial
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, List, Optional, Set, Tuple
 
 import rclpy
-import yaml
 from action_msgs.msg import GoalStatus
-from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import PoseStamped, Twist
 from nav2_msgs.action import NavigateToPose
 from rclpy.action import ActionClient
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
 
 from .geometry import quaternion_to_yaw
@@ -25,8 +19,8 @@ class FloorManager(Node):
 
     def __init__(self) -> None:
         super().__init__("m20pro_floor_manager")
-        self.declare_parameter("config_file", "")
         self.declare_parameter("initial_floor", "")
+        self.declare_parameter("map_frame", "map")
         self.declare_parameter("stair_command_topic", "/m20pro/use_stairs")
         self.declare_parameter("floor_goal_topic", "/m20pro/floor_goal")
         self.declare_parameter("stop_task_topic", "/m20pro/stop_task")
@@ -34,10 +28,7 @@ class FloorManager(Node):
         self.declare_parameter("rviz_floor_goal_topics", [])
         self.declare_parameter("current_floor_topic", "/m20pro/current_floor")
         self.declare_parameter("stair_status_topic", "/m20pro/stair_status")
-        self.declare_parameter("floor_route_config_topic", "/m20pro/floor_route_config")
         self.declare_parameter("floor_context_topic", "/m20pro/set_current_floor")
-        self.declare_parameter("field_profile_name", "")
-        self.declare_parameter("field_profile_hash", "")
         self.declare_parameter("navigate_to_pose_action", "/navigate_to_pose")
         self.declare_parameter("cmd_vel_topic", "/cmd_vel_nav")
         self.declare_parameter("service_timeout_s", 5.0)
@@ -45,20 +36,9 @@ class FloorManager(Node):
         self.declare_parameter("duplicate_goal_yaw_tolerance_rad", 0.12)
         self.declare_parameter("nav_feedback_status_period_s", 1.0)
 
-        self.field_profile_name = str(
-            self.get_parameter("field_profile_name").value
-        ).strip()
-        self.field_profile_hash = str(
-            self.get_parameter("field_profile_hash").value
-        ).strip()
-        self.config_file = self._resolve_path(
-            str(self.get_parameter("config_file").value)
+        self.map_frame = (
+            str(self.get_parameter("map_frame").value).strip() or "map"
         )
-        self.config = self._load_config(self.config_file)
-        self.floors: Dict[str, Dict[str, Any]] = dict(
-            self.config.get("floors", {})
-        )
-        self.route_configured = self._has_stair_routes(self.floors)
 
         self.current_floor = ""
         self.active_floor_mission = False
@@ -71,7 +51,6 @@ class FloorManager(Node):
         self.last_nav_feedback_publish_monotonic = 0.0
         self.cancelled_nav_goal_handle_ids: Set[int] = set()
         self.rviz_floor_goal_subscriptions: List[Any] = []
-        self._validate_floor_config()
 
         self.navigate_to_pose_client = ActionClient(
             self,
@@ -94,15 +73,6 @@ class FloorManager(Node):
             10,
         )
 
-        route_qos = QoSProfile(depth=1)
-        route_qos.reliability = ReliabilityPolicy.RELIABLE
-        route_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
-        self.create_subscription(
-            String,
-            str(self.get_parameter("floor_route_config_topic").value),
-            self._on_floor_route_config,
-            route_qos,
-        )
         self.create_subscription(
             String,
             str(self.get_parameter("floor_context_topic").value),
@@ -133,26 +103,14 @@ class FloorManager(Node):
 
         initial_floor = str(self.get_parameter("initial_floor").value).strip()
         if initial_floor:
-            if not self.route_configured or initial_floor in self.floors:
-                self.current_floor = initial_floor
-                self.get_logger().info(
-                    "assuming runtime map label %s without reloading map"
-                    % initial_floor
-                )
-            else:
-                self.get_logger().warning(
-                    "unknown initial_floor: %s" % initial_floor
-                )
+            self.current_floor = initial_floor
+            self.get_logger().info(
+                "assuming runtime map label %s without reloading map"
+                % initial_floor
+            )
 
         self.get_logger().info(
-            "floor manager ready; field_profile=%s hash=%s "
-            "route_configured=%s floors: %s"
-            % (
-                self.field_profile_name,
-                self.field_profile_hash,
-                self.route_configured,
-                ", ".join(sorted(self.floors.keys())) or "(ordinary maps)",
-            )
+            "floor manager ready; map_frame=%s" % self.map_frame
         )
 
     def _create_rviz_floor_goal_subscriptions(self) -> None:
@@ -200,109 +158,9 @@ class FloorManager(Node):
             routes.append((floor_id, topic))
         return routes
 
-    def _load_config(self, config_file: str) -> Dict[str, Any]:
-        if not config_file:
-            raise RuntimeError("config_file parameter is required")
-        with open(config_file, "r", encoding="utf-8") as file:
-            data = yaml.safe_load(file) or {}
-        if not isinstance(data, dict):
-            raise RuntimeError("floor manager config must be a YAML mapping")
-        return data
-
-    @staticmethod
-    def _has_stair_routes(floors: Dict[str, Dict[str, Any]]) -> bool:
-        return any(
-            isinstance(floor, dict)
-            and isinstance(floor.get("stairs"), dict)
-            and any(
-                isinstance(route, dict) and route.get("target_floor")
-                for route in floor["stairs"].values()
-            )
-            for floor in floors.values()
-        )
-
-    def _on_floor_route_config(self, msg: String) -> None:
-        try:
-            payload = json.loads(msg.data)
-            config = payload.get("config") if isinstance(payload, dict) else None
-        except Exception as exc:
-            self.get_logger().warning(
-                "ignored invalid runtime floor route config: %s" % exc
-            )
-            return
-        if not isinstance(config, dict) or not isinstance(
-            config.get("floors"), dict
-        ):
-            self.get_logger().warning(
-                "ignored runtime floor route config without floors"
-            )
-            return
-        if self.active_floor_mission:
-            self.get_logger().warning(
-                "ignored runtime floor route update while a floor mission is active"
-            )
-            return
-        self.config = dict(config)
-        self.floors = dict(config.get("floors") or {})
-        self.route_configured = self._has_stair_routes(self.floors)
-        self._validate_floor_config()
-        self.get_logger().info(
-            "runtime floor routes updated; configured=%s floors=%s"
-            % (
-                self.route_configured,
-                ",".join(sorted(self.floors)) or "(none)",
-            )
-        )
-
-    def _validate_floor_config(self) -> None:
-        for floor_id, floor in self.floors.items():
-            if not isinstance(floor, dict):
-                self.get_logger().warning(
-                    "floor %s config is not a mapping" % floor_id
-                )
-                continue
-            stairs = floor.get("stairs") or {}
-            if not isinstance(stairs, dict):
-                self.get_logger().warning(
-                    "floor %s stairs config is not a mapping" % floor_id
-                )
-                continue
-            for stair_name, stair in stairs.items():
-                if not isinstance(stair, dict):
-                    continue
-                target_floor = str(stair.get("target_floor") or "").strip()
-                if target_floor and target_floor not in self.floors:
-                    self.get_logger().warning(
-                        "stair route %s/%s targets unknown floor %s"
-                        % (floor_id, stair_name, target_floor)
-                    )
-
-    def _resolve_path(self, value: str) -> str:
-        path = os.path.expandvars(os.path.expanduser(value))
-        if path.startswith("package://"):
-            package_and_path = path[len("package://") :]
-            package_name, _, relative_path = package_and_path.partition("/")
-            if not package_name or not relative_path:
-                raise RuntimeError("invalid package path: %s" % value)
-            return os.path.join(
-                get_package_share_directory(package_name),
-                relative_path,
-            )
-        if os.path.isabs(path):
-            return path
-        if path:
-            return str((Path.cwd() / path).resolve())
-        return path
-
     def _on_floor_context(self, msg: String) -> None:
         floor = str(msg.data or "").strip()
         if not floor or self.active_floor_mission:
-            return
-        if self.route_configured and floor not in self.floors:
-            self.get_logger().warning(
-                "ignored floor context outside configured route profile: %s"
-                % floor
-            )
             return
         self.current_floor = floor
         self._publish_current_floor()
@@ -330,7 +188,7 @@ class FloorManager(Node):
         target_floor = self._normalize_floor_id(msg.header.frame_id)
         if not target_floor:
             target_floor = self.current_floor
-        if self.route_configured and not target_floor:
+        if not target_floor:
             self.get_logger().error(
                 "floor goal ignored; current floor is unknown"
             )
@@ -338,36 +196,7 @@ class FloorManager(Node):
                 "error reason=no_current_floor_for_goal label=floor_goal"
             )
             return
-        if self.route_configured and target_floor not in self.floors:
-            self.get_logger().error(
-                "floor goal has unknown target floor: %s" % target_floor
-            )
-            self._publish_stair_status(
-                "error reason=unknown_goal_floor floor=%s label=floor_goal"
-                % target_floor
-            )
-            return
-        if (
-            not self.route_configured
-            and target_floor
-            and self.current_floor
-            and target_floor != self.current_floor
-        ):
-            self.get_logger().error(
-                "ordinary map mode cannot switch maps from a floor goal; "
-                "select the target map first"
-            )
-            self._publish_stair_status(
-                "error reason=ordinary_map_floor_mismatch current=%s "
-                "target=%s label=floor_goal"
-                % (self.current_floor, target_floor)
-            )
-            return
-        if (
-            not self.route_configured
-            and target_floor
-            and not self.current_floor
-        ):
+        if not self.current_floor:
             self.current_floor = target_floor
 
         goal = self._pose_in_map_frame(msg)
@@ -463,9 +292,7 @@ class FloorManager(Node):
             self._clear_floor_mission_if_needed(label)
             return
 
-        pose.header.frame_id = str(
-            self.config.get("mission", {}).get("frame_id", "map")
-        )
+        pose.header.frame_id = self.map_frame
         pose.header.stamp = self.get_clock().now().to_msg()
         goal = NavigateToPose.Goal()
         goal.pose = pose
@@ -929,18 +756,13 @@ class FloorManager(Node):
 
     def _pose_in_map_frame(self, msg: PoseStamped) -> PoseStamped:
         pose = PoseStamped()
-        pose.header.frame_id = str(
-            self.config.get("mission", {}).get("frame_id", "map")
-        )
+        pose.header.frame_id = self.map_frame
         pose.pose = msg.pose
         return pose
 
     def _normalize_floor_id(self, frame_id: str) -> str:
         value = frame_id.strip()
-        map_frame = str(
-            self.config.get("mission", {}).get("frame_id", "map")
-        )
-        if not value or value == map_frame:
+        if not value or value == self.map_frame:
             return ""
         if value.startswith("floor:"):
             value = value.split(":", 1)[1]

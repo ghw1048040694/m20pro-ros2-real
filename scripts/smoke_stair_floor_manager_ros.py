@@ -172,7 +172,6 @@ def _run_direction(direction: str, index: int, workspace: Path) -> None:
         "target_platform": {"x": 0.5, "y": 0.0, "yaw": 0.0},
         "post_exit": {"x": 1.5, "y": 0.0, "yaw": 0.0},
     }
-    runtime_config = workspace / "src/m20pro_bringup/config/runtime_navigation.yaml"
     shared_topics = {
         "floor_goal_topic": f"{prefix}/floor_goal",
         "floor_switch_request_topic": f"{prefix}/floor_request",
@@ -191,8 +190,6 @@ def _run_direction(direction: str, index: int, workspace: Path) -> None:
         "floor_manager",
         "--ros-args",
         "-p",
-        f"config_file:={runtime_config}",
-        "-p",
         "enable_rviz_floor_goal_topics:=false",
         "-p",
         "service_timeout_s:=1.0",
@@ -200,8 +197,6 @@ def _run_direction(direction: str, index: int, workspace: Path) -> None:
         f"navigate_to_pose_action:={prefix}/navigate_to_pose",
         "-p",
         f"floor_context_topic:={prefix}/floor_context",
-        "-p",
-        f"floor_route_config_topic:={prefix}/floor_routes",
         "-p",
         f"stair_command_topic:={prefix}/retired_stair",
     ]

@@ -593,8 +593,6 @@ def render_m20pro_parameters(
 def floor_manager_field_parameters(profile: Mapping[str, Any]) -> Dict[str, Any]:
     transition = profile["stair_transition"]
     return {
-        "field_profile_name": profile["profile_name"],
-        "field_profile_hash": profile["profile_hash"],
         "duplicate_goal_tolerance_m": transition["duplicate_goal_tolerance_m"],
         "duplicate_goal_yaw_tolerance_rad": transition[
             "duplicate_goal_yaw_tolerance_rad"

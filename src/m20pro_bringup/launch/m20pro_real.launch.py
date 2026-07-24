@@ -378,7 +378,6 @@ def generate_launch_description():
             output="screen",
             parameters=[
                 {
-                    "config_file": floor_config,
                     "initial_floor": initial_floor,
                     "cmd_vel_topic": "/cmd_vel_nav",
                     **floor_manager_parameters,
