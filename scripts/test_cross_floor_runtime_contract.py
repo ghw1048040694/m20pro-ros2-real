@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CLOUD = ROOT / "src/m20pro_cloud_bridge/m20pro_cloud_bridge"
 NAVIGATION = ROOT / "src/m20pro_navigation/m20pro_navigation"
+RECORD_SCRIPT = ROOT / "src/m20pro_bringup/scripts/m20pro_record_real.sh"
 
 
 def main() -> None:
@@ -16,6 +17,7 @@ def main() -> None:
     )
     executor = (NAVIGATION / "stair_executor_node.py").read_text(encoding="utf-8")
     floor_manager = (NAVIGATION / "floor_manager.py").read_text(encoding="utf-8")
+    record_script = RECORD_SCRIPT.read_text(encoding="utf-8")
 
     for topic in (
         "/m20pro/floor_switch_request",
@@ -77,6 +79,19 @@ def main() -> None:
     assert "_update_terrain_segment_gait" not in floor_manager
     assert 'self._publish_flat_gait("same_floor_goal")' not in floor_manager
     assert "if rclpy.ok():" in floor_manager
+
+    # A field bag must show every hand-off in the minimal connector chain.
+    # These are observations only; they do not add runtime gates.
+    for topic in (
+        "/m20pro/stair_executor/start",
+        "/m20pro/stair_executor/status",
+        "/m20pro/floor_switch_request",
+        "/m20pro/floor_switch_result",
+        "/m20pro/set_current_floor",
+        "/m20pro/gait_command",
+        "/m20pro_tcp_bridge/gait_result",
+    ):
+        assert topic in record_script
 
     print("cross-floor runtime contract tests passed")
 

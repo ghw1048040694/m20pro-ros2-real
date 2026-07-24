@@ -110,6 +110,12 @@ TOPICS=(
   /m20pro/cmd_vel_mux/status
   /m20pro/current_floor
   /m20pro/stair_status
+  /m20pro/stair_executor/start
+  /m20pro/stair_executor/status
+  /m20pro/floor_switch_request
+  /m20pro/floor_switch_result
+  /m20pro/set_current_floor
+  /m20pro/gait_command
   /m20pro/floor_goal
   /m20pro/active_waypoint
   /m20pro/charge_command
@@ -117,6 +123,7 @@ TOPICS=(
   /m20pro_tcp_bridge/localization_ok
   /m20pro_tcp_bridge/navigation_status
   /m20pro_tcp_bridge/relocalization_result
+  /m20pro_tcp_bridge/gait_result
   /m20pro_tcp_bridge/charge_result
   /NAV_STATUS
   /MOTION_STATE

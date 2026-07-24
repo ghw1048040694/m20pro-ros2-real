@@ -24657,3 +24657,10 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 全部 `scripts/test_*.py` 共 49 个测试文件通过；Python 编译、`git diff --check` 和 `m20pro_navigation`、`m20pro_cloud_bridge`、`m20pro_bringup` 三包安装态构建通过。
 - `stair_executor` 独立 ROS 烟雾回放及 `floor_manager + stair_executor + 假 Nav2` 联合回放均完成上、下楼闭环；目标层出口 Nav2 被刻意暂停期间保持楼梯步态，出口成功后才恢复 `flat`。
 - 本轮仍只验证上位机开发分支，没有合并 `main`、部署或操作 103/104/106，也没有改变上位机网络；下一步仅在开发狗联机后做两层单程最小真机测试。
+
+## 2026-07-24 12:50 CST - 补齐最小跨层闭环录包证据
+
+- 继续执行“先跑起来、再依据真机事实加固”的原则：本轮不增加运行判定、仲裁、哈希门禁或回退机制，只完善现场录包的可诊断性。
+- 统一录包脚本新增楼梯执行器启动/状态、切图请求/结果、目标楼层同步、步态命令和原厂步态回执话题；真机失败后可直接判断停在入口、步态切换、共享平台、104/106 切图、2101、楼层同步还是出口阶段。
+- 跨层运行合同新增录包话题断言，防止后续链路演进时再次漏掉关键交接证据；录包内容只旁路观察，不参与任务放行或停止。
+- 验证：全部 `scripts/test_*.py` 共 49 个测试文件通过，`git diff --check` 通过，`m20pro_navigation`、`m20pro_cloud_bridge`、`m20pro_bringup` 三包构建通过；本轮未部署或操作 103/104/106，未改变上位机网络。
