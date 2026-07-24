@@ -172,7 +172,7 @@ def test_legacy_task_is_migrated_to_compact_plan() -> None:
     assert state["record"]["transitions"][0]["route_id"] == "r12"
 
 
-def test_existing_plan_must_match_current_route_and_order() -> None:
+def test_existing_plan_is_refreshed_from_current_route_and_order() -> None:
     annotations = {
         "p1": {"id": "p1", "floor": "F1", "map_id": "map1", "pose": pose(1)},
         "p2": {"id": "p2", "floor": "F2", "map_id": "map2", "pose": pose(2)},
@@ -190,6 +190,7 @@ def test_existing_plan_must_match_current_route_and_order() -> None:
     matched = task_navigation_plan_state(task, annotations_by_id=annotations, routes=routes)
     assert matched["ok"] is True
     assert matched["migrated"] is False
+    assert matched["refreshed"] is False
 
     stale_task = dict(task)
     stale_task["navigation_plan"] = navigation_plan_record(
@@ -199,9 +200,11 @@ def test_existing_plan_must_match_current_route_and_order() -> None:
             routes=[route("F1", "F2", "old-route")],
         )
     )
-    stale = task_navigation_plan_state(stale_task, annotations_by_id=annotations, routes=routes)
-    assert stale["ok"] is False
-    assert stale["code"] == "navigation_task_plan_stale"
+    refreshed = task_navigation_plan_state(stale_task, annotations_by_id=annotations, routes=routes)
+    assert refreshed["ok"] is True
+    assert refreshed["migrated"] is False
+    assert refreshed["refreshed"] is True
+    assert refreshed["record"]["transitions"][0]["route_id"] == "r12"
 
 
 def test_task_map_binding_must_match_plan() -> None:

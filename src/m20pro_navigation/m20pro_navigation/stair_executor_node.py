@@ -14,6 +14,7 @@ from std_msgs.msg import Bool, String
 from .geometry import quaternion_to_yaw, yaw_to_quaternion
 from .stair_executor_contract import (
     connector_motion_decision,
+    connector_nav_status_event,
     create_connector_execution,
     step_connector_execution,
 )
@@ -34,15 +35,6 @@ def _parse_json(value: Any) -> Optional[Dict[str, Any]]:
     except (TypeError, ValueError, json.JSONDecodeError):
         return None
     return parsed if isinstance(parsed, dict) else None
-
-
-def _status_fields(value: Any) -> Dict[str, str]:
-    fields: Dict[str, str] = {}
-    for token in str(value or "").replace(",", " ").split():
-        key, separator, item = token.partition("=")
-        if separator and key:
-            fields[key.strip()] = item.strip()
-    return fields
 
 
 class StairExecutorNode(Node):
@@ -161,10 +153,22 @@ class StairExecutorNode(Node):
             self._publish_status(self._error("connector_start_invalid", "楼梯执行启动请求不是 JSON 对象"))
             return
         if not self._enabled:
-            self._publish_status(self._error("stair_executor_disabled", "楼梯执行器未启用"))
+            self._publish_status(
+                self._start_error(
+                    payload,
+                    "stair_executor_disabled",
+                    "楼梯执行器未启用",
+                )
+            )
             return
         if self._is_active():
-            self._publish_status(self._error("connector_busy", "已有楼梯连接边正在执行"))
+            self._publish_status(
+                self._start_error(
+                    payload,
+                    "connector_busy",
+                    "已有楼梯连接边正在执行",
+                )
+            )
             return
         self._reset_runtime()
         result = create_connector_execution(
@@ -181,25 +185,24 @@ class StairExecutorNode(Node):
         if not self._is_active() or not self._expected_nav_stage:
             return
         text = str(message.data or "").strip()
-        fields = _status_fields(text)
-        if str(fields.get("label") or "") != "floor_goal":
+        decision = connector_nav_status_event(
+            text,
+            expected_goal_seq=self._expected_nav_goal_seq,
+        )
+        action = str(decision.get("action") or "")
+        if action == "accepted":
+            self._expected_nav_goal_seq = int(decision["goal_seq"])
             return
-        try:
-            goal_seq = int(fields.get("goal_seq", ""))
-        except (TypeError, ValueError):
-            return
-        if text.startswith("nav_goal_accepted"):
-            self._expected_nav_goal_seq = goal_seq
-            return
-        if self._expected_nav_goal_seq is None or goal_seq != self._expected_nav_goal_seq:
-            return
-        if text.startswith("nav_goal_succeeded"):
+        if action == "reached":
             event_type = "entry_reached" if self._expected_nav_stage == "entry" else "exit_reached"
             self._expected_nav_stage = None
             self._expected_nav_goal_seq = None
             self._apply_event(event_type)
-        elif text.startswith("nav_goal_failed") or text.startswith("nav_goal_rejected"):
-            self._apply_event("navigation_failed")
+        elif action == "failed":
+            self._apply_event(
+                "navigation_failed",
+                reason=str(decision.get("code") or "connector_nav_goal_failed"),
+            )
 
     def _on_floor_switch_result(self, message: String) -> None:
         if not self._is_active() or self._state() != "PLATFORM_HOLD":
@@ -453,9 +456,38 @@ class StairExecutorNode(Node):
             "source_map_id": execution.get("source_map_id"),
             "target_map_id": execution.get("target_map_id"),
             "localization_ok": self._localization_ok,
-            **self._identity(),
+            "request_id": execution.get("request_id"),
+            "route_id": execution.get("route_id"),
+            "plan_id": execution.get("plan_id"),
+            "map_epoch": execution.get("map_epoch"),
         }
         self._status_pub.publish(_json_message(payload))
+
+    @staticmethod
+    def _start_error(
+        payload: Dict[str, Any],
+        code: str,
+        message: str,
+    ) -> Dict[str, Any]:
+        route = payload.get("route") if isinstance(payload.get("route"), dict) else {}
+        return {
+            "ok": False,
+            "code": code,
+            "message": message,
+            "execution": {
+                "request_id": payload.get("request_id"),
+                "route_id": route.get("id"),
+                "plan_id": payload.get("plan_id"),
+                "map_epoch": payload.get("map_epoch"),
+                "source_floor": route.get("source_floor"),
+                "target_floor": route.get("target_floor"),
+                "source_map_id": route.get("source_map_id"),
+                "target_map_id": route.get("target_map_id"),
+                "state": "FAILED",
+                "status": "failed",
+            },
+            "actions": [],
+        }
 
     @staticmethod
     def _error(code: str, message: str) -> Dict[str, Any]:

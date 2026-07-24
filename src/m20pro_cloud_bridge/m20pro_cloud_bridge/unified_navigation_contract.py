@@ -310,11 +310,10 @@ def task_navigation_plan_state(
 ) -> Dict[str, Any]:
     """Validate or migrate the canonical plan stored on a task.
 
-    The point store and the current directed route registry are the inputs of
-    truth.  A task created before unified navigation may have no plan and is
-    migrated to the compact record on first start.  A task that already has a
-    plan must still match those inputs; silently changing its route or point
-    order at execution time would make a persisted task mean something else.
+    The point store and current directed route registry are the inputs of
+    truth.  The compact plan on a task is a display/cache projection, so every
+    task start rebuilds it from those sources instead of turning an older
+    projection into a second route database.
     """
     if not isinstance(task, dict):
         return {
@@ -344,28 +343,16 @@ def task_navigation_plan_state(
 
     record = navigation_plan_record(plan)
     existing = task.get("navigation_plan")
-    if isinstance(existing, dict) and existing.get("ok"):
-        existing_record = navigation_plan_record(existing)
-        if existing_record != record:
-            return {
-                "ok": False,
-                "code": "navigation_task_plan_stale",
-                "message": "任务的统一导航计划已过期，请重新生成任务",
-                "expected_plan": existing_record,
-                "current_plan": record,
-            }
-        return {
-            "ok": True,
-            "plan": plan,
-            "record": record,
-            "migrated": False,
-        }
-
     return {
         "ok": True,
         "plan": plan,
         "record": record,
-        "migrated": True,
+        "migrated": not (isinstance(existing, dict) and existing.get("ok")),
+        "refreshed": (
+            isinstance(existing, dict)
+            and existing.get("ok")
+            and navigation_plan_record(existing) != record
+        ),
     }
 
 

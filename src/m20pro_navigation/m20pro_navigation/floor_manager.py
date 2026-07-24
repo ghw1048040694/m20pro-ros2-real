@@ -206,7 +206,7 @@ class FloorManager(Node):
                     "duplicate active floor goal ignored"
                 )
                 self._publish_stair_status(
-                    "ignored reason=duplicate_floor_goal target_floor=%s"
+                    "ignored reason=duplicate_floor_goal target_floor=%s label=floor_goal"
                     % target_floor
                 )
                 return
@@ -224,7 +224,7 @@ class FloorManager(Node):
                     "floor goal ignored; another floor mission is active"
                 )
                 self._publish_stair_status(
-                    "ignored reason=floor_mission_active"
+                    "ignored reason=floor_mission_active label=floor_goal"
                 )
                 return
 
@@ -280,6 +280,13 @@ class FloorManager(Node):
         self.current_floor_pub.publish(msg)
 
     def _send_nav_goal(self, pose: PoseStamped, label: str) -> None:
+        pose.header.frame_id = self.map_frame
+        pose.header.stamp = self.get_clock().now().to_msg()
+        self.nav_goal_sequence += 1
+        goal_sequence = self.nav_goal_sequence
+        status_suffix = self._goal_status_suffix(
+            label, goal_sequence, pose
+        )
         if not self.navigate_to_pose_client.wait_for_server(
             timeout_sec=float(self.get_parameter("service_timeout_s").value)
         ):
@@ -287,21 +294,18 @@ class FloorManager(Node):
                 "navigate_to_pose action server is not available"
             )
             self._publish_stair_status(
-                "error reason=navigate_action_unavailable label=%s" % label
+                "error reason=navigate_action_unavailable %s"
+                % status_suffix
             )
             self._clear_floor_mission_if_needed(label)
             return
 
-        pose.header.frame_id = self.map_frame
-        pose.header.stamp = self.get_clock().now().to_msg()
         goal = NavigateToPose.Goal()
         goal.pose = pose
         self.get_logger().info(
             "sending Nav2 goal label=%s x=%.2f y=%.2f"
             % (label, pose.pose.position.x, pose.pose.position.y)
         )
-        self.nav_goal_sequence += 1
-        goal_sequence = self.nav_goal_sequence
         future = self.navigate_to_pose_client.send_goal_async(
             goal,
             feedback_callback=lambda feedback: self._on_nav_feedback(

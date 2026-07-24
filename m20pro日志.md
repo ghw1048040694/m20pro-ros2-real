@@ -24706,3 +24706,21 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - `floor_manager` 的地图坐标系改为单一 `map_frame` 参数，默认 `map`；同时删除该节点仅用于日志展示、从不参与运行的 `field_profile_name/field_profile_hash` 参数，避免哈希以后被误用成启动或任务门禁。跨层资产完整性、人工停止、通信/阶段超时、104/106 切图失败和 2101 失败等必要边界不变。
 - 本轮整体净删除约 200 行。现存 48 个 `scripts/test_*.py` 全部通过；`m20pro_navigation`、`m20pro_cloud_bridge`、`m20pro_bringup` 三包构建通过；安装态 `stair_executor` 独立回放及 `floor_manager + stair_executor + 假 Nav2` 联合回放均完成上、下楼闭环。
 - 本轮只修改上位机 `feature/unified-navigation-v2` 分支，未合并 `main`，未部署或操作 103/104/106，也未改变上位机网络。
+
+## 2026-07-24 13:59 CST - 修复连接边出口并发抢目标与失败回执丢失
+
+- 继续按“先跑通唯一最小链路、只保留必要判定”做端到端审计，发现切图事务发布目标楼层后、出口 Nav2 尚未完成前，Web 旧逻辑会因为“当前楼层已等于任务点楼层”退出跨层等待，主任务循环随即并发下发目标层任务点，与 `stair_executor` 的 `post_exit` 目标互相替换。这是确定性双入口，不是安全策略缺失。
+- 将任务 tick 收敛为唯一所有权判断：只要连接边处于 `PREPARING/ENTRY_NAVIGATION/TRAVERSING/PLATFORM_HOLD/EXIT_NAVIGATION`，主任务循环立即让出 Nav2 并只监控执行器回执；不再依赖楼层文字或旧 `last_floor_goal_cross_floor` 组合判断。删除旧直接跨楼层目标的两套无响应/总超时分支，连接边只保留自身阶段超时和通信超时。
+- 修复 `floor_manager -> stair_executor` Nav2 状态协议不一致：管理器真实失败为 `error reason=...`，执行器过去只识别 `nav_goal_failed/nav_goal_rejected` 前缀，入口/出口失败后会空等 180 秒。现在每次 Nav2 尝试先分配 `goal_seq`，执行器按 `label/goal_seq/reason` 识别不可用、拒绝、失败和并发任务冲突并立即停止当次连接边；迟到的其他 goal 序号仍被忽略。
+- 修复执行器 disabled/busy 回执缺少新请求身份的问题。拒绝结果现在原样携带 `request_id/route_id/plan_id/map_epoch` 和 `FAILED` 状态，Web 可立即关联本次任务，不再把回复当成普通心跳后等待 12 秒。
+- 删除任务创建后保存的完整计划相等门禁。点位和路线在任务运行期间本就禁止修改，任务开始时也会重新验证；现以点位库和有向路线库为唯一事实源，每次重复执行任务都会刷新计划投影，路线调整后无需删除重建任务。
+- 验证：现存 48 个 `scripts/test_*.py` 全部通过，三包构建通过；安装态 `stair_executor` ROS smoke 完成上楼、下楼和 disabled 身份回执，`floor_manager + stair_executor + 假 Nav2` smoke 完成上/下楼并确认 Nav2 不可用时 3 秒内停止，不再等待阶段总超时。
+- `10.21.31.103/104/106` 当前仍不可达；本轮未部署、未发送运动/导航/切图/重定位命令，也未改变上位机网络。
+
+## 2026-07-24 14:04 CST - 收紧入口与出口 Nav2 回执相关性
+
+- 在安装态验证前继续审查回执状态机，发现新增失败解析器会在本次 `nav_goal_accepted` 尚未到达时接受一条迟到的 `nav_goal_succeeded`，存在把入口或出口假判完成的窗口；现要求先建立本次 `goal_seq`，随后只有同序号成功才能推进，接收确认前的成功和其他序号的接收回执均忽略。
+- 前置失败单独保留立即停止语义：Nav2 action 不可用、请求失败、目标拒绝、当前楼层缺失、已有楼层任务冲突和旧跨层入口误用不需要等待接收确认；`floor_manager` 的重复目标和任务冲突回执统一补齐实际 `label=floor_goal`。
+- API 和统一导航说明同步明确：`navigation_plan` 是当前点位与路线的可重建投影，不是第二份路线数据库；任务执行期间路线编辑仍被禁止。README 和跨层操作文档补充连接边独占入口/出口 Nav2、任务可直接重复执行以及入口/出口明确失败会停止。
+- 验证：现存 48 个 `scripts/test_*.py` 全部通过，Python/JavaScript 语法和差异检查通过，三个 ROS 包构建通过；执行器独立 smoke 完成上楼、下楼和禁用身份拒绝，联合 smoke 完成上/下楼并确认 Nav2 action 不可用时 3 秒内停止。受限沙箱只打印 UDP 网卡访问警告，本机私有 ROS 话题断言全部通过。
+- 本轮仍只修改上位机 `feature/unified-navigation-v2`，没有合并 `main`、部署或操作 103/104/106，也没有改变上位机网络。

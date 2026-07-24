@@ -31,6 +31,7 @@ def test_connector_plan_carries_terrain_identity() -> None:
     assert "connector_terrain_guard_profile" in contract
     assert '"terrain_guard": connector_terrain_guard_profile(route)' in contract
     assert '"terrain_guard": connector_terrain_guard_profile(' in contract
+    assert "navigation_task_plan_stale" not in contract
 
 
 def test_terrain_guard_remains_shadow_observation_only() -> None:
@@ -55,9 +56,16 @@ def test_cross_floor_dispatch_uses_the_single_executor_without_a_readiness_gate(
     ).exists()
     assert '"stair_executor_start_topic"' in WEB_SOURCE
     assert "mark_connector_started_state" in WEB_SOURCE
-    assert '"navigation_task_plan_stale"' in WEB_SOURCE
-    assert "current_record != stored_plan" in WEB_SOURCE
+    assert '"navigation_task_plan_stale"' not in WEB_SOURCE
+    assert "current_record != stored_plan" not in WEB_SOURCE
     assert "connector_owns_navigation_status(active)" in WEB_SOURCE
+    tick_start = WEB_SOURCE.index("def _tick_active_task(")
+    connector_owner = WEB_SOURCE.index("if connector_owns_navigation_status(active):", tick_start)
+    scan_guard = WEB_SOURCE.index("scan_guard = self._active_task_scan_guard(scan)", tick_start)
+    assert connector_owner < scan_guard
+    assert "_active_waypoint_waiting_cross_floor" not in WEB_SOURCE
+    assert "_stop_task_if_cross_floor_unresponsive" not in WEB_SOURCE
+    assert "_stop_task_if_cross_floor_transition_timed_out" not in WEB_SOURCE
     assert "_stop_task_if_connector_unresponsive" in WEB_SOURCE
     assert 'self._settings["floor_switch_map_epoch"] = reserved_epoch' in WEB_SOURCE
     assert '"map_epoch": int(map_epoch)' in WEB_SOURCE

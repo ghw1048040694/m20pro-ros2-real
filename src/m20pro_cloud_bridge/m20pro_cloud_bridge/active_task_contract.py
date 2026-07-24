@@ -634,7 +634,7 @@ def mark_floor_goal_published_state(
         "z": goal["z"],
         "yaw": goal["yaw"],
     }
-    updated["status_message"] = "已发布 /m20pro/floor_goal，等待 floor_goal_bridge/Nav2 接收"
+    updated["status_message"] = "已发布 /m20pro/floor_goal，等待 floor_manager/Nav2 接收"
     event_extra = {
         "annotation_id": annotation.get("id"),
         "label": annotation.get("label"),

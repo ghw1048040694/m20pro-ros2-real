@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT / "src/m20pro_navigation"))
 
 from m20pro_navigation.stair_executor_contract import (  # noqa: E402
     connector_motion_decision,
+    connector_nav_status_event,
     create_connector_execution,
     step_connector_execution,
 )
@@ -186,6 +187,53 @@ def test_operator_stop_and_timeout_are_terminal() -> None:
     assert_equal(timeout["actions"][-1]["kind"], "stop_motion", "timeout stops connector motion")
 
 
+def test_floor_manager_nav_status_protocol_handles_real_failure_format() -> None:
+    accepted = connector_nav_status_event(
+        "nav_goal_accepted label=floor_goal goal_seq=7",
+        expected_goal_seq=None,
+    )
+    assert_equal(accepted["action"], "accepted", "accepted goal establishes sequence")
+    rejected = connector_nav_status_event(
+        "error reason=nav_goal_rejected label=floor_goal goal_seq=7",
+        expected_goal_seq=7,
+    )
+    assert_equal(rejected["action"], "failed", "floor manager rejection stops connector")
+    early_failure = connector_nav_status_event(
+        "error reason=navigate_action_unavailable label=floor_goal goal_seq=8",
+        expected_goal_seq=None,
+    )
+    assert_equal(early_failure["action"], "failed", "pre-accept failure is not lost")
+    premature_success = connector_nav_status_event(
+        "nav_goal_succeeded label=floor_goal goal_seq=6",
+        expected_goal_seq=None,
+    )
+    assert_equal(
+        premature_success["action"],
+        "ignore",
+        "success cannot advance before this goal is accepted",
+    )
+    active_conflict = connector_nav_status_event(
+        "ignored reason=floor_mission_active label=floor_goal",
+        expected_goal_seq=None,
+    )
+    assert_equal(active_conflict["action"], "failed", "parallel floor mission is terminal")
+    stale_accept = connector_nav_status_event(
+        "nav_goal_accepted label=floor_goal goal_seq=6",
+        expected_goal_seq=7,
+    )
+    assert_equal(stale_accept["action"], "ignore", "stale acceptance cannot replace sequence")
+    stale = connector_nav_status_event(
+        "error reason=nav_goal_failed label=floor_goal goal_seq=6 status=4",
+        expected_goal_seq=7,
+    )
+    assert_equal(stale["action"], "ignore", "other goal sequence is ignored")
+    succeeded = connector_nav_status_event(
+        "nav_goal_succeeded label=floor_goal goal_seq=7",
+        expected_goal_seq=7,
+    )
+    assert_equal(succeeded["action"], "reached", "matching success advances connector")
+
+
 def main() -> int:
     tests = [
         test_valid_route_starts_with_entry_navigation,
@@ -194,6 +242,7 @@ def main() -> int:
         test_event_without_request_identity_is_ignored,
         test_stale_event_and_wrong_floor_result_are_safe,
         test_operator_stop_and_timeout_are_terminal,
+        test_floor_manager_nav_status_protocol_handles_real_failure_format,
     ]
     for test in tests:
         test()

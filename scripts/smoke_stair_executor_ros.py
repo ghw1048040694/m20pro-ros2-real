@@ -273,6 +273,96 @@ def _run_direction(direction: str, index: int) -> None:
             )
 
 
+def _run_disabled_rejection(index: int) -> None:
+    prefix = f"/m20pro_stair_smoke_{os.getpid()}_{index}"
+    identity = {
+        "request_id": "smoke-disabled",
+        "route_id": "route-disabled",
+        "plan_id": "plan-disabled",
+        "map_epoch": index + 1,
+    }
+    route = {
+        "id": identity["route_id"],
+        "source_floor": "F1",
+        "target_floor": "F2",
+        "source_map_id": "map-f1",
+        "target_map_id": "map-f2",
+        "direction": "up",
+        "entry": {"x": 0.0, "y": 0.0, "yaw": 0.0},
+        "source_platform": {"x": 1.0, "y": 0.0, "yaw": 0.0},
+        "target_platform": {"x": 0.0, "y": 0.0, "yaw": 0.0},
+        "post_exit": {"x": 1.0, "y": 0.0, "yaw": 0.0},
+    }
+    command = [
+        "ros2",
+        "run",
+        "m20pro_navigation",
+        "stair_executor",
+        "--ros-args",
+        "-p",
+        "enabled:=false",
+        "-p",
+        "heartbeat_period_s:=0.1",
+    ]
+    topic_parameters = {
+        "start_topic": f"{prefix}/start",
+        "status_topic": f"{prefix}/status",
+        "floor_goal_topic": f"{prefix}/goal",
+        "floor_switch_request_topic": f"{prefix}/floor_request",
+        "floor_switch_result_topic": f"{prefix}/floor_result",
+        "current_floor_topic": f"{prefix}/current_floor",
+        "stair_status_topic": f"{prefix}/nav_status",
+        "stop_task_topic": f"{prefix}/stop",
+        "robot_pose_topic": f"{prefix}/pose",
+        "localization_ok_topic": f"{prefix}/localization",
+        "gait_command_topic": f"{prefix}/gait",
+        "cmd_vel_topic": f"{prefix}/cmd_vel",
+    }
+    for name, value in topic_parameters.items():
+        command.extend(["-p", f"{name}:={value}"])
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=True,
+    )
+    node = Harness(prefix)
+    try:
+        _spin_until(
+            node,
+            lambda: any(item.get("code") == "stair_executor_disabled" for item in node.statuses),
+            "disabled executor heartbeat",
+        )
+        node.start_pub.publish(_json_message({**identity, "route": route}))
+        _spin_until(
+            node,
+            lambda: any(
+                item.get("code") == "stair_executor_disabled"
+                and item.get("request_id") == identity["request_id"]
+                and item.get("route_id") == identity["route_id"]
+                and item.get("plan_id") == identity["plan_id"]
+                and item.get("map_epoch") == identity["map_epoch"]
+                and item.get("state") == "FAILED"
+                for item in node.statuses
+            ),
+            "identity-bound disabled rejection",
+        )
+    finally:
+        node.destroy_node()
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGINT)
+        try:
+            output, _ = process.communicate(timeout=3.0)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            output, _ = process.communicate(timeout=3.0)
+        if process.returncode not in (0, -signal.SIGINT):
+            raise RuntimeError(
+                f"disabled stair executor process failed:\n{output[-2000:]}"
+            )
+
+
 def main() -> int:
     workspace = Path(__file__).resolve().parents[1]
     if "m20pro_navigation" not in os.environ.get("AMENT_PREFIX_PATH", ""):
@@ -292,10 +382,11 @@ def main() -> int:
     try:
         _run_direction("up", 0)
         _run_direction("down", 1)
+        _run_disabled_rejection(2)
     finally:
         if rclpy.ok():
             rclpy.shutdown()
-    print("stair executor ROS smoke passed: up and down")
+    print("stair executor ROS smoke passed: up, down, and disabled rejection")
     return 0
 
 

@@ -335,6 +335,137 @@ def _run_direction(direction: str, index: int, workspace: Path) -> None:
             raise RuntimeError("\n".join(errors))
 
 
+def _run_nav_unavailable(index: int) -> None:
+    prefix = f"/m20pro_floor_chain_smoke_{os.getpid()}_{index}"
+    identity = {
+        "request_id": "floor-chain-nav-unavailable",
+        "route_id": "route-nav-unavailable",
+        "plan_id": "plan-nav-unavailable",
+        "map_epoch": index + 1,
+    }
+    route = {
+        "id": identity["route_id"],
+        "source_floor": "F1",
+        "target_floor": "F2",
+        "source_map_id": "map-f1",
+        "target_map_id": "map-f2",
+        "direction": "up",
+        "entry": {"x": 0.0, "y": 0.0, "yaw": 0.0},
+        "source_platform": {"x": 2.0, "y": 0.0, "yaw": 0.0},
+        "target_platform": {"x": 0.5, "y": 0.0, "yaw": 0.0},
+        "post_exit": {"x": 1.5, "y": 0.0, "yaw": 0.0},
+    }
+    shared_topics = {
+        "floor_goal_topic": f"{prefix}/floor_goal",
+        "floor_switch_request_topic": f"{prefix}/floor_request",
+        "floor_switch_result_topic": f"{prefix}/floor_result",
+        "current_floor_topic": f"{prefix}/current_floor",
+        "stair_status_topic": f"{prefix}/nav_status",
+        "stop_task_topic": f"{prefix}/stop",
+        "robot_pose_topic": f"{prefix}/pose",
+        "gait_command_topic": f"{prefix}/gait",
+        "cmd_vel_topic": f"{prefix}/cmd_vel",
+    }
+    floor_manager_command = [
+        "ros2",
+        "run",
+        "m20pro_navigation",
+        "floor_manager",
+        "--ros-args",
+        "-p",
+        "enable_rviz_floor_goal_topics:=false",
+        "-p",
+        "service_timeout_s:=0.2",
+        "-p",
+        f"navigate_to_pose_action:={prefix}/missing_navigate_to_pose",
+        "-p",
+        f"floor_context_topic:={prefix}/floor_context",
+    ]
+    for name in (
+        "floor_goal_topic",
+        "current_floor_topic",
+        "stair_status_topic",
+        "stop_task_topic",
+        "cmd_vel_topic",
+    ):
+        floor_manager_command.extend(["-p", f"{name}:={shared_topics[name]}"])
+    stair_executor_command = [
+        "ros2",
+        "run",
+        "m20pro_navigation",
+        "stair_executor",
+        "--ros-args",
+        "-p",
+        "enabled:=true",
+        "-p",
+        "heartbeat_period_s:=0.1",
+        "-p",
+        f"start_topic:={prefix}/start",
+        "-p",
+        f"status_topic:={prefix}/status",
+        "-p",
+        f"localization_ok_topic:={prefix}/localization",
+    ]
+    for name, value in shared_topics.items():
+        stair_executor_command.extend(["-p", f"{name}:={value}"])
+    processes = [
+        subprocess.Popen(
+            floor_manager_command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+        ),
+        subprocess.Popen(
+            stair_executor_command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+        ),
+    ]
+    node = Harness(prefix, index)
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(node)
+    spin_thread = threading.Thread(target=executor.spin, daemon=True)
+    spin_thread.start()
+    try:
+        _wait(
+            lambda: {"m20pro_floor_manager", "m20pro_stair_executor"}.issubset(
+                set(node.get_node_names())
+            ),
+            "nav-unavailable installed nodes",
+        )
+        _publish_repeated(node.floor_context_pub, _text("F1"))
+        _wait(lambda: "F1" in node.current_floors, "nav-unavailable source floor")
+        started = time.monotonic()
+        node.start_pub.publish(_json_message({**identity, "route": route}))
+        _wait(
+            lambda: any(
+                item.get("request_id") == identity["request_id"]
+                and item.get("state") == "STOPPED"
+                and item.get("code") == "connector_stopped"
+                for item in node.statuses
+            ),
+            "immediate Nav2 unavailable stop",
+        )
+        assert time.monotonic() - started < 3.0
+    finally:
+        node.release_exit_goal.set()
+        executor.shutdown(timeout_sec=2.0)
+        spin_thread.join(timeout=2.0)
+        executor.remove_node(node)
+        node.destroy_node()
+        errors = []
+        for process in processes:
+            try:
+                _stop_process(process)
+            except Exception as exc:
+                errors.append(str(exc))
+        if errors:
+            raise RuntimeError("\n".join(errors))
+
+
 def main() -> int:
     workspace = Path(__file__).resolve().parents[1]
     if "m20pro_navigation" not in os.environ.get("AMENT_PREFIX_PATH", ""):
@@ -354,10 +485,11 @@ def main() -> int:
     try:
         _run_direction("up", 0, workspace)
         _run_direction("down", 1, workspace)
+        _run_nav_unavailable(2)
     finally:
         if rclpy.ok():
             rclpy.shutdown()
-    print("stair + floor manager ROS smoke passed: up and down")
+    print("stair + floor manager ROS smoke passed: up, down, and Nav2 failure")
     return 0
 
 

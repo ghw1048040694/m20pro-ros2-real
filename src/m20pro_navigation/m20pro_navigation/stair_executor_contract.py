@@ -18,6 +18,28 @@ ACTIVE_STATES = {
 }
 TERMINAL_STATES = {"COMPLETED", "STOPPED", "FAILED"}
 
+NAV_FAILURE_REASONS = {
+    "duplicate_floor_goal",
+    "floor_mission_active",
+    "navigate_action_unavailable",
+    "nav_cancel_failed",
+    "nav_goal_failed",
+    "nav_goal_rejected",
+    "nav_goal_request_failed",
+    "nav_result_failed",
+    "no_current_floor_for_goal",
+    "stair_execution_retired",
+}
+NAV_PRE_ACCEPT_FAILURE_REASONS = {
+    "duplicate_floor_goal",
+    "floor_mission_active",
+    "navigate_action_unavailable",
+    "nav_goal_rejected",
+    "nav_goal_request_failed",
+    "no_current_floor_for_goal",
+    "stair_execution_retired",
+}
+
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
@@ -87,6 +109,87 @@ def _route_validation(route: Any) -> Dict[str, Any]:
 def connector_route_activation_decision(route: Any) -> Dict[str, Any]:
     """Validate the geometry needed by the minimal connector loop."""
     return _route_validation(route)
+
+
+def connector_nav_status_event(
+    status_text: Any,
+    *,
+    expected_goal_seq: Optional[int],
+) -> Dict[str, Any]:
+    """Translate floor_manager status into one connector navigation event."""
+    text = _text(status_text)
+    fields: Dict[str, str] = {}
+    for token in text.replace(",", " ").split():
+        key, separator, value = token.partition("=")
+        if separator and key:
+            fields[key.strip()] = value.strip()
+    if fields.get("label") != "floor_goal":
+        return {"action": "ignore", "code": "connector_nav_status_unrelated"}
+    reason = fields.get("reason", "")
+    try:
+        goal_seq = int(fields.get("goal_seq", ""))
+    except (TypeError, ValueError):
+        if reason in NAV_PRE_ACCEPT_FAILURE_REASONS:
+            return {
+                "action": "failed",
+                "code": reason,
+                "goal_seq": None,
+            }
+        return {"action": "ignore", "code": "connector_nav_status_sequence_missing"}
+    if goal_seq <= 0:
+        return {"action": "ignore", "code": "connector_nav_status_sequence_invalid"}
+    if text.startswith("nav_goal_accepted"):
+        if expected_goal_seq is not None and goal_seq != int(expected_goal_seq):
+            return {
+                "action": "ignore",
+                "code": "connector_nav_status_stale",
+                "goal_seq": goal_seq,
+            }
+        return {
+            "action": "accepted",
+            "code": "connector_nav_goal_accepted",
+            "goal_seq": goal_seq,
+        }
+    if expected_goal_seq is None:
+        if reason in NAV_PRE_ACCEPT_FAILURE_REASONS:
+            return {
+                "action": "failed",
+                "code": reason,
+                "goal_seq": goal_seq,
+            }
+        return {
+            "action": "ignore",
+            "code": "connector_nav_status_sequence_unestablished",
+            "goal_seq": goal_seq,
+        }
+    if goal_seq != int(expected_goal_seq):
+        return {
+            "action": "ignore",
+            "code": "connector_nav_status_stale",
+            "goal_seq": goal_seq,
+        }
+    if text.startswith("nav_goal_succeeded"):
+        return {
+            "action": "reached",
+            "code": "connector_nav_goal_succeeded",
+            "goal_seq": goal_seq,
+        }
+    if (
+        reason in NAV_FAILURE_REASONS
+        or text.startswith("nav_goal_failed")
+        or text.startswith("nav_goal_rejected")
+        or text.startswith("nav_goal_cancelled")
+    ):
+        return {
+            "action": "failed",
+            "code": reason or "connector_nav_goal_failed",
+            "goal_seq": goal_seq,
+        }
+    return {
+        "action": "ignore",
+        "code": "connector_nav_status_nonterminal",
+        "goal_seq": goal_seq,
+    }
 
 
 def connector_motion_decision(

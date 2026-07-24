@@ -335,7 +335,7 @@ def test_mark_floor_goal_published_state() -> None:
     assert_equal(updated["last_floor_goal_source_floor"], None, "missing source floor stored as none")
     assert_equal(updated["last_floor_goal_target_floor"], "F20", "target floor stored")
     assert_equal(updated["last_floor_goal_cross_floor"], False, "same or unknown source floor is not cross-floor")
-    assert_equal(updated["status_message"], "已发布 /m20pro/floor_goal，等待 floor_goal_bridge/Nav2 接收", "publish message")
+    assert_equal(updated["status_message"], "已发布 /m20pro/floor_goal，等待 floor_manager/Nav2 接收", "publish message")
     assert_equal(result["event_extra"]["goal_attempt_id"], "goal_1", "publish attempt id")
     assert_equal(result["event_extra"]["goal"]["x"], 1.0, "publish goal x")
     assert_equal(result["event_extra"]["cross_floor"], False, "event records same-floor/cross-floor state")

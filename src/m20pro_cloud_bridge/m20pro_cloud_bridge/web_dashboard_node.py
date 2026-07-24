@@ -7133,18 +7133,6 @@ class WebDashboardNode(Node):
                 "code": str(plan.get("code") or "navigation_plan_invalid"),
                 "message": str(plan.get("message") or "统一导航计划无法解析楼层连接"),
             }
-        stored_plan = active.get("navigation_plan")
-        current_record = navigation_plan_record(plan)
-        if (
-            isinstance(stored_plan, dict)
-            and stored_plan.get("ok")
-            and current_record != stored_plan
-        ):
-            return {
-                "ok": False,
-                "code": "navigation_task_plan_stale",
-                "message": "任务执行期间点位或连接路线已变化，已停止以避免切入错误地图",
-            }
         transition = runtime_transition_for_annotation(
             plan,
             annotation.get("id"),
@@ -8031,24 +8019,9 @@ class WebDashboardNode(Node):
             if decision.get("action") == "advance":
                 self._advance_active_task(annotation)
                 return
-        if self._active_waypoint_waiting_cross_floor(active, annotation):
-            if connector_owns_navigation_status(active):
-                self._publish_active_waypoint(annotation, active, "cross_floor")
-                self._stop_task_if_connector_unresponsive(active, annotation)
-                return
-            target_floor = str(annotation.get("floor") or "")
-            self._mark_active_task_waiting(
-                active,
-                "cross_floor_transitioning",
-                "跨楼层目标已下发，等待 floor_manager 切换到 %s" % target_floor,
-            )
-            with self._data_lock:
-                active_snapshot = dict(self._settings.get("active_task") or active)
-            self._publish_active_waypoint(annotation, active_snapshot, "cross_floor")
-            if self._stop_task_if_cross_floor_unresponsive(active_snapshot, annotation):
-                return
-            if self._stop_task_if_cross_floor_transition_timed_out(active_snapshot, annotation):
-                return
+        if connector_owns_navigation_status(active):
+            self._publish_active_waypoint(annotation, active, "cross_floor")
+            self._stop_task_if_connector_unresponsive(active, annotation)
             return
         with self._lock:
             pose = dict(self._state.get("pose") or {})
@@ -8316,57 +8289,6 @@ class WebDashboardNode(Node):
                 self._settings["active_task"] = current
                 self._save_json("settings.json", self._settings)
 
-    def _active_waypoint_waiting_cross_floor(
-        self,
-        active: Dict[str, Any],
-        annotation: Dict[str, Any],
-    ) -> bool:
-        target_floor = str(annotation.get("floor") or "").strip()
-        if not target_floor:
-            return False
-        with self._lock:
-            current_floor = str(self._state.get("floor") or "").strip()
-        if current_floor == target_floor:
-            return False
-        return (
-            active.get("last_goal_annotation_id") == annotation.get("id")
-            and active.get("last_floor_goal_annotation_id") == annotation.get("id")
-            and bool(active.get("last_floor_goal_cross_floor"))
-        )
-
-    def _stop_task_if_cross_floor_unresponsive(
-        self,
-        active: Dict[str, Any],
-        annotation: Dict[str, Any],
-    ) -> bool:
-        published_at = 0.0
-        try:
-            published_at = float(active.get("last_floor_goal_published_monotonic") or 0.0)
-        except (TypeError, ValueError):
-            published_at = 0.0
-        if published_at <= 0.0:
-            return False
-        if active.get("last_transition_nav_status") or active.get("last_nav_status"):
-            return False
-        timeout_s = max(1.0, float(self.get_parameter("task_goal_accept_timeout_s").value))
-        age_s = max(0.0, time.monotonic() - published_at)
-        if age_s < timeout_s:
-            return False
-        self._fail_active_task(
-            str(active.get("task_id") or ""),
-            "跨楼层目标下发 %.1f 秒后未收到 floor_manager/Nav2 回应，已停止任务；请检查 floor_manager、/m20pro/stair_status 和 /m20pro/floor_goal"
-            % timeout_s,
-            {
-                "reason": "cross_floor_goal_no_response",
-                "annotation_id": annotation.get("id"),
-                "label": annotation.get("label"),
-                "target_floor": annotation.get("floor"),
-                "age_s": age_s,
-                "timeout_s": timeout_s,
-            },
-        )
-        return True
-
     def _stop_task_if_connector_unresponsive(
         self,
         active: Dict[str, Any],
@@ -8395,42 +8317,6 @@ class WebDashboardNode(Node):
                 "connector_request_id": active.get("connector_request_id"),
                 "connector_state": active.get("connector_state"),
                 "status_age_s": age_s,
-                "timeout_s": timeout_s,
-            },
-        )
-        return True
-
-    def _stop_task_if_cross_floor_transition_timed_out(
-        self,
-        active: Dict[str, Any],
-        annotation: Dict[str, Any],
-    ) -> bool:
-        published_at = 0.0
-        try:
-            published_at = float(active.get("last_floor_goal_published_monotonic") or 0.0)
-        except (TypeError, ValueError):
-            published_at = 0.0
-        if published_at <= 0.0:
-            return False
-        timeout_s = max(10.0, float(self.get_parameter("task_waypoint_timeout_s").value))
-        age_s = max(0.0, time.monotonic() - published_at)
-        if age_s < timeout_s:
-            return False
-        self._fail_active_task(
-            str(active.get("task_id") or ""),
-            "跨楼层目标下发 %.1f 秒后仍未切换到目标楼层，已停止任务；请查看最近楼梯阶段、/m20pro/stair_status 和 Nav2 状态"
-            % timeout_s,
-            {
-                "reason": "cross_floor_transition_timeout",
-                "annotation_id": annotation.get("id"),
-                "label": annotation.get("label"),
-                "source_floor": active.get("last_floor_goal_source_floor"),
-                "target_floor": annotation.get("floor"),
-                "last_transition_nav_status": active.get("last_transition_nav_status"),
-                "last_transition_nav_label": active.get("last_transition_nav_label"),
-                "last_transition_nav_payload": active.get("last_transition_nav_payload"),
-                "last_nav_status": active.get("last_nav_status"),
-                "age_s": age_s,
                 "timeout_s": timeout_s,
             },
         )

@@ -22,7 +22,7 @@ def process_imported_map(
     cell_size: float = 0.25,
     stair_point_max: int = 20000,
 ) -> Dict[str, Any]:
-    """Generate the internal stair-zone payload used by floor_manager.
+    """Generate the optional stair-zone metadata exposed by the Web API.
 
     The frontend 3D map and stair pointcloud viewers were removed from the
     single-floor workflow, so this postprocess now avoids loading factory PCDs
