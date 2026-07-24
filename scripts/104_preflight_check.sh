@@ -244,6 +244,9 @@ required_nodes=(
   bt_navigator
   m20pro_floor_manager
 )
+if [[ "${MODE}" == "move" ]]; then
+  required_nodes+=(m20pro_stair_executor)
+fi
 for node in "${required_nodes[@]}"; do
   if node_exists "$node"; then
     pass "node /${node}"

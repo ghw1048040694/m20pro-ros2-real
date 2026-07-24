@@ -3369,6 +3369,8 @@ class WebDashboardNode(Node):
             "m20pro_nav2_startup_gate",
             "m20pro_floor_manager",
         ]
+        if str(payload.get("mode") or "move").strip().lower() == "move":
+            required_nodes.append("m20pro_stair_executor")
         items.append(preflight_node_item(list(node_names), required_nodes))
 
         topic_names = {name for name, _types in self.get_topic_names_and_types()}

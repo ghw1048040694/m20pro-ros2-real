@@ -128,6 +128,13 @@ def test_real_move_mode_starts_connector_with_the_existing_axis_chain() -> None:
     assert '"enable_stair_connector": enable_stair_connector' in top_launch
     assert 'enable_stair_connector:="${AXIS_ENABLED}"' in start
 
+    preflight = (
+        ROOT / "scripts" / "104_preflight_check.sh"
+    ).read_text(encoding="utf-8")
+    assert 'if [[ "${MODE}" == "move" ]]; then' in preflight
+    assert "required_nodes+=(m20pro_stair_executor)" in preflight
+    assert 'required_nodes.append("m20pro_stair_executor")' in WEB_SOURCE
+
 
 def test_floor_manager_is_a_same_floor_nav2_gateway_without_route_whitelists() -> None:
     floor_manager = (

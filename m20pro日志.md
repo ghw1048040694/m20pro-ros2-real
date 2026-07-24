@@ -24740,3 +24740,11 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 本轮没有增加任何生产运行判定、仲裁、哈希、readiness 或回滚机制；新增内容全部位于离线 smoke 和文档，不影响真机运行时性能或链路复杂度。
 - 验证：现存 48 个 `scripts/test_*.py` 全部通过，Python 编译和 `git diff --check` 通过，`m20pro_navigation`、`m20pro_cloud_bridge`、`m20pro_bringup` 三包构建通过；执行器独立 smoke 及包含生产 Web 切图事务的联合 smoke 通过。
 - `10.21.31.103/104/106` 仍不可达；本轮未部署、未发送任何运动/导航/切图/重定位命令，也未改变上位机网络。
+
+## 2026-07-24 14:43 CST - 首次真机部署链审计与非阻断自检补齐
+
+- 再次按用户明确的开发顺序执行：先保证唯一最小链路能跑，再依据真实录包和现场事实加固；没有新增任务启动门禁、哈希、readiness、仲裁、回滚或运动判断。
+- 审计唯一整狗部署入口 `local_deploy_to_test_robot.sh`：106 只安装 edge scan 最小文件集，104 在最终目录构建后以 `move` 模式启动；正式入口会启用 `stair_executor`，楼梯速度与 Nav2 共用 `/cmd_vel_nav -> command_mux -> /cmd_vel -> tcp_bridge`，不存在第二套运动链。
+- 修复一处确定性的自检漏报：`move` 模式的网页自检和终端备用自检现在把 `/m20pro_stair_executor` 纳入既有核心节点清单；`shadow` 模式不要求该节点。这只影响诊断显示和自检返回，不参与任务放行，也不改变 launch 或运动行为。
+- 验证：48 个 `scripts/test_*.py` 全部通过；Python/JavaScript 语法、部署脚本 shell 语法和 `git diff --check` 通过；`m20pro_navigation`、`m20pro_cloud_bridge`、`m20pro_bringup` 三包在上位机 Humble 构建通过；执行器独立 smoke 及 `floor_manager + stair_executor + 生产 Web 切图事务` 联合 smoke 均通过上楼、下楼和明确失败路径。
+- 开发狗 `10.21.31.103/104/106` 当前 SSH 均超时，故没有部署、启动服务或发送运动/导航/切图/重定位命令；未改变上位机网络。主机上线后继续使用唯一入口 `./scripts/local_deploy_to_test_robot.sh`，先做无运动节点/API 验收，再进行受监督的最小两层单程实测。
