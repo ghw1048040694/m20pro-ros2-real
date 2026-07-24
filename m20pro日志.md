@@ -24748,3 +24748,12 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 修复一处确定性的自检漏报：`move` 模式的网页自检和终端备用自检现在把 `/m20pro_stair_executor` 纳入既有核心节点清单；`shadow` 模式不要求该节点。这只影响诊断显示和自检返回，不参与任务放行，也不改变 launch 或运动行为。
 - 验证：48 个 `scripts/test_*.py` 全部通过；Python/JavaScript 语法、部署脚本 shell 语法和 `git diff --check` 通过；`m20pro_navigation`、`m20pro_cloud_bridge`、`m20pro_bringup` 三包在上位机 Humble 构建通过；执行器独立 smoke 及 `floor_manager + stair_executor + 生产 Web 切图事务` 联合 smoke 均通过上楼、下楼和明确失败路径。
 - 开发狗 `10.21.31.103/104/106` 当前 SSH 均超时，故没有部署、启动服务或发送运动/导航/切图/重定位命令；未改变上位机网络。主机上线后继续使用唯一入口 `./scripts/local_deploy_to_test_robot.sh`，先做无运动节点/API 验收，再进行受监督的最小两层单程实测。
+
+## 2026-07-24 14:59 CST - 继续最小跨层链验收与状态语义归一
+
+- 记录并强化开发顺序：先保证唯一最小链路能跑，只保留直接决定闭环能否继续的判定；安全加固必须由真机和 rosbag 中已经出现的失效模式驱动，不预先叠加哈希、readiness、重复仲裁、额外运动链或复杂回退。
+- 复核跨层自动重定位：运行调用已将额外稳定窗口设为 `0`，`/scan` 和代价地图只影响诊断中的 `navigation_ready`，不阻止切层提交；仅保留本轮 2101 回执、原厂定位有效与目标图位姿靠近目标平台三项必要事实。
+- 修正任务状态中的旧链语义：跨层任务已经直接启动唯一 `stair_executor`，但页面仍显示“下发给 floor_manager”。现统一为“启动/等待楼层连接边”，不修改任何判定、话题或运动行为，并增加合同断言防止旧所有权文案回归。
+- 权威资产核对确认：仓库 F19/F20/F21 是同一份模板地图，上位机 `~/.m20pro_web` 也没有可用的两层地图与有向路线，因此不把离线回放冒充真实跨层成功。
+- 验证：48 个 `scripts/test_*.py` 全部通过，正式 JavaScript 语法、部署 shell 语法、现场参数合同和 `git diff --check` 通过；三个 ROS 包构建通过，执行器独立 smoke 及 `floor_manager + stair_executor + 生产 Web 切图事务` 联合 smoke 均通过。
+- `10.21.31.103/104/106` 再次 SSH 超时，且当前上位机到 `10.21.31.104` 的路由指向公司 VPN `tun0`；本轮仅做只读查看，未修改上位机任何网络设置，也未向机器狗发送命令。

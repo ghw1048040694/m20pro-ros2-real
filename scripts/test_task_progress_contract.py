@@ -237,6 +237,8 @@ def test_cross_floor_pre_dispatch_decision() -> None:
     assert_equal(first_dispatch["action"], "pass_cross_floor", "first cross-floor goal is dispatched")
     assert_equal(first_dispatch["code"], "cross_floor_dispatch", "cross-floor dispatch code")
     assert_equal(first_dispatch["target_floor"], "F21", "cross-floor target floor")
+    assert "floor_manager" not in first_dispatch["message"]
+    assert "楼层连接边" in first_dispatch["message"]
 
     waiting = active_task_pre_dispatch_decision(
         active=active(last_goal_annotation_id="p1"),
@@ -249,6 +251,7 @@ def test_cross_floor_pre_dispatch_decision() -> None:
     )
     assert_equal(waiting["action"], "wait", "published cross-floor goal waits for floor switch")
     assert_equal(waiting["code"], "cross_floor_transitioning", "cross-floor waiting code")
+    assert "楼层连接边" in waiting["message"]
 
 
 def test_runtime_gate_uses_ordered_plan_transition() -> None:
