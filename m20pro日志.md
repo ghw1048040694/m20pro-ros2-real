@@ -24609,3 +24609,21 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 身份链统一：Web 通过运行门后一次性持久化预留递增 `map_epoch`，启动信封、执行器状态、terrain 请求、floor switch 请求、事务和回执统一绑定 `request_id/route_id/plan_id/map_epoch`；切层线程只消费预留 epoch，不再生成第二个代次。旧 epoch、缺字段或其他连接边回执不能推进状态机。
 - 106 所有权修正：terrain guard 对 malformed、迟到或其他连接边的启用/释放请求保持当前所有者，不再被任意 `enabled=false` 清空；状态回传补齐 `plan_id/map_epoch`，示例和说明同步更新。
 - 验证：全部 `scripts/test_*.py` 通过；新增运行门禁、epoch、旧回执和 terrain 所有权回归；Python 编译、JavaScript 语法、`git diff --check` 通过；`m20pro_navigation`、`m20pro_cloud_bridge`、`m20pro_bringup` 三包构建通过。本轮仅修改上位机开发分支，未部署或操作 103/104/106，未发送运动、导航、重定位、切图或网络命令。
+
+## 2026-07-24 11:18 CST - 统一导航开发优先级调整为先跑通、后加固
+
+- 用户明确要求：统一导航首要目标是尽快跑通最小真实闭环，在闭环尚未成立前不加入多余的条件判断和预防性门禁；只有实测证明存在风险或闭环运行必需时，才增加相应保护。
+- 首版只保留必要底线：随时停止任务、人工接管、关键通信超时停止，以及切图或自动重定位失败后停止；不预置地图摘要/哈希、多层 readiness、重复仲裁或其他尚未证明必要的阻断条件。
+- 实施顺序固定为：入口导航、切换楼梯步态、楼梯运动、到达共享平台、104/106 切图、自动重定位、导航离开楼梯、恢复平地步态并继续任务；先用唯一动作链跑通，再基于实测问题逐项加固。
+- 本轮仅记录开发原则，没有修改运行代码、部署或操作 103/104/106，也未发送运动、导航、重定位、切图或网络命令。
+
+## 2026-07-24 11:58 CST - 跨楼层最小真机闭环实现收口
+
+- 统一导航运动链收敛为唯一 `stair_executor`：入口和目标层出口复用现有 Nav2，楼梯段通过 `/m20pro/gait_command` 切换原厂步态，以 `/cmd_vel_nav -> command_mux` 低速运动，到达共享平台后停车并请求切层；上楼正向，下楼按原厂要求后退。
+- 删除 `stair_action_orchestrator` 节点、合同和测试入口，旧 `floor_manager.use_stairs()` 继续明确拒绝，防止历史运动链与新链并行；`terrain_guard` 仅保留 106 影子观测，不参与首轮运动和切图门禁。
+- 切层事务从多层摘要/readiness/回滚/解锁机制简化为 `SWITCHING_MAP -> RELOCALIZING -> COMMITTED | FAILED`：104 Nav2 地图和 106 原厂地图并行激活，成功后在 `target_platform` 执行 2101；只核对两端切图返回、2101 和目标图位姿。失败立即停止当次任务，不建立永久锁；人工确认当前地图并重定位后可重新测试。
+- 切层成功后先同步目标楼层；`stair_executor` 只在收到 `/m20pro/current_floor` 的目标层回执后下发出口 Nav2 目标，避免 `floor_manager` 仍持有源层上下文时拒绝出口。该回执只用于保证链路顺序，不是新的多层认证。
+- 启动边界统一：`m20pro_real_full.sh shadow` 不启动楼梯执行器，`move` 随 103 轴运动能力启动；原始 launch 参数默认仍为 `false`。现场参数统一进入 `m20pro_field_profile.yaml`，schema v4 现为 75 项。
+- 新增完整离线 replay，覆盖入口、步态、楼梯速度、平台停车、104/106 切图、2101、出口和恢复平地步态；全部 `scripts/test_*.py`、Python 编译、JavaScript 语法、`git diff --check` 和 `m20pro_navigation/m20pro_cloud_bridge/m20pro_bringup` 三包构建通过。
+- README、跨楼层操作文档、技术路线报告和前端 API 说明已同步到当前唯一链路。当前结论是“已具备两层单程最小真机测试条件”，仍需真实楼梯验收，不宣称已可无人跨层运行。
+- 本轮只修改上位机 `feature/unified-navigation-v2` 分支，没有合并 `main`、没有部署或操作 103/104/106，也没有改动上位机网络。

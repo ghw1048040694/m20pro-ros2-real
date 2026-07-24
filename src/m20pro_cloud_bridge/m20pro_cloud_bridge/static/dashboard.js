@@ -70,7 +70,6 @@
       loadingRadarResults: false,
       yoloControlBusy: false,
       yoloLiveRequestInFlight: false,
-      floorSwitchRecoveryBusy: false,
       teleop: {
         sessionId: null,
         sequence: 0,
@@ -2004,35 +2003,28 @@
     }
     function floorSwitchTransactionText(transaction) {
       const stateName = String((transaction && transaction.state) || "").toUpperCase();
-      if (stateName === "PREPARED") return "跨楼层事务已准备";
-      if (stateName === "APPLYING") return "正在切换目标地图";
+      if (stateName === "SWITCHING_MAP") return "正在切换104/106目标地图";
       if (stateName === "RELOCALIZING") return "正在目标层重定位";
-      if (stateName === "ROLLING_BACK") return "目标层失败，正在恢复起始层";
-      if (stateName === "UNCERTAIN") return "地图状态不确定，需要人工确认";
       if (stateName === "COMMITTED") return "跨楼层切换完成";
-      if (stateName === "ROLLED_BACK") return "跨楼层切换已回滚";
-      if (stateName === "RECOVERED") return "地图状态已人工核验恢复";
+      if (stateName === "FAILED") return "跨楼层切换失败，任务已停止";
       return "";
     }
     function renderTaskExecutionFlow(activeTask, waypoint, transaction = null) {
       const box = $("taskExecutionFlow");
       if (!box) return;
       const transactionState = String((transaction && transaction.state) || "").toUpperCase();
-      const activeTransaction = ["PREPARED", "APPLYING", "RELOCALIZING", "ROLLING_BACK", "UNCERTAIN"].includes(transactionState);
+      const activeTransaction = ["SWITCHING_MAP", "RELOCALIZING"].includes(transactionState);
       const transactionMatchesTask = Boolean(
         activeTask
         && String((transaction && transaction.task_id) || "")
         && String(transaction.task_id) === String(activeTask.task_id || "")
       );
       const showTransaction = activeTransaction || (
-        ["COMMITTED", "ROLLED_BACK"].includes(transactionState) && transactionMatchesTask
+        ["COMMITTED", "FAILED"].includes(transactionState) && transactionMatchesTask
       );
       const transactionText = showTransaction ? floorSwitchTransactionText(transaction) : "";
-      const recoveryAction = transactionState === "UNCERTAIN"
-        ? `<div class="task-transaction-actions"><span>先选择当前固定地图并重新拉一次重定位箭头，再核验解除锁定。</span><button type="button" class="mini-btn" data-floor-switch-recover ${state.floorSwitchRecoveryBusy ? "disabled" : ""}>${state.floorSwitchRecoveryBusy ? "核验中..." : "确认当前地图并恢复"}</button></div>`
-        : "";
       const transactionHtml = transactionText
-        ? `<div class="task-transaction ${transactionState === "UNCERTAIN" ? "fail" : (["COMMITTED", "ROLLED_BACK", "RECOVERED"].includes(transactionState) ? "ok" : "warn")}"><strong>${escapeHtml(transactionText)}</strong><span>${escapeHtml((transaction && transaction.message) || "")}</span>${recoveryAction}</div>`
+        ? `<div class="task-transaction ${transactionState === "FAILED" ? "fail" : (transactionState === "COMMITTED" ? "ok" : "warn")}"><strong>${escapeHtml(transactionText)}</strong><span>${escapeHtml((transaction && transaction.message) || "")}</span></div>`
         : "";
       if (!activeTask || activeTask.status !== "running") {
         box.innerHTML = transactionHtml || '<div class="small">暂无执行任务</div>';
@@ -2059,39 +2051,6 @@
         <div class="task-flow-head"><strong>${escapeHtml(activeTask.task_name || activeTask.task_id || "执行任务")}</strong><span>${total ? `${current + 1} / ${total}` : phaseText}</span></div>
         <div class="task-progress-track"><div class="task-progress-fill" style="width:${progress}%"></div></div>
         <div class="task-flow-list">${rows || `<div class="small">${escapeHtml(activeTask.status_message || phaseText)}</div>`}</div>`;
-    }
-    async function recoverFloorSwitchTransaction() {
-      const transaction = (state.latest && state.latest.floor_switch_transaction) || null;
-      if (!transaction || String(transaction.state || "").toUpperCase() !== "UNCERTAIN") return;
-      if (!state.selectedMapId) {
-        showOperationFeedback("跨楼层恢复未执行", "请先在地图菜单中明确选择机器人当前所在的固定地图。", true);
-        return;
-      }
-      state.floorSwitchRecoveryBusy = true;
-      renderTaskExecutionFlow(
-        (state.latest && state.latest.active_task) || null,
-        (state.latest && state.latest.active_waypoint && state.latest.active_waypoint.parsed) || null,
-        transaction
-      );
-      try {
-        const payload = await api("POST", "/api/floor_switch/recover", {
-          request_id: transaction.request_id,
-          map_id: state.selectedMapId
-        });
-        if (state.latest) state.latest.floor_switch_transaction = payload.transaction || null;
-        showOperationFeedback("跨楼层地图状态已恢复", payload.message || "当前地图、重定位和导航链路均已确认。", false);
-        updateState(await fetchJson("/api/state?debug=0"));
-      } catch (err) {
-        showOperationFeedback("跨楼层恢复未通过", err, true);
-      } finally {
-        state.floorSwitchRecoveryBusy = false;
-        const latest = state.latest || {};
-        renderTaskExecutionFlow(
-          latest.active_task || null,
-          (latest.active_waypoint && latest.active_waypoint.parsed) || null,
-          latest.floor_switch_transaction || null
-        );
-      }
     }
     async function loadPreflight() {
       try {
@@ -3054,7 +3013,7 @@
         const transaction = s.floor_switch_transaction || null;
         const transactionText = floorSwitchTransactionText(transaction);
         const transactionState = String((transaction && transaction.state) || "").toUpperCase();
-        taskTop.textContent = transactionText && ["APPLYING", "RELOCALIZING", "ROLLING_BACK", "UNCERTAIN"].includes(transactionState)
+        taskTop.textContent = transactionText && ["SWITCHING_MAP", "RELOCALIZING"].includes(transactionState)
           ? transactionText
           : taskTopStatusText(s.active_task || null, activeWaypoint);
       }
@@ -4899,9 +4858,6 @@
       loadRecordingList().catch(err => showOperationFeedback("读取录包列表失败", err, true));
     });
     $("taskStatusBtn").addEventListener("click", () => toggleStatusPopover("task"));
-    $("taskExecutionFlow").addEventListener("click", event => {
-      if (event.target.closest("[data-floor-switch-recover]")) recoverFloorSwitchTransaction();
-    });
     $("teleopStatusBtn").addEventListener("click", () => {
       toggleStatusPopover("teleop");
       loadTeleopStatus().catch(console.warn);

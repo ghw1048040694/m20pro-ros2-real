@@ -22,6 +22,7 @@ def generate_launch_description():
     real_params_file = LaunchConfiguration("real_params_file")
     real_nav2_params_file = LaunchConfiguration("real_nav2_params_file")
     enable_axis_command = LaunchConfiguration("enable_axis_command")
+    enable_stair_connector = LaunchConfiguration("enable_stair_connector")
     enable_initialpose_relocalization = LaunchConfiguration("enable_initialpose_relocalization")
     enable_initialpose_3d_adapter = LaunchConfiguration("enable_initialpose_3d_adapter")
     initialpose_3d_z = LaunchConfiguration("initialpose_3d_z")
@@ -104,6 +105,7 @@ def generate_launch_description():
             default_value=os.path.join(bringup_share, "config", "nav2_params_real.yaml"),
         ),
         DeclareLaunchArgument("enable_axis_command", default_value="false"),
+        DeclareLaunchArgument("enable_stair_connector", default_value="false"),
         DeclareLaunchArgument(
             "enable_initialpose_relocalization",
             default_value="false",
@@ -204,6 +206,7 @@ def generate_launch_description():
                 "params_file": real_params_file,
                 "nav2_params_file": real_nav2_params_file,
                 "enable_axis_command": enable_axis_command,
+                "enable_stair_connector": enable_stair_connector,
                 "enable_initialpose_relocalization": enable_initialpose_relocalization,
                 "enable_initialpose_3d_adapter": enable_initialpose_3d_adapter,
                 "initialpose_3d_z": initialpose_3d_z,

@@ -19,6 +19,7 @@ from m20pro_navigation.field_profile_contract import (  # noqa: E402
     edge_environment,
     load_field_profile,
     render_edge_environment,
+    stair_executor_field_parameters,
     validate_field_profile,
     web_navigation_field_parameters,
     web_teleoperation_field_parameters,
@@ -60,7 +61,7 @@ def main() -> None:
             "localization",
         )
     }
-    assert leaf_count(editable) == 70
+    assert leaf_count(editable) == 74
     assert leaf_count(editable["navigation"]) == 30
     assert leaf_count(editable["teleoperation"]) == 7
 
@@ -115,11 +116,16 @@ def main() -> None:
     command_mux = command_mux_field_parameters(profile)
     web_teleoperation = web_teleoperation_field_parameters(profile)
     web_navigation = web_navigation_field_parameters(profile)
+    stair_executor = stair_executor_field_parameters(profile)
     assert command_mux["teleop_max_lateral_speed_mps"] == 0.30
     assert web_teleoperation["teleop_max_lateral_speed_mps"] == 0.30
     assert web_navigation["goal_reached_tolerance_m"] == profile["navigation"]["goal"]["xy_tolerance_m"]
     assert web_navigation["cross_floor_platform_position_tolerance_m"] == profile["stair_transition"]["platform_position_tolerance_m"]
     assert web_navigation["cross_floor_platform_yaw_tolerance_rad"] == profile["stair_transition"]["platform_yaw_tolerance_rad"]
+    assert stair_executor["motion_speed_mps"] == 0.12
+    assert stair_executor["platform_tolerance_m"] == profile["stair_transition"]["platform_position_tolerance_m"]
+    assert stair_executor["gait_settle_s"] == 1.0
+    assert stair_executor["post_switch_goal_delay_s"] == 0.2
     rendered = render_edge_environment(profile)
     assert not any(key.startswith("STAIR_") for key in environment)
     assert len(environment) == 17

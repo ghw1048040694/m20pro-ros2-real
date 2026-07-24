@@ -13,6 +13,7 @@ from m20pro_navigation.field_profile_contract import (
     command_mux_field_parameters,
     floor_manager_field_parameters,
     load_field_profile,
+    stair_executor_field_parameters,
     web_navigation_field_parameters,
     web_teleoperation_field_parameters,
 )
@@ -43,6 +44,7 @@ def generate_launch_description():
     field_profile = load_field_profile(default_field_profile)
     floor_manager_parameters = floor_manager_field_parameters(field_profile)
     command_mux_parameters = command_mux_field_parameters(field_profile)
+    stair_executor_parameters = stair_executor_field_parameters(field_profile)
     web_navigation_parameters = web_navigation_field_parameters(field_profile)
     web_teleoperation_parameters = web_teleoperation_field_parameters(field_profile)
     default_floor_config = os.path.join(bringup_share, "config", "runtime_navigation.yaml")
@@ -63,6 +65,7 @@ def generate_launch_description():
     enable_nav2 = LaunchConfiguration("enable_nav2")
     enable_floor_manager = LaunchConfiguration("enable_floor_manager")
     enable_floor_goal_bridge = LaunchConfiguration("enable_floor_goal_bridge")
+    enable_stair_connector = LaunchConfiguration("enable_stair_connector")
     enable_system_check = LaunchConfiguration("enable_system_check")
     enable_config_audit = LaunchConfiguration("enable_config_audit")
     initial_floor = LaunchConfiguration("initial_floor")
@@ -146,6 +149,11 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument("enable_floor_manager", default_value="true"),
         DeclareLaunchArgument("enable_floor_goal_bridge", default_value="true"),
+        DeclareLaunchArgument(
+            "enable_stair_connector",
+            default_value="false",
+            description="Start the single unified stair connector executor.",
+        ),
         DeclareLaunchArgument("enable_system_check", default_value="true"),
         DeclareLaunchArgument("enable_config_audit", default_value="true"),
         DeclareLaunchArgument(
@@ -267,6 +275,16 @@ def generate_launch_description():
             name="m20pro_command_mux",
             output="screen",
             parameters=[command_mux_parameters],
+        ),
+        Node(
+            package="m20pro_navigation",
+            executable="stair_executor",
+            name="m20pro_stair_executor",
+            output="screen",
+            parameters=[{"enabled": True, **stair_executor_parameters}],
+            condition=IfCondition(
+                enable_stair_connector if nav2_stack_available else "false"
+            ),
         ),
         Node(
             package="m20pro_navigation",

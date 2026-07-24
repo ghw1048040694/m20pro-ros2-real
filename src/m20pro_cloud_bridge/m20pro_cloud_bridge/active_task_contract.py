@@ -726,7 +726,7 @@ def mark_connector_started_state(
     updated["last_floor_goal_target_floor"] = transition.get("target_floor")
     updated["last_floor_goal_cross_floor"] = True
     updated["last_floor_goal_pose"] = dict(updated["last_goal_pose"])
-    updated["status_message"] = "已启动楼梯连接边，等待 terrain_guard 与入口导航"
+    updated["status_message"] = "已启动楼梯连接边，正在导航至楼梯入口"
     return {
         "changed": updated != active,
         "active": updated,

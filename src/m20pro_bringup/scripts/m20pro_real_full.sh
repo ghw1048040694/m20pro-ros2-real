@@ -262,4 +262,5 @@ ros2 launch m20pro_bringup m20pro.launch.py \
   "${COMMON_ARGS[@]}" \
   real_params_file:="${RUNTIME_PARAMS}" \
   real_nav2_params_file:="${RUNTIME_NAV2_PARAMS}" \
-  enable_axis_command:="${AXIS_ENABLED}"
+  enable_axis_command:="${AXIS_ENABLED}" \
+  enable_stair_connector:="${AXIS_ENABLED}"

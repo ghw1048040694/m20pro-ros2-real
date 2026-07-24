@@ -70,20 +70,6 @@ def valid_route() -> dict:
     return result["route"]
 
 
-def terrain_status(route_id: str = "route_up", stamp: float = 100.0, **extra) -> dict:
-    payload = {
-        "route_id": route_id,
-        "profile_id": f"{route_id}:terrain",
-        "corridor_version": "shadow-v1",
-        "state": "traversable",
-        "reason": "step_profile_continuous",
-        "stamp_unix_s": stamp,
-        "cloud_age_s": 0.1,
-    }
-    payload.update(extra)
-    return payload
-
-
 def test_validate_route_and_runtime_config() -> None:
     route = valid_route()
     assert_equal(route["source_floor"], "F1", "source floor")
@@ -185,8 +171,6 @@ def test_floor_switch_request_contract() -> None:
         routes=[route],
         active_task=active,
         selected_map_id="map_f1",
-        terrain_guard_status=terrain_status(),
-        now_unix_s=100.2,
     )
     assert_equal(accepted["ok"], True, "matching request accepted")
     assert_equal(accepted["task_id"], "task_1", "transaction binds active task")
@@ -196,8 +180,6 @@ def test_floor_switch_request_contract() -> None:
         routes=[route],
         active_task=active,
         selected_map_id="map_f2",
-        terrain_guard_status=terrain_status(),
-        now_unix_s=100.2,
     )
     assert_equal(wrong_map["code"], "floor_switch_source_map_mismatch", "source map enforced")
     wrong_route = resolve_floor_switch_request({**request, "target_floor": "F3"}, routes=[route], active_task=active, selected_map_id="map_f1")
@@ -215,34 +197,6 @@ def test_floor_switch_request_contract() -> None:
         "floor_switch_connector_identity_mismatch",
         "previous connector epoch cannot switch maps",
     )
-
-    missing_status = resolve_floor_switch_request(
-        request,
-        routes=[route],
-        active_task=active,
-        selected_map_id="map_f1",
-        now_unix_s=100.2,
-    )
-    assert_equal(missing_status["code"], "terrain_guard_status_missing", "terrain evidence required")
-    blocked_status = resolve_floor_switch_request(
-        request,
-        routes=[route],
-        active_task=active,
-        selected_map_id="map_f1",
-        terrain_guard_status=terrain_status(state="blocked"),
-        now_unix_s=100.2,
-    )
-    assert_equal(blocked_status["code"], "terrain_guard_not_traversable", "blocked terrain rejected")
-    stale_status = resolve_floor_switch_request(
-        request,
-        routes=[route],
-        active_task=active,
-        selected_map_id="map_f1",
-        terrain_guard_status=terrain_status(stamp=95.0),
-        now_unix_s=100.2,
-    )
-    assert_equal(stale_status["code"], "terrain_guard_status_stale", "stale terrain rejected")
-
 
 def test_public_payload_only_exposes_semantic_candidates() -> None:
     items = list(annotations().values()) + [{"id": "patrol", "type": "patrol", "floor": "F1", "map_id": "map_f1", "pose": pose(0, 0)}]

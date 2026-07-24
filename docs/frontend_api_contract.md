@@ -95,7 +95,7 @@
 | `scan` | `/scan` 摘要和前端激光轮廓点 |
 | `path` | 当前规划路径，用于画导航线 |
 | `active_task` | 当前正在执行的任务状态，空闲时为 `null` |
-| `floor_switch_transaction` | 当前/最近一次跨楼层地图事务；包含 `request_id`、单调 `map_epoch`、`state`（`PREPARED`/`APPLYING`/`RELOCALIZING`/`ROLLING_BACK`/`COMMITTED`/`ROLLED_BACK`/`UNCERTAIN`/`RECOVERED`）和后验证据；`UNCERTAIN` 时必须人工确认地图并重定位，不能继续运动；完整核验后进入 `RECOVERED` |
+| `floor_switch_transaction` | 当前/最近一次跨楼层切图事务；包含 `request_id`、`route_id`、`plan_id`、`map_epoch` 和 `state`（`SWITCHING_MAP`/`RELOCALIZING`/`COMMITTED`/`FAILED`）；切图或重定位失败时任务停止，新任务可在人工确认地图并重定位后重新执行 |
 | `active_waypoint` | 当前任务点 JSON 字符串和解析结果 |
 | `charge_command_result` | 最近一次原厂充电导航请求的 JSON 回执；只在充电任务阶段使用 |
 | `detections` | YOLO 检测结果，来自 `/m20pro_yolov8_inspection/detections` |
@@ -779,27 +779,9 @@ active_waypoint.parsed
 }
 ```
 
-跨楼层任务还应同时读取 `floor_switch_transaction`。`APPLYING` 表示正在切换
-104/106 地图，`RELOCALIZING` 表示正在目标共享平台执行 2101，
-`ROLLING_BACK` 表示正在恢复起始层；只有 `COMMITTED` 才允许继续向目标层任务点
-导航。`UNCERTAIN` 是安全停止态，不得由前端自行重试或把旧位姿当成成功。
+跨楼层任务还应同时读取 `floor_switch_transaction`。`SWITCHING_MAP` 表示 104 Nav2 地图与 106 原厂地图正在并行激活，`RELOCALIZING` 表示正在目标共享平台执行 2101，`COMMITTED` 表示可以继续目标层出口导航，`FAILED` 表示当次任务已停止。
 
-### POST `/api/floor_switch/recover`
-
-仅用于人工解除 `UNCERTAIN`。该接口不切换地图、不发布重定位位姿，也不发送运动
-指令。操作员必须先停止任务，在地图菜单明确选择机器人当前所在的固定地图，再在
-地图上重新执行一次重定位，最后提交当前事务和地图身份：
-
-```json
-{"request_id": "switch_xxx", "map_id": "map_xxx"}
-```
-
-后端只在以下证据同时满足时写入 `RECOVERED`：请求仍属于当前持久事务；没有活动
-任务；请求地图与前端当前显式选择的固定地图一致；104 当前 `/map` 的完整 occupancy
-摘要与归档地图一致；106 active 与该固定地图的原厂包一致；最近 2101 的时间不早于
-`uncertain_at_unix` 且定位合同已确认、切图重定位锁已清除；`/scan`、local/global
-costmap 均晚于该 2101，Nav2 lifecycle 全部就绪。任一项失败只返回证据，不清理
-`UNCERTAIN`。`RECOVERED` 后允许发起新的切层事务，但不会恢复已经停止的旧任务。
+当前不提供单独的切层“解锁”接口。失败后由操作员确认机器狗实际所在楼层，选择对应固定地图并重新执行一次 2101，然后重新启动任务。上一次 `FAILED` 记录不会永久锁住新任务。
 
 ROS 2 功能包也可以订阅：
 
@@ -986,7 +968,7 @@ ROS 2 功能包也可以订阅：
 
 跨楼层路线不是由项目楼层或地图名称自动推导的。每条路线必须绑定两张正式地图和四个实测语义点，并按方向保存；`F1 -> F2` 不会隐式生成 `F2 -> F1`。
 
-当前只保留路线和任务编排接口。旧楼梯感知与爬楼执行链已停用；新方案接入前，向其他楼层发送 `/m20pro/floor_goal` 或 `/m20pro/use_stairs` 会在任何跨层运动开始前返回 `error reason=stair_execution_retired`。
+路线和任务编排接口共用统一导航计划。单层任务是一个 floor segment，跨层任务在相邻 segment 之间引用一条有向路线。运动时只由 `/m20pro/stair_executor/start` 启动单一楼梯执行器；旧 `/m20pro/use_stairs` 入口保持停用，不能与新链并行。
 
 ### GET `/api/floor_routes`
 
@@ -1006,7 +988,7 @@ ROS 2 功能包也可以订阅：
 
 保存时后端强制检查：两侧点位类型、楼层、地图和坐标一致；两张地图均具备 104 Nav2 yaml 和非 `active` 的 106 原厂地图包；同一楼层的所有路线只能引用同一张正式地图。路线持久化到 Web `data_dir/floor_routes.json`，并通过 transient-local `/m20pro/floor_route_config` 动态下发给 `floor_manager`。
 
-后端会为每条路线保存一个 `terrain_guard` 身份块，例如：
+后端会为每条路线保存一个 `terrain_guard` 影子观测身份块，例如：
 
 ```json
 {
@@ -1019,7 +1001,7 @@ ROS 2 功能包也可以订阅：
 }
 ```
 
-`corridor` 只有在现场标定完成后才填写 `width_m` 和 `lookahead_m`；缺失时表示未标定，不能猜测默认走廊。该块不携带或复制点云几何阈值。路线编辑接口不能把路线标记为已认证运动；地图、走廊几何或 profile 版本变化时，统一导航计划必须重新生成。平地任务不经过该字段，也不改变 `/scan`/Nav2 链路。
+`corridor` 只有在现场标定完成后才填写 `width_m` 和 `lookahead_m`；缺失时表示未标定。该块不携带或复制点云几何阈值，当前也不是跨层首轮执行的强制门禁。平地任务不经过该字段，不改变 `/scan`/Nav2 链路。
 
 ### POST `/api/floor_routes/delete`
 
@@ -1031,7 +1013,7 @@ ROS 2 功能包也可以订阅：
 
 ### 内部切层协议
 
-该切层协议作为后续新爬楼方案的地图事务基础保留，当前不会由旧爬楼链路触发。新方案接入后，Web 仍应校验当前任务、路线、起始地图和目标身份，并在切图前要求匹配路线 profile 的新鲜 106 `terrain_guard` 状态为 `traversable`；随后依次切换 104 Nav2 地图、执行 106 `drmap apply` 并后验确认 active 路径、按 occupancy 内容摘要确认 104 `/map`、发布目标层初始位姿并等待 2101/定位/位姿/Nav2 readiness 证据。事务使用持久化 `request_id/map_epoch` 隔离重启和迟到结果；状态缺失、profile 不匹配、点云过期、地图内容不一致或楼梯不可通行时直接拒绝。失败时必须恢复源地图、源平台重定位和源层导航链路，只有完整恢复才返回回滚成功，否则保持 `state_uncertain=true`。真实楼梯执行仍受 `stair_execution_retired` 保护。
+该协议由单一 `stair_executor` 在到达共享平台并停车后触发。Web 核对当前任务、有向路线、起始地图和目标地图，随后切换 104 Nav2 地图、执行 106 `drmap apply`、在目标层平台执行 2101 重定位并确认结果。`terrain_guard` 状态不作为首轮切层前置条件。事务回执继续携带 `request_id/route_id/plan_id/map_epoch`，仅用于防止上一次请求的迟到结果推进当前任务。切图或重定位失败时停止楼梯运动和任务，不猜测已到达目标层。
 
 ## YOLO 和视频接口
 

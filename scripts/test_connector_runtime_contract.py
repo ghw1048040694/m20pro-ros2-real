@@ -29,17 +29,12 @@ def check(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
-def decide(executor=None, orchestrator=None, now: float = 101.0) -> dict:
+def decide(executor=None, now: float = 101.0) -> dict:
     return connector_runtime_readiness(
         executor_status=(
             executor
             if executor is not None
             else record("stair_executor")
-        ),
-        orchestrator_status=(
-            orchestrator
-            if orchestrator is not None
-            else record("stair_action_orchestrator")
         ),
         now_unix_s=now,
         timeout_s=3.5,
@@ -47,11 +42,10 @@ def decide(executor=None, orchestrator=None, now: float = 101.0) -> dict:
 
 
 def main() -> int:
-    check(decide()["ok"], "both fresh enabled components admit connector start")
+    check(decide()["ok"], "fresh enabled executor admits connector start")
 
     missing = connector_runtime_readiness(
         executor_status=None,
-        orchestrator_status=record("stair_action_orchestrator"),
         now_unix_s=101.0,
         timeout_s=3.5,
     )
@@ -60,28 +54,17 @@ def main() -> int:
     disabled = decide(executor=record("stair_executor", enabled=False, ready=False))
     check(disabled["code"] == "stair_executor_disabled", "disabled executor cannot be inferred ready")
 
-    missing_orchestrator = connector_runtime_readiness(
-        executor_status=record("stair_executor"),
-        orchestrator_status=None,
-        now_unix_s=101.0,
-        timeout_s=3.5,
-    )
-    check(
-        missing_orchestrator["code"] == "stair_action_orchestrator_status_missing",
-        "executor alone cannot start a connector",
-    )
-
     stale = decide(now=104.0)
     check(stale["code"] == "stair_executor_status_stale", "stale heartbeat fails closed")
 
     busy = decide(
-        orchestrator=record(
-            "stair_action_orchestrator",
+        executor=record(
+            "stair_executor",
             busy=True,
             request_id="previous",
         )
     )
-    check(busy["code"] == "stair_action_orchestrator_busy", "prior connector ownership blocks overlap")
+    check(busy["code"] == "stair_executor_busy", "prior connector ownership blocks overlap")
 
     wrong_identity = decide(executor=record("other_component"))
     check(

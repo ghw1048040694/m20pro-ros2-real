@@ -1215,14 +1215,6 @@
     .task-transaction.ok { border-left-color: var(--good); background: #f0faf4; }
     .task-transaction.warn { border-left-color: #c58a00; background: #fff9e8; }
     .task-transaction.fail { border-left-color: var(--bad); background: #fff1f1; }
-    .task-transaction-actions {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 8px;
-      align-items: center;
-      margin-top: 5px;
-    }
-    .task-transaction-actions .mini-btn { white-space: nowrap; }
     .task-flow-head {
       display: flex;
       align-items: center;

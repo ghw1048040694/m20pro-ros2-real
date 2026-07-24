@@ -288,6 +288,8 @@ def main() -> None:
     assert "localization_parameters" not in real_launch
     assert "**floor_manager_parameters" in real_launch
     assert 'executable="command_mux"' in real_launch
+    assert 'executable="stair_executor"' in real_launch
+    assert 'executable="stair_action_orchestrator"' not in real_launch
     assert real_launch.count('"cmd_vel_topic": "/cmd_vel_nav"') >= 2
     assert '"teleop_cmd_vel_topic": "/cmd_vel_teleop"' in real_launch
     assert 'LaunchConfiguration("cmd_vel_topic")' in nav_launch
@@ -372,6 +374,7 @@ def main() -> None:
     assert "render-real-yaml" in real_start
     assert "render-nav2-yaml" in real_start
     assert 'real_nav2_params_file:="${RUNTIME_NAV2_PARAMS}"' in real_start
+    assert 'enable_stair_connector:="${AXIS_ENABLED}"' in real_start
     assert "cleanup_runtime_params" in real_start
 
     edge_env = edge_environment(field_profile)

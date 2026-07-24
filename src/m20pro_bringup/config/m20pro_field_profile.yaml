@@ -19,14 +19,18 @@ scan:
   range_min_m: 0.20               # 最小有效测距，单位 m
   range_max_m: 10.0               # 最大有效测距，单位 m，必须大于最小测距
 
-# 跨楼层路线与切图元数据。当前爬楼执行入口已停用，供后续新方案复用。
+# 跨楼层路线、楼梯运动与切图参数。
 stair_transition:
   entry_tolerance_m: 0.80         # 到达爬楼入口点的允许位置误差，单位 m
-  floor_switch_timeout_s: 110.0   # 104/106 切图并完成目标层重定位的总超时，单位 s
+  motion_speed_mps: 0.12          # 楼梯直行速度，单位 m/s；上楼为正向，下楼自动后退
+  motion_command_hz: 10.0         # 楼梯速度指令发布频率，单位 Hz
+  motion_pose_timeout_s: 1.50     # 楼梯运动期间原厂地图位姿最大中断时间，单位 s
+  gait_settle_s: 1.0              # 原厂步态切换后开始楼梯运动前的等待时间，单位 s
+  connector_stage_timeout_s: 180.0 # 每个连接边阶段的最大执行时间，单位 s
+  floor_switch_timeout_s: 30.0    # 104/106 切图并完成目标层重定位的总超时，单位 s
   platform_position_tolerance_m: 0.50 # 跨层共享平台重定位的位置容差，单位 m
   platform_yaw_tolerance_rad: 0.45 # 跨层共享平台重定位的朝向容差，单位 rad
-  platform_stability_window_s: 2.0 # 跨层重定位连续稳定观察窗口，单位 s
-  post_switch_goal_delay_s: 1.0   # 切层确认后再下发下一目标的等待时间，单位 s
+  post_switch_goal_delay_s: 0.2   # floor_manager确认目标层后的最小发目标间隔，单位 s
   duplicate_goal_tolerance_m: 0.08 # 两目标位置差小于该值时视为重复，单位 m
   duplicate_goal_yaw_tolerance_rad: 0.12 # 两目标朝向差小于该值时视为重复，单位 rad
 

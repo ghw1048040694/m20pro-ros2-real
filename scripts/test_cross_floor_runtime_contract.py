@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static regression contract for coordinated cross-floor runtime wiring."""
+"""Static regression contract for the minimal cross-floor runtime."""
 
 from pathlib import Path
 
@@ -11,82 +11,67 @@ NAVIGATION = ROOT / "src/m20pro_navigation/m20pro_navigation"
 
 def main() -> None:
     web = (CLOUD / "web_dashboard_node.py").read_text(encoding="utf-8")
+    transaction = (CLOUD / "floor_switch_transaction_contract.py").read_text(
+        encoding="utf-8"
+    )
+    executor = (NAVIGATION / "stair_executor_node.py").read_text(encoding="utf-8")
     floor_manager = (NAVIGATION / "floor_manager.py").read_text(encoding="utf-8")
-    tcp_bridge = (NAVIGATION / "tcp_bridge_node.py").read_text(encoding="utf-8")
-    transaction = (CLOUD / "floor_switch_transaction_contract.py").read_text(encoding="utf-8")
-    identity = (CLOUD / "map_identity_contract.py").read_text(encoding="utf-8")
-
-    # The field profile supplies defaults and launch overrides; it is not a
-    # runtime license/hash gate for the field-stable nodes.
-    assert "requires a validated canonical field profile" not in floor_manager
-    assert "requires a validated canonical field profile" not in tcp_bridge
-    assert "field_profile.py\" check" not in (
-        ROOT / "scripts" / "local_deploy_to_test_robot.sh"
-    ).read_text(encoding="utf-8")
 
     for topic in (
-        "/m20pro/floor_route_config",
         "/m20pro/floor_switch_request",
         "/m20pro/floor_switch_result",
         "/m20pro/set_current_floor",
     ):
-        assert topic in floor_manager
         assert topic in web
-
-    for retired_topic in ("/m20pro/stair_perception_mode", "/m20pro/stair_clearance"):
-        assert retired_topic not in floor_manager
-        assert retired_topic not in web
-
-    assert "DurabilityPolicy.TRANSIENT_LOCAL" in web
-    assert "DurabilityPolicy.TRANSIENT_LOCAL" in floor_manager
-    assert "self._publish_runtime_floor_config()" in web
     assert "resolve_floor_switch_request(" in web
     assert "begin_transaction(" in web
-    assert "commit_decision(" in web
+    assert "completion_decision(" in web
     assert "_persist_floor_switch_transaction" in web
-    assert "_rollback_floor_switch_transaction" in web
-    assert "check_lifecycle=True" in web
-    assert "content_digest" in web
-    assert "recover_interrupted_transaction" in web
-    assert "recover_uncertain_transaction" in web
-    assert 'elif parsed.path == "/api/floor_switch/recover":' in web
-    assert "min_update_time=relocalization_time" in web
-    assert 'requested_map_id != selected_map_id' in web
-    assert 'active_task.get("status") == "running"' in web
-    assert "floor_switch_transaction" in transaction
-    assert "occupancy_grid_content_digest" in identity
-    assert 'reason="cross_floor_transition"' in web
-    assert 'reason="cross_floor_rollback"' in web
-    assert "_publish_stair_connector_start" in web
-    assert "connector_route_activation_decision(" in web
-    assert "connector_runtime_readiness(" in web
-    assert 'self._settings["floor_switch_map_epoch"] = reserved_epoch' in web
-    assert "mark_connector_started_state" in web
-    assert "rollback_factory_map" in web
-    assert "selected_map_not_observed" in web
-    assert "self._floor_switch_task_is_active(task_id)" in web
-    assert '"state_uncertain":' in web
+    assert "_activate_cross_floor_target_map" in web
+    assert "ThreadPoolExecutor(max_workers=2)" in web
+    assert "verify_observed=False" in web
+    assert "require_lifecycle=False" in web
+    assert "stability_window_s=0.0" in web
+    assert "floor_message.data = target_floor" in web
 
-    finish_start = floor_manager.index("def _finish_pending_stair_transition")
-    finish_end = floor_manager.index("def _request_coordinated_floor_switch", finish_start)
-    finish_body = floor_manager[finish_start:finish_end]
-    assert "self._request_coordinated_floor_switch(transition)" in finish_body
-    assert "self.switch_floor(" not in finish_body
-    assert "self.current_floor = target_floor" in floor_manager
-    assert 'if bool(result.get("state_uncertain")):' in floor_manager
-    assert 'self.current_floor = ""' in floor_manager
-    assert "self.pending_floor_switch = None" in floor_manager
-    assert "floor_switch_timeout_s" in floor_manager, "coordinated switch must have a bounded wait"
-    goal_start = floor_manager.index("def _on_floor_goal")
-    goal_end = floor_manager.index("def _on_rviz_floor_goal", goal_start)
-    goal_body = floor_manager[goal_start:goal_end]
-    assert "stair_execution_retired" in goal_body
-    assert "_resolve_next_stair_route" not in goal_body
-    assert "stair_clearance" not in floor_manager
-    assert "stair_perception" not in floor_manager
+    for retired in (
+        "commit_decision(",
+        "_rollback_floor_switch_transaction",
+        "recover_uncertain_transaction",
+        "mark_uncertain_transaction",
+        'parsed.path == "/api/floor_switch/recover"',
+        "source_map_digest",
+        "target_map_digest",
+    ):
+        assert retired not in web
+    for retired in (
+        "UNCERTAIN",
+        "ROLLING_BACK",
+        "source_map_digest",
+        "target_map_digest",
+        "content_digest",
+    ):
+        assert retired not in transaction
+
+    assert '"SWITCHING_MAP"' in transaction
+    assert '"RELOCALIZING"' in transaction
+    assert '"COMMITTED"' in transaction
+    assert '"FAILED"' in transaction
+    assert "factory_pose_accepted" in transaction
+    assert "nav2_load_map" in transaction
+    assert "factory_apply_map" in transaction
+
+    assert 'self.declare_parameter("current_floor_topic", "/m20pro/current_floor")' in executor
+    assert "self._current_floor == target_floor" in executor
+    assert "floor_context_sync_timeout" in executor
+    assert "self._publish_floor_goal(action, stage=\"exit\")" in executor
+    assert 'self.declare_parameter("cmd_vel_topic", "/cmd_vel_nav")' in executor
+
+    # floor_manager remains the same-floor Nav2 gateway.  The connector owns
+    # the map transition and only sends entry/exit goals after floor context
+    # has changed, so direct cross-floor goals remain rejected.
     assert "stair_execution_retired" in floor_manager
     assert 'label in ("stair_traverse", "stair_exit")' in floor_manager
-    assert "self._cancel_active_nav_goal(reason)" in floor_manager
 
     print("cross-floor runtime contract tests passed")
 

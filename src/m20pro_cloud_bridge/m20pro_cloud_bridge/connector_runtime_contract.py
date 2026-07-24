@@ -77,36 +77,17 @@ def _component_readiness(
 def connector_runtime_readiness(
     *,
     executor_status: Any,
-    orchestrator_status: Any,
     now_unix_s: float,
     timeout_s: float,
 ) -> Dict[str, Any]:
-    """Require both halves of the one connector pipeline before dispatch."""
-    checks = {
-        "stair_executor": _component_readiness(
-            executor_status,
-            component="stair_executor",
-            label="楼梯语义执行器",
-            now_unix_s=now_unix_s,
-            timeout_s=timeout_s,
-        ),
-        "stair_action_orchestrator": _component_readiness(
-            orchestrator_status,
-            component="stair_action_orchestrator",
-            label="楼梯动作编排器",
-            now_unix_s=now_unix_s,
-            timeout_s=timeout_s,
-        ),
-    }
-    for name in ("stair_executor", "stair_action_orchestrator"):
-        if not checks[name].get("ok"):
-            return {**checks[name], "checks": checks}
-    return {
-        "ok": True,
-        "code": "connector_runtime_ready",
-        "message": "楼梯执行器与动作编排器均已启用并就绪",
-        "checks": checks,
-    }
+    """Confirm the single executor is online before publishing a volatile start."""
+    return _component_readiness(
+        executor_status,
+        component="stair_executor",
+        label="楼梯执行器",
+        now_unix_s=now_unix_s,
+        timeout_s=timeout_s,
+    )
 
 
 __all__ = ["connector_runtime_readiness"]

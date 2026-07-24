@@ -192,8 +192,8 @@ def main() -> None:
     assert "function paintMapEditor" in script
     assert "button.textContent = item.label || item.id;" in script
     assert "button.textContent = `+ ${item.label || item.id}`" not in script
-    assert "20260723-floor-recovery-1" in html
-    assert html.count("20260723-floor-recovery-1") == 2
+    assert "20260724-unified-navigation-minimal-1" in html
+    assert html.count("20260724-unified-navigation-minimal-1") == 2
     assert 'id="floor"' not in html
     assert '$("floor")' not in script
     assert "const reportedCount = Number(battery.count);" in script
@@ -260,9 +260,10 @@ def main() -> None:
     assert "floor_switch_transaction" in backend
     assert "floorSwitchTransactionText" in script
     assert "task-transaction" in css
-    assert "data-floor-switch-recover" in script
-    assert '"/api/floor_switch/recover"' in script
-    assert 'elif parsed.path == "/api/floor_switch/recover":' in backend
+    assert 'stateName === "SWITCHING_MAP"' in script
+    assert 'stateName === "FAILED"' in script
+    assert "data-floor-switch-recover" not in script
+    assert '"/api/floor_switch/recover"' not in script
     assert 'self.declare_parameter("motion_state_topic", "/m20pro_tcp_bridge/motion_state")' in backend
     assert 'id="locFloor"' not in html
     assert '$("locFloor")' not in script

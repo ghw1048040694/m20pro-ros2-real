@@ -33,11 +33,11 @@ def test_connector_plan_carries_terrain_identity() -> None:
     assert '"terrain_guard": connector_terrain_guard_profile(' in contract
 
 
-def test_floor_switch_requires_fresh_terrain_status() -> None:
+def test_terrain_guard_remains_shadow_observation_only() -> None:
     assert '"terrain_guard_status_topic"' in WEB_SOURCE
     assert "def _on_terrain_guard_status(" in WEB_SOURCE
-    assert "terrain_guard_status=terrain_status" in WEB_SOURCE
-    assert "terrain_guard_timeout_s" in WEB_SOURCE
+    assert "terrain_guard_status=terrain_status" not in WEB_SOURCE
+    assert "terrain_guard_timeout_s=" not in WEB_SOURCE
 
 
 def test_cross_floor_dispatch_uses_connector_gate() -> None:
@@ -45,7 +45,6 @@ def test_cross_floor_dispatch_uses_connector_gate() -> None:
     assert "_publish_stair_connector_start" in WEB_SOURCE
     assert "connector_route_activation_decision(" in WEB_SOURCE
     assert "connector_runtime_readiness(" in WEB_SOURCE
-    assert '"stair_execution_retired"' in WEB_SOURCE
     assert '"stair_executor_start_topic"' in WEB_SOURCE
     assert "mark_connector_started_state" in WEB_SOURCE
     assert '"navigation_task_plan_stale"' in WEB_SOURCE
@@ -56,7 +55,7 @@ def test_cross_floor_dispatch_uses_connector_gate() -> None:
     assert '"map_epoch": int(map_epoch)' in WEB_SOURCE
 
 
-def test_stair_executor_is_a_semantic_reducer_without_motion_publishers() -> None:
+def test_stair_executor_is_the_single_connector_runtime_owner() -> None:
     source = (
         ROOT
         / "src"
@@ -69,7 +68,9 @@ def test_stair_executor_is_a_semantic_reducer_without_motion_publishers() -> Non
     assert "cmd_vel_pub" not in source
     assert "from geometry_msgs" not in source
     assert "request_floor_switch" in source
-    assert "stair_execution_retired" in source
+    assert "def connector_motion_decision(" in source
+    assert '"source_platform"' in source
+    assert '"start_connector_motion"' in source
     node = (
         ROOT
         / "src"
@@ -78,78 +79,38 @@ def test_stair_executor_is_a_semantic_reducer_without_motion_publishers() -> Non
         / "stair_executor_node.py"
     ).read_text(encoding="utf-8")
     assert 'self.declare_parameter("enabled", False)' in node
-    assert "cmd_vel_pub" not in node
-    assert "from geometry_msgs" not in node
-    assert "Twist(" not in node
-    assert '"watchdog_period_s", 1.0' in node
-    assert "def _on_watchdog_tick(" in node
-    assert '"connector_heartbeat"' in node
+    assert 'self.declare_parameter("cmd_vel_topic", "/cmd_vel_nav")' in node
+    assert 'self.declare_parameter("gait_command_topic", "/m20pro/gait_command")' in node
+    assert 'self.declare_parameter("localization_ok_topic", "/m20pro_tcp_bridge/localization_ok")' in node
+    assert "connector_motion_decision(" in node
+    assert "Twist(" in node
+    assert "def _on_tick(" in node
     assert '"component": "stair_executor"' in node
     assert '"ready": self._enabled' in node
-    assert "if actions:\n            self._publish_action(actions, envelope)" in node
-
-
-def test_stair_orchestrator_owns_identity_bound_terrain_request() -> None:
-    executor = (
-        ROOT
-        / "src"
-        / "m20pro_navigation"
-        / "m20pro_navigation"
-        / "stair_executor_node.py"
-    ).read_text(encoding="utf-8")
-    orchestrator = (
-        ROOT
-        / "src"
-        / "m20pro_navigation"
-        / "m20pro_navigation"
-        / "stair_action_orchestrator_node.py"
-    ).read_text(encoding="utf-8")
-    assert '"terrain_status_topic", "/m20pro/terrain_guard/status"' in executor
-    assert "self._on_terrain_status" in executor
-    assert "terrain_request_topic" not in executor
-    assert "_terrain_request_pub" not in executor
-    assert '"terrain_request_topic", "/m20pro/terrain_guard/request"' in orchestrator
-    assert "self._terrain_request_pub = self.create_publisher" in orchestrator
-    assert "publish_terrain_guard_request" in orchestrator
-    assert '"/cmd_vel"' not in executor
-    assert "Twist(" not in executor
-
-
-def test_stair_action_orchestrator_is_the_only_semantic_adapter() -> None:
-    contract = (
-        ROOT
-        / "src"
-        / "m20pro_navigation"
-        / "m20pro_navigation"
-        / "stair_action_orchestrator_contract.py"
-    ).read_text(encoding="utf-8")
-    node = (
-        ROOT
-        / "src"
-        / "m20pro_navigation"
-        / "m20pro_navigation"
-        / "stair_action_orchestrator_node.py"
-    ).read_text(encoding="utf-8")
     setup = (ROOT / "src" / "m20pro_navigation" / "setup.py").read_text(encoding="utf-8")
-    for topic in ("/m20pro/floor_goal", "/m20pro/floor_switch_request", "/m20pro/stop_task"):
-        assert topic in contract
-        assert topic in node
-    assert "translate_action_envelope" in node
-    assert "event_for_stair_status" in node
-    assert "event_for_floor_switch_result" in node
-    assert "_expected_nav_goal_seq" in node
-    assert "expected_goal_seq" in contract
-    assert '"stair_action_orchestrator = m20pro_navigation.stair_action_orchestrator_node:main"' in setup
-    assert 'self.declare_parameter("enabled", False)' in node
-    assert "Twist" not in node
-    assert "gait_command_topic" not in node
-    assert '"dispatchable": False' in contract
-    assert 'self._expected_nav_label = "floor_goal"' in node
-    assert "self._expected_nav_stage" in node
-    assert "deque(maxlen=128)" in node
-    assert '"stair_action_retired_ignored"' in node
-    assert '"component": "stair_action_orchestrator"' in node
-    assert "def _publish_runtime_heartbeat(" in node
+    assert '"stair_executor = m20pro_navigation.stair_executor_node:main"' in setup
+    assert "stair_action_orchestrator" not in setup
+    assert not (
+        ROOT / "src" / "m20pro_navigation" / "m20pro_navigation" / "stair_action_orchestrator_node.py"
+    ).exists()
+
+
+def test_real_move_mode_starts_connector_with_the_existing_axis_chain() -> None:
+    real_launch = (
+        ROOT / "src" / "m20pro_bringup" / "launch" / "m20pro_real.launch.py"
+    ).read_text(encoding="utf-8")
+    top_launch = (
+        ROOT / "src" / "m20pro_bringup" / "launch" / "m20pro.launch.py"
+    ).read_text(encoding="utf-8")
+    start = (
+        ROOT / "src" / "m20pro_bringup" / "scripts" / "m20pro_real_full.sh"
+    ).read_text(encoding="utf-8")
+    assert 'LaunchConfiguration("enable_stair_connector")' in real_launch
+    assert 'executable="stair_executor"' in real_launch
+    assert 'executable="stair_action_orchestrator"' not in real_launch
+    assert "**stair_executor_parameters" in real_launch
+    assert '"enable_stair_connector": enable_stair_connector' in top_launch
+    assert 'enable_stair_connector:="${AXIS_ENABLED}"' in start
 
 
 def test_floor_goal_early_errors_keep_protocol_label() -> None:
@@ -198,10 +159,10 @@ def test_runtime_plan_failure_stops_task() -> None:
 if __name__ == "__main__":
     test_task_creation_builds_unified_plan()
     test_connector_plan_carries_terrain_identity()
-    test_stair_executor_is_a_semantic_reducer_without_motion_publishers()
-    test_stair_orchestrator_owns_identity_bound_terrain_request()
+    test_terrain_guard_remains_shadow_observation_only()
+    test_stair_executor_is_the_single_connector_runtime_owner()
     test_cross_floor_dispatch_uses_connector_gate()
-    test_stair_action_orchestrator_is_the_only_semantic_adapter()
+    test_real_move_mode_starts_connector_with_the_existing_axis_chain()
     test_floor_goal_early_errors_keep_protocol_label()
     test_compatibility_fields_are_plan_projections()
     print("unified navigation wiring tests passed")
