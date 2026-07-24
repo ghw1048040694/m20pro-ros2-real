@@ -40,11 +40,19 @@ def test_terrain_guard_remains_shadow_observation_only() -> None:
     assert "terrain_guard_timeout_s=" not in WEB_SOURCE
 
 
-def test_cross_floor_dispatch_uses_connector_gate() -> None:
+def test_cross_floor_dispatch_uses_the_single_executor_without_a_readiness_gate() -> None:
     assert "_resolve_active_connector_transition" in WEB_SOURCE
     assert "_publish_stair_connector_start" in WEB_SOURCE
     assert "connector_route_activation_decision(" in WEB_SOURCE
-    assert "connector_runtime_readiness(" in WEB_SOURCE
+    assert "connector_runtime_readiness" not in WEB_SOURCE
+    assert "connector_runtime_status_timeout_s" not in WEB_SOURCE
+    assert not (
+        ROOT
+        / "src"
+        / "m20pro_cloud_bridge"
+        / "m20pro_cloud_bridge"
+        / "connector_runtime_contract.py"
+    ).exists()
     assert '"stair_executor_start_topic"' in WEB_SOURCE
     assert "mark_connector_started_state" in WEB_SOURCE
     assert '"navigation_task_plan_stale"' in WEB_SOURCE
@@ -165,7 +173,7 @@ if __name__ == "__main__":
     test_connector_plan_carries_terrain_identity()
     test_terrain_guard_remains_shadow_observation_only()
     test_stair_executor_is_the_single_connector_runtime_owner()
-    test_cross_floor_dispatch_uses_connector_gate()
+    test_cross_floor_dispatch_uses_the_single_executor_without_a_readiness_gate()
     test_real_move_mode_starts_connector_with_the_existing_axis_chain()
     test_floor_goal_early_errors_keep_protocol_label()
     test_compatibility_fields_are_plan_projections()

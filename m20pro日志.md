@@ -24681,3 +24681,12 @@ M20PRO REAL OK: required topics, nodes, maps and Nav2 are active
 - 保留 104 Nav2 `/map` 与归档 OccupancyGrid 的内容一致性检查：它直接验证导航实际使用的栅格，解决过历史上的旧图/错图问题，不属于本次删除的跨主机包哈希门禁。
 - 新增静态回归约束，禁止 `sha256sum`、factory identity 捕获/确认/恢复方法和 `source_factory_identity` 再进入 Web 运行链；删除已无消费者的 `factory_identity_match`。
 - 验证：49 个 `scripts/test_*.py` 全部通过，Python 编译和 `git diff --check` 通过，`m20pro_navigation`、`m20pro_cloud_bridge`、`m20pro_bringup` 三包构建通过。本轮仅修改上位机 `feature/unified-navigation-v2`，三台主机仍未联机，因此未部署或发送运动、导航、切图、重定位、网络命令，也未改变上位机网络。
+
+## 2026-07-24 13:28 CST - 删除楼梯执行器前置心跳 readiness 门禁
+
+- 继续按“先跑起来，再依据真机事实加固”审计跨层入口，发现 Web 在发布连接边请求前要求收到 3.5 秒内的 `stair_executor` 心跳；服务刚启动、订阅建立顺序变化或单帧心跳延迟时，即使唯一执行器已经可用也会直接把任务判失败。这与执行器收到请求后的 `enabled/busy` 判断及启动后的通信超时重复。
+- 从 Web 删除 `connector_runtime_readiness` 调用和 `connector_runtime_status_timeout_s` 参数，连同无消费者的 93 行 readiness contract 及其旧测试一起删除。Web 现在在路线身份和四个位姿完整后直接持久化连接边身份并发布请求；执行器自身仍拒绝未启用或正在执行上一条路线的请求，发布后没有状态回执则由 `_stop_task_if_connector_unresponsive()` 按通信超时停止。
+- 保留必要判定：路线源/目标楼层与地图、方向、四个位姿；用户停止；地图位姿通信超时；阶段超时；104/106 切图失败；2101 失败。terrain guard、执行器心跳 freshness、第二动作编排器和额外 readiness 均不参与首轮放行。
+- 验证：现存 48 个 `scripts/test_*.py` 全部通过，三个 ROS 包构建通过；安装态 `stair_executor` 独立回放和 `floor_manager + stair_executor + 假 Nav2` 联合回放均完成上楼、下楼闭环。测试锁定前置心跳门禁不得重新进入 Web，同时保留启动后执行器无回执超时。
+- 资产审计确认上位机 `~/.m20pro_web` 当前没有 `maps.json` 和 `floor_routes.json`，`annotations.json` 为空；源码 F19/F20/F21 的 PGM 内容完全相同，不能充当真实两层地图。现有 `Original_map_factory_cache_20260604_1045` 也只有一份原厂地图包。因此代码已具备离线闭环，但真机验收仍必须现场准备两张真实 104 地图、两份 106 原厂包和 `entry/source_platform/target_platform/post_exit` 四个实测位姿。
+- `10.21.31.103/104/106` 本轮均不可达，未部署、未启动服务、未发送运动/导航/切图/重定位/网络命令，也未改变上位机网络。

@@ -37,7 +37,6 @@ from m20pro_navigation.command_mux_contract import (
 )
 
 from .battery_contract import battery_pack_present
-from .connector_runtime_contract import connector_runtime_readiness
 from .active_task_contract import (
     advance_active_task_state,
     active_annotation_from_list,
@@ -1063,7 +1062,6 @@ class WebDashboardNode(Node):
         self.declare_parameter(
             "stair_executor_status_topic", "/m20pro/stair_executor/status"
         )
-        self.declare_parameter("connector_runtime_status_timeout_s", 3.5)
         self.declare_parameter("terrain_guard_status_topic", "/m20pro/terrain_guard/status")
         self.declare_parameter("terrain_guard_status_timeout_s", 1.0)
         self.declare_parameter("gait_command_topic", "/m20pro/gait_command")
@@ -8987,27 +8985,6 @@ class WebDashboardNode(Node):
                         "route_id": connector_route.get("id"),
                         "source_floor": connector_route.get("source_floor"),
                         "target_floor": connector_route.get("target_floor"),
-                    },
-                )
-                return
-            with self._lock:
-                executor_status = dict(self._state.get("stair_executor_status") or {})
-            runtime_gate = connector_runtime_readiness(
-                executor_status=executor_status,
-                now_unix_s=time.time(),
-                timeout_s=float(
-                    self.get_parameter("connector_runtime_status_timeout_s").value
-                ),
-            )
-            if not runtime_gate.get("ok"):
-                self._fail_active_task(
-                    active.get("task_id"),
-                    str(runtime_gate.get("message") or "楼梯连接边运行组件尚未就绪"),
-                    {
-                        "reason": runtime_gate.get("code")
-                        or "connector_runtime_not_ready",
-                        "route_id": connector_route.get("id"),
-                        "runtime": runtime_gate,
                     },
                 )
                 return
